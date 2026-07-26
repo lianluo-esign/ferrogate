@@ -216,3 +216,105 @@ fn serialized_context_never_contains_a_token() {
     // The only auth material is the variable *name*, not a value.
     assert!(!json.contains("secret-token-value"));
 }
+
+// ----- scope fields the server does not act on -------------------------------
+
+/// A resolved tenant is announced, because sending it changes nothing: the
+/// `x-ferrogate-tenant` header it becomes is declared by no operation in the
+/// contract, so `--tenant acme` with an admin token returns whatever the
+/// token's scope is. Silence there is a wrong-tenant read presented as a scoped
+/// one.
+#[test]
+fn a_resolved_tenant_is_announced_as_unhonored() {
+    let store = store_with_prod();
+    let mut staging_only = ContextStore::default();
+    staging_only.upsert(Context::new("plain", "https://prod.example.com"));
+    staging_only.set_current("plain").unwrap();
+
+    let scoped = resolve(
+        &store,
+        &EnvOverrides::default(),
+        &GlobalOverrides::default(),
+    )
+    .unwrap();
+    let notice = unhonored_scope_notice(&scoped).expect("a set tenant must be announced");
+    assert!(
+        notice.contains("x-ferrogate-tenant") && notice.contains("bearer token"),
+        "the note must say what is sent and why it does not scope: {notice}"
+    );
+    // It also points at the one tenant selection that DOES work.
+    assert!(notice.contains("--filter tenant="), "{notice}");
+
+    // The negative twin: no scope set, no nagging. A note that fires
+    // unconditionally is one operators learn to ignore.
+    let unscoped = resolve(
+        &staging_only,
+        &EnvOverrides::default(),
+        &GlobalOverrides::default(),
+    )
+    .unwrap();
+    assert_eq!(unhonored_scope_notice(&unscoped), None);
+}
+
+/// `project`/`workspace` never reach a request in any form — not a header, not
+/// a query parameter — so they are announced separately from the tenant, and
+/// only when actually set.
+#[test]
+fn project_and_workspace_are_announced_as_never_sent() {
+    let mut store = ContextStore::default();
+    let mut context = Context::new("local", "https://prod.example.com");
+    context.project = Some("payments".to_string());
+    context.workspace = Some("ws-1".to_string());
+    store.upsert(context);
+    store.set_current("local").unwrap();
+
+    let effective = resolve(
+        &store,
+        &EnvOverrides::default(),
+        &GlobalOverrides::default(),
+    )
+    .unwrap();
+    let notice = unhonored_scope_notice(&effective).expect("set fields must be announced");
+    assert!(
+        notice.contains("project and workspace") && notice.contains("not sent with any request"),
+        "both unsent fields must be named: {notice}"
+    );
+    // No tenant is set here, so the tenant half must not fire.
+    assert!(
+        !notice.contains("x-ferrogate-tenant"),
+        "only the fields actually set may be reported: {notice}"
+    );
+
+    // One field alone reads correctly rather than as a mangled plural.
+    let mut single = ContextStore::default();
+    let mut only_project = Context::new("local", "https://prod.example.com");
+    only_project.project = Some("payments".to_string());
+    single.upsert(only_project);
+    single.set_current("local").unwrap();
+    let effective = resolve(
+        &single,
+        &EnvOverrides::default(),
+        &GlobalOverrides::default(),
+    )
+    .unwrap();
+    let notice = unhonored_scope_notice(&effective).unwrap();
+    assert!(notice.contains("project is recorded locally"), "{notice}");
+}
+
+/// The note follows the *resolved* value, not the flag, so an inherited
+/// `FERROGATE_TENANT` — the path an operator is least likely to have in mind —
+/// is announced exactly like an explicit `--tenant`.
+#[test]
+fn an_env_supplied_tenant_is_announced_too() {
+    let mut store = ContextStore::default();
+    store.upsert(Context::new("plain", "https://prod.example.com"));
+    store.set_current("plain").unwrap();
+    let env = EnvOverrides {
+        tenant: Some("from-the-shell".to_string()),
+        ..EnvOverrides::default()
+    };
+
+    let effective = resolve(&store, &env, &GlobalOverrides::default()).unwrap();
+    assert_eq!(effective.tenant.as_deref(), Some("from-the-shell"));
+    assert!(unhonored_scope_notice(&effective).is_some());
+}

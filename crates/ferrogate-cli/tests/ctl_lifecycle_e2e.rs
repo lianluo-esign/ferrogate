@@ -92,8 +92,17 @@ impl CliRun {
 /// Run `ferrogate ctl <args...>` as an operator holding `token` against the
 /// gateway at `endpoint`, with `--output json`. The CLI home is a fresh tempdir
 /// so no on-disk context leaks between invocations; the bearer token rides an
-/// env var (never the argv) exactly as `--token-env` requires. `tenant`, when
-/// set, exercises tenant selection (the `x-ferrogate-tenant` header).
+/// env var (never the argv) exactly as `--token-env` requires.
+///
+/// `tenant`, when set, adds `--tenant` — which puts an `x-ferrogate-tenant`
+/// header on the request and **nothing more**. No Control Plane API operation
+/// declares that header, so the value does not select, narrow, or redirect
+/// anything; tenancy below comes from the bearer token. An earlier version of
+/// this comment claimed the argument "exercises tenant selection", which was
+/// wrong in the way that matters: these runs would pass with any tenant string,
+/// including one that does not exist. What it does exercise is that a resolved
+/// tenant reaches the wire without disturbing the request — and that the CLI
+/// says so on stderr (`context::unhonored_scope_notice`).
 fn run_ctl(endpoint: &str, token: &str, tenant: Option<&str>, args: &[&str]) -> CliRun {
     let home = tempfile::tempdir().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));

@@ -66,7 +66,10 @@ fn prepare_request_builds_url_headers_and_body() {
     );
     assert_eq!(prepared.header("accept"), Some("application/json"));
     assert_eq!(prepared.header("content-type"), Some("application/json"));
-    assert_eq!(prepared.header("x-ferrogate-tenant"), Some("acme"));
+    // Sent — but see `tenant_scope_is_not_yet_an_openapi_parameter`: nothing
+    // server-side reads this header today, which is why the CLI says so on
+    // stderr rather than letting this assertion imply a working capability.
+    assert_eq!(prepared.header(TENANT_HEADER_UNDER_TEST), Some("acme"));
     assert!(prepared.header("user-agent").unwrap().contains("ferrogate"));
     assert_eq!(prepared.body, br#"{"name":"new-tenant"}"#.to_vec());
 }
@@ -303,7 +306,28 @@ fn page_envelope_recognizes_the_list_shapes() {
     assert_eq!(envelope.items.len(), 1);
     assert_eq!(envelope.total, Some(7));
     assert_eq!(envelope.limit, Some(1));
+    assert_eq!(envelope.offset, Some(0));
     assert!(!envelope.cursor);
+    assert!(envelope.echoes_page_window());
+
+    // An envelope that says nothing about the window it served: the shape 43 of
+    // the contract's 65 `list*` operations return, and the one the walk must
+    // refuse to advance through.
+    let windowless = serde_json::json!({"object": "list", "data": [{"id": "a"}]});
+    let envelope = page_envelope(&windowless).unwrap();
+    assert_eq!(envelope.items.len(), 1);
+    assert!(
+        !envelope.echoes_page_window(),
+        "no offset, limit, or total means no evidence of an offset window"
+    );
+    // Any ONE of the three is enough evidence to keep walking.
+    for marker in ["total", "limit", "offset"] {
+        let body = serde_json::json!({"object": "list", "data": [{"id": "a"}], marker: 1});
+        assert!(
+            page_envelope(&body).unwrap().echoes_page_window(),
+            "'{marker}' alone is a page-window echo"
+        );
+    }
 
     // Spellings the contract does NOT use are not list envelopes. Accepting
     // them would let the pagination surface be "proven" against a payload no
@@ -363,22 +387,19 @@ fn page_item_keys_match_the_openapi_contract() {
         }
     }
 
-    assert!(
-        array_keys.contains("data"),
-        "the contract must still carry `data` page arrays: {array_keys:?}"
+    let declared: std::collections::BTreeSet<String> =
+        PAGE_ITEM_KEYS.iter().map(|key| key.to_string()).collect();
+    // Asserted as an equality, in both directions at once, because each
+    // direction catches a different regression and neither catches the other:
+    // a contract that grows a page array the CLI cannot read (left side), and a
+    // speculative alias re-added to PAGE_ITEM_KEYS that no endpoint emits
+    // (right side — the failure this whole surface was reworked for). A
+    // one-directional containment check stayed green when `items` was put back.
+    assert_eq!(
+        array_keys, declared,
+        "the page-array spellings in the contract and PAGE_ITEM_KEYS must match exactly: \
+         contract has {array_keys:?}, the CLI declares {declared:?}"
     );
-    for key in &array_keys {
-        // `events` is a timeline projection, not a paginated page: it carries
-        // no page cursor of its own. Every *paginated* array is `data`.
-        if key == "events" {
-            continue;
-        }
-        assert!(
-            PAGE_ITEM_KEYS.contains(&key.as_str()),
-            "the contract grew a '{key}' page array the CLI pagination surface cannot read; \
-             add it to PAGE_ITEM_KEYS (found: {array_keys:?})"
-        );
-    }
 }
 
 /// `--sort` is documented as unhonored, and this pins that claim to the
@@ -413,6 +434,73 @@ fn sort_is_not_yet_an_openapi_query_parameter() {
          help, docs/cli-reference.md, and drop the 'not honored' stderr note in resource_cmd.rs"
     );
 }
+
+/// The tenant selection this client sends is documented as unhonored, and this
+/// pins that claim to the contract rather than to a comment.
+///
+/// `prepare_request` turns a resolved tenant into an `x-ferrogate-tenant`
+/// header. No operation and no component parameter in the contract declares it,
+/// so the server has nothing to read it with — which is why `--tenant` exits 0
+/// while returning whatever the bearer token's scope is. Three existing tests
+/// assert only that the header is *sent*, and would pass just as happily if the
+/// capability were entirely fictional; this one is the direction that matters.
+/// The day the API declares the header, this fails and forces the flag help,
+/// `docs/cli-reference.md`, and the stderr note to be corrected together.
+#[test]
+fn tenant_scope_is_not_yet_an_openapi_parameter() {
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+            .expect("the OpenAPI contract parses");
+
+    let mut declared: Vec<String> = Vec::new();
+    let mut collect = |where_: String, parameters: &serde_json::Value| {
+        let Some(parameters) = parameters.as_array() else {
+            return;
+        };
+        for parameter in parameters {
+            if parameter.get("name").and_then(|name| name.as_str())
+                == Some(TENANT_HEADER_UNDER_TEST)
+            {
+                declared.push(where_.clone());
+            }
+        }
+    };
+    for (path, item) in spec["paths"].as_object().expect("paths") {
+        let Some(operations) = item.as_object() else {
+            continue;
+        };
+        for (method, operation) in operations {
+            if let Some(parameters) = operation.get("parameters") {
+                collect(format!("{method} {path}"), parameters);
+            }
+        }
+    }
+    if let Some(components) = spec["components"]
+        .get("parameters")
+        .and_then(|p| p.as_object())
+    {
+        for (name, parameter) in components {
+            if parameter.get("name").and_then(|value| value.as_str())
+                == Some(TENANT_HEADER_UNDER_TEST)
+            {
+                declared.push(format!("components.parameters.{name}"));
+            }
+        }
+    }
+
+    assert!(
+        declared.is_empty(),
+        "the API now declares the '{TENANT_HEADER_UNDER_TEST}' parameter on {declared:?} — honor \
+         it: drop the 'not honored' wording from the --tenant flag help, regenerate \
+         docs/cli-reference.md, and remove the stderr note from \
+         context::unhonored_scope_notice"
+    );
+}
+
+/// The header `prepare_request` emits for a resolved tenant. Named once so the
+/// test above and the assertion in `prepare_request_builds_url_headers_and_body`
+/// cannot drift apart from the producer at `transport.rs`.
+const TENANT_HEADER_UNDER_TEST: &str = "x-ferrogate-tenant";
 
 /// Fake transport that replies with a scripted sequence of responses and
 /// records every request it saw, so a multi-page walk is provable without a
@@ -514,22 +602,25 @@ fn send_all_pages_walks_every_page_and_loses_no_rows() {
 
 /// Without a server-reported total the walk still terminates on the first
 /// short page — and still returns every row it fetched.
+///
+/// The endpoint echoes its `offset`/`limit` window (so the walk has evidence it
+/// is offset-paginated) but no `total`, which is a shape the contract really
+/// produces; the walk must lean on the short page alone to stop.
 #[test]
 fn send_all_pages_stops_on_a_short_page_when_total_is_unknown() {
     let context = context_with_endpoint("https://prod.example.com", None);
     let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
-        r#"[{"id":"a"},{"id":"b"}]"#,
-        r#"[{"id":"c"}]"#,
+        r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"offset":0,"limit":2}"#,
+        r#"{"object":"list","data":[{"id":"c"}],"offset":2,"limit":2}"#,
         // A third response is scripted but must never be requested; asking for
         // it would exhaust nothing, so the assertion below is the real guard.
-        r#"[{"id":"never"}]"#,
+        r#"{"object":"list","data":[{"id":"never"}],"offset":4,"limit":2}"#,
     ]));
     let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
     let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
 
-    let ids: Vec<&str> = response
-        .body
+    let ids: Vec<&str> = response.body["data"]
         .as_array()
         .unwrap()
         .iter()
@@ -682,6 +773,139 @@ fn send_all_pages_refuses_a_cursor_paginated_endpoint() {
         transport.urls().len(),
         1,
         "exactly one page is fetched before refusing, not MAX_PAGES"
+    );
+}
+
+/// **The storm, in its broad form.** An endpoint that supports *neither*
+/// pagination style carries no cursor marker, so the cursor rule never fires;
+/// it ignores `offset`/`limit` and returns the whole collection on every
+/// request. Full page + no `total` ⇒ `next_page` advances ⇒ the identical rows
+/// come back ⇒ 10 000 requests.
+///
+/// This shape is the majority of the contract, not a curiosity: a structural
+/// parse puts 43 of the 65 `list*` operations here (no `limit`/`offset` query
+/// parameter declared, no `total`/`limit`/`offset` echoed) — `listVirtualKeys`
+/// and `listAssets` among them. The walk must refuse after the first page.
+#[test]
+fn send_all_pages_refuses_an_endpoint_that_echoes_no_page_window() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    // The same full page every time — the server ignored offset entirely.
+    let page = r#"{"object":"list","data":[{"id":"vk-1"},{"id":"vk-2"}]}"#;
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![page, page, page]));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::get("/admin/v1/virtual-keys");
+
+    let error = block_on(client.send_all_pages(&spec, 2)).unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(
+        error
+            .to_string()
+            .contains("echoes no offset, limit, or total"),
+        "the message must name the missing signal, not just fail: {error}"
+    );
+    assert_eq!(
+        transport.urls().len(),
+        1,
+        "exactly one page may be fetched before refusing, not MAX_PAGES"
+    );
+}
+
+/// The negative twin: a windowless endpoint whose single page is *short* has
+/// already returned everything, so the walk completes rather than failing.
+/// Without this the guard could be a blanket refusal of every windowless
+/// endpoint and still look correct.
+#[test]
+fn send_all_pages_completes_when_a_windowless_endpoint_returns_a_short_page() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
+        r#"{"object":"list","data":[{"id":"vk-1"}]}"#,
+    ]));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::get("/admin/v1/virtual-keys");
+
+    let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
+    assert_eq!(response.body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(transport.urls().len(), 1);
+}
+
+/// A transport that answers every request with the same body, forever, and
+/// counts what it served. Distinct from [`ScriptedTransport`], which runs out:
+/// a walk that never terminates cannot be modeled by a finite script.
+struct EndlessTransport {
+    body: String,
+    served: Mutex<u32>,
+}
+
+impl EndlessTransport {
+    fn new(body: &str) -> EndlessTransport {
+        EndlessTransport {
+            body: body.to_string(),
+            served: Mutex::new(0),
+        }
+    }
+
+    fn served(&self) -> u32 {
+        *self.served.lock().unwrap()
+    }
+}
+
+impl Transport for std::sync::Arc<EndlessTransport> {
+    fn execute<'a>(
+        &'a self,
+        _request: PreparedRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<RawResponse>> + Send + 'a>>
+    {
+        *self.served.lock().unwrap() += 1;
+        let body = self.body.as_bytes().to_vec();
+        Box::pin(async move {
+            Ok(RawResponse {
+                status: 200,
+                headers: vec![("x-request-id".to_string(), "rid-endless".to_string())],
+                body,
+            })
+        })
+    }
+}
+
+/// `MAX_PAGES` is load-bearing, and this is what proves it.
+///
+/// The window check (above) refuses an endpoint that admits it is not
+/// offset-paginating. What it cannot catch is a server that *echoes* `offset`
+/// and `limit` — so it looks like a well-behaved offset endpoint — and then
+/// ignores them, handing back the same full page while reporting no `total`.
+/// Every stop condition is defeated: never short, never empty, no total to
+/// reach. Only the page cap ends it.
+///
+/// Delete `MAX_PAGES` (turn the bounded `for` into a `loop`) and this test does
+/// not pass more quietly — it never terminates. Before this fixture existed the
+/// constant could be removed with the whole suite staying green, which is the
+/// definition of an untested guard.
+#[test]
+fn send_all_pages_gives_up_at_the_page_cap_when_the_server_never_advances() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    // Echoes a page window, so it is not refused as windowless — and then
+    // serves the identical row no matter what offset was asked for.
+    let transport = std::sync::Arc::new(EndlessTransport::new(
+        r#"{"object":"list","data":[{"id":"stuck"}],"offset":0,"limit":1}"#,
+    ));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::get("/admin/v1/tenant-accounts");
+
+    let error = block_on(client.send_all_pages(&spec, 1)).unwrap_err();
+    assert_eq!(
+        error.exit_class(),
+        ExitClass::Transport,
+        "a server that never finishes paging is a transport-class failure, not the \
+         operator's usage error: {error}"
+    );
+    assert!(
+        error.to_string().contains("gave up after"),
+        "the operator must be told the walk hit the cap: {error}"
+    );
+    assert_eq!(
+        transport.served(),
+        MAX_PAGES,
+        "the cap is what stopped the walk"
     );
 }
 

@@ -32,7 +32,16 @@ pub struct GlobalArgs {
     #[arg(long, global = true)]
     pub endpoint: Option<String>,
 
-    /// Override the tenant for this invocation.
+    /// Override the tenant for this invocation. NOT HONORED BY THE SERVER
+    /// TODAY: it becomes an `x-ferrogate-tenant` request header, which no
+    /// Control Plane API operation declares — admin requests are scoped by the
+    /// bearer token, so this neither narrows nor redirects the result; a note
+    /// is printed to stderr on every use. Where an operation does accept tenant
+    /// selection it is a `tenant` query parameter: pass `--filter tenant=<id>`.
+    // The help must stay ONE doc-comment paragraph: clap's derive splits on the
+    // first blank line and keeps only the leading paragraph as the short help
+    // that `docs/cli-reference.md` is generated from, so a caveat below a blank
+    // line would be true in the source and invisible in the reference.
     #[arg(long, global = true)]
     pub tenant: Option<String>,
 

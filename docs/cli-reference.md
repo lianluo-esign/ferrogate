@@ -348,9 +348,9 @@ Arguments:
 Options:
 
 - `--endpoint <ENDPOINT>` — Control Plane API base URL, for example https://control.example.com
-- `--tenant <TENANT>` — Default tenant applied to commands that accept one
-- `--project <PROJECT>` — Default project
-- `--workspace <WORKSPACE>` — Default workspace
+- `--tenant <TENANT>` — Default tenant for this context. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` header no Control Plane API operation declares, so it neither narrows nor redirects a result; a note is printed to stderr whenever it applies
+- `--project <PROJECT>` — Default project. RECORDED LOCALLY ONLY: it is never sent with any request; a note is printed to stderr whenever it applies
+- `--workspace <WORKSPACE>` — Default workspace. RECORDED LOCALLY ONLY: it is never sent with any request; a note is printed to stderr whenever it applies
 - `--token-env <VAR>` — Name of the environment variable holding the bearer token, read at call time. The token value is never stored in the context
 - `--token-stdin` — Read the bearer token from stdin at call time instead of an env var
 - `--ca-bundle <PATH>` — Path to a PEM CA bundle used to verify this endpoint's TLS certificate in addition to the system trust roots (for a private/internal CA)
@@ -399,7 +399,7 @@ Options:
 
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -515,7 +515,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -542,7 +542,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -569,7 +569,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -596,7 +596,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -623,7 +623,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -650,7 +650,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -677,7 +677,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -712,7 +712,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -752,7 +752,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -779,7 +779,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -806,7 +806,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -833,7 +833,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -860,7 +860,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -887,7 +887,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -927,7 +927,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -954,7 +954,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -981,7 +981,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1008,7 +1008,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1035,7 +1035,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1062,7 +1062,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1101,7 +1101,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1128,7 +1128,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1155,7 +1155,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1182,7 +1182,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1209,7 +1209,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1249,7 +1249,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1276,7 +1276,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1303,7 +1303,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1330,7 +1330,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1357,7 +1357,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1384,7 +1384,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1426,7 +1426,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1453,7 +1453,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1480,7 +1480,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1507,7 +1507,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1534,7 +1534,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1561,7 +1561,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1588,7 +1588,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1615,7 +1615,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1655,7 +1655,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1682,7 +1682,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1709,7 +1709,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1736,7 +1736,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1763,7 +1763,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1790,7 +1790,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1828,7 +1828,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1855,7 +1855,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1882,7 +1882,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1909,7 +1909,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1947,7 +1947,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -1974,7 +1974,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2001,7 +2001,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2028,7 +2028,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2068,7 +2068,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2095,7 +2095,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2122,7 +2122,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2149,7 +2149,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2176,7 +2176,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2203,7 +2203,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2240,7 +2240,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2267,7 +2267,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2294,7 +2294,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2334,7 +2334,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2361,7 +2361,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2388,7 +2388,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2415,7 +2415,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2442,7 +2442,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2469,7 +2469,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2511,7 +2511,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2538,7 +2538,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2565,7 +2565,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2592,7 +2592,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2619,7 +2619,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2646,7 +2646,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2673,7 +2673,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2700,7 +2700,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2740,7 +2740,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2767,7 +2767,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2794,7 +2794,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2821,7 +2821,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2848,7 +2848,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2875,7 +2875,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2912,7 +2912,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2939,7 +2939,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -2966,7 +2966,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3005,7 +3005,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3032,7 +3032,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3059,7 +3059,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3086,7 +3086,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3113,7 +3113,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3156,7 +3156,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3183,7 +3183,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3210,7 +3210,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3237,7 +3237,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3264,7 +3264,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3291,7 +3291,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3318,7 +3318,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3345,7 +3345,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3372,7 +3372,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3407,7 +3407,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3442,7 +3442,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3477,7 +3477,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3512,7 +3512,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3552,7 +3552,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3579,7 +3579,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3606,7 +3606,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3633,7 +3633,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3660,7 +3660,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3687,7 +3687,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3725,7 +3725,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3752,7 +3752,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3779,7 +3779,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3806,7 +3806,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3841,7 +3841,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3877,7 +3877,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3904,7 +3904,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3943,7 +3943,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3970,7 +3970,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -3997,7 +3997,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4024,7 +4024,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4051,7 +4051,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4095,7 +4095,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4122,7 +4122,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4149,7 +4149,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4176,7 +4176,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4203,7 +4203,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4230,7 +4230,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4257,7 +4257,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4284,7 +4284,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4311,7 +4311,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4338,7 +4338,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4373,7 +4373,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4408,7 +4408,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4452,7 +4452,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4479,7 +4479,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4506,7 +4506,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4533,7 +4533,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4560,7 +4560,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4587,7 +4587,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4614,7 +4614,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4641,7 +4641,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4668,7 +4668,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4695,7 +4695,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4733,7 +4733,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4760,7 +4760,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4787,7 +4787,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4814,7 +4814,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4851,7 +4851,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4878,7 +4878,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4905,7 +4905,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4944,7 +4944,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4971,7 +4971,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -4998,7 +4998,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5025,7 +5025,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5052,7 +5052,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5093,7 +5093,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5120,7 +5120,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5147,7 +5147,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5174,7 +5174,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5201,7 +5201,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5228,7 +5228,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5255,7 +5255,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5295,7 +5295,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5322,7 +5322,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5349,7 +5349,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5376,7 +5376,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5403,7 +5403,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5430,7 +5430,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5469,7 +5469,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5496,7 +5496,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5523,7 +5523,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5550,7 +5550,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5577,7 +5577,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5616,7 +5616,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5643,7 +5643,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5670,7 +5670,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5697,7 +5697,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5724,7 +5724,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5761,7 +5761,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5788,7 +5788,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5815,7 +5815,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5856,7 +5856,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5883,7 +5883,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5910,7 +5910,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5937,7 +5937,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5964,7 +5964,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -5991,7 +5991,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6018,7 +6018,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6055,7 +6055,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6082,7 +6082,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6109,7 +6109,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6146,7 +6146,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6173,7 +6173,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6200,7 +6200,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6239,7 +6239,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6266,7 +6266,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6293,7 +6293,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6320,7 +6320,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6347,7 +6347,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6383,7 +6383,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6410,7 +6410,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6445,7 +6445,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6480,7 +6480,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6519,7 +6519,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6546,7 +6546,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6573,7 +6573,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6600,7 +6600,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6627,7 +6627,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6662,7 +6662,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6698,7 +6698,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6725,7 +6725,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6761,7 +6761,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6788,7 +6788,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6828,7 +6828,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6855,7 +6855,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6882,7 +6882,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6909,7 +6909,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6936,7 +6936,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
@@ -6963,7 +6963,7 @@ Options:
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
-- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
 - `--token-env <VAR>` — Read the bearer token from this environment variable
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds

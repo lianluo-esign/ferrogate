@@ -1204,6 +1204,94 @@ fn ctl_all_pages_on_a_cursor_endpoint_refuses_after_one_page() {
     assert_eq!(served, 1, "exactly one page may be fetched before refusing");
 }
 
+/// **The storm in its broad form, through the real binary.** An endpoint that
+/// paginates by neither offset nor cursor carries no cursor marker, so the
+/// cursor rule never sees it: it ignores `offset`/`limit` and hands back the
+/// whole collection every time. A full page with no `total` made the walk
+/// advance the offset forever — 10 000 requests at the operator's control plane
+/// and every row buffered 10 000 times before the cap errored.
+///
+/// This is the majority shape of the contract, not an edge case: 43 of the 65
+/// `list*` operations declare no `limit`/`offset` query parameter and echo no
+/// `total`/`limit`/`offset` back, `listVirtualKeys` (used here) among them. It
+/// stays invisible in a dev tenant whose collections fit in one page, which is
+/// why it needed a fixture with exactly this shape — the suite had none, so the
+/// page cap could be deleted outright with everything still green.
+///
+/// The mock serves the identical full page regardless of the `offset` asked
+/// for, and counts what it served, so the refusal is proven by request count.
+#[test]
+fn ctl_all_pages_on_an_offset_blind_endpoint_refuses_after_one_page() {
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = sender.send(());
+            // The offset in the request is ignored outright: no `total`, no
+            // `offset`, no `limit` — just the same full page, every time.
+            let response = http_response(
+                200,
+                "OK",
+                &[("content-type", "application/json")],
+                r#"{"object":"list","data":[{"id":"vk-1"},{"id":"vk-2"}]}"#,
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &format!("http://127.0.0.1:{port}"),
+            "--all-pages",
+            "--limit",
+            "2",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        code(&output),
+        2,
+        "an endpoint with no page window is a usage error under --all-pages: {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("echoes no offset, limit, or total"),
+        "the rule must be stated, not implied: {}",
+        stderr(&output)
+    );
+    // Refusing must not print a half-answer to stdout: a truncated list on
+    // stdout with a diagnostic on stderr is what a piping operator misses.
+    assert!(
+        !stdout(&output).contains("vk-1"),
+        "no rows may be printed for a refused walk: {}",
+        stdout(&output)
+    );
+    let mut served = 0;
+    while receiver.recv_timeout(Duration::from_millis(250)).is_ok() {
+        served += 1;
+    }
+    assert_eq!(
+        served, 1,
+        "exactly one page may be fetched before refusing, not 10 000"
+    );
+}
+
 /// `--sort` says out loud that the server does not honor it. Zero operations in
 /// the OpenAPI contract declare a `sort` query parameter, so a flag advertised
 /// on 200+ verb blocks that provably changes nothing is the ignored-field
@@ -1289,6 +1377,121 @@ fn ctl_list_sort_rejects_a_swallowed_flag() {
         "the diagnostic must name the swallowed flag: {}",
         stderr(&output)
     );
+}
+
+/// `--tenant` says out loud that the server does not act on it.
+///
+/// The flag is documented as "Override the tenant for this invocation" and
+/// becomes an `x-ferrogate-tenant` header that **no** Control Plane API
+/// operation declares — admin tenancy comes from the bearer token. So
+/// `ctl virtual-keys list --tenant acme` exits 0 and returns whatever the
+/// token's scope is: a wrong-tenant read presented as a scoped one. That is
+/// worse than a dropped `ca_bundle_path`, because what is wrong is the
+/// operator's belief about *whose data they are reading*.
+///
+/// Three existing tests pin only the sending side and would survive the
+/// capability being entirely fictional. This one pins the diagnostic.
+#[test]
+fn ctl_tenant_flag_warns_that_the_api_does_not_honor_it() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_http(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"list","data":[],"total":0}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--tenant",
+            "acme",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let diagnostics = stderr(&output);
+    assert!(
+        diagnostics.contains("x-ferrogate-tenant") && diagnostics.contains("bearer token"),
+        "the operator must be told the tenant did not scope the read: {diagnostics}"
+    );
+    // And pointed at the selection that does work.
+    assert!(diagnostics.contains("--filter tenant="), "{diagnostics}");
+    // The note is a diagnostic; a piped JSON payload stays clean.
+    assert!(!stdout(&output).contains("note:"), "{}", stdout(&output));
+
+    // The same command WITHOUT a tenant must not be nagged — a note that fires
+    // unconditionally is one operators learn to ignore.
+    let quiet = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !stderr(&quiet).contains("x-ferrogate-tenant"),
+        "stderr: {}",
+        stderr(&quiet)
+    );
+}
+
+/// A context's `project`/`workspace` are recorded, shown by `context show`, and
+/// never sent with any request — so an operator who set them is told, on the
+/// invocation where it matters, rather than being left to assume the call was
+/// scoped.
+#[test]
+fn ctl_context_project_and_workspace_are_announced_as_never_sent() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_http(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"list","data":[],"total":0}"#,
+    ));
+
+    let created = base_cmd(home.path())
+        .args([
+            "context",
+            "create",
+            "scoped",
+            "--endpoint",
+            &endpoint,
+            "--project",
+            "payments",
+            "--workspace",
+            "ws-1",
+            "--use",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&created), 0, "stderr: {}", stderr(&created));
+
+    let output = base_cmd(home.path())
+        .args(["ctl", "virtual-keys", "list", "--output", "json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let diagnostics = stderr(&output);
+    assert!(
+        diagnostics.contains("project and workspace")
+            && diagnostics.contains("not sent with any request"),
+        "both fields must be reported as unsent: {diagnostics}"
+    );
+    assert!(!stdout(&output).contains("note:"), "{}", stdout(&output));
 }
 
 /// A server error that echoes key material is redacted on the way to stderr,

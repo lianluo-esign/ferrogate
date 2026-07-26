@@ -144,7 +144,15 @@ pub fn prepare_request(
     ];
     if let Some(tenant) = &context.tenant {
         // Tenant selection is an explicit, inspectable header rather than a
-        // hidden default so audit evidence can attribute the request.
+        // hidden default, so a proxy or audit log can attribute the request.
+        //
+        // Read this together with `context::unhonored_scope_notice`: **no
+        // Control Plane API operation declares this header** (pinned by
+        // `tenant_scope_is_not_yet_an_openapi_parameter`), so today it is
+        // inspectable but not acted upon — admin requests are scoped by the
+        // bearer token. It is still sent, because the client inventing a
+        // tenancy parameter the contract does not define would be worse than
+        // sending an ignored one; the operator is told on stderr instead.
         headers.push(("x-ferrogate-tenant".to_string(), tenant.clone()));
     }
     let body = match &spec.body {
@@ -342,6 +350,17 @@ pub const DEFAULT_PAGE_SIZE: u64 = 100;
 /// Hard cap on how many pages one all-pages walk will fetch. A server that
 /// never reports a final page is a bug; failing loudly at the cap beats
 /// looping forever or silently returning a partial answer.
+///
+/// This is the *last* backstop, not the first: an endpoint that ignores
+/// `offset`/`limit` is refused up front by
+/// [`ControlPlaneClient::send_all_pages`]'s window check, and a cursor endpoint
+/// by its cursor check. What is left for the cap is a server that *claims* an
+/// offset window (it echoes `offset`/`limit`) and then never advances through
+/// it — reaching the cap there is 10 000 requests at the operator's control
+/// plane, so the failure names the server rather than blaming the invocation.
+/// `send_all_pages_gives_up_at_the_page_cap_when_the_server_never_advances`
+/// exercises that path, so the cap cannot be deleted while the suite stays
+/// green.
 const MAX_PAGES: u32 = 10_000;
 
 /// Response keys under which the Control Plane API returns a list page.
@@ -374,11 +393,17 @@ const PAGE_WINDOW_KEYS: [&str; 2] = ["offset", "limit"];
 /// `offset`/`limit` only; a cursor endpoint ignores those parameters and would
 /// return page one forever, so their presence is a hard stop rather than an
 /// accidental fallback (see [`ControlPlaneClient::send_all_pages`]).
-const PAGE_CURSOR_KEYS: [&str; 5] = [
+///
+/// Spec-derived, like [`PAGE_ITEM_KEYS`]: these are exactly the cursor markers
+/// carried by the contract's two cursor envelopes (`AgentJobEventPage`,
+/// `AdminSelfHostedWorkerEventStream`). A speculative `next_cursor` alias was
+/// removed — a false positive here only *refuses*, so it is harmless in
+/// operation, but a list documented as derived from the contract must actually
+/// be derived from it or the next reader trusts the wrong thing.
+const PAGE_CURSOR_KEYS: [&str; 4] = [
     "after_event_id",
     "next_after_event_id",
     "has_more",
-    "next_cursor",
     "cursor_reset",
 ];
 
@@ -397,8 +422,30 @@ pub struct PageEnvelope<'a> {
     /// named none, which is what lets the truncation notice fire on a default
     /// `list` instead of staying silent.
     pub limit: Option<u64>,
+    /// The window start the *server* applied, from the envelope's own `offset`.
+    /// Carried for the same reason as `limit`: it is the endpoint's only
+    /// evidence that it read the `offset` the walk asked for.
+    pub offset: Option<u64>,
     /// True when the envelope carries cursor-pagination markers.
     pub cursor: bool,
+}
+
+impl PageEnvelope<'_> {
+    /// Whether the envelope says **anything** about the page window it just
+    /// served — its own `offset`, its own `limit`, or the collection `total`.
+    ///
+    /// This is the signal that separates "an offset-paginated endpoint" from
+    /// "an endpoint that ignored `offset`/`limit` and handed back the whole
+    /// collection". A structural parse of the contract puts 43 of 65 `list*`
+    /// operations in the second group — they declare no `limit`/`offset` query
+    /// parameter and echo none back — so treating a silent envelope as
+    /// offset-paginated is the common case, not the exotic one. When such an
+    /// endpoint returns a full page the walk would advance the offset, receive
+    /// the identical rows, and repeat: a request storm that stays invisible in
+    /// a dev tenant small enough to fit in one page.
+    pub fn echoes_page_window(&self) -> bool {
+        self.total.is_some() || self.limit.is_some() || self.offset.is_some()
+    }
 }
 
 /// Recognize a list response shape. Returns `None` when the document is not a
@@ -411,6 +458,7 @@ pub fn page_envelope(body: &serde_json::Value) -> Option<PageEnvelope<'_>> {
             items,
             total: None,
             limit: None,
+            offset: None,
             cursor: false,
         }),
         serde_json::Value::Object(map) => {
@@ -423,12 +471,14 @@ pub fn page_envelope(body: &serde_json::Value) -> Option<PageEnvelope<'_>> {
                 .iter()
                 .find_map(|total_key| map.get(*total_key)?.as_u64());
             let limit = map.get("limit").and_then(serde_json::Value::as_u64);
+            let offset = map.get("offset").and_then(serde_json::Value::as_u64);
             let cursor = PAGE_CURSOR_KEYS.iter().any(|key| map.contains_key(*key));
             Some(PageEnvelope {
                 items_key: Some(key),
                 items,
                 total,
                 limit,
+                offset,
                 cursor,
             })
         }
@@ -655,7 +705,7 @@ impl<T: Transport> ControlPlaneClient<T> {
     /// the cursor, and a caller-supplied offset would make "every page"
     /// ambiguous.
     ///
-    /// Four refusals, each preferring a loud failure to a plausible-looking
+    /// Five refusals, each preferring a loud failure to a plausible-looking
     /// partial answer:
     ///
     /// 1. **A non-`GET` spec is rejected before anything is sent.** `--all-pages`
@@ -670,7 +720,20 @@ impl<T: Transport> ControlPlaneClient<T> {
     ///    would hand back page one on every iteration until `MAX_PAGES`,
     ///    buffering 10 000 pages of duplicated rows. Refusing states the rule
     ///    instead of leaving a request storm as the accidental behavior.
-    /// 4. **A walk that ends short of a reported `total` fails.** Iteration
+    /// 4. **An endpoint that echoes no page window at all is refused before the
+    ///    second request.** Cursor markers are the *narrow* case; the broad one
+    ///    is an endpoint supporting neither pagination style, which carries no
+    ///    cursor key and so slipped past refusal 3 and was walked as if it were
+    ///    offset-paginated. It ignores `offset`/`limit`, returns the whole
+    ///    collection every time, and — being a full page with no `total` —
+    ///    makes [`next_page`] advance forever: 10 000 requests at the
+    ///    operator's control plane and a million duplicated rows buffered
+    ///    before the cap errors. It passes unnoticed in a dev tenant whose
+    ///    collections fit in one page and storms in production, which is
+    ///    exactly the shape of bug a rule must catch rather than a fixture.
+    ///    The signal is [`PageEnvelope::echoes_page_window`] — generic, keyed
+    ///    on the response shape, naming no resource.
+    /// 5. **A walk that ends short of a reported `total` fails.** Iteration
     ///    itself stops on [`next_page`]'s conditions, one of which is an empty
     ///    page — and an empty page can arrive in the *middle* of a collection
     ///    (a concurrent delete, or a server that filters after paging). Without
@@ -701,7 +764,7 @@ impl<T: Transport> ControlPlaneClient<T> {
         for _ in 0..MAX_PAGES {
             let paged = spec.clone().with_page(&page);
             let response = self.send(&paged).await?;
-            let (returned, total) = {
+            let (returned, total, echoes_window) = {
                 let envelope = page_envelope(&response.body).ok_or_else(|| {
                     CliError::usage(format!(
                         "--all-pages requires a list response, but {} returned a non-list document",
@@ -723,7 +786,11 @@ impl<T: Transport> ControlPlaneClient<T> {
                     items_key = envelope.items_key;
                 }
                 merged.extend(envelope.items.iter().cloned());
-                (envelope.items.len() as u64, envelope.total)
+                (
+                    envelope.items.len() as u64,
+                    envelope.total,
+                    envelope.echoes_page_window(),
+                )
             };
             if let Some(total) = total {
                 reported_total = Some(total);
@@ -735,7 +802,27 @@ impl<T: Transport> ControlPlaneClient<T> {
                 first = Some(response);
             }
             match next {
-                Some(next) => page = next,
+                Some(next) => {
+                    // Only refuse where it would actually matter: a *short*
+                    // page from a windowless endpoint already ended the walk
+                    // above with every row in hand, and failing that would be
+                    // gratuitous. It is the full page — the one that makes the
+                    // walk want another request it has no evidence the server
+                    // will honor — that must stop here.
+                    if !echoes_window {
+                        return Err(CliError::usage(format!(
+                            "--all-pages cannot walk {}: its response echoes no offset, limit, or \
+                             total, so nothing shows the endpoint honored the page window this \
+                             walk asked for. An endpoint that ignores offset/limit returns the \
+                             same rows on every iteration, so continuing would issue up to \
+                             {MAX_PAGES} identical requests. Re-run without --all-pages — the one \
+                             page is the whole answer this endpoint gives — and narrow it with \
+                             --filter",
+                            spec.path
+                        )));
+                    }
+                    page = next;
+                }
                 None => {
                     let fetched = merged.len() as u64;
                     if let Some(total) = reported_total {
@@ -756,7 +843,8 @@ impl<T: Transport> ControlPlaneClient<T> {
         }
 
         Err(CliError::transport(format!(
-            "--all-pages gave up after {MAX_PAGES} pages of {}; the server never reported a final page",
+            "--all-pages gave up after {MAX_PAGES} pages of {}; the endpoint echoed a page window \
+             but never advanced through it, so it never reported a final page",
             spec.path
         )))
     }

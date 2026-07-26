@@ -254,6 +254,12 @@ fn create_tenant_account_round_trips_through_the_transport() {
     assert_eq!(response.body["version"], 7);
 }
 
+/// The resolved tenant rides an explicit header rather than being folded into
+/// the path. This asserts the *sending* side only — it would pass just as well
+/// if no server read the header, which is exactly the situation today; see
+/// `transport_test::tenant_scope_is_not_yet_an_openapi_parameter` for the
+/// contract-side half and `context::unhonored_scope_notice` for what the
+/// operator is told.
 #[test]
 fn tenant_scope_is_carried_as_an_explicit_header() {
     let spec = build_projects("list", &ResourceInput::new()).unwrap();

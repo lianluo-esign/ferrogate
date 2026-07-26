@@ -48,6 +48,14 @@ impl SecretResolver for ProcessSecretResolver {
 /// Apply the foundation's precedence rule (flag > env > context > default) using
 /// the real process environment and the on-disk store. Commands read the
 /// returned [`EffectiveContext`] and never re-derive precedence themselves.
+///
+/// This is also where a scope the server will not act on is announced. Every
+/// remote command resolves through here, so the note fires once per invocation
+/// no matter which family was invoked, and regardless of whether the scope came
+/// from `--tenant`, `FERROGATE_TENANT`, or the selected context — the three
+/// paths that reach the same ignored header. Putting it in the resolver rather
+/// than in each command is what stops the next resource family from quietly
+/// re-introducing the silence.
 pub(crate) fn resolve_effective(global: &GlobalArgs) -> CliResult<EffectiveContext> {
     let overrides = global.to_overrides()?;
     let env = EnvOverrides::from_lookup(|name| {
@@ -56,7 +64,12 @@ pub(crate) fn resolve_effective(global: &GlobalArgs) -> CliResult<EffectiveConte
             .filter(|value| !value.trim().is_empty())
     })?;
     let store = store::load()?;
-    context::resolve(&store, &env, &overrides)
+    let effective = context::resolve(&store, &env, &overrides)?;
+    // Diagnostic → stderr, so a piped `--output json` payload stays clean.
+    if let Some(notice) = context::unhonored_scope_notice(&effective) {
+        eprintln!("{notice}");
+    }
+    Ok(effective)
 }
 
 /// Build the small current-thread async runtime used to drive one blocking CLI

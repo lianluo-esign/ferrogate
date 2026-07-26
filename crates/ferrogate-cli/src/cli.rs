@@ -363,13 +363,18 @@ pub(crate) struct ContextCreateArgs {
     /// Control Plane API base URL, for example https://control.example.com.
     #[arg(long)]
     pub(crate) endpoint: String,
-    /// Default tenant applied to commands that accept one.
+    /// Default tenant for this context. NOT HONORED BY THE SERVER TODAY: it
+    /// becomes an `x-ferrogate-tenant` header no Control Plane API operation
+    /// declares, so it neither narrows nor redirects a result; a note is
+    /// printed to stderr whenever it applies.
     #[arg(long)]
     pub(crate) tenant: Option<String>,
-    /// Default project.
+    /// Default project. RECORDED LOCALLY ONLY: it is never sent with any
+    /// request; a note is printed to stderr whenever it applies.
     #[arg(long)]
     pub(crate) project: Option<String>,
-    /// Default workspace.
+    /// Default workspace. RECORDED LOCALLY ONLY: it is never sent with any
+    /// request; a note is printed to stderr whenever it applies.
     #[arg(long)]
     pub(crate) workspace: Option<String>,
     /// Name of the environment variable holding the bearer token, read at call

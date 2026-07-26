@@ -286,6 +286,70 @@ pub fn resolve(
     })
 }
 
+/// The operator-facing note that a resolved scope field is **not** applied to
+/// the request, or `None` when every set field is honored.
+///
+/// Why this exists rather than the fields being made to work: `--tenant`
+/// (and `FERROGATE_TENANT`, and a context's `tenant`) becomes the
+/// `x-ferrogate-tenant` request header, and that header appears **nowhere** in
+/// `docs/openapi/admin-api.openapi.json` — no operation declares it, so no
+/// server-side reader exists. Admin requests are scoped by the bearer token.
+/// `project` and `workspace` are worse: persisted, shown by `context show`,
+/// resolved here, and never placed in a request in any form.
+///
+/// The failure that motivates it: `ferrogate ctl virtual-keys list --tenant
+/// acme` with an admin token exits 0 and returns whatever the token's scope is
+/// — a wrong-tenant read presented as a scoped one, with no diagnostic. That is
+/// the #188 ignored-field anti-pattern, and it is worse here than in a dropped
+/// `ca_bundle_path`, because the operator's mental model of *which tenant's
+/// data they are looking at* is what is wrong.
+///
+/// Honoring them client-side is not available: the client must not invent a
+/// tenancy parameter ~200 operations do not accept. So they get the treatment
+/// `--sort` got — stated in the flag help, in the generated reference, and on
+/// stderr at every use — and `tenant_scope_is_not_yet_an_openapi_parameter`
+/// pins the claim to the contract so it cannot go stale silently.
+///
+/// Pure, so the wording is unit-testable without capturing process stderr.
+pub fn unhonored_scope_notice(effective: &EffectiveContext) -> Option<String> {
+    let mut unsent: Vec<&str> = Vec::new();
+    if effective.project.is_some() {
+        unsent.push("project");
+    }
+    if effective.workspace.is_some() {
+        unsent.push("workspace");
+    }
+
+    let mut notice = String::new();
+    if effective.tenant.is_some() {
+        notice.push_str(
+            "note: the selected tenant is sent as the 'x-ferrogate-tenant' header, which no \
+             Control Plane API operation declares — admin requests are scoped by the bearer \
+             token, so this does not narrow or redirect the result. Where an operation does \
+             accept tenant selection it is a 'tenant' query parameter: pass it as \
+             `--filter tenant=<id>`",
+        );
+    }
+    if !unsent.is_empty() {
+        if !notice.is_empty() {
+            notice.push('\n');
+        }
+        notice.push_str(&format!(
+            "note: the selected context's {} {} recorded locally and {} not sent with any \
+             request; scope the call with an id segment or `--filter` instead",
+            unsent.join(" and "),
+            if unsent.len() == 1 { "is" } else { "are" },
+            if unsent.len() == 1 { "is" } else { "are" },
+        ));
+    }
+
+    if notice.is_empty() {
+        None
+    } else {
+        Some(notice)
+    }
+}
+
 #[cfg(test)]
 #[path = "context_test.rs"]
 mod context_test;
