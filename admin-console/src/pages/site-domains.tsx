@@ -38,6 +38,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  bindAcmeNoteKey,
   SiteDomainChallenge,
   SiteDomainLiveness,
 } from "@/components/site-domain-liveness";
@@ -142,12 +143,10 @@ export default function SiteDomainsPage() {
       adminPost(apiKey, "/admin/v1/site-domains", body),
     onSuccess: (response) => {
       const bound = response.site_domain.hostname;
-      const acme = response.acme;
-      const acmeNote = acme.enabled
-        ? acme.reload_triggered
-          ? t("page.siteDomains.acme.reloadTriggered")
-          : t("page.siteDomains.acme.enabledNoReload")
-        : t("page.siteDomains.acme.disabled");
+      // The ACME claim is qualified by whether THIS hostname was enrolled, not
+      // by the gateway-wide flag: an unproven binding (the gateway's 202) is
+      // deliberately kept out of the order set. See bindAcmeNoteKey.
+      const acmeNote = t(bindAcmeNoteKey(response));
       toast.success(t("page.siteDomains.toast.bound", { hostname: bound, note: acmeNote }));
       setHostname("");
       setTenantId("");

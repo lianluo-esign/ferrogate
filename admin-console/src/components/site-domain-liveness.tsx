@@ -79,6 +79,38 @@ export function SiteDomainLiveness({
 }
 
 /**
+ * Which ACME posture a BIND response actually justifies claiming.
+ *
+ * `acme.enabled` is the gateway-wide issuance flag, not this hostname's
+ * enrolment: the bind handler only refreshes the ACME domain set when the
+ * binding is `proven && holds_binding`, and otherwise returns the ambient state
+ * untouched (`site_domains.rs`, the `#488` branch). The very same `proven` also
+ * decides the response status — 202 for an unproven binding, 200/201 otherwise —
+ * and is serialized in-band as `site_domain.serving` (`admin_site_domain`:
+ * `serving: verification.is_some_and(|record| record.serves(now))`). So reading
+ * `acme.enabled` alone tells an operator "ACME enabled" about a hostname that
+ * was deliberately KEPT OUT of the certificate order set.
+ *
+ * The verdict is derived from `serving` rather than from the HTTP status
+ * because it is the same boolean, travels with the payload the caller already
+ * has, and — unlike a status code — is present on every later read of the same
+ * binding. `undefined` (a gateway predating #488, or a field the contract marks
+ * optional) yields `unknown`: never a guess, exactly as the liveness cell above.
+ */
+export function bindAcmeNoteKey(response: {
+  site_domain: { serving?: boolean };
+  acme: { enabled: boolean; reload_triggered: boolean };
+}): TranslationKey {
+  if (!response.acme.enabled) return "page.siteDomains.acme.disabled";
+  const { serving } = response.site_domain;
+  if (serving === undefined) return "page.siteDomains.acme.unknownEnrolment";
+  if (!serving) return "page.siteDomains.acme.notEnrolled";
+  return response.acme.reload_triggered
+    ? "page.siteDomains.acme.reloadTriggered"
+    : "page.siteDomains.acme.enabledNoReload";
+}
+
+/**
  * The actionable half: while a binding is pending verification the operator has
  * one concrete thing to do — publish a TXT record — and the gateway hands us
  * exactly that record. Showing "not serving" without it would report a problem

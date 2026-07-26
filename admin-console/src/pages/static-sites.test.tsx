@@ -1814,6 +1814,62 @@ describe("StaticSitesPage publish error states", () => {
     expect(alert).not.toHaveTextContent("Quarantined");
   });
 
+  // The "it was not withheld, therefore it was not a ZIP" deduction is only
+  // sound if the whole withheld listing was seen. It is PAGINATED (any non-empty
+  // query takes the paginated branch at admin_list_default_limit = 100) and
+  // sorted by (name, version) — alphabetically, NOT by recency — so a tenant
+  // with more withheld static_site rows than one page holds could have this
+  // bundle's row sort past the cut. Concluding "not a ZIP archive" from a
+  // truncated page is exactly the guess the message claims never to make.
+  it("does not deduce 'not a ZIP' from a TRUNCATED withheld listing", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    let withheldQuery: URLSearchParams | undefined;
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
+        blobEnvelope("marketing", "2.2.0"),
+      ),
+      // A page of rows that does NOT include marketing/2.2.0, while `total`
+      // reports there are more rows than were returned.
+      http.get(gatewayUrl("/v1/assets/withheld"), ({ request }) => {
+        withheldQuery = new URL(request.url).searchParams;
+        return HttpResponse.json({
+          object: "list",
+          data: [withheldAsset({ name: "aardvark", version: "2.2.0", id: "a" })],
+          total: 4_200,
+          offset: 0,
+          limit: 1,
+        });
+      }),
+    );
+    const successToast = vi.spyOn(toast, "success");
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const row = await screen.findByTestId("static-site-marketing");
+      await within(row).findByText("2.1.0");
+
+      await fillAndPublish(user, "marketing", "2.2.0");
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("Not published");
+      // The observed outcome is still stated…
+      expect(alert).toHaveTextContent("stored the upload as an ordinary asset");
+      // …but neither reason is asserted from a partial answer.
+      expect(alert).toHaveTextContent("could not be determined");
+      expect(alert).not.toHaveTextContent("the upload is not a ZIP archive");
+      expect(alert).not.toHaveTextContent("screening withheld");
+      expect(successToast).not.toHaveBeenCalled();
+      // And the read narrows before it paginates: `search` is matched against
+      // id/name/version/asset_type/visibility server-side, and the limit is the
+      // largest a single read can be given (clamped by admin_list_max_limit).
+      expect(withheldQuery?.get("search")).toBe("2.2.0");
+      expect(withheldQuery?.get("asset_type")).toBe("static_site");
+      expect(Number(withheldQuery?.get("limit"))).toBeGreaterThanOrEqual(1000);
+    } finally {
+      successToast.mockRestore();
+    }
+  });
+
   // Honesty rule: when the reason cannot be read we report the outcome we DID
   // observe and surface the unread reason — we never pick one of the two.
   it("admits it could not read WHY the publish did not commit", async () => {
@@ -1953,6 +2009,84 @@ describe("StaticSitesPage domain binding (site context)", () => {
     // The ACME + reload posture stays visible in the drawer after binding.
     const status = await within(drawer).findByRole("status");
     expect(status).toHaveTextContent(/ACME reload triggered/);
+  });
+
+  // The gateway answers 202 for a binding it recorded but could not prove, and
+  // it deliberately keeps that hostname OUT of the ACME order set (`let acme =
+  // if proven && holds_binding { refresh… } else { ambient }`, site_domains.rs).
+  // `acme.enabled` still reports the gateway-wide flag, so reading it alone
+  // announces "ACME reload triggered"/"ACME enabled" for a hostname that was
+  // never enrolled. The in-band twin of that 202 is `site_domain.serving`.
+  it("does not claim ACME enrolment for an UNPROVEN (202) binding", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    server.use(
+      http.post(gatewayUrl("/admin/v1/site-domains"), () =>
+        HttpResponse.json(
+          {
+            object: "site_domain",
+            site_domain: domain({
+              hostname: "app.example.com",
+              serving: false,
+              verification_state: "pending_verification",
+            }),
+            // ACME is on for the gateway, and reports a reload — but this
+            // hostname is not in the set that was reloaded.
+            acme: { enabled: true, reload_triggered: true },
+          },
+          { status: 202 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    await user.type(
+      within(drawer).getByLabelText("Hostname (FQDN)"),
+      "app.example.com",
+    );
+    await user.click(
+      within(drawer).getByRole("button", { name: "Bind hostname" }),
+    );
+
+    const status = await within(drawer).findByRole("status");
+    expect(status).toHaveTextContent(/Not enrolled for ACME/);
+    expect(status).not.toHaveTextContent(/ACME reload triggered/);
+    expect(status).not.toHaveTextContent(/ACME enabled/);
+  });
+
+  // Absent liveness is not a licence to guess the healthy answer, here either.
+  it("says the enrolment is unknown when the bind response omits serving", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    server.use(
+      http.post(gatewayUrl("/admin/v1/site-domains"), () =>
+        HttpResponse.json({
+          object: "site_domain",
+          // A gateway predating #488: no liveness on the wire at all.
+          site_domain: domain({
+            hostname: "app.example.com",
+            serving: undefined,
+            verification_state: undefined,
+          }),
+          acme: { enabled: true, reload_triggered: false },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    await user.type(
+      within(drawer).getByLabelText("Hostname (FQDN)"),
+      "app.example.com",
+    );
+    await user.click(
+      within(drawer).getByRole("button", { name: "Bind hostname" }),
+    );
+
+    const status = await within(drawer).findByRole("status");
+    expect(status).toHaveTextContent(/whether this hostname was enrolled is unknown/);
+    expect(status).not.toHaveTextContent(/Not enrolled for ACME/);
   });
 
   it("validates the hostname client-side without issuing a bind", async () => {

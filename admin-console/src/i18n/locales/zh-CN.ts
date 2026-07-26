@@ -771,6 +771,10 @@ export const zhCN = {
   "page.siteDomains.acme.reloadTriggered": " 已触发 ACME 重载——证书将随新域名重新签发。",
   "page.siteDomains.acme.enabledNoReload": " 已启用 ACME；无需重载监听器。",
   "page.siteDomains.acme.disabled": " 此网关已禁用 ACME 签发；请在带外配置 TLS。",
+  "page.siteDomains.acme.notEnrolled":
+    " 未纳入 ACME：该主机名尚未通过验证，因此未加入证书域名集合。完成验证后才会纳入。",
+  "page.siteDomains.acme.unknownEnrolment":
+    " 此网关已启用 ACME，但无法确定该主机名是否已纳入——响应未给出其服务状态。",
   // 已绑定主机名的存活状态（#488）：绑定会立即记录，但只有 DNS 归属证明生效后
   // 才会真正对外提供服务，因此在每个主机名旁展示 serving 与 verification_state；
   // 字段缺失时显示“未知”，绝不臆测。
@@ -819,6 +823,8 @@ export const zhCN = {
     "未发布：供应链扫描扣留了该站点包（{state}），网关已存储但不会对外提供。{site} 仍在提供此前的站点包。请在“扣留资产”中查看。",
   "page.staticSites.notPublished.unknown":
     "未发布：网关将上传内容作为普通资产存储在 {site}/{version}，并未发布站点包；且无法读取具体原因：{message}。{site} 仍在提供此前的站点包。",
+  "page.staticSites.notPublished.inconclusive":
+    "未发布：网关将上传内容作为普通资产存储在 {site}/{version}，并未发布站点包。扣留资产列表被截断，因此无法在此判定该站点包是否被扫描扣留——请在“扣留资产”中查看 {site} {version}。{site} 仍在提供此前的站点包。",
   "page.staticSites.loadError": "加载静态站点失败：{message}",
   "page.staticSites.manifestError": "清单不可用",
   "page.staticSites.empty": "尚无已发布的静态站点。",

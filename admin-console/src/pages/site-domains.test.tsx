@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it } from "vitest";
+import { toast } from "sonner";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider } from "@/i18n";
 import SiteDomainsPage from "@/pages/site-domains";
@@ -224,6 +225,66 @@ describe("SiteDomainsPage", () => {
     );
     // onSuccess clears the form once the bind (and its ACME posture) is accepted.
     await waitFor(() => expect(hostnameInput).toHaveValue(""));
+  });
+
+  // Same finding as the drawer's: the gateway answers 202 for an UNPROVEN
+  // binding and keeps that hostname out of the ACME order set, while
+  // `acme.enabled` keeps reporting the gateway-wide flag. The toast must not
+  // announce an enrolment that did not happen.
+  it("does not claim ACME enrolment for an UNPROVEN (202) binding", async () => {
+    mockList([]);
+    server.use(
+      http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [{ id: "org-acme", name: "Acme", slug: "acme" }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+      http.get(gatewayUrl("/admin/v1/tenant-accounts/org-acme"), () =>
+        HttpResponse.json({
+          object: "tenant",
+          tenant: { id: "org-acme", name: "Acme", slug: "acme" },
+        }),
+      ),
+      http.post(gatewayUrl("/admin/v1/site-domains"), () =>
+        HttpResponse.json(
+          {
+            object: "site_domain",
+            site_domain: domain({
+              hostname: "new.example.com",
+              site: "docs",
+              serving: false,
+              verification_state: "pending_verification",
+            }),
+            acme: { enabled: true, reload_triggered: true },
+          },
+          { status: 202 },
+        ),
+      ),
+    );
+    const success = vi.spyOn(toast, "success");
+    try {
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText("No bound hostnames.");
+
+      await user.type(screen.getByLabelText("Hostname (FQDN)"), "new.example.com");
+      await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+      await user.click(await screen.findByRole("option", { name: /Acme/ }));
+      await user.type(screen.getByLabelText("Site"), "docs");
+      await user.click(screen.getByRole("button", { name: "Bind hostname" }));
+
+      await waitFor(() => expect(success).toHaveBeenCalled());
+      const message = success.mock.calls[0][0] as string;
+      expect(message).toContain("Not enrolled for ACME");
+      expect(message).not.toContain("ACME reload triggered");
+      expect(message).not.toContain("ACME enabled");
+    } finally {
+      success.mockRestore();
+    }
   });
 
   it("backs the site field with the session tenant's published site slugs", async () => {

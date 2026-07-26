@@ -745,6 +745,13 @@ export const enRest = {
   "page.siteDomains.acme.enabledNoReload": " ACME enabled; no listener reload was required.",
   "page.siteDomains.acme.disabled":
     " ACME issuance is disabled on this gateway; provision TLS out-of-band.",
+  // An UNPROVEN binding (the gateway's 202) is deliberately kept out of the
+  // ACME order set, while `acme.enabled` still reports the gateway-wide flag —
+  // so the note must not read "ACME enabled" for a hostname never enrolled.
+  "page.siteDomains.acme.notEnrolled":
+    " Not enrolled for ACME: the hostname is not verified yet, so it was not added to the certificate set. Verify it, then it enrols.",
+  "page.siteDomains.acme.unknownEnrolment":
+    " ACME is enabled on this gateway, but whether this hostname was enrolled is unknown — the response did not report its serving state.",
   // Bound-hostname LIVENESS (#488), shared by the site-domains page and the
   // static-site detail drawer. A binding is recorded immediately but only SERVES
   // once its DNS ownership proof resolves, so `serving` + `verification_state`
@@ -799,6 +806,10 @@ export const enRest = {
     "Not published: supply-chain screening withheld this bundle ({state}), so the gateway stored it without serving it. {site} still serves its previous bundle. Review it under Withheld assets.",
   "page.staticSites.notPublished.unknown":
     "Not published: the gateway stored the upload as an ordinary asset at {site}/{version} rather than publishing a site bundle, and the reason could not be read back: {message}. {site} still serves its previous bundle.",
+  // The withheld listing is paginated and sorted by name/version, not by
+  // recency, so a truncated page cannot prove this bundle was NOT withheld.
+  "page.staticSites.notPublished.inconclusive":
+    "Not published: the gateway stored the upload as an ordinary asset at {site}/{version} rather than publishing a site bundle. The withheld-asset listing was truncated, so whether supply-chain screening held this bundle back could not be determined here — check Withheld assets for {site} {version}. {site} still serves its previous bundle.",
   "page.staticSites.loadError": "Failed to load static sites: {message}",
   "page.staticSites.manifestError": "Manifest unavailable",
   "page.staticSites.empty": "No published static sites.",

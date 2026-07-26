@@ -23,6 +23,10 @@
 // in the dev-loop, so this is authored here and executed by the gate across the
 // three viewport projects (mobile-390 / tablet-768 / desktop-1440).
 import type { Page, Request } from "@playwright/test";
+import {
+  E2E_PUBLISH_BUNDLE,
+  E2E_REPUBLISH_BUNDLE,
+} from "../src/test/fixtures/zip-bundle";
 import { installAuthenticatedAdminApi } from "./support/admin-api";
 import { installGatewayStaticSites } from "./support/gateway-static-sites";
 import {
@@ -78,7 +82,12 @@ test("publish drives the static_site bundle PUT with x-site-* policy headers, by
   await page.locator("#site-bundle").setInputFiles({
     name: "landing.zip",
     mimeType: "application/zip",
-    buffer: Buffer.alloc(4096, 1),
+    // Real ZIP magic, NOT `Buffer.alloc(...)`: the publish form gates on
+    // `readsAsZipArchive` (the gateway's own `PK\x03\x04` predicate), so a
+    // filler buffer leaves the Publish button `disabled` and this test hangs on
+    // actionability. Shared with src/lib/zip-archive.test.ts, which runs the
+    // product predicate over this exact constant — see src/test/fixtures/zip-bundle.ts.
+    buffer: Buffer.from(E2E_PUBLISH_BUNDLE),
   });
 
   // The live serve-URL preview exposes the canonical serve path as the slug is
@@ -130,7 +139,8 @@ test("republish pushes a new bundle version to an existing site and it appears (
   await page.locator("#site-bundle").setInputFiles({
     name: "marketing-v3.zip",
     mimeType: "application/zip",
-    buffer: Buffer.alloc(2048, 9),
+    // See the publish test: ZIP magic is load-bearing for the Publish button.
+    buffer: Buffer.from(E2E_REPUBLISH_BUNDLE),
   });
 
   const publishPromise = page.waitForRequest((request) =>

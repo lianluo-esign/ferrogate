@@ -88,6 +88,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  bindAcmeNoteKey,
   SiteDomainChallenge,
   SiteDomainLiveness,
 } from "@/components/site-domain-liveness";
@@ -143,6 +144,7 @@ import {
   resolveAdminPath,
 } from "@/lib/gateway-client";
 import { validateSiteDomainHostname } from "@/lib/hostname";
+import { readsAsZipArchive } from "@/lib/zip-archive";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
@@ -155,6 +157,13 @@ type AssetChannelMutationResponse = AdminSchema<"AssetChannelMutationResponse">;
  * never collides with it. */
 const SITE_MANIFEST_VERSION = "__site_manifest__";
 const STATIC_SITE_TYPE = "static_site";
+
+/** Page size asked of the withheld listing when explaining an uncommitted
+ * publish. `storage.admin_list_max_limit` defaults to 1000 (config/types.rs:
+ * `default_admin_list_max_limit`) and clamps anything larger, so this is the
+ * most a single read can return; whether it was ENOUGH is decided by comparing
+ * the returned rows against the response's `total`, never assumed. */
+const WITHHELD_LOOKUP_LIMIT = 1000;
 
 /** `version`-key prefix under which gateway #397 stores each per-file object of
  * a RETAINED bundle: `__site_file__:{bundle_version}:{path}`. A bare version is
@@ -468,30 +477,12 @@ function serveHref(servePath: string): string {
   }
 }
 
-/** The ZIP local-file-header magic, byte-for-byte the gateway's `is_zip_archive`
- * predicate (`data.starts_with(&[0x50, 0x4b, 0x03, 0x04])`, sites.rs:203-205). */
-const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
-
-/**
- * Reads the bundle's first bytes and reports whether the gateway will see a ZIP
- * archive — the SAME predicate `is_zip_archive` applies, so the client-side
- * check cannot disagree with the branch it is predicting.
- *
- * This used to trust the FILENAME (`.zip`) or the browser-declared MIME type,
- * which is not evidence about the bytes at all: `head -c 400 /dev/urandom >
- * site.zip` sailed straight through to a publish that the gateway then stored as
- * an opaque blob. The filename is the operator's claim; the magic is the fact.
- * Still fast feedback rather than the gate — the gateway remains authoritative,
- * and the envelope check on the response is the real guarantee (see
- * `PublishEnvelope`) — but it now fails the case it was meant to catch.
- */
-async function readsAsZipArchive(file: File): Promise<boolean> {
-  const head = new Uint8Array(await file.slice(0, ZIP_MAGIC.length).arrayBuffer());
-  return (
-    head.length === ZIP_MAGIC.length &&
-    ZIP_MAGIC.every((byte, index) => head[index] === byte)
-  );
-}
+// The client-side archive check (`readsAsZipArchive`, the gateway's own
+// `PK\x03\x04` predicate) lives in lib/zip-archive.ts so tests other than this
+// page's can run it — notably lib/zip-archive.test.ts, which runs it over the
+// byte fixtures e2e/static-sites.spec.ts uploads. Tightening this gate is what
+// silently invalidated those fixtures once; a shared predicate is what lets a
+// unit test catch the next one.
 
 /**
  * Explains a publish PUT that answered 200 WITHOUT committing a site bundle,
@@ -506,6 +497,18 @@ async function readsAsZipArchive(file: File): Promise<boolean> {
  * state; its absence means the screening passed and the body was therefore not a
  * ZIP archive. If that read fails we report the outcome we DID observe (nothing
  * was published) and surface the unread reason verbatim, rather than picking one.
+ *
+ * ABSENCE ONLY MEANS ANYTHING IF WE SAW THE WHOLE ANSWER. Any non-empty query
+ * puts this listing on the paginated branch (admin_list_query.rs:21-36) at
+ * `admin_list_default_limit = 100`, and it is sorted by `(name, version)` —
+ * alphabetically, NOT by recency (ferrogate-storage/src/lib.rs:4415-4440). So a
+ * tenant with more withheld `static_site` rows than the page holds could have
+ * this bundle's row sort past the cut, and reading absence as "not a ZIP" would
+ * be exactly the guess the message claims never to make. Hence: narrow the query
+ * with `search` (matched against id/name/version/asset_type/visibility) and ask
+ * for the maximum page, then CHECK `total` against what came back and, if rows
+ * were left behind, say the reason could not be determined instead of asserting
+ * one.
  */
 async function explainUncommittedPublish(
   t: ReturnType<typeof useI18n>["t"],
@@ -514,13 +517,22 @@ async function explainUncommittedPublish(
   version: string,
 ): Promise<string> {
   let withheld: WithheldAssetSummary | undefined;
+  let truncated = false;
   try {
     const listing = await adminGet(apiKey, "/v1/assets/withheld", {
-      query: { asset_type: STATIC_SITE_TYPE },
+      query: {
+        asset_type: STATIC_SITE_TYPE,
+        search: version,
+        limit: WITHHELD_LOOKUP_LIMIT,
+      },
     });
     withheld = listing.data.find(
       (row) => row.name === site && row.version === version,
     );
+    // `total` is the pre-pagination count; the gateway clamps `limit` to
+    // `storage.admin_list_max_limit`, so asking for the max is not a promise of
+    // getting it. Fewer rows than `total` means rows we never saw.
+    truncated = listing.total !== undefined && listing.data.length < listing.total;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return t("page.staticSites.notPublished.unknown", { site, version, message });
@@ -535,6 +547,9 @@ async function explainUncommittedPublish(
           : "page.withheldAssets.visibility.pendingScan",
       ),
     });
+  }
+  if (truncated) {
+    return t("page.staticSites.notPublished.inconclusive", { site, version });
   }
   return t("page.staticSites.notPublished.notArchive", { site, version });
 }
@@ -779,12 +794,10 @@ function SiteDetailSheet({
         site: row!.name,
       }),
     onSuccess: (response) => {
-      const acme = response.acme;
-      const acmeNote = acme.enabled
-        ? acme.reload_triggered
-          ? t("page.siteDomains.acme.reloadTriggered")
-          : t("page.siteDomains.acme.enabledNoReload")
-        : t("page.siteDomains.acme.disabled");
+      // Qualified by THIS hostname's enrolment, not by the gateway-wide ACME
+      // flag: a binding the gateway answered 202 for is recorded but unproven,
+      // and it is deliberately excluded from the certificate order set.
+      const acmeNote = t(bindAcmeNoteKey(response));
       // Keep the ACME posture visible in the drawer (not just a transient toast).
       setBindAcmeNote(acmeNote);
       setBindHostname("");
