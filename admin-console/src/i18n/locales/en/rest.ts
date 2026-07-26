@@ -48,10 +48,15 @@ export const enRest = {
     "This overview is older than the refresh interval; a refresh is in flight.",
   "dashboard.loading": "Loading control-plane overview…",
   "dashboard.loadError": "The control-plane overview could not be loaded: {message}.",
+  "dashboard.refreshError":
+    "The last refresh failed ({message}); the values below are the payload generated {time}.",
   "dashboard.value.unavailable": "Unavailable",
   "dashboard.value.unavailableHint": "This section could not be loaded. Unavailable is not zero.",
   "dashboard.value.notAvailable": "N/A",
-  "dashboard.value.notAvailableHint": "Not reported by the current overview contract.",
+  "dashboard.value.notAvailableHint":
+    "Not reported by this overview payload, or not readable by this console. Not a zero.",
+  "dashboard.value.notApplicableScopeHint":
+    "Not applicable at tenant scope: this count exists only for a platform-operator key.",
   "dashboard.period.label": "Token and cost period",
   "dashboard.period.lifetime": "Lifetime",
   "dashboard.period.month": "This month",
@@ -72,11 +77,16 @@ export const enRest = {
   "dashboard.metric.agentRuns": "Agent runs",
   "dashboard.metric.agentRunsHint": "all recorded runs",
   "dashboard.metric.workers": "Self-hosted workers",
-  "dashboard.metric.workersHint": "active / total",
+  "dashboard.metric.workersHint": "healthy (registered or online) / registered total",
+  "dashboard.metric.workersUnknownHint":
+    "The fleet reports a worker status this console cannot classify, so the healthy count is unknown. See the status breakdown in the inventory below.",
   "dashboard.breakdown.enabledOfTotal": "{enabled} enabled / {total} total",
   "dashboard.breakdown.activeOfTotal": "{active} active / {total} total",
   "dashboard.breakdown.connectedOfTotal": "{connected} connected / {total} total",
   "dashboard.breakdown.storage": "{size} stored",
+  "dashboard.breakdown.storageQuota": " of a {quota} scope quota",
+  "dashboard.breakdown.assetReferences":
+    "{referenced} channel-referenced / {unreferenced} unreferenced",
   "dashboard.alerts.title": "Alerts",
   "dashboard.alerts.active": "{count} active",
   "dashboard.alerts.empty": "No active control-plane alerts.",
@@ -84,17 +94,20 @@ export const enRest = {
     "Some alert sources could not be evaluated and may be underreported: {sources}.",
   "dashboard.alerts.truncated":
     "More alerts exist than shown; the summary is capped to stay a triage signal.",
-  "dashboard.alerts.deferred":
-    "Quota-pressure and pending-approval alerts are not yet reported by the overview (tracked in #458).",
-  "dashboard.deferred.title": "Not yet reported",
-  "dashboard.deferred.pendingApprovals": "Pending approvals",
-  "dashboard.deferred.quotaPressure": "Quota pressure",
+  "dashboard.alerts.malformed":
+    "{count} alert entr(ies) could not be read from this payload and are not listed below.",
+  "dashboard.signals.title": "Governance signals",
+  "dashboard.signals.pendingApprovals": "Pending tool approvals",
+  "dashboard.signals.quotaPressure": "Scopes under quota pressure",
   "dashboard.alerts.evidenceMore": "+{count} more",
   "dashboard.alerts.investigate": "Investigate",
   "dashboard.alert.kind.provider_unhealthy": "Providers unhealthy",
   "dashboard.alert.kind.mcp_server_disconnected": "MCP servers disconnected",
   "dashboard.alert.kind.agent_runs_failed": "Agent runs failing",
   "dashboard.alert.kind.self_hosted_workers_unhealthy": "Workers under pressure",
+  "dashboard.alert.kind.quota_pressure": "Quota pressure",
+  "dashboard.alert.kind.tool_approvals_pending": "Tool approvals pending",
+  "dashboard.alert.kind.alerts_unreadable": "Unreadable alert entries",
   "dashboard.alert.kind.section_unavailable": "Overview section unavailable",
   "dashboard.alert.kind.unknown": "Alert",
   "dashboard.severity.critical": "Critical",
@@ -104,6 +117,7 @@ export const enRest = {
   "dashboard.section.runtime": "Runtime inventory",
   "dashboard.section.controlPlane": "Control-plane inventory",
   "dashboard.section.usage": "Usage totals",
+  "dashboard.section.alerts": "Alert summary",
   "dashboard.inventory.title": "Resource inventory",
   "dashboard.inventory.description":
     "Counts by control-plane domain. Follow a row to its filtered management view.",
@@ -133,6 +147,11 @@ export const enRest = {
   "dashboard.res.assets": "Static assets",
   "dashboard.res.agentRuns": "Agent runs",
   "dashboard.res.workers": "Self-hosted workers",
+  "dashboard.res.toolApprovals": "Pending tool approvals",
+  "dashboard.res.guardrailRevisions": "Guardrail policy revisions",
+  "dashboard.res.guardrailBindings": "Guardrail policy bindings",
+  "dashboard.res.quotaPolicies": "Quota policies",
+  "dashboard.res.policyRules": "Policy rules",
   "dashboard.action.viewResource": "View {resource}",
 
   // Generated resource-CRUD framework chrome (#348). These localize the shared

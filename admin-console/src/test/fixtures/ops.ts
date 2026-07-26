@@ -3,10 +3,10 @@
 import type { components } from "@/lib/api-types.generated";
 import type {
   AdminOverviewSection,
-  OverviewAlertsData,
-  OverviewControlPlaneData,
-  OverviewRuntimeData,
-  OverviewUsageData,
+  OverviewAlertsWire,
+  OverviewControlPlaneWire,
+  OverviewRuntimeWire,
+  OverviewUsageWire,
 } from "@/lib/overview";
 
 type AdminSchema<K extends keyof components["schemas"]> = components["schemas"][K];
@@ -168,8 +168,8 @@ export function overviewSectionUnavailable(
 }
 
 export function overviewRuntimeData(
-  overrides: Partial<OverviewRuntimeData> = {},
-): OverviewRuntimeData {
+  overrides: Partial<OverviewRuntimeWire> = {},
+): OverviewRuntimeWire {
   return {
     providers: { total: 4, enabled: 3 },
     models: { total: 12, enabled: 10 },
@@ -184,27 +184,56 @@ export function overviewRuntimeData(
   };
 }
 
+// The control-plane payload mirrors `AdminOverviewControlPlane`
+// (crates/ferrogate-cli/src/gateway/admin_overview.rs) AFTER #458, and the
+// worker histogram uses the status labels the gateway really writes:
+// `registered` at registration and the worker-reported `online` on heartbeat —
+// never an `active` bucket, which no gateway code path produces.
 export function overviewControlPlaneData(
-  overrides: Partial<OverviewControlPlaneData> = {},
-): OverviewControlPlaneData {
+  overrides: Partial<OverviewControlPlaneWire> = {},
+): OverviewControlPlaneWire {
   return {
     tenants: 24,
     projects: 52,
     workspaces: 8,
-    virtual_keys: 15,
-    assets: { count: 128, storage_bytes: 5_368_709_120 },
+    virtual_keys: { total: 15, enabled: 11 },
+    assets: {
+      count: 128,
+      storage_bytes: 5_368_709_120,
+      referenced: 96,
+      unreferenced: 32,
+      storage_quota_bytes: null,
+    },
     agent_runs: { total: 340, by_status: { completed: 300, failed: 32, blocked: 8 } },
     self_hosted_workers: {
       total: 12,
-      by_status: { active: 9, stale: 2, draining: 1 },
+      by_status: { online: 8, registered: 1, stale: 2, draining: 1 },
+    },
+    pending_tool_approvals: 4,
+    quota_pressure: [
+      {
+        scope_type: "tenant",
+        scope_id: "tenant-alpha",
+        dimension: "monthly_budget_usd",
+        unit: "usd",
+        used: 912.5,
+        cap: 1000,
+        utilization_pct: 91.25,
+      },
+    ],
+    policy_governance: {
+      guardrail_policy_revisions: 7,
+      guardrail_policy_bindings: 5,
+      quota_policies: 3,
+      policy_rules: 9,
     },
     ...overrides,
   };
 }
 
 export function overviewUsageData(
-  overrides: Partial<OverviewUsageData> = {},
-): OverviewUsageData {
+  overrides: Partial<OverviewUsageWire> = {},
+): OverviewUsageWire {
   return {
     current_period_month: "2026-07",
     lifetime: {
@@ -227,11 +256,14 @@ export function overviewUsageData(
   };
 }
 
+// Mirrors the alert set `build_overview` derives from the control-plane payload
+// above: runtime alerts first, then the durable ones (failed runs, worker
+// pressure, quota pressure, pending approvals) — the last two landed in #458.
 export function overviewAlertsData(
-  overrides: Partial<OverviewAlertsData> = {},
-): OverviewAlertsData {
+  overrides: Partial<OverviewAlertsWire> = {},
+): OverviewAlertsWire {
   return {
-    total: 3,
+    total: 5,
     truncated: false,
     unavailable_sources: [],
     entries: [
@@ -275,6 +307,36 @@ export function overviewAlertsData(
             reference: "/admin/v1/self-hosted-worker-records",
           },
           { id: "draining", detail: "1 in status draining" },
+        ],
+        evidence_truncated: false,
+      },
+      {
+        kind: "quota_pressure",
+        severity: "warning",
+        summary: "1 scope/quota-dimension(s) at or over the pressure threshold",
+        count: 1,
+        detected_at_unix: 1_752_000_000,
+        evidence: [
+          {
+            id: "tenant-alpha:monthly_budget_usd",
+            detail: "91.25% of monthly_budget_usd cap (912.5 / 1000 usd)",
+            reference: "/admin/v1/quota-policies",
+          },
+        ],
+        evidence_truncated: false,
+      },
+      {
+        kind: "tool_approvals_pending",
+        severity: "warning",
+        summary: "4 tool approval(s) awaiting a decision",
+        count: 4,
+        detected_at_unix: 1_752_000_000,
+        evidence: [
+          {
+            id: "pending",
+            detail: "4 pending tool approval(s)",
+            reference: "/admin/v1/tool-approvals",
+          },
         ],
         evidence_truncated: false,
       },

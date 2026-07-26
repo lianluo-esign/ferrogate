@@ -49,12 +49,15 @@ import { APP_ROUTES } from "@/lib/app-routes";
 import { adminGet } from "@/lib/gateway-client";
 import {
   alertSeverityRank,
+  healthyWorkerCount,
+  parseAlerts,
+  parseControlPlane,
+  parseRuntime,
+  parseUsage,
   sectionView,
-  type OverviewAlert,
   type OverviewControlPlaneData,
   type OverviewEvidence,
   type OverviewRuntimeData,
-  type OverviewUsageData,
 } from "@/lib/overview";
 
 // Bounded polling cadence and the age past which the overview is flagged stale.
@@ -77,12 +80,18 @@ const RELATIVE_TIME: Intl.DateTimeFormatOptions = {
 
 type Period = "lifetime" | "month";
 
+const QUOTA_POLICIES_ROUTE = "/app/quota-policies";
+
 // Console routes an alert kind pivots to (filtered where the target supports it).
 const ALERT_ROUTE: Record<string, string> = {
   provider_unhealthy: APP_ROUTES.operationsProviderHealth,
   mcp_server_disconnected: "/app/mcp-servers",
   agent_runs_failed: `${APP_ROUTES.agentRuns}?status=failed`,
   self_hosted_workers_unhealthy: APP_ROUTES.selfHostedWorkerOperations,
+  // #458 alert kinds: both are raised by the live gateway, so both need a label
+  // and a pivot target — an untitled "Alert" with no link is not triage.
+  quota_pressure: QUOTA_POLICIES_ROUTE,
+  tool_approvals_pending: APP_ROUTES.toolApprovals,
 };
 
 const ALERT_KIND_LABEL: Record<string, TranslationKey> = {
@@ -90,6 +99,8 @@ const ALERT_KIND_LABEL: Record<string, TranslationKey> = {
   mcp_server_disconnected: "dashboard.alert.kind.mcp_server_disconnected",
   agent_runs_failed: "dashboard.alert.kind.agent_runs_failed",
   self_hosted_workers_unhealthy: "dashboard.alert.kind.self_hosted_workers_unhealthy",
+  quota_pressure: "dashboard.alert.kind.quota_pressure",
+  tool_approvals_pending: "dashboard.alert.kind.tool_approvals_pending",
   section_unavailable: "dashboard.alert.kind.section_unavailable",
 };
 
@@ -121,12 +132,36 @@ function Unavailable() {
   );
 }
 
-/** Explicit "not applicable" value: a field the contract does not (yet) expose. */
-function NotAvailable() {
+/**
+ * Explicit "not available" value: a field the payload did not carry, one this
+ * console could not read, or one that is not applicable at this scope. Distinct
+ * from a real zero and from an unavailable section; `hint` says which.
+ */
+function NotAvailable({ hint }: { hint?: TranslationKey } = {}) {
   const { t } = useI18n();
   return (
-    <span className="text-muted-foreground" title={t("dashboard.value.notAvailableHint")}>
+    <span className="text-muted-foreground" title={t(hint ?? "dashboard.value.notAvailableHint")}>
       {t("dashboard.value.notAvailable")}
+    </span>
+  );
+}
+
+/** `x / y` where an unknown numerator stays N/A instead of collapsing to zero. */
+function Ratio({
+  value,
+  total,
+  unknownHint,
+}: {
+  value: number | undefined;
+  total: number;
+  unknownHint?: TranslationKey;
+}) {
+  const { format } = useI18n();
+  return (
+    <span>
+      {value === undefined ? <NotAvailable hint={unknownHint} /> : format.number(value)}
+      {" / "}
+      {format.number(total)}
     </span>
   );
 }
@@ -210,23 +245,25 @@ export default function DashboardPage() {
 
   const overview = overviewQuery.data;
 
-  const runtime = overview ? sectionView<OverviewRuntimeData>(overview.runtime) : undefined;
+  // Every section is PARSED, not cast: a field the gateway renamed or retyped
+  // arrives as `undefined` (rendered N/A) instead of reaching a formatter.
+  const runtime = overview ? sectionView(overview.runtime, parseRuntime) : undefined;
   const controlPlane = overview
-    ? sectionView<OverviewControlPlaneData>(overview.control_plane)
+    ? sectionView(overview.control_plane, parseControlPlane)
     : undefined;
-  const usage = overview ? sectionView<OverviewUsageData>(overview.usage) : undefined;
-  const alerts = overview
-    ? sectionView<{
-        total: number;
-        truncated: boolean;
-        unavailable_sources: string[];
-        entries: OverviewAlert[];
-      }>(overview.alerts)
-    : undefined;
+  const usage = overview ? sectionView(overview.usage, parseUsage) : undefined;
+  const alerts = overview ? sectionView(overview.alerts, parseAlerts) : undefined;
+
+  // A FAILED BACKGROUND REFRESH keeps the last good payload: TanStack Query
+  // sets `error` while retaining `data`, and blanking a healthy cockpit over one
+  // transient tick is exactly the "blanks healthy sections" failure mode. The
+  // payload on screen is then, by definition, stale — say so.
+  const refreshError = overview !== undefined ? (overviewQuery.error as Error | null) : null;
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const isStale =
-    overview !== undefined && nowSeconds - overview.generated_at_unix > STALE_AFTER_SECONDS;
+    refreshError !== null ||
+    (overview !== undefined && nowSeconds - overview.generated_at_unix > STALE_AFTER_SECONDS);
 
   // The period-scoped token/cost/request totals, or undefined when the usage
   // section failed (rendered as Unavailable, never zero).
@@ -237,7 +274,9 @@ export default function DashboardPage() {
     : undefined;
   const periodScope =
     usage?.status === "ok" && period === "month"
-      ? t("dashboard.period.monthScope", { month: usage.data.current_period_month })
+      ? t("dashboard.period.monthScope", {
+          month: usage.data.current_period_month ?? t("dashboard.value.notAvailable"),
+        })
       : t("dashboard.period.lifetimeScope");
 
   // Prioritized alert list: synthesize a visible alert for any unavailable
@@ -268,8 +307,23 @@ export default function DashboardPage() {
     sectionFailure(controlPlane, "dashboard.section.controlPlane", undefined);
     sectionFailure(usage, "dashboard.section.usage", "/app/usage-reports");
     sectionFailure(runtime, "dashboard.section.runtime", APP_ROUTES.operationsStatus);
+    // An unavailable ALERTS section must never read as "all clear" — the worst
+    // dishonest state a cockpit can reach.
+    sectionFailure(alerts, "dashboard.section.alerts", undefined);
 
     if (alerts?.status === "ok") {
+      if (alerts.data.malformed_entries > 0) {
+        // Entries this console could not read are COUNTED, not silently dropped.
+        rows.push({
+          key: "alerts-malformed",
+          kind: "alerts_unreadable",
+          severity: "warning",
+          summary: t("dashboard.alerts.malformed", { count: alerts.data.malformed_entries }),
+          count: alerts.data.malformed_entries,
+          evidence: [],
+          evidenceTruncated: false,
+        });
+      }
       for (const [index, entry] of alerts.data.entries.entries()) {
         rows.push({
           key: `alert-${index}-${entry.kind}`,
@@ -287,8 +341,18 @@ export default function DashboardPage() {
   }, [overview, runtime, controlPlane, usage, alerts, t]);
 
   const unavailableSources =
-    alerts?.status === "ok" ? alerts.data.unavailable_sources : [];
-  const alertsTruncated = alerts?.status === "ok" ? alerts.data.truncated : false;
+    alerts?.status === "ok" ? (alerts.data.unavailable_sources ?? []) : [];
+  const alertsTruncated = alerts?.status === "ok" ? (alerts.data.truncated ?? false) : false;
+
+  // #458 governance signals, read from the live payload. Three distinct states:
+  // an unavailable section (Unavailable), a field this console could not read
+  // (N/A), and a real count.
+  const controlPlaneData = controlPlane?.status === "ok" ? controlPlane.data : undefined;
+  const signalValue = (value: number | undefined): ReactNode => {
+    if (controlPlane?.status !== "ok") return <Unavailable />;
+    if (value === undefined) return <NotAvailable />;
+    return <span className="tabular-nums">{format.number(value)}</span>;
+  };
 
   const scopeLabel =
     overview?.scope.kind === "tenant"
@@ -304,7 +368,8 @@ export default function DashboardPage() {
       </div>
     );
   }
-  if (overviewQuery.error || !overview) {
+  // Only a load with NO payload at all is a full-page error. See `refreshError`.
+  if (!overview) {
     return (
       <div className="flex flex-col gap-2">
         <h1 className="text-lg font-semibold">{t("dashboard.title")}</h1>
@@ -347,6 +412,19 @@ export default function DashboardPage() {
           )}
         </div>
       </header>
+
+      {/* A failed refresh degrades the cockpit to "stale", never to a blank page. */}
+      {refreshError ? (
+        <p
+          role="status"
+          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-muted-foreground"
+        >
+          {t("dashboard.refreshError", {
+            message: refreshError.message,
+            time: format.date(overview.generated_at_unix * 1000, RELATIVE_TIME),
+          })}
+        </p>
+      ) : null}
 
       {/* --- Band 1: traffic, cost, and core counts (first viewport) --------- */}
       <section aria-labelledby="traffic-heading">
@@ -408,10 +486,15 @@ export default function DashboardPage() {
             icon={Server}
             label={t("dashboard.metric.providers")}
             value={
-              runtime?.status === "ok" ? (
-                `${format.number(runtime.data.providers.enabled)} / ${format.number(runtime.data.providers.total)}`
-              ) : (
+              runtime?.status !== "ok" ? (
                 <Unavailable />
+              ) : runtime.data.providers === undefined ? (
+                <NotAvailable />
+              ) : (
+                <Ratio
+                  value={runtime.data.providers.enabled}
+                  total={runtime.data.providers.total}
+                />
               )
             }
             detail={t("dashboard.metric.providersHint")}
@@ -420,10 +503,15 @@ export default function DashboardPage() {
             icon={Network}
             label={t("dashboard.metric.mcpServers")}
             value={
-              runtime?.status === "ok" ? (
-                `${format.number(runtime.data.mcp_servers.connected)} / ${format.number(runtime.data.mcp_servers.total)}`
-              ) : (
+              runtime?.status !== "ok" ? (
                 <Unavailable />
+              ) : runtime.data.mcp_servers === undefined ? (
+                <NotAvailable />
+              ) : (
+                <Ratio
+                  value={runtime.data.mcp_servers.connected}
+                  total={runtime.data.mcp_servers.total}
+                />
               )
             }
             detail={t("dashboard.metric.mcpHint")}
@@ -434,15 +522,23 @@ export default function DashboardPage() {
             icon={HardDrive}
             label={t("dashboard.metric.assets")}
             value={
-              controlPlane?.status === "ok" ? format.number(controlPlane.data.assets.count) : <Unavailable />
+              controlPlane?.status !== "ok" ? (
+                <Unavailable />
+              ) : controlPlaneData?.assets === undefined ? (
+                <NotAvailable />
+              ) : (
+                format.number(controlPlaneData.assets.count)
+              )
             }
             detail={
-              controlPlane?.status === "ok" ? (
-                t("dashboard.breakdown.storage", {
-                  size: format.bytes(controlPlane.data.assets.storage_bytes),
-                })
-              ) : (
+              controlPlane?.status !== "ok" ? (
                 <Unavailable />
+              ) : controlPlaneData?.assets === undefined ? (
+                <NotAvailable />
+              ) : (
+                t("dashboard.breakdown.storage", {
+                  size: format.bytes(controlPlaneData.assets.storage_bytes),
+                })
               )
             }
             href={APP_ROUTES.assets}
@@ -452,20 +548,39 @@ export default function DashboardPage() {
             icon={Bot}
             label={t("dashboard.metric.agentRuns")}
             value={
-              controlPlane?.status === "ok" ? format.number(controlPlane.data.agent_runs.total) : <Unavailable />
+              controlPlane?.status !== "ok" ? (
+                <Unavailable />
+              ) : controlPlaneData?.agent_runs === undefined ? (
+                <NotAvailable />
+              ) : (
+                format.number(controlPlaneData.agent_runs.total)
+              )
             }
             detail={t("dashboard.metric.agentRunsHint")}
             href={APP_ROUTES.agentRuns}
             viewLabel={t("dashboard.action.viewResource", { resource: t("dashboard.res.agentRuns") })}
           />
+          {/*
+            Healthy workers are DERIVED from the status labels the gateway
+            actually writes (`registered` on registration, the worker-reported
+            `online` on heartbeat). There is no `active` bucket to read, and a
+            histogram this console cannot classify renders N/A — never a zero
+            that would claim twelve healthy workers are down.
+          */}
           <MetricTile
             icon={Boxes}
             label={t("dashboard.metric.workers")}
             value={
-              controlPlane?.status === "ok" ? (
-                `${format.number(controlPlane.data.self_hosted_workers.by_status.active ?? 0)} / ${format.number(controlPlane.data.self_hosted_workers.total)}`
-              ) : (
+              controlPlane?.status !== "ok" ? (
                 <Unavailable />
+              ) : controlPlaneData?.self_hosted_workers === undefined ? (
+                <NotAvailable />
+              ) : (
+                <Ratio
+                  value={healthyWorkerCount(controlPlaneData.self_hosted_workers.by_status)}
+                  total={controlPlaneData.self_hosted_workers.total}
+                  unknownHint="dashboard.metric.workersUnknownHint"
+                />
               )
             }
             detail={t("dashboard.metric.workersHint")}
@@ -564,15 +679,24 @@ export default function DashboardPage() {
             </p>
           ) : null}
           {alertsTruncated ? <p>{t("dashboard.alerts.truncated")}</p> : null}
-          <p>{t("dashboard.alerts.deferred")}</p>
-          {/* Deferred #458 signals: shown as explicit N/A, never a fabricated zero. */}
+          {/*
+            Live #458 governance signals. Each links to the page that resolves it
+            and reports three distinct states: unavailable section, unreadable
+            field (N/A), or a real count.
+          */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-            <span className="font-medium">{t("dashboard.deferred.title")}</span>
+            <span className="font-medium">{t("dashboard.signals.title")}</span>
             <span className="inline-flex items-center gap-1">
-              {t("dashboard.deferred.pendingApprovals")} <NotAvailable />
+              <Link to={APP_ROUTES.toolApprovals} className="hover:underline">
+                {t("dashboard.signals.pendingApprovals")}
+              </Link>
+              {signalValue(controlPlaneData?.pending_tool_approvals)}
             </span>
             <span className="inline-flex items-center gap-1">
-              {t("dashboard.deferred.quotaPressure")} <NotAvailable />
+              <Link to={QUOTA_POLICIES_ROUTE} className="hover:underline">
+                {t("dashboard.signals.quotaPressure")}
+              </Link>
+              {signalValue(controlPlaneData?.quota_pressure?.length)}
             </span>
           </div>
         </div>
@@ -605,63 +729,57 @@ export default function DashboardPage() {
   );
 }
 
-/** A single inventory row: a resource, its total, a breakdown, and its route. */
+/**
+ * A single inventory row: a resource, its total, a breakdown, and its route.
+ * `total: undefined` means the payload did not carry a readable count — the row
+ * renders N/A (with `totalHint` explaining why), never a zero.
+ */
 interface InventoryRow {
   labelKey: TranslationKey;
-  total: number;
+  total: number | undefined;
+  totalHint?: TranslationKey;
   breakdown?: (t: ReturnType<typeof useI18n>["t"], format: ReturnType<typeof useI18n>["format"]) => ReactNode;
   href?: string;
 }
 
+/** An `{enabled,total}` row; the whole row degrades to N/A when the field is unreadable. */
+function enabledRow(
+  labelKey: TranslationKey,
+  count: { total: number; enabled: number } | undefined,
+  href?: string,
+): InventoryRow {
+  return {
+    labelKey,
+    total: count?.total,
+    href,
+    breakdown: count
+      ? (t) =>
+          t("dashboard.breakdown.enabledOfTotal", {
+            enabled: count.enabled,
+            total: count.total,
+          })
+      : undefined,
+  };
+}
+
 function runtimeRows(data: OverviewRuntimeData): InventoryRow[] {
+  const plugins = data.plugins;
+  const mcp = data.mcp_servers;
   return [
-    {
-      labelKey: "dashboard.res.providers",
-      total: data.providers.total,
-      breakdown: (t) =>
-        t("dashboard.breakdown.enabledOfTotal", {
-          enabled: data.providers.enabled,
-          total: data.providers.total,
-        }),
-      href: "/app/providers",
-    },
-    {
-      labelKey: "dashboard.res.models",
-      total: data.models.total,
-      breakdown: (t) =>
-        t("dashboard.breakdown.enabledOfTotal", {
-          enabled: data.models.enabled,
-          total: data.models.total,
-        }),
-      href: "/app/models",
-    },
-    {
-      labelKey: "dashboard.res.upstreams",
-      total: data.upstreams.total,
-      breakdown: (t) =>
-        t("dashboard.breakdown.enabledOfTotal", {
-          enabled: data.upstreams.enabled,
-          total: data.upstreams.total,
-        }),
-      href: "/app/agent-upstreams",
-    },
-    {
-      labelKey: "dashboard.res.routes",
-      total: data.routes.total,
-      breakdown: (t) =>
-        t("dashboard.breakdown.enabledOfTotal", {
-          enabled: data.routes.enabled,
-          total: data.routes.total,
-        }),
-    },
+    enabledRow("dashboard.res.providers", data.providers, "/app/providers"),
+    enabledRow("dashboard.res.models", data.models, "/app/models"),
+    enabledRow("dashboard.res.upstreams", data.upstreams, "/app/agent-upstreams"),
+    enabledRow("dashboard.res.routes", data.routes),
     {
       labelKey: "dashboard.res.plugins",
-      total: data.plugins.total,
-      breakdown: (t) =>
-        t("dashboard.breakdown.activeOfTotal", {
-          active: data.plugins.active,
-          total: data.plugins.total,
-        }),
+      total: plugins?.total,
+      breakdown: plugins
+        ? (t) =>
+            t("dashboard.breakdown.activeOfTotal", {
+              active: plugins.active,
+              total: plugins.total,
+            })
+        : undefined,
       href: "/app/plugins",
     },
     { labelKey: "dashboard.res.tools", total: data.tools, href: APP_ROUTES.tools },
@@ -669,12 +787,14 @@ function runtimeRows(data: OverviewRuntimeData): InventoryRow[] {
     { labelKey: "dashboard.res.staticApiKeys", total: data.static_api_keys },
     {
       labelKey: "dashboard.res.mcpServers",
-      total: data.mcp_servers.total,
-      breakdown: (t) =>
-        t("dashboard.breakdown.connectedOfTotal", {
-          connected: data.mcp_servers.connected,
-          total: data.mcp_servers.total,
-        }),
+      total: mcp?.total,
+      breakdown: mcp
+        ? (t) =>
+            t("dashboard.breakdown.connectedOfTotal", {
+              connected: mcp.connected,
+              total: mcp.total,
+            })
+        : undefined,
       href: "/app/mcp-servers",
     },
   ];
@@ -695,29 +815,84 @@ function controlPlaneRows(data: OverviewControlPlaneData): InventoryRow[] {
       </span>
     );
   };
+  const assets = data.assets;
+  const runs = data.agent_runs;
+  const workers = data.self_hosted_workers;
+  // `policy_governance` is `null` — not zero — for a tenant-scoped key, because
+  // guardrail/quota/policy tables are not per-tenant attributable (#458).
+  const governance = data.policy_governance ?? undefined;
+  const governanceHint: TranslationKey | undefined =
+    data.policy_governance === null ? "dashboard.value.notApplicableScopeHint" : undefined;
   return [
     { labelKey: "dashboard.res.tenants", total: data.tenants, href: "/app/tenants" },
     { labelKey: "dashboard.res.projects", total: data.projects, href: "/app/projects" },
     { labelKey: "dashboard.res.workspaces", total: data.workspaces, href: "/app/workspaces" },
-    { labelKey: "dashboard.res.virtualKeys", total: data.virtual_keys, href: APP_ROUTES.virtualKeys },
+    enabledRow("dashboard.res.virtualKeys", data.virtual_keys, APP_ROUTES.virtualKeys),
     {
       labelKey: "dashboard.res.assets",
-      total: data.assets.count,
-      breakdown: (t, format) =>
-        t("dashboard.breakdown.storage", { size: format.bytes(data.assets.storage_bytes) }),
+      total: assets?.count,
+      breakdown: assets
+        ? (t, format) => (
+            <span className="flex flex-col">
+              <span>
+                {t("dashboard.breakdown.storage", { size: format.bytes(assets.storage_bytes) })}
+                {assets.storage_quota_bytes !== null
+                  ? t("dashboard.breakdown.storageQuota", {
+                      quota: format.bytes(assets.storage_quota_bytes),
+                    })
+                  : null}
+              </span>
+              <span>
+                {t("dashboard.breakdown.assetReferences", {
+                  referenced: assets.referenced,
+                  unreferenced: assets.unreferenced,
+                })}
+              </span>
+            </span>
+          )
+        : undefined,
       href: APP_ROUTES.assets,
     },
     {
       labelKey: "dashboard.res.agentRuns",
-      total: data.agent_runs.total,
-      breakdown: byStatus(data.agent_runs.by_status),
+      total: runs?.total,
+      breakdown: runs ? byStatus(runs.by_status) : undefined,
       href: APP_ROUTES.agentRuns,
     },
     {
       labelKey: "dashboard.res.workers",
-      total: data.self_hosted_workers.total,
-      breakdown: byStatus(data.self_hosted_workers.by_status),
+      total: workers?.total,
+      breakdown: workers ? byStatus(workers.by_status) : undefined,
       href: APP_ROUTES.selfHostedWorkerOperations,
+    },
+    {
+      labelKey: "dashboard.res.toolApprovals",
+      total: data.pending_tool_approvals,
+      href: APP_ROUTES.toolApprovals,
+    },
+    {
+      labelKey: "dashboard.res.guardrailRevisions",
+      total: governance?.guardrail_policy_revisions,
+      totalHint: governanceHint,
+      href: APP_ROUTES.guardrailPolicies,
+    },
+    {
+      labelKey: "dashboard.res.guardrailBindings",
+      total: governance?.guardrail_policy_bindings,
+      totalHint: governanceHint,
+      href: APP_ROUTES.guardrailPolicies,
+    },
+    {
+      labelKey: "dashboard.res.quotaPolicies",
+      total: governance?.quota_policies,
+      totalHint: governanceHint,
+      href: QUOTA_POLICIES_ROUTE,
+    },
+    {
+      labelKey: "dashboard.res.policyRules",
+      total: governance?.policy_rules,
+      totalHint: governanceHint,
+      href: "/app/policies",
     },
   ];
 }
@@ -776,7 +951,13 @@ function InventoryTable({
                         label
                       )}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">{format.number(row.total)}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {row.total === undefined ? (
+                        <NotAvailable hint={row.totalHint} />
+                      ) : (
+                        format.number(row.total)
+                      )}
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {row.breakdown ? row.breakdown(t, format) : "—"}
                     </TableCell>

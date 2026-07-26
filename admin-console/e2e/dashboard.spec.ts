@@ -27,6 +27,9 @@ test("cockpit surfaces inventory, traffic, health, and filtered-view links", asy
   await expect(traffic.getByText("12,000,000")).toBeVisible();
   await expect(traffic.getByText("3 / 4")).toBeVisible();
   await expect(traffic.getByText("$4,210.50")).toBeVisible();
+  // Healthy workers derived from the gateway's real status labels (`online` +
+  // `registered`), not from an `active` bucket the gateway never writes.
+  await expect(traffic.getByText("9 / 12")).toBeVisible();
 
   // Core counts link to their FILTERED management views.
   await expect(traffic.getByRole("link", { name: "View MCP servers" })).toHaveAttribute(
@@ -49,6 +52,9 @@ test("cockpit surfaces inventory, traffic, health, and filtered-view links", asy
   const alerts = page.getByRole("region", { name: "Alerts" });
   await expect(alerts.getByText("Providers unhealthy")).toBeVisible();
   await expect(alerts.getByText("anthropic")).toBeVisible();
+  // The #458 alert kinds are titled, not a generic untitled "Alert".
+  await expect(alerts.getByText("Tool approvals pending")).toBeVisible();
+  await expect(alerts.getByText("Quota pressure")).toBeVisible();
   await expect(alerts.getByRole("link", { name: "Investigate" }).first()).toBeVisible();
 
   await expectNoDocumentOverflow(page, testInfo);

@@ -58,10 +58,24 @@ function emptyOverview(): AdminOverview {
         tenants: 0,
         projects: 0,
         workspaces: 0,
-        virtual_keys: 0,
-        assets: { count: 0, storage_bytes: 0 },
+        virtual_keys: { total: 0, enabled: 0 },
+        assets: {
+          count: 0,
+          storage_bytes: 0,
+          referenced: 0,
+          unreferenced: 0,
+          storage_quota_bytes: null,
+        },
         agent_runs: { total: 0, by_status: {} },
         self_hosted_workers: { total: 0, by_status: {} },
+        pending_tool_approvals: 0,
+        quota_pressure: [],
+        policy_governance: {
+          guardrail_policy_revisions: 0,
+          guardrail_policy_bindings: 0,
+          quota_policies: 0,
+          policy_rules: 0,
+        },
       }),
       "control_plane_store",
       now,
@@ -121,7 +135,9 @@ describe("DashboardPage cockpit", () => {
     expect(within(traffic).getByText("$4,210.50")).toBeInTheDocument();
     expect(within(traffic).getByText("3 / 4")).toBeInTheDocument(); // providers enabled/total
     expect(within(traffic).getByText("4 / 5")).toBeInTheDocument(); // mcp connected/total
-    expect(within(traffic).getByText("9 / 12")).toBeInTheDocument(); // workers active/total
+    // Workers: healthy is DERIVED from the labels the gateway really writes
+    // (`online` 8 + `registered` 1), not from a non-existent `active` bucket.
+    expect(within(traffic).getByText("9 / 12")).toBeInTheDocument();
 
     // Core counts link to their filtered management views.
     expect(
@@ -151,9 +167,153 @@ describe("DashboardPage cockpit", () => {
     expect(investigateHrefs).toContain("/app/ops/provider-health");
     expect(investigateHrefs).toContain("/app/agent-runs?status=failed");
 
-    // Deferred #458 signals render as explicit N/A, never a fabricated zero.
-    expect(within(alerts).getByText("Pending approvals")).toBeInTheDocument();
-    expect(within(alerts).getAllByText("N/A").length).toBeGreaterThanOrEqual(2);
+    // The #458 alert kinds the live gateway raises are titled and pivotable —
+    // not an untitled "Alert" with no link.
+    expect(within(alerts).getByText("Quota pressure")).toBeInTheDocument();
+    expect(within(alerts).getByText("Tool approvals pending")).toBeInTheDocument();
+    expect(investigateHrefs).toContain("/app/quota-policies");
+    expect(investigateHrefs).toContain("/app/tool-approvals");
+    expect(within(alerts).queryByText("Alert")).not.toBeInTheDocument();
+
+    // The governance signals report the payload's real counts, not "not yet
+    // reported": 4 pending approvals and 1 scope under quota pressure.
+    expect(within(alerts).getByText("Pending tool approvals")).toBeInTheDocument();
+    expect(within(alerts).getByText("Scopes under quota pressure")).toBeInTheDocument();
+    expect(within(alerts).queryByText("N/A")).not.toBeInTheDocument();
+  });
+
+  it("derives healthy workers from the gateway's own status labels", async () => {
+    // `by_status` carries a label this console cannot classify, so the healthy
+    // count is genuinely unknown: N/A, never the `0 / 12` a `?? 0` would print
+    // for a fleet whose twelve workers are all reporting in.
+    mockOverview(
+      adminOverview({
+        control_plane: overviewSectionOk(
+          overviewControlPlaneData({
+            self_hosted_workers: { total: 12, by_status: { warming_up: 12 } },
+          }),
+        ),
+      }),
+    );
+    renderWithProviders(<DashboardPage />);
+
+    const traffic = await screen.findByRole("region", { name: "Traffic and cost" });
+    // The N/A sits in its own (hint-carrying) element, so match on the tile text.
+    expect(
+      within(traffic).getAllByText((_content, element) => element?.textContent === "N/A / 12")
+        .length,
+    ).toBeGreaterThan(0);
+    expect(within(traffic).queryByText("0 / 12")).not.toBeInTheDocument();
+  });
+
+  it("renders an unreadable field as N/A instead of NaN", async () => {
+    // The pre-#458 wire shape: `virtual_keys` as a bare number. The parser
+    // rejects it, so the cell reads N/A — `format.number({total,enabled})`
+    // would have printed "NaN" on screen.
+    mockOverview(
+      adminOverview({
+        control_plane: overviewSectionOk({
+          ...overviewControlPlaneData(),
+          virtual_keys: 15,
+        }),
+      }),
+    );
+    renderWithProviders(<DashboardPage />);
+
+    await screen.findByRole("region", { name: "Traffic and cost" });
+    const row = screen.getByRole("row", { name: /Virtual keys/ });
+    expect(within(row).getByText("N/A")).toBeInTheDocument();
+    expect(screen.queryByText("NaN")).not.toBeInTheDocument();
+    // Sibling rows of the same section stay populated.
+    expect(within(screen.getByRole("row", { name: /Tenants/ })).getByText("24")).toBeInTheDocument();
+  });
+
+  it("shows the #458 breakdowns the backend reports", async () => {
+    mockOverview(adminOverview());
+    renderWithProviders(<DashboardPage />);
+
+    await screen.findByRole("region", { name: "Traffic and cost" });
+    // Virtual keys enabled/disabled split and asset reference counts. The row
+    // total is the object's `total`, never the object itself — passing the
+    // `{total,enabled}` payload to a number formatter prints "NaN" on screen.
+    expect(within(screen.getByRole("row", { name: /Virtual keys/ })).getByText("15"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("NaN")).not.toBeInTheDocument();
+    expect(screen.getByText("11 enabled / 15 total")).toBeInTheDocument();
+    expect(
+      screen.getByText("96 channel-referenced / 32 unreferenced"),
+    ).toBeInTheDocument();
+    // Global-scope policy governance counts are real numbers, and pending
+    // approvals appear in the inventory with a link to their page.
+    expect(
+      within(screen.getByRole("row", { name: /Guardrail policy revisions/ })).getByText("7"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("row", { name: /Pending tool approvals/ })).getByRole("link"),
+    ).toHaveAttribute("href", "/app/tool-approvals");
+  });
+
+  it("marks tenant-scope policy governance not-applicable, not zero", async () => {
+    mockOverview(
+      adminOverview({
+        scope: { kind: "tenant", tenant_id: "tenant-alpha" },
+        control_plane: overviewSectionOk(
+          overviewControlPlaneData({
+            policy_governance: null,
+            assets: {
+              count: 128,
+              storage_bytes: 5_368_709_120,
+              referenced: 96,
+              unreferenced: 32,
+              storage_quota_bytes: 10_737_418_240,
+            },
+          }),
+        ),
+      }),
+    );
+    renderWithProviders(<DashboardPage />);
+
+    await screen.findByRole("region", { name: "Traffic and cost" });
+    const row = screen.getByRole("row", { name: /Quota policies/ });
+    expect(within(row).getByText("N/A")).toBeInTheDocument();
+    expect(within(row).queryByText("0")).not.toBeInTheDocument();
+    // A per-scope asset-storage quota is shown when the scope actually has one.
+    expect(screen.getByText(/of a 10 GB scope quota/)).toBeInTheDocument();
+  });
+
+  it("never reads an unavailable alerts section as all-clear", async () => {
+    mockOverview(
+      adminOverview({
+        alerts: overviewSectionUnavailable("alert summary unreachable", "runtime+control_plane"),
+      }),
+    );
+    renderWithProviders(<DashboardPage />);
+
+    const alerts = await screen.findByRole("region", { name: "Alerts" });
+    expect(alerts.textContent).not.toContain("No active control-plane alerts.");
+    expect(within(alerts).getByText("Overview section unavailable")).toBeInTheDocument();
+    expect(within(alerts).getByText(/Alert summary is unavailable/)).toBeInTheDocument();
+  });
+
+  it("keeps the last payload when a background refresh fails", async () => {
+    mockOverview(adminOverview());
+    renderWithProviders(<DashboardPage />);
+
+    const traffic = await screen.findByRole("region", { name: "Traffic and cost" });
+    expect(within(traffic).getByText("12,000,000")).toBeInTheDocument();
+
+    // The next refresh fails; the cockpit must degrade to "stale", not blank.
+    mockOverviewError();
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("visibilitychange"));
+
+    expect(await screen.findByText(/The last refresh failed/)).toBeInTheDocument();
+    expect(within(traffic).getByText("12,000,000")).toBeInTheDocument();
+    expect(within(traffic).getByText("9 / 12")).toBeInTheDocument();
+    expect(screen.getByText("Stale")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/The control-plane overview could not be loaded/),
+    ).not.toBeInTheDocument();
   });
 
   it("switches the token/cost period and preserves the selection in the control", async () => {
