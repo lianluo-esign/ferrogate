@@ -624,20 +624,39 @@ impl PostgresControlPlaneStore {
         Ok(reservation)
     }
 
-    /// Sweeper (billing-outbox pattern): marks active holds past their TTL
-    /// `released` and returns the swept ids. Available balance already ignores
-    /// expired holds; this reclaims their rows and surfaces expiry metrics.
+    /// Sweeper (billing-outbox pattern): marks active, past-TTL holds that NO
+    /// payment attempt owns `released`, and returns the swept ids. Available
+    /// balance already ignores expired holds; this reclaims the rows, so a
+    /// consumer that reads `status` (the wallet ledger, `list_wallet_reservations`,
+    /// the restart durability contract) stops reporting a phantom live hold.
     ///
-    /// Money-safety (#396): a hold bound (via `payment_attempts.hold_id`) to an
-    /// x402 attempt that is NOT in a pre-submission
-    /// [`PAYMENT_ATTEMPT_EXPIRABLE_STATES`](crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES)
-    /// state is NEVER released here. A `submitted`/`outcome_unknown` attempt's
-    /// stablecoin transfer may already be on-chain, so releasing its hold would
-    /// double-charge or lose the hold; that case stays retained for the #354
-    /// reconciler, exactly the invariant the #354 TTL sweeper respects. Holds
-    /// with no bound attempt (non-x402 reservations) and holds bound to an
-    /// `authorized`/`challenged` attempt remain sweepable. The `NOT EXISTS`
-    /// probe is served by the existing partial `idx_payment_attempts_hold`.
+    /// **Scope: UNOWNED holds only** (#352 review §3). Two disjoint loops reclaim
+    /// x402 money and they must never both act on one hold:
+    ///
+    /// * An `authorized`/`challenged` attempt's hold is owned by the
+    ///   attempt-driven TTL sweeper (`list_expirable_due_payment_attempts` ->
+    ///   `expire_if_due`), which releases the hold AND moves the attempt to
+    ///   `released` in one re-driveable edge. Releasing such a hold from here
+    ///   would strand its attempt forever: the attempt-side due query joins on
+    ///   `wr.status = 'active'`, so a hold this sweep released behind the
+    ///   attempt's back makes that attempt permanently invisible to the loop
+    ///   that owns its state.
+    /// * A `submitted`/`outcome_unknown` attempt's hold must be RETAINED (its
+    ///   stablecoin transfer may already be on-chain, so releasing would spend
+    ///   without charging) until the #354 reconciler resolves it. This was the
+    ///   #396 money-safety guard, and narrowing to unowned holds preserves it
+    ///   strictly: a post-submission hold has an attempt row, so it is excluded
+    ///   a fortiori.
+    ///
+    /// What is left, and what this sweep exists for, is the ORPHAN: a hold
+    /// committed by `reserve_wallet_credits` whose `create_payment_attempt`
+    /// never committed (the process died in that window, which #352 deliberately
+    /// did not fold into one transaction). Nothing else re-drives it, so without
+    /// this sweep it stays `active` forever. Genuinely non-x402 reservations are
+    /// unowned too and stay sweepable, exactly as in #281.
+    ///
+    /// The `NOT EXISTS` probe is served by the existing partial
+    /// `idx_payment_attempts_hold`.
     pub(super) async fn sweep_expired_wallet_reservations(
         &self,
         now_unix: i64,
@@ -654,7 +673,6 @@ impl PostgresControlPlaneStore {
                 .await
                 .map_err(postgres_error)?;
         }
-        let expirable: Vec<&str> = crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES.to_vec();
         let rows = transaction
             .query(
                 "UPDATE wallet_reservations SET status = 'released', updated_at_unix = $1 \
@@ -662,10 +680,9 @@ impl PostgresControlPlaneStore {
                    AND NOT EXISTS ( \
                      SELECT 1 FROM payment_attempts pa \
                      WHERE pa.hold_id = wallet_reservations.id \
-                       AND pa.state <> ALL($2) \
                    ) \
                  RETURNING id",
-                &[&now_unix, &expirable],
+                &[&now_unix],
             )
             .await
             .map_err(postgres_error)?;
@@ -1244,21 +1261,19 @@ impl RuntimeControlPlaneState {
     /// [`PostgresControlPlaneStore::sweep_expired_wallet_reservations`]
     /// (issue #281). Returns the swept ids sorted for deterministic tests.
     ///
-    /// Money-safety (#396): mirrors the Postgres `NOT EXISTS` guard -- a hold
-    /// bound to an x402 attempt outside the pre-submission
-    /// [`PAYMENT_ATTEMPT_EXPIRABLE_STATES`](crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES)
-    /// set (e.g. `submitted`/`outcome_unknown`, whose stablecoin may be on-chain)
-    /// is never released; it stays retained for the #354 reconciler. Non-x402
-    /// holds and holds bound to an `authorized`/`challenged` attempt stay
-    /// sweepable.
+    /// Money-safety (#396, narrowed by the #352 review §3): mirrors the Postgres
+    /// `NOT EXISTS` guard -- a hold that ANY payment attempt owns is never
+    /// released here. That keeps the post-submission retention invariant
+    /// (`submitted`/`outcome_unknown` stablecoin may be on-chain) and stops this
+    /// sweep from stranding a pre-submission attempt whose own TTL loop joins on
+    /// `status = 'active'`. Only UNOWNED holds -- the reserve-committed /
+    /// create-uncommitted orphan, and genuinely non-x402 reservations -- are
+    /// swept.
     pub fn sweep_expired_wallet_reservations(&mut self, now_unix: i64) -> Vec<String> {
         let protected: std::collections::HashSet<String> = self
             .payment_attempts
             .list()
             .into_iter()
-            .filter(|attempt| {
-                !crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES.contains(&attempt.state.as_str())
-            })
             .filter_map(|attempt| attempt.hold_id)
             .collect();
         let expired: Vec<StoredWalletReservation> = self

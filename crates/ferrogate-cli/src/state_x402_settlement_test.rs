@@ -672,10 +672,22 @@ proptest! {
                 match action {
                     Action::Settle => {
                         loop_.submit(&id, None, 200, 200).await.expect("submit");
-                        // Duplicate finalizes must not double-capture.
+                        // A distinct on-chain signature per attempt: one transfer
+                        // may back at most ONE attempt (migration 59's partial
+                        // UNIQUE index), so reusing a single literal here would
+                        // exercise the double-capture-from-one-transfer path this
+                        // property is not about -- and would now fail closed.
+                        // Duplicate finalizes of the SAME attempt with the SAME
+                        // signature still must not double-capture.
+                        let signature = format!("sig-{id}");
+                        let evidence = SettlementEvidence::Settled {
+                            transaction_signature: signature.as_str(),
+                            settled_atomic_amount: "1000000",
+                            response: Some("{\"ok\":true}"),
+                        };
                         for _ in 0..*dup {
                             loop_
-                                .finalize(&id, &settled_evidence(), 300)
+                                .finalize(&id, &evidence, 300)
                                 .await
                                 .expect("finalize");
                         }

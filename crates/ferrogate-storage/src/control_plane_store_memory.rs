@@ -2287,11 +2287,15 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
     async fn list_payment_attempts(
         &self,
         tenant_id: &str,
-    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        query: &PaymentAttemptQuery,
+    ) -> Result<PaymentAttemptPage, StorageError> {
         Ok(self
             .lock()
-            .map(|control_plane| control_plane.list_payment_attempts(tenant_id))
-            .unwrap_or_default())
+            .map(|control_plane| control_plane.list_payment_attempts(tenant_id, query))
+            .unwrap_or_else(|_| PaymentAttemptPage {
+                attempts: Vec::new(),
+                next_cursor: None,
+            }))
     }
 
     async fn get_payment_attempt_links(

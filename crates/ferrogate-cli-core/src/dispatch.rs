@@ -110,6 +110,8 @@ pub fn resource_builder(group: &str) -> Option<VerbBuilder> {
         "payment-methods" => billing::build_payment_methods,
         "billing-events" => billing::build_billing_events,
         "usage" => billing::build_usage,
+        // Durable x402 payment attempts (#352): read-only inspection.
+        "payment-attempts" => billing::build_payment_attempts,
         // Evidence (#364).
         "request-logs" => evidence::build_request_logs,
         "audit-events" => evidence::build_audit_events,

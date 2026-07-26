@@ -277,12 +277,14 @@ pub use wallet::{
 
 mod payment_attempt;
 pub use payment_attempt::{
-    payment_attempt_state_is_terminal, PaymentAttemptCreation, PaymentAttemptEvidenceArgs,
-    PaymentAttemptLinks, PaymentAttemptTransition, StoredPaymentAttempt,
-    PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED,
-    PAYMENT_ATTEMPT_EXPIRABLE_STATES, PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_INITIAL_STATES,
-    PAYMENT_ATTEMPT_OUTCOME_UNKNOWN, PAYMENT_ATTEMPT_RECONCILABLE_STATES, PAYMENT_ATTEMPT_RELEASED,
-    PAYMENT_ATTEMPT_SETTLED, PAYMENT_ATTEMPT_SUBMITTED,
+    payment_attempt_state_is_terminal, PaymentAttemptCreation, PaymentAttemptCursor,
+    PaymentAttemptEvidenceArgs, PaymentAttemptLinks, PaymentAttemptPage, PaymentAttemptQuery,
+    PaymentAttemptTransition, StoredPaymentAttempt, PAYMENT_ATTEMPT_AUTHORIZED,
+    PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED, PAYMENT_ATTEMPT_EXPIRABLE_STATES,
+    PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_INITIAL_STATES, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
+    PAYMENT_ATTEMPT_PAGE_DEFAULT_LIMIT, PAYMENT_ATTEMPT_PAGE_MAX_LIMIT,
+    PAYMENT_ATTEMPT_RECONCILABLE_STATES, PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED,
+    PAYMENT_ATTEMPT_SUBMITTED,
 };
 
 mod workflow_budget;
@@ -585,8 +587,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
 /// Current schema migration version; exported so the E2E harness asserts
 /// against the runtime authority instead of a hardcoded copy.
-pub const POSTGRES_SCHEMA_VERSION: u64 = 50;
-pub const POSTGRES_SCHEMA_NAME: &str = "050_bucket_backed_asset_size_constraint";
+pub const POSTGRES_SCHEMA_VERSION: u64 = 59;
+pub const POSTGRES_SCHEMA_NAME: &str = "059_payment_attempt_amount_domains";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -15086,6 +15088,14 @@ mod asset_withheld_listing_test;
 #[cfg(test)]
 #[path = "payment_attempt_test.rs"]
 mod payment_attempt_test;
+
+#[cfg(test)]
+#[path = "payment_attempt_pagination_test.rs"]
+mod payment_attempt_pagination_test;
+
+#[cfg(test)]
+#[path = "payment_attempt_amount_domain_test.rs"]
+mod payment_attempt_amount_domain_test;
 
 #[cfg(test)]
 #[path = "billing_outbox_replay_test.rs"]

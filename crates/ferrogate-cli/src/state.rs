@@ -6902,6 +6902,11 @@ mod state_tenancy;
 #[path = "state_wallets.rs"]
 mod state_wallets;
 
+// #352: read seam for the durable x402 payment attempts the settlement loop
+// writes -- the data behind the narrow read-only Admin API.
+#[path = "state_payment_attempts.rs"]
+mod state_payment_attempts;
+
 // #354: runtime orchestration for the x402 managed paid-egress settle/release
 // loop, composing the #281 wallet holds with the #352 payment-attempt CAS.
 #[path = "state_x402_settlement.rs"]

@@ -3141,6 +3141,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/payment-attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a tenant's durable x402 payment attempts.
+         * @description Returns one BOUNDED, tenant-scoped page of durable x402 payment attempts (#352), newest-first, so an operator can inspect a stuck attempt -- notably an outcome_unknown one whose wallet hold is still live and whose stablecoin may already have moved. tenant_id is REQUIRED and applied before ordering and before the cursor; a tenant-scoped admin key may only name its own tenant. Paging is a keyset cursor over (created_at_unix, id) -- the index's own order, with no OFFSET scan -- and limit is clamped server-side, so no request can ask for the whole table. Read-only: nothing is created, released, or captured.
+         */
+        get: operations["listPaymentAttempts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/payment-attempts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Inspect one payment attempt with its wallet reservation and settlement.
+         * @description Returns one durable x402 payment attempt joined to its wallet hold and its captured wallet settlement (#352 E2E evidence: attempt, hold, wallet settlement, policy revision, transaction evidence). Tenancy fails closed BOTH ways: a tenant-scoped key is scoped to its own tenant unless it names one, so another tenant's attempt is indistinguishable from a missing one and returns 404 without disclosing that the payment exists; naming a tenant the key does not own is 403. A platform-operator key may omit tenant_id, in which case the owner is resolved from the attempt. Read-only: no hold is released or captured by this call.
+         */
+        get: operations["getPaymentAttemptLinks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -6900,6 +6940,127 @@ export interface components {
                 supplied: boolean;
             };
             decision: components["schemas"]["X402PaymentDecision"];
+        };
+        /** @description One durable x402 payment attempt (#352): the complete immutable audit tuple (wire-contract identity + #351 policy decision) plus the mutable state/evidence tail. Money keeps its stored representation exactly: atomic_amount and settled_atomic_amount are canonical decimal STRINGS of the on-chain u64 atomic units (a u64 does not survive JSON's double), and credits_amount is the integer internal wallet-credit hold. Nothing here is rounded or recomputed. */
+        AdminPaymentAttempt: {
+            /** @constant */
+            object: "payment_attempt";
+            /** @description Attempt / idempotency id. */
+            id: string;
+            tenant_id: string;
+            project_id?: string | null;
+            workspace_id?: string | null;
+            run_id?: string | null;
+            worker_id?: string | null;
+            request_id?: string | null;
+            trace_id?: string | null;
+            /** @description HTTP method of the egress request the payment unlocks. */
+            method: string;
+            /** @description Canonical resource URL FerroGate authorized egress to. */
+            resource_url: string;
+            /** @description Hex SHA-256 of the authorized request body. */
+            request_body_hash?: string | null;
+            /** @description Deterministic hex challenge hash from the frozen wire contract. */
+            challenge_hash: string;
+            /** Format: int64 */
+            x402_version: number;
+            scheme: string;
+            /** @description CAIP-2 network identifier. */
+            network_caip2: string;
+            /** @description SPL token mint (base58). */
+            mint: string;
+            /** @description ORIGINAL on-chain atomic amount, canonical decimal u64 string. */
+            atomic_amount: string;
+            /** @description payTo recipient (base58). */
+            recipient: string;
+            /**
+             * Format: int64
+             * @description Internal wallet credits held for this payment.
+             */
+            credits_amount?: number | null;
+            /** @description Conversion-rule version tag in effect at decision time (#351). */
+            conversion_version?: string | null;
+            /** Format: int64 */
+            policy_revision: number;
+            /** @enum {string} */
+            decision: "allow" | "approval_required" | "deny";
+            /** @description Stable x402_* policy reason code. */
+            reason_code: string;
+            /** @description Linked wallet reservation (hold) id. Absent on a denied attempt. */
+            hold_id?: string | null;
+            /**
+             * @description Attempt state. outcome_unknown is NON-TERMINAL and RETAINS the wallet hold: after proof submission a timeout or RPC ambiguity is not proof the money did not move.
+             * @enum {string}
+             */
+            state: "challenged" | "authorized" | "submitted" | "settled" | "denied" | "released" | "failed" | "outcome_unknown";
+            /**
+             * Format: int64
+             * @description Monotonic CAS operation token, bumped by every applied transition.
+             */
+            generation: number;
+            /** Format: int64 */
+            submitted_at_unix?: number | null;
+            /** @description Base58 on-chain transaction signature recorded on settle. */
+            transaction_signature?: string | null;
+            settled_atomic_amount?: string | null;
+            /** @description Raw settlement evidence blob, when captured. */
+            settlement_response?: string | null;
+            failure_code?: string | null;
+            /** Format: int64 */
+            created_at_unix: number;
+            /** Format: int64 */
+            updated_at_unix: number;
+        };
+        /** @description The wallet hold (#281 reservation) this attempt reserved. status is reported as STORED; available balance separately ignores a hold past expires_at_unix, so an active row with an elapsed expiry no longer counts against the wallet. */
+        AdminPaymentAttemptReservation: {
+            /** @constant */
+            object: "wallet_reservation";
+            id: string;
+            tenant_id: string;
+            /** Format: int64 */
+            amount_credits: number;
+            /** @enum {string} */
+            status: "active" | "settled" | "released";
+            /** Format: int64 */
+            expires_at_unix: number;
+            settlement_id?: string | null;
+            /** Format: int64 */
+            created_at_unix: number;
+            /** Format: int64 */
+            updated_at_unix: number;
+        };
+        /** @description The captured wallet settlement (the ledger charge the hold produced). */
+        AdminPaymentAttemptSettlement: {
+            /** @constant */
+            object: "wallet_settlement";
+            id: string;
+            tenant_id: string;
+            /** Format: int64 */
+            delta_credits: number;
+            /** Format: int64 */
+            balance_after_credits?: number | null;
+            /** Format: int64 */
+            created_at_unix: number;
+        };
+        /** @description An attempt joined to its wallet hold and captured settlement -- the #352 E2E evidence chain (attempt, hold, wallet settlement, policy revision, transaction evidence) in one read. */
+        AdminPaymentAttemptLinks: {
+            /** @constant */
+            object: "payment_attempt_links";
+            attempt: components["schemas"]["AdminPaymentAttempt"];
+            /** @description Absent when the attempt records no hold (denied) or the hold row is gone. */
+            reservation?: components["schemas"]["AdminPaymentAttemptReservation"] | null;
+            /** @description Absent until the hold is captured. */
+            settlement?: components["schemas"]["AdminPaymentAttemptSettlement"] | null;
+        };
+        /** @description One BOUNDED page of a tenant's attempts, newest-first. payment_attempts grows one row per paid egress request, so there is no unbounded listing: limit is clamped server-side and paging is a keyset cursor over (created_at_unix, id), never an OFFSET scan. */
+        AdminPaymentAttemptList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AdminPaymentAttempt"][];
+            /** @description The page size actually applied, after clamping. */
+            limit: number;
+            /** @description Opaque cursor to pass back as ?cursor= for the next page. Null at the definitive end of the listing. */
+            next_cursor?: string | null;
         };
     };
     responses: {
@@ -13927,6 +14088,69 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+        };
+    };
+    listPaymentAttempts: {
+        parameters: {
+            query: {
+                /** @description Tenant (organization) id. Required -- an unscoped listing would be a cross-tenant scan. */
+                tenant_id: string;
+                /** @description Page size. Defaults to 50 and is clamped to 500; a non-positive or non-numeric value is a 400 rather than a silent default. */
+                limit?: number;
+                /** @description Opaque next_cursor from a previous page. A malformed cursor is a 400 rather than a silent restart from page one. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One bounded page of the tenant's attempts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminPaymentAttemptList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getPaymentAttemptLinks: {
+        parameters: {
+            query?: {
+                /** @description Owning tenant. Optional: defaults to the caller's own tenant, and may be omitted entirely by a platform-operator key. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Payment attempt (idempotency) id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The attempt with its linked reservation and settlement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminPaymentAttemptLinks"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
 }

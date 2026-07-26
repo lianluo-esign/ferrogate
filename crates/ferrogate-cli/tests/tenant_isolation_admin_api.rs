@@ -1503,3 +1503,158 @@ fn x402_spend_policy_diagnostics_are_tenant_scoped() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+/// #352: the narrow read-only payment-attempt Admin API, driven over real HTTP
+/// against a running gateway.
+///
+/// This is the proof the endpoint EXISTS and is wired -- the repository half was
+/// built and restart-proven long before anything routed to it, and unit tests on
+/// the projection cannot tell a wired handler from a dead seam. Delete the
+/// `RouteGroup::PaymentAttempt` arm (or the runtime-contract route pattern) and
+/// every assertion below turns into a 404 from the fall-through.
+///
+/// It also pins the tenancy contract in both directions: naming ANOTHER tenant
+/// is 403, while a foreign attempt read under the caller's own scope is 404 --
+/// the existence of another tenant's payment is never disclosed.
+#[test]
+fn payment_attempt_inspection_is_tenant_scoped_and_bounded() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    register_tenant(&gateway_addr, "tenant-iso-a");
+    register_tenant(&gateway_addr, "tenant-iso-b");
+
+    // Control: tenant A listing its OWN attempts reaches the repository and gets
+    // a real (empty) page back. Without this a blanket 403/404 would satisfy the
+    // refusals below without proving the surface is reachable at all.
+    let own = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/payment-attempts?tenant_id=tenant-iso-a",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&own).contains("200"),
+        "a caller must be able to list its own tenant's attempts: {own}"
+    );
+    let own_body = response_json(own);
+    assert_eq!(own_body["object"], "list");
+    assert_eq!(own_body["data"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        own_body["limit"], 50,
+        "the page carries a server-owned default bound: {own_body}"
+    );
+    assert!(
+        own_body["next_cursor"].is_null(),
+        "an empty page is the definitive end of the listing: {own_body}"
+    );
+
+    // The bound is enforced server-side: an oversized limit is clamped, never
+    // honoured, so no single request can ask for the whole table.
+    let clamped = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/payment-attempts?tenant_id=tenant-iso-a&limit=100000",
+        &TENANT_A,
+        "",
+    );
+    assert_eq!(
+        response_json(clamped)["limit"],
+        500,
+        "an oversized limit must be clamped to the server maximum"
+    );
+
+    // Malformed paging is a 400, not a silent default.
+    for (query, code) in [
+        ("", "invalid_query"),
+        ("?tenant_id=tenant-iso-a&limit=abc", "invalid_pagination"),
+        ("?tenant_id=tenant-iso-a&cursor=nope", "invalid_pagination"),
+    ] {
+        let response = http_request(
+            &gateway_addr,
+            "GET",
+            &format!("/admin/v1/payment-attempts{query}"),
+            &TENANT_A,
+            "",
+        );
+        assert!(
+            status_line(&response).contains("400"),
+            "{query:?} must be refused: {response}"
+        );
+        assert_eq!(response_json(response)["error"]["code"], code);
+    }
+
+    // The refusal: naming ANOTHER tenant is 403, before any read runs.
+    let cross_tenant = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/payment-attempts?tenant_id=tenant-iso-b",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&cross_tenant).contains("403"),
+        "listing another tenant's payment attempts must be refused: {cross_tenant}"
+    );
+    assert_eq!(
+        response_json(cross_tenant)["error"]["code"],
+        "tenant_scope_denied"
+    );
+
+    // A single attempt the caller's tenant does not own is 404, NOT 403: the
+    // storage predicate makes it indistinguishable from a missing one, so the
+    // existence of another tenant's payment is not disclosed.
+    let unknown = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/payment-attempts/att-does-not-exist",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&unknown).contains("404"),
+        "an attempt the caller does not own must read as missing: {unknown}"
+    );
+    assert_eq!(
+        response_json(unknown)["error"]["code"],
+        "payment_attempt_not_found"
+    );
+
+    // The surface is READ-ONLY: an attempt is minted by a paid egress request,
+    // never by an operator, so no write verb is accepted.
+    for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        let response = http_request(
+            &gateway_addr,
+            method,
+            "/admin/v1/payment-attempts",
+            &ADMIN,
+            "{}",
+        );
+        assert!(
+            status_line(&response).contains("405"),
+            "{method} on the payment-attempt surface must be refused: {response}"
+        );
+    }
+
+    // The platform operator retains unrestricted cross-tenant access.
+    let operator = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/payment-attempts?tenant_id=tenant-iso-b",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        status_line(&operator).contains("200"),
+        "the platform operator must list any tenant's attempts: {operator}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

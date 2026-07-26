@@ -842,10 +842,14 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         &self,
         id: &str,
     ) -> Result<Option<StoredPaymentAttempt>, StorageError>;
+    /// One bounded, keyset-paginated page of a tenant's attempts (#352 box 6).
+    /// Every backend must apply the tenant predicate BEFORE the cursor and
+    /// return at most `query.limit()` rows.
     async fn list_payment_attempts(
         &self,
         tenant_id: &str,
-    ) -> Result<Vec<StoredPaymentAttempt>, StorageError>;
+        query: &PaymentAttemptQuery,
+    ) -> Result<PaymentAttemptPage, StorageError>;
     async fn get_payment_attempt_links(
         &self,
         id: &str,

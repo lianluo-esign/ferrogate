@@ -17,11 +17,12 @@ use proptest::prelude::*;
 use crate::schema_routing_test_support::block_on;
 use crate::{
     payment_attempt_state_is_terminal, PaymentAttemptCreation, PaymentAttemptEvidenceArgs,
-    PaymentAttemptTransition, RuntimeStorageRepositories, StorageError, StorageProviderKind,
-    StoredPaymentAttempt, StoredWallet, WalletReservationResult, PAYMENT_ATTEMPT_AUTHORIZED,
-    PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED, PAYMENT_ATTEMPT_FAILED,
-    PAYMENT_ATTEMPT_OUTCOME_UNKNOWN, PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED,
-    PAYMENT_ATTEMPT_SUBMITTED, WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_SETTLED,
+    PaymentAttemptQuery, PaymentAttemptTransition, RuntimeStorageRepositories, StorageError,
+    StorageProviderKind, StoredPaymentAttempt, StoredWallet, WalletReservationResult,
+    PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED,
+    PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN, PAYMENT_ATTEMPT_RELEASED,
+    PAYMENT_ATTEMPT_SETTLED, PAYMENT_ATTEMPT_SUBMITTED, WALLET_RESERVATION_ACTIVE,
+    WALLET_RESERVATION_SETTLED,
 };
 
 fn memory_repositories() -> RuntimeStorageRepositories {
@@ -111,12 +112,21 @@ fn create_round_trips_the_full_audit_tuple() {
         .expect("attempt persisted");
     assert_eq!(fetched, attempt, "every column must survive the round trip");
 
-    let listed = block_on(repositories.list_payment_attempts("tenant-a")).unwrap();
-    assert_eq!(listed, vec![attempt]);
+    let listed =
+        block_on(repositories.list_payment_attempts("tenant-a", &PaymentAttemptQuery::default()))
+            .unwrap();
+    assert_eq!(listed.attempts, vec![attempt]);
+    assert_eq!(
+        listed.next_cursor, None,
+        "a page shorter than the limit is the definitive end of the listing"
+    );
     // Tenant scoping: another tenant sees nothing.
-    assert!(block_on(repositories.list_payment_attempts("tenant-other"))
-        .unwrap()
-        .is_empty());
+    assert!(block_on(
+        repositories.list_payment_attempts("tenant-other", &PaymentAttemptQuery::default())
+    )
+    .unwrap()
+    .attempts
+    .is_empty());
 }
 
 #[test]
@@ -691,6 +701,94 @@ fn conflicting_transitions_cannot_both_win_the_cas() {
     }
 }
 
+/// One on-chain transfer must not be usable as proof to capture TWO different
+/// attempts' wallet holds (#352 review §5). Migration 59 enforces this with a
+/// partial UNIQUE index on `transaction_signature` -- the only place two
+/// concurrent settles can be serialized -- and the memory backend mirrors it, so
+/// both backends decide identically (#188).
+///
+/// Delete the `transaction_signature` guard in
+/// `RuntimeControlPlaneState::transition_payment_attempt` and this test goes red:
+/// the second attempt settles and a single transfer captures two holds.
+#[test]
+fn one_transaction_signature_cannot_settle_two_attempts() {
+    let repositories = repositories_with_wallet("tenant-sig", 10_000);
+    let signature = "7".repeat(88);
+
+    for (attempt_id, hold_id) in [("att-sig-1", "hold-sig-1"), ("att-sig-2", "hold-sig-2")] {
+        block_on(repositories.reserve_wallet_credits(hold_id, "tenant-sig", 250, 10_000, 1))
+            .unwrap();
+        block_on(repositories.create_payment_attempt(sample_attempt(
+            attempt_id,
+            "tenant-sig",
+            PAYMENT_ATTEMPT_AUTHORIZED,
+            Some(hold_id),
+        )))
+        .unwrap();
+        block_on(repositories.submit_payment_attempt(attempt_id, no_evidence(), 10)).unwrap();
+    }
+
+    // The first attempt records the signature and captures its hold.
+    block_on(repositories.settle_payment_attempt(
+        "att-sig-1",
+        PaymentAttemptEvidenceArgs {
+            transaction_signature: Some(signature.as_str()),
+            ..Default::default()
+        },
+        20,
+    ))
+    .unwrap();
+
+    // The second attempt presenting the SAME transfer as proof fails closed.
+    let error = block_on(repositories.settle_payment_attempt(
+        "att-sig-2",
+        PaymentAttemptEvidenceArgs {
+            transaction_signature: Some(signature.as_str()),
+            ..Default::default()
+        },
+        21,
+    ))
+    .expect_err("a reused transaction signature must fail closed");
+    assert!(
+        matches!(error, StorageError::Conflict(ref message) if message.contains("already recorded")),
+        "wrong error: {error:?}"
+    );
+
+    // The rejected attempt is byte-identical to before: still `submitted`, hold
+    // still RETAINED, no signature recorded, generation not advanced.
+    let rejected = block_on(repositories.get_payment_attempt("att-sig-2"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.state, PAYMENT_ATTEMPT_SUBMITTED);
+    assert_eq!(rejected.transaction_signature, None);
+    assert_eq!(
+        rejected.generation, 1,
+        "the failed CAS did not bump the token"
+    );
+    let hold = block_on(repositories.get_payment_attempt_links("att-sig-2", "tenant-sig"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        hold.reservation.as_ref().map(|r| r.status.as_str()),
+        Some(WALLET_RESERVATION_ACTIVE),
+        "the second hold is retained, not captured and not released"
+    );
+    assert!(hold.settlement.is_none(), "no second capture happened");
+
+    // And the SAME attempt replaying its OWN signature is still idempotent --
+    // the guard must not break legitimate re-entry.
+    let replay = block_on(repositories.settle_payment_attempt(
+        "att-sig-1",
+        PaymentAttemptEvidenceArgs {
+            transaction_signature: Some(signature.as_str()),
+            ..Default::default()
+        },
+        22,
+    ))
+    .expect("replaying an attempt's own signature stays idempotent");
+    assert!(matches!(replay, PaymentAttemptTransition::Idempotent(_)));
+}
+
 // A minimal transition alphabet the proptest drives against the real backend.
 #[derive(Debug, Clone, Copy)]
 enum Step {
@@ -713,17 +811,71 @@ fn step_strategy() -> impl Strategy<Value = Step> {
     ]
 }
 
+/// Hold sizes for the capture invariant, biased hard onto the boundaries a
+/// uniformly-random amount essentially never reaches: zero (a free
+/// authorization), one, exactly the wallet balance, and one credit OVER it. The
+/// interior range is kept so the invariant is still exercised on ordinary values.
+fn hold_amount_strategy() -> impl Strategy<Value = i64> {
+    prop_oneof![
+        4 => Just(0i64),       // zero -- must be refused outright
+        4 => Just(1i64),
+        4 => Just(999i64),
+        4 => Just(1_000i64),   // exactly at balance
+        4 => Just(1_001i64),   // one over -- must be refused
+        8 => 1i64..1_000i64,
+    ]
+}
+
 proptest! {
     /// Invariant: no matter what (even invalid) transition sequence is thrown at
     /// one authorized attempt, total captured settlement credits never exceed
     /// the single authorized hold. `settled` is terminal and captures the hold
     /// exactly once, so the coupled wallet debit can never oversell.
     #[test]
-    fn settled_capture_never_exceeds_authorized_hold(steps in prop::collection::vec(step_strategy(), 0..24)) {
+    fn settled_capture_never_exceeds_authorized_hold(
+        steps in prop::collection::vec(step_strategy(), 0..24),
+        hold_amount in hold_amount_strategy(),
+    ) {
+        // The hold size is generated, and the strategy PINS the boundaries a
+        // fixed 250-against-1000 never reaches (#352 review): zero, one, exactly
+        // the balance, and one credit OVER it. A `>=` vs `>` inversion in the
+        // availability check shows up at exactly-at-balance and one-over, and
+        // nowhere else.
         let repositories = repositories_with_wallet("tenant-p", 1_000);
-        let hold_amount = 250i64;
-        block_on(repositories.reserve_wallet_credits("hold-p", "tenant-p", hold_amount, 10_000, 1))
-            .unwrap();
+        let reserved =
+            block_on(repositories.reserve_wallet_credits("hold-p", "tenant-p", hold_amount, 10_000, 1));
+        if hold_amount == 0 {
+            // A zero-credit hold reserves nothing and is refused outright,
+            // rather than creating a live hold that can never be captured.
+            prop_assert!(
+                matches!(reserved, Err(StorageError::Conflict(_))),
+                "a zero-credit hold must be refused, got {:?}",
+                reserved
+            );
+            let balance = block_on(repositories.get_wallet("tenant-p")).unwrap().unwrap().balance_credits;
+            prop_assert_eq!(balance, 1_000);
+            return Ok(());
+        }
+        let reservation = reserved.unwrap();
+        if hold_amount > 1_000 {
+            // One credit over the balance must be refused, and must leave the
+            // wallet untouched -- never a partial or silently-clamped hold.
+            prop_assert!(
+                matches!(reservation, WalletReservationResult::Insufficient { .. }),
+                "a hold of {} against a balance of 1000 must be refused, got {:?}",
+                hold_amount,
+                reservation
+            );
+            let balance = block_on(repositories.get_wallet("tenant-p")).unwrap().unwrap().balance_credits;
+            prop_assert_eq!(balance, 1_000);
+            return Ok(());
+        }
+        prop_assert!(
+            matches!(reservation, WalletReservationResult::Reserved(_)),
+            "a hold of {} against a balance of 1000 must be accepted, got {:?}",
+            hold_amount,
+            reservation
+        );
         block_on(repositories.create_payment_attempt(sample_attempt(
             "att-p",
             "tenant-p",

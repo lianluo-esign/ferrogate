@@ -14,9 +14,9 @@
 // see `wallet.rs`/`workflow_budget.rs` for the pattern this mirrors.
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
-    RuntimeStorageRepositories, StorageError, StorageOperation, StoredWalletReservation,
-    StoredWalletSettlement,
+    is_unique_violation, postgres_error, PostgresControlPlaneStore, PostgresRow, Repository,
+    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
+    StoredWalletReservation, StoredWalletSettlement,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,22 +57,35 @@ use super::{
 //     time, `Idempotent` on replay) instead of a false failure. `generation`
 //     is the per-attempt operation token that survives the generic scheduler.
 
+// The state alphabet itself is owned by `ferrogate-payments`
+// (`PaymentAttemptState`) -- the issue's `## Scope and ownership` bullet
+// "ferrogate-payments: state/transition types only; no SQL". Storage keeps the
+// `&str` spellings its SQL and its public API already use, but DERIVES each one
+// from the enum instead of re-typing it, so the two crates cannot drift.
+//
+// The earlier rationale for keeping the alphabet here -- "policy already depends
+// on storage, so a back-dependency would cycle" -- was correct for
+// `ferrogate-policy` (it depends on both) and WRONG for `ferrogate-payments`,
+// which declares no FerroGate dependency at all. `storage -> payments` is
+// acyclic, and that is the edge this file now uses.
+use ferrogate_payments::PaymentAttemptState;
+
 /// The attempt exists but has not yet been authorized by policy.
-pub const PAYMENT_ATTEMPT_CHALLENGED: &str = "challenged";
+pub const PAYMENT_ATTEMPT_CHALLENGED: &str = PaymentAttemptState::Challenged.as_str();
 /// Policy allowed the payment and credits are held (`hold_id` is set).
-pub const PAYMENT_ATTEMPT_AUTHORIZED: &str = "authorized";
+pub const PAYMENT_ATTEMPT_AUTHORIZED: &str = PaymentAttemptState::Authorized.as_str();
 /// The signed proof was submitted; from here a timeout is `outcome_unknown`.
-pub const PAYMENT_ATTEMPT_SUBMITTED: &str = "submitted";
+pub const PAYMENT_ATTEMPT_SUBMITTED: &str = PaymentAttemptState::Submitted.as_str();
 /// Durable on-chain evidence captured the hold. Terminal.
-pub const PAYMENT_ATTEMPT_SETTLED: &str = "settled";
+pub const PAYMENT_ATTEMPT_SETTLED: &str = PaymentAttemptState::Settled.as_str();
 /// Policy refused the payment before authorization. Terminal.
-pub const PAYMENT_ATTEMPT_DENIED: &str = "denied";
+pub const PAYMENT_ATTEMPT_DENIED: &str = PaymentAttemptState::Denied.as_str();
 /// A pre-submission cancel/expiry released the hold. Terminal.
-pub const PAYMENT_ATTEMPT_RELEASED: &str = "released";
+pub const PAYMENT_ATTEMPT_RELEASED: &str = PaymentAttemptState::Released.as_str();
 /// Durable evidence proved the payment did not settle. Terminal.
-pub const PAYMENT_ATTEMPT_FAILED: &str = "failed";
+pub const PAYMENT_ATTEMPT_FAILED: &str = PaymentAttemptState::Failed.as_str();
 /// Post-submission ambiguity; the hold is RETAINED. Non-terminal.
-pub const PAYMENT_ATTEMPT_OUTCOME_UNKNOWN: &str = "outcome_unknown";
+pub const PAYMENT_ATTEMPT_OUTCOME_UNKNOWN: &str = PaymentAttemptState::OutcomeUnknown.as_str();
 
 /// States an attempt may be created in (the entry points of the machine).
 pub const PAYMENT_ATTEMPT_INITIAL_STATES: &[&str] = &[
@@ -81,15 +94,11 @@ pub const PAYMENT_ATTEMPT_INITIAL_STATES: &[&str] = &[
     PAYMENT_ATTEMPT_DENIED,
 ];
 
-/// True for the four terminal states no transition may leave.
+/// True for the four terminal states no transition may leave. Delegates to
+/// [`PaymentAttemptState::is_terminal`]; an unknown spelling is NOT terminal,
+/// which is the fail-closed answer (an unrecognised state may still hold money).
 pub fn payment_attempt_state_is_terminal(state: &str) -> bool {
-    matches!(
-        state,
-        PAYMENT_ATTEMPT_SETTLED
-            | PAYMENT_ATTEMPT_DENIED
-            | PAYMENT_ATTEMPT_RELEASED
-            | PAYMENT_ATTEMPT_FAILED
-    )
+    PaymentAttemptState::parse(state).is_some_and(PaymentAttemptState::is_terminal)
 }
 
 /// The pre-submission states a TTL sweep may expire (release the hold), and
@@ -204,6 +213,139 @@ pub struct PaymentAttemptLinks {
     pub settlement: Option<StoredWalletSettlement>,
 }
 
+// ---------------------------------------------------------------------------
+// Pagination (acceptance box 6: "reads are indexed, tenant-scoped BEFORE
+// pagination")
+// ---------------------------------------------------------------------------
+//
+// `payment_attempts` grows one row per paid egress request, so an unbounded
+// `WHERE tenant_id = $1` list is a table-sized response for a busy tenant: past
+// `statement_timeout_millis` or into the pool's memory, and -- now that
+// `GET /admin/v1/payment-attempts` exists -- a one-request DoS on the admin
+// plane. Every tenant listing is therefore bounded by a `limit` and resumed
+// through a KEYSET cursor on `(created_at_unix, id)`, which is exactly the
+// `idx_payment_attempts_tenant_time` order, so resuming a page is an index seek
+// rather than an `OFFSET` scan that re-reads (and re-sorts) every skipped row.
+//
+// The tenant predicate still comes FIRST: the cursor narrows within one
+// tenant's slice of the index and can never widen a read past it.
+
+/// Default page size when a caller does not ask for one.
+pub const PAYMENT_ATTEMPT_PAGE_DEFAULT_LIMIT: usize = 50;
+/// Hard ceiling on one page, whatever a caller asks for. A caller cannot opt
+/// out of the bound -- that is the whole point of the box-6 fix.
+pub const PAYMENT_ATTEMPT_PAGE_MAX_LIMIT: usize = 500;
+
+/// Keyset position in the `(created_at_unix DESC, id ASC)` listing order.
+///
+/// Both components are needed: `created_at_unix` alone is not unique (a tenant
+/// can open several attempts within one second), so a cursor that carried only
+/// the timestamp would either re-emit or skip the whole tie group. Carrying the
+/// `id` tiebreaker makes the resume point exact even in the middle of a tie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentAttemptCursor {
+    pub created_at_unix: i64,
+    pub id: String,
+}
+
+impl PaymentAttemptCursor {
+    /// The opaque wire form: `<created_at_unix>:<id>`. Rendered/parsed in one
+    /// place so the admin surface never invents a second encoding.
+    pub fn encode(&self) -> String {
+        format!("{}:{}", self.created_at_unix, self.id)
+    }
+
+    /// Parses [`encode`](Self::encode). `None` for anything malformed -- a
+    /// cursor that cannot be understood is refused, never silently treated as
+    /// "start from the beginning" (which would loop a paging client forever).
+    /// The id is taken as the whole remainder, so an id containing `:` survives
+    /// a round trip.
+    pub fn decode(raw: &str) -> Option<Self> {
+        let (created_at, id) = raw.split_once(':')?;
+        let created_at_unix = created_at.parse::<i64>().ok()?;
+        if id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            created_at_unix,
+            id: id.to_string(),
+        })
+    }
+}
+
+/// One bounded page request against a tenant's attempts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentAttemptQuery {
+    limit: usize,
+    cursor: Option<PaymentAttemptCursor>,
+}
+
+impl Default for PaymentAttemptQuery {
+    fn default() -> Self {
+        Self {
+            limit: PAYMENT_ATTEMPT_PAGE_DEFAULT_LIMIT,
+            cursor: None,
+        }
+    }
+}
+
+impl PaymentAttemptQuery {
+    /// A first page of `limit` rows. `limit` is CLAMPED into
+    /// `1..=PAYMENT_ATTEMPT_PAGE_MAX_LIMIT`: zero would make a paging client
+    /// spin forever on an empty page, and an arbitrarily large value is the
+    /// unbounded read this type exists to prevent.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.clamp(1, PAYMENT_ATTEMPT_PAGE_MAX_LIMIT),
+            cursor: None,
+        }
+    }
+
+    /// Resume after `cursor`.
+    pub fn after(mut self, cursor: PaymentAttemptCursor) -> Self {
+        self.cursor = Some(cursor);
+        self
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub fn cursor(&self) -> Option<&PaymentAttemptCursor> {
+        self.cursor.as_ref()
+    }
+}
+
+/// One bounded page of a tenant's attempts, plus where to resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentAttemptPage {
+    /// At most [`PaymentAttemptQuery::limit`] attempts, newest-first.
+    pub attempts: Vec<StoredPaymentAttempt>,
+    /// `Some` only when this page filled to `limit`, i.e. there may be more.
+    /// `None` is the definitive end of the tenant's listing.
+    pub next_cursor: Option<PaymentAttemptCursor>,
+}
+
+impl PaymentAttemptPage {
+    /// Builds the page from an already-ordered, already-`LIMIT`ed row batch.
+    /// The cursor is the LAST row of a full page -- the two backends share this
+    /// one constructor so a memory page and a Postgres page can never disagree
+    /// about where the next page starts.
+    fn from_rows(attempts: Vec<StoredPaymentAttempt>, limit: usize) -> Self {
+        let next_cursor = (attempts.len() >= limit)
+            .then(|| attempts.last())
+            .flatten()
+            .map(|last| PaymentAttemptCursor {
+                created_at_unix: last.created_at_unix,
+                id: last.id.clone(),
+            });
+        Self {
+            attempts,
+            next_cursor,
+        }
+    }
+}
+
 /// Outcome of [`RuntimeStorageRepositories::create_payment_attempt`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaymentAttemptCreation {
@@ -212,6 +354,52 @@ pub enum PaymentAttemptCreation {
     /// The id already existed with a byte-equivalent immutable tuple; the
     /// existing row is returned (idempotent replay).
     Existing(StoredPaymentAttempt),
+}
+
+/// The canonical decimal-`u64` shape both amount columns must hold: 1..=20
+/// digits, no sign, no exponent, no whitespace, never empty (issue #352 review
+/// §4). 20 digits is exactly `u64::MAX`'s width, so any value that parses as a
+/// `u64` passes and nothing wider can be stored.
+///
+/// `atomic_amount` is TEXT because an on-chain `u64` exceeds `BIGINT`'s `i64`
+/// range -- that choice is right, but it left the column with NO domain: `""`,
+/// `"-5"` and `"1e9"` were all storable into a durable audit record that
+/// `evidence_conflict` then compares as opaque strings and the reconciler parses
+/// downstream. Migration 59 adds the same rule as a Postgres `CHECK`; this
+/// function is the application mirror so the memory and Postgres backends refuse
+/// the identical set of values (the #188 conformance obligation) instead of the
+/// memory twin silently accepting what the database rejects.
+fn is_canonical_atomic_amount(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Rejects a create whose money columns are outside their domain. Mirrors the
+/// migration-59 `CHECK`s exactly; see [`is_canonical_atomic_amount`].
+fn validate_payment_attempt_amounts(attempt: &StoredPaymentAttempt) -> Result<(), StorageError> {
+    if !is_canonical_atomic_amount(&attempt.atomic_amount) {
+        return Err(StorageError::Conflict(format!(
+            "payment attempt {} has non-canonical atomic_amount {:?} (expected 1-20 decimal digits)",
+            attempt.id, attempt.atomic_amount
+        )));
+    }
+    if let Some(settled) = attempt.settled_atomic_amount.as_deref() {
+        if !is_canonical_atomic_amount(settled) {
+            return Err(StorageError::Conflict(format!(
+                "payment attempt {} has non-canonical settled_atomic_amount {settled:?} \
+                 (expected 1-20 decimal digits)",
+                attempt.id
+            )));
+        }
+    }
+    if let Some(credits) = attempt.credits_amount {
+        if credits < 0 {
+            return Err(StorageError::Conflict(format!(
+                "payment attempt {} has negative credits_amount {credits}",
+                attempt.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Outcome of a state transition CAS.
@@ -408,6 +596,7 @@ impl PostgresControlPlaneStore {
                 attempt.id, attempt.state
             )));
         }
+        validate_payment_attempt_amounts(attempt)?;
         let operation = self.payment_attempt_operation("create payment attempt");
         let mut client = self
             .async_pool
@@ -551,7 +740,27 @@ impl PostgresControlPlaneStore {
                 ],
             )
             .await
-            .map_err(postgres_error)?;
+            // Migration 59 puts a partial UNIQUE index on
+            // `transaction_signature`, so a SECOND attempt trying to record an
+            // on-chain signature another attempt already used trips SQLSTATE
+            // 23505 here. That is a business conflict -- one stablecoin transfer
+            // being used as proof to capture two wallet holds -- so it must
+            // surface as the typed `Conflict` (which fails closed and leaves the
+            // hold retained), not as a raw storage error that a caller could
+            // read as a transient outage and retry. The database is the only
+            // place two concurrent settles can be serialized, which is why the
+            // guard lives there rather than in a read-then-write check.
+            .map_err(|error| {
+                if is_unique_violation(&error) {
+                    StorageError::Conflict(format!(
+                        "payment attempt {id} cannot record transaction signature {}: another \
+                         attempt already recorded it",
+                        evidence.transaction_signature.unwrap_or("<none>")
+                    ))
+                } else {
+                    postgres_error(error)
+                }
+            })?;
         if let Some(row) = updated {
             transaction.commit().await.map_err(postgres_error)?;
             return Ok(PaymentAttemptTransition::Applied(payment_attempt_from_row(
@@ -616,10 +825,23 @@ impl PostgresControlPlaneStore {
         Ok(row.as_ref().map(payment_attempt_from_row))
     }
 
+    /// One bounded, keyset-paginated page of a tenant's attempts (issue #352
+    /// acceptance box 6). The tenant predicate is applied BEFORE the cursor and
+    /// the ordering, so `idx_payment_attempts_tenant_time` serves the whole
+    /// read and the cursor only ever narrows within one tenant's slice.
+    ///
+    /// The cursor predicate is the exact complement of the
+    /// `created_at_unix DESC, id ASC` order: a row is strictly after the cursor
+    /// when its timestamp is older, or -- on a `created_at_unix` TIE -- its id
+    /// sorts after the cursor's. Without the tie arm a cursor landing inside a
+    /// group of same-second attempts would either skip the rest of that group or
+    /// re-emit it forever. There is no `OFFSET`: resuming is an index seek, not
+    /// a re-scan of every skipped row.
     pub(super) async fn list_payment_attempts(
         &self,
         tenant_id: &str,
-    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        query: &PaymentAttemptQuery,
+    ) -> Result<PaymentAttemptPage, StorageError> {
         let operation = self.payment_attempt_operation("list payment attempts");
         let mut client = self
             .async_pool
@@ -633,18 +855,43 @@ impl PostgresControlPlaneStore {
                 .map_err(postgres_error)?;
         }
         // Tenant-scoped BEFORE ordering, served by idx_payment_attempts_tenant_time.
-        let rows = transaction
-            .query(
-                &format!(
-                    "SELECT {PAYMENT_ATTEMPT_COLUMNS} FROM payment_attempts \
-                     WHERE tenant_id = $1 ORDER BY created_at_unix DESC, id ASC"
-                ),
-                &[&tenant_id],
-            )
-            .await
-            .map_err(postgres_error)?;
+        let limit = query.limit() as i64;
+        let rows = match query.cursor() {
+            Some(cursor) => {
+                transaction
+                    .query(
+                        &format!(
+                            "SELECT {PAYMENT_ATTEMPT_COLUMNS} FROM payment_attempts \
+                             WHERE tenant_id = $1 \
+                               AND (created_at_unix < $2 \
+                                    OR (created_at_unix = $2 AND id > $3)) \
+                             ORDER BY created_at_unix DESC, id ASC \
+                             LIMIT $4"
+                        ),
+                        &[&tenant_id, &cursor.created_at_unix, &cursor.id, &limit],
+                    )
+                    .await
+            }
+            None => {
+                transaction
+                    .query(
+                        &format!(
+                            "SELECT {PAYMENT_ATTEMPT_COLUMNS} FROM payment_attempts \
+                             WHERE tenant_id = $1 \
+                             ORDER BY created_at_unix DESC, id ASC \
+                             LIMIT $2"
+                        ),
+                        &[&tenant_id, &limit],
+                    )
+                    .await
+            }
+        }
+        .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
-        Ok(rows.iter().map(payment_attempt_from_row).collect())
+        Ok(PaymentAttemptPage::from_rows(
+            rows.iter().map(payment_attempt_from_row).collect(),
+            query.limit(),
+        ))
     }
 
     pub(super) async fn get_payment_attempt_links(
@@ -824,6 +1071,7 @@ impl RuntimeControlPlaneState {
                 attempt.id, attempt.state
             )));
         }
+        validate_payment_attempt_amounts(&attempt)?;
         if let Some(existing) = self.payment_attempts.get(&attempt.id) {
             if immutable_tuple(&existing) != immutable_tuple(&attempt) {
                 return Err(StorageError::Conflict(format!(
@@ -851,6 +1099,22 @@ impl RuntimeControlPlaneState {
                 "payment attempt {id} does not exist"
             )));
         };
+        // Memory mirror of the migration-59 partial UNIQUE index on
+        // `transaction_signature` (#188 conformance): one on-chain transfer must
+        // not be usable as proof to capture two different attempts' wallet
+        // holds. Checked BEFORE the transition applies, so a rejected replay
+        // leaves the row byte-identical, exactly as the Postgres constraint does
+        // by aborting the statement.
+        if let Some(signature) = evidence.transaction_signature {
+            if self.payment_attempts.list().into_iter().any(|other| {
+                other.id != id && other.transaction_signature.as_deref() == Some(signature)
+            }) {
+                return Err(StorageError::Conflict(format!(
+                    "payment attempt {id} cannot record transaction signature {signature}: \
+                     another attempt already recorded it"
+                )));
+            }
+        }
         let outcome = apply_memory_transition(&record, allowed_from, to_state, evidence, now_unix)?;
         if let PaymentAttemptTransition::Applied(next) = &outcome {
             self.payment_attempts.insert(next.id.clone(), next.clone());
@@ -862,19 +1126,38 @@ impl RuntimeControlPlaneState {
         self.payment_attempts.get(id)
     }
 
-    pub fn list_payment_attempts(&self, tenant_id: &str) -> Vec<StoredPaymentAttempt> {
+    /// Memory twin of the Postgres keyset page. Same tenant-first predicate,
+    /// same `created_at_unix DESC, id ASC` order, the SAME strictly-after cursor
+    /// comparison (including the `created_at_unix` tie arm), the same `limit`
+    /// truncation and the same [`PaymentAttemptPage::from_rows`] cursor
+    /// construction -- so an operator paging a memory-backed gateway sees the
+    /// identical page boundaries a Postgres-backed one produces (#188
+    /// conformance obligation).
+    pub fn list_payment_attempts(
+        &self,
+        tenant_id: &str,
+        query: &PaymentAttemptQuery,
+    ) -> PaymentAttemptPage {
         let mut attempts: Vec<StoredPaymentAttempt> = self
             .payment_attempts
             .list()
             .into_iter()
             .filter(|a| a.tenant_id == tenant_id)
+            .filter(|a| match query.cursor() {
+                Some(cursor) => {
+                    a.created_at_unix < cursor.created_at_unix
+                        || (a.created_at_unix == cursor.created_at_unix && a.id > cursor.id)
+                }
+                None => true,
+            })
             .collect();
         attempts.sort_by(|a, b| {
             b.created_at_unix
                 .cmp(&a.created_at_unix)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        attempts
+        attempts.truncate(query.limit());
+        PaymentAttemptPage::from_rows(attempts, query.limit())
     }
 
     pub fn get_payment_attempt_links(
@@ -1090,15 +1373,20 @@ impl RuntimeStorageRepositories {
         self.control_plane.store().get_payment_attempt(id).await
     }
 
-    /// Lists a tenant's attempts newest-first for admin inspect (issue #352).
-    /// Tenant-scoped before ordering; no blocking Postgres bridge in the path.
+    /// One bounded page of a tenant's attempts, newest-first, for admin inspect
+    /// (issue #352, `GET /admin/v1/payment-attempts`). Tenant-scoped BEFORE the
+    /// keyset cursor and the ordering; no blocking Postgres bridge in the path.
+    /// There is deliberately no unbounded variant: `payment_attempts` grows one
+    /// row per paid egress request, so an "all rows" read is a table-sized
+    /// response and, behind an admin endpoint, a one-request DoS.
     pub async fn list_payment_attempts(
         &self,
         tenant_id: &str,
-    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        query: &PaymentAttemptQuery,
+    ) -> Result<PaymentAttemptPage, StorageError> {
         self.control_plane
             .store()
-            .list_payment_attempts(tenant_id)
+            .list_payment_attempts(tenant_id, query)
             .await
     }
 

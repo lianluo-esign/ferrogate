@@ -101,7 +101,13 @@ fn all_groups_register_in_order() {
     let names: Vec<&str> = registry.groups().iter().map(|g| g.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["wallets", "payment-methods", "billing-events", "usage"]
+        vec![
+            "wallets",
+            "payment-methods",
+            "billing-events",
+            "usage",
+            "payment-attempts"
+        ]
     );
 }
 
@@ -112,6 +118,7 @@ fn every_declared_verb_builds_a_request() {
         (PaymentMethodsGroup.descriptor(), build_payment_methods),
         (BillingEventsGroup.descriptor(), build_billing_events),
         (UsageGroup.descriptor(), build_usage),
+        (PaymentAttemptsGroup.descriptor(), build_payment_attempts),
     ];
     let input = universal_input();
     for (descriptor, build) in cases {
@@ -152,11 +159,15 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "listAdminMeteringEvents",
         "listAdminMeteringExportStatus",
         "listAdminAgentCostBurn",
+        // #352: read-only durable x402 payment-attempt inspection.
+        "listPaymentAttempts",
+        "getPaymentAttemptLinks",
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 7 (wallets) + 3 (payment-methods) + 3 (billing-events) + 5 (usage) = 18.
-    assert_eq!(manifest.len(), 18);
+    // 7 (wallets) + 3 (payment-methods) + 3 (billing-events) + 5 (usage)
+    // + 2 (payment-attempts) = 20.
+    assert_eq!(manifest.len(), 20);
 }
 
 #[test]

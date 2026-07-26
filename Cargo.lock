@@ -1440,6 +1440,7 @@ dependencies = [
  "ferrogate-billing",
  "ferrogate-cloudflare",
  "ferrogate-core",
+ "ferrogate-payments",
  "native-tls",
  "postgres-native-tls",
  "proptest",

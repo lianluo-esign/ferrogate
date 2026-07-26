@@ -60,6 +60,8 @@ mod mcp_rpc;
 mod messages;
 mod messages_stream;
 pub(crate) mod observed_agent_activity;
+// #352: read-only Admin API over durable x402 payment attempts.
+mod payment_attempts;
 pub(crate) mod payments;
 mod plans;
 mod proxy;

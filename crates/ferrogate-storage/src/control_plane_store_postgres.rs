@@ -1636,8 +1636,9 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
     async fn list_payment_attempts(
         &self,
         tenant_id: &str,
-    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
-        self.list_payment_attempts(tenant_id).await
+        query: &PaymentAttemptQuery,
+    ) -> Result<PaymentAttemptPage, StorageError> {
+        self.list_payment_attempts(tenant_id, query).await
     }
 
     async fn get_payment_attempt_links(

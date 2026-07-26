@@ -535,6 +535,33 @@ impl X402SettlementLoop {
                 settled_atomic_amount,
                 response,
             } => {
+                // Last line of defence on the capture (#352 review). The capture
+                // takes the FULL hold, so a transfer SHORT of what the attempt
+                // authorized must never reach `settle_edge`. Both production
+                // callers (`state_x402_negotiation`, `state_x402_reconciler`)
+                // already run this exact classification before building the
+                // evidence, but `finalize` is the seam every future caller and
+                // every replay comes through, and a capture is not the place to
+                // rely on a caller having checked. Re-using the SHARED
+                // `classify_settled_amount` -- not a string equality -- is what
+                // keeps the guard correct: the x402 SVM `exact` scheme
+                // (`scheme_exact_svm.md` 1.4) says a matching transfer MAY EXCEED
+                // the required amount and MUST NOT be less, so a spec-valid
+                // overpayment still settles (capturing only the owed hold, #469)
+                // while an underpayment fails closed here. Failing closed RETAINS
+                // the hold and leaves the attempt non-terminal for the
+                // reconciler: no capture on short evidence, and no release either
+                // (the money may well have moved).
+                if classify_settled_amount(&attempt.atomic_amount, settled_atomic_amount)
+                    == AmountCoverage::Short
+                {
+                    return Err(StorageError::Conflict(format!(
+                        "payment attempt {attempt_id} settlement evidence reports \
+                         settled_atomic_amount {settled_atomic_amount}, which does not cover the \
+                         authorized {}; refusing to capture the hold",
+                        attempt.atomic_amount
+                    )));
+                }
                 self.settle_edge(
                     attempt_id,
                     &hold_id,

@@ -41,6 +41,7 @@
 //!
 //! This crate performs no network I/O, opens no wallet, and loads no keys.
 
+mod attempt_state;
 mod error;
 mod intent;
 mod proof;
@@ -49,6 +50,7 @@ mod wire;
 #[cfg(feature = "sdk-solana-pay-kit")]
 pub mod sdk;
 
+pub use attempt_state::PaymentAttemptState;
 pub use error::PaymentError;
 pub use intent::{
     PaymentIntent, PaymentIntentDraft, PaymentIntentError, PaymentIntentIdentity, RequestBodyHash,

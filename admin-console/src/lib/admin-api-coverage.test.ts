@@ -100,6 +100,20 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
     reason:
       "read-only effective-policy diagnostics plus a dry-run evaluator; the policy is authored in ferrogate.toml, not through this API, so a CRUD page would imply writes the surface does not support — deferred, needs UI alongside the wallets/metering spend panel",
   },
+  // Read-only x402 payment-attempt INSPECTION (#352): two GETs over rows the
+  // #354 settlement loop writes. There is no operator write path at all — an
+  // attempt is minted by a paid egress request, never by a console action — so
+  // a CRUD page here would present editable-looking controls over a surface
+  // that cannot write. The operator UI that belongs here is the stuck-payment
+  // panel next to the wallet holds it joins to, in the same wallets/metering
+  // spend cockpit the x402 spend-policy diagnostics are waiting on. Operators
+  // are NOT blocked meanwhile: the `ctl payment-attempts list|get` verbs cover
+  // the surface today. Deferred, needs UI — tracked on the #313 chain.
+  "payment-attempts": {
+    owner: "billing/ops cockpit (#352 inspection, #428 follow-up, #313 chain)",
+    reason:
+      "read-only durable x402 payment-attempt inspection with no operator write path; covered today by the ctl payment-attempts verbs, and its UI belongs in the wallets/metering spend cockpit beside the wallet holds it joins — deferred, needs UI",
+  },
   tenants: {
     owner: "tenancy (superseded by tenant-accounts)",
     reason:

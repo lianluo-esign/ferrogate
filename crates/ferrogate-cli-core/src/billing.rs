@@ -96,6 +96,8 @@ pub const METERING_EXPORT_STATUS: ResourceApi =
 /// `/admin/v1/agent-cost-burn` — durable per-agent runtime cost-burn for a
 /// billing period (read view, #428).
 pub const AGENT_COST_BURN: ResourceApi = ResourceApi::new("/admin/v1/agent-cost-burn");
+/// `/admin/v1/payment-attempts` — durable x402 payment attempts (read view, #352).
+pub const PAYMENT_ATTEMPTS: ResourceApi = ResourceApi::new("/admin/v1/payment-attempts");
 
 /// Tenant wallets: read/create/settings plus the two settlement-affecting
 /// actions and the ledger read.
@@ -281,12 +283,60 @@ pub fn build_usage(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> 
     }
 }
 
+/// Durable x402 payment attempts (#352): a read-only inspection surface over the
+/// rows the #354 settlement loop writes. Read-only by design — an attempt is
+/// minted by a paid egress request, never by an operator command, so there is no
+/// create/update/delete verb to declare.
+pub struct PaymentAttemptsGroup;
+
+impl CommandGroup for PaymentAttemptsGroup {
+    fn descriptor(&self) -> GroupDescriptor {
+        GroupDescriptor::new(
+            "payment-attempts",
+            "Inspect durable x402 payment attempts and their wallet holds",
+            vec![
+                VerbDescriptor::api(
+                    "list",
+                    "List a tenant's payment attempts (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])",
+                    "listPaymentAttempts",
+                ),
+                VerbDescriptor::api(
+                    "get",
+                    "Show one payment attempt with its wallet reservation and settlement",
+                    "getPaymentAttemptLinks",
+                ),
+            ],
+        )
+    }
+}
+
+/// Build the request for a `payment-attempts` verb.
+///
+/// `list` is a collection read whose REQUIRED `tenant_id` plus the optional
+/// `limit`/`cursor` ride the generic `input.list` filter channel verbatim — the
+/// server owns the clamp and the keyset cursor, and the CLI neither invents a
+/// default page size nor re-derives a cursor. `get` addresses the attempt by id;
+/// an operator inspecting another tenant's attempt gets the server's 404/403,
+/// not a locally-guessed answer. Money fields are transported exactly as the
+/// server rendered them (`atomic_amount` stays a canonical decimal string), so
+/// this layer is structurally incapable of rounding a payment.
+pub fn build_payment_attempts(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
+    match verb {
+        "list" => PAYMENT_ATTEMPTS.read(&[], &input.list),
+        "get" => PAYMENT_ATTEMPTS.read(&[first_segment(input, "payment attempt")?], &input.list),
+        other => Err(crate::error::CliError::usage(format!(
+            "verb '{other}' is not a payment-attempts verb"
+        ))),
+    }
+}
+
 /// Register every billing/usage command group with the registry.
 pub fn register(registry: &mut Registry) -> CliResult<()> {
     registry.register(&WalletsGroup)?;
     registry.register(&PaymentMethodsGroup)?;
     registry.register(&BillingEventsGroup)?;
     registry.register(&UsageGroup)?;
+    registry.register(&PaymentAttemptsGroup)?;
     Ok(())
 }
 

@@ -69,6 +69,8 @@ pub(super) enum RouteGroup {
     Wallets,
     /// #351: read-only x402 spend-policy diagnostics.
     X402SpendPolicy,
+    /// #352: read-only durable x402 payment-attempt inspection.
+    PaymentAttempt,
 }
 
 impl RouteGroup {
@@ -110,6 +112,7 @@ impl RouteGroup {
             "plans" => Self::Plans,
             "wallets" => Self::Wallets,
             "x402_spend_policy" => Self::X402SpendPolicy,
+            "payment_attempt" => Self::PaymentAttempt,
             _ => return None,
         })
     }
@@ -200,6 +203,7 @@ impl FerroGateway {
             RouteGroup::X402SpendPolicy => {
                 self.try_x402_spend_policy_routes(session, ctx, req).await
             }
+            RouteGroup::PaymentAttempt => self.try_payment_attempt_routes(session, ctx, req).await,
         }
     }
 
@@ -217,6 +221,33 @@ impl FerroGateway {
             || req.path.starts_with("/admin/v1/x402-spend-policies/")
         {
             self.handle_admin_x402_spend_policies(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// #352: the two read-only payment-attempt inspection paths. Anything else
+    /// under the prefix is an explicit 404 from the handler rather than a
+    /// fall-through to dynamic proxy routing, so a typo'd path can never be
+    /// silently proxied upstream.
+    async fn try_payment_attempt_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path == "/admin/v1/payment-attempts"
+            || req.path.starts_with("/admin/v1/payment-attempts/")
+        {
+            self.handle_admin_payment_attempts(
                 session,
                 ctx,
                 &req.headers,

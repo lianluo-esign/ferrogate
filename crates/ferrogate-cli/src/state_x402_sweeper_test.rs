@@ -454,3 +454,172 @@ fn concurrent_sweeps_release_each_hold_exactly_once() {
     }
     assert_eq!(block_on(wallet_balance(&state)), 10_000);
 }
+
+// --------------------------------------------------------------------------
+// Orphan holds: the reserve committed and the attempt create did not (#352 §3)
+// --------------------------------------------------------------------------
+
+/// Reproduces the crash window `open()` leaves open: `reserve_wallet_credits`
+/// commits, then `create_payment_attempt` commits in a SECOND transaction. A
+/// process death in between leaves a `status = 'active'` reservation that no
+/// attempt owns.
+///
+/// The attempt-driven pass is structurally blind to it -- its due query is an
+/// INNER JOIN from the attempt side -- so before this slice the row stayed
+/// `active` forever and every consumer reading `status` reported a phantom live
+/// hold. Delete the `sweep_orphaned_x402_holds` call from
+/// `sweep_x402_expired_attempts_once` and this test goes red.
+#[test]
+fn sweep_releases_an_orphan_hold_the_attempt_pass_cannot_see() {
+    let state = seed_state(10_000, sweeper_config(true, 100, 0));
+    // Only the reserve committed: no `create_payment_attempt` follows.
+    block_on(state.repositories_arc().reserve_wallet_credits(
+        "orphan-1",
+        TENANT,
+        500,
+        OPEN_AT + HOLD_TTL_SECS,
+        OPEN_AT,
+    ))
+    .expect("reserve");
+
+    // The attempt-driven pass sees nothing: there is no attempt row to join.
+    let report = block_on(state.sweep_x402_expired_attempts_once(4_000));
+    assert_eq!(report.scanned, 0, "no attempt owns this hold");
+    assert_eq!(report.released, 0);
+    assert_eq!(report.failed, 0);
+    // The orphan pass is what reclaims it.
+    assert_eq!(
+        report.orphan_holds_released, 1,
+        "the overdue unowned hold must be reclaimed"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "orphan-1")).as_deref(),
+        Some(WALLET_RESERVATION_RELEASED),
+        "the row stops reporting itself as a live hold"
+    );
+    assert_eq!(block_on(wallet_balance(&state)), 10_000, "no money moved");
+
+    // Idempotent: a later tick finds nothing left.
+    let again = block_on(state.sweep_x402_expired_attempts_once(5_000));
+    assert_eq!(again.orphan_holds_released, 0);
+}
+
+/// The money-critical constraint the orphan sweep must not break: a
+/// `submitted` attempt's hold may correspond to stablecoin already on-chain, so
+/// it is RETAINED. It has an attempt row, so the unowned-only predicate excludes
+/// it -- and the attempt-driven pass never fetches a submitted attempt either.
+#[test]
+fn orphan_sweep_never_touches_a_submitted_attempts_hold() {
+    let state = seed_state(10_000, sweeper_config(true, 100, 0));
+    open_authorized(&state, "s1", 500);
+    block_on(
+        state
+            .x402_settlement_loop()
+            .submit("s1", Some(&"5".repeat(88)), 200, 200),
+    )
+    .expect("submit");
+
+    let report = block_on(state.sweep_x402_expired_attempts_once(4_000));
+    assert_eq!(
+        report.scanned, 0,
+        "a submitted attempt is never a candidate"
+    );
+    assert_eq!(report.released, 0);
+    assert_eq!(
+        report.orphan_holds_released, 0,
+        "a hold an attempt owns is not an orphan, whatever its TTL"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "s1")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE),
+        "the submitted attempt's hold stays RETAINED"
+    );
+    assert_eq!(
+        block_on(attempt_state(&state, "s1")),
+        PAYMENT_ATTEMPT_SUBMITTED,
+        "and the attempt is not reported failed or released"
+    );
+}
+
+/// A PRE-submission attempt's hold is owned by the attempt-driven pass, which
+/// releases the hold AND moves the attempt to `released` in one edge. The orphan
+/// sweep must not race it: releasing that hold behind the attempt's back would
+/// make the attempt invisible to its own due query (which joins on
+/// `wr.status = 'active'`) and strand it in `authorized` forever.
+///
+/// Widen the storage predicate back to "not in an expirable state" and this test
+/// goes red -- `orphan_holds_released` becomes 1.
+#[test]
+fn orphan_sweep_never_steals_a_pre_submission_attempts_hold() {
+    let state = seed_state(10_000, sweeper_config(true, 100, 0));
+    open_authorized(&state, "p1", 500);
+
+    let report = block_on(state.sweep_x402_expired_attempts_once(4_000));
+    assert_eq!(
+        report.orphan_holds_released, 0,
+        "an authorized attempt's hold belongs to the attempt-driven pass"
+    );
+    // And that pass did its job in the same tick: attempt released, hold released.
+    assert_eq!(report.released, 1);
+    assert_eq!(
+        block_on(attempt_state(&state, "p1")),
+        PAYMENT_ATTEMPT_RELEASED,
+        "the attempt reached a terminal state instead of being stranded"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "p1")).as_deref(),
+        Some(WALLET_RESERVATION_RELEASED)
+    );
+}
+
+/// A not-yet-due orphan is left alone: this reclaims overdue holds, it does not
+/// cancel live ones. The `hold_ttl_grace_secs` knob applies to it too, since it
+/// shares the tick's `due_before`.
+#[test]
+fn orphan_sweep_respects_the_ttl_and_the_grace_window() {
+    let state = seed_state(10_000, sweeper_config(true, 100, 600));
+    block_on(state.repositories_arc().reserve_wallet_credits(
+        "orphan-live",
+        TENANT,
+        500,
+        OPEN_AT + HOLD_TTL_SECS,
+        OPEN_AT,
+    ))
+    .expect("reserve");
+
+    // Hold expires at 3700; with a 600s grace the sweep is due only from 4300.
+    let early = block_on(state.sweep_x402_expired_attempts_once(4_000));
+    assert_eq!(
+        early.orphan_holds_released, 0,
+        "inside the grace window nothing is reclaimed"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "orphan-live")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE)
+    );
+
+    let due = block_on(state.sweep_x402_expired_attempts_once(4_400));
+    assert_eq!(due.orphan_holds_released, 1);
+}
+
+/// Disabled means disabled for BOTH passes: a config that turns the sweeper off
+/// must not keep reclaiming holds through the orphan path.
+#[test]
+fn orphan_sweep_is_a_noop_when_the_sweeper_is_disabled() {
+    let state = seed_state(10_000, sweeper_config(false, 100, 0));
+    block_on(state.repositories_arc().reserve_wallet_credits(
+        "orphan-off",
+        TENANT,
+        500,
+        OPEN_AT + HOLD_TTL_SECS,
+        OPEN_AT,
+    ))
+    .expect("reserve");
+
+    let report = block_on(state.sweep_x402_expired_attempts_once(4_000));
+    assert_eq!(report, X402SweepReport::default());
+    assert_eq!(
+        block_on(reservation_status(&state, "orphan-off")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE)
+    );
+}

@@ -499,10 +499,16 @@ impl DurablePaymentAttemptFixture {
 
             // The tenant-scoped admin listing recovers both attempts.
             let listed = repositories
-                .list_payment_attempts(&self.tenant_id)
+                .list_payment_attempts(
+                    &self.tenant_id,
+                    &ferrogate_storage::PaymentAttemptQuery::new(16),
+                )
                 .await
                 .context("list payment attempts after restart")?;
-            let mut listed_ids: Vec<&str> = listed.iter().map(|a| a.id.as_str()).collect();
+            if listed.next_cursor.is_some() {
+                bail!("{label}: a 16-row page over 2 attempts must end the listing");
+            }
+            let mut listed_ids: Vec<&str> = listed.attempts.iter().map(|a| a.id.as_str()).collect();
             listed_ids.sort_unstable();
             let mut expected_ids = [
                 self.settled_attempt_id.as_str(),

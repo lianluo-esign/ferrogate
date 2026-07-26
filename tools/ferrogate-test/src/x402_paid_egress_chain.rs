@@ -664,10 +664,18 @@ async fn assert_chain_accounting(ledger: &RuntimeStorageRepositories) -> Result<
     // Operator visibility: every attempt the chain made is listable under its
     // tenant, in a documented state. "Why was this payment made and what
     // happened to it?" is answerable from durable evidence, not log scraping.
-    let attempts = ledger
-        .list_payment_attempts(TENANT_ID)
+    // The listing is BOUNDED (#352 box 6): a page carries at most `limit` rows
+    // and resumes through a keyset cursor, so this asks for a page comfortably
+    // wider than the three attempts the chain makes and asserts the page ends
+    // there rather than assuming an unbounded read.
+    let page = ledger
+        .list_payment_attempts(TENANT_ID, &ferrogate_storage::PaymentAttemptQuery::new(16))
         .await
         .context("list the chain's payment attempts")?;
+    if page.next_cursor.is_some() {
+        bail!("a 16-row page over 3 attempts must be the end of the listing");
+    }
+    let attempts = page.attempts;
     if attempts.len() != 3 {
         bail!(
             "the chain recorded {} attempts, expected 3 (settled, denied, reconciled)",

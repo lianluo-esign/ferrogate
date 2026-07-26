@@ -13203,6 +13203,148 @@
           "rbac_action": null
         }
       }
+    },
+    "/admin/v1/payment-attempts": {
+      "get": {
+        "operationId": "listPaymentAttempts",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List a tenant's durable x402 payment attempts.",
+        "description": "Returns one BOUNDED, tenant-scoped page of durable x402 payment attempts (#352), newest-first, so an operator can inspect a stuck attempt -- notably an outcome_unknown one whose wallet hold is still live and whose stablecoin may already have moved. tenant_id is REQUIRED and applied before ordering and before the cursor; a tenant-scoped admin key may only name its own tenant. Paging is a keyset cursor over (created_at_unix, id) -- the index's own order, with no OFFSET scan -- and limit is clamped server-side, so no request can ask for the whole table. Read-only: nothing is created, released, or captured.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "description": "Tenant (organization) id. Required -- an unscoped listing would be a cross-tenant scan.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size. Defaults to 50 and is clamped to 500; a non-positive or non-numeric value is a 400 rather than a silent default.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque next_cursor from a previous page. A malformed cursor is a 400 rather than a silent restart from page one.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One bounded page of the tenant's attempts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPaymentAttemptList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/payment-attempts/{id}": {
+      "get": {
+        "operationId": "getPaymentAttemptLinks",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Inspect one payment attempt with its wallet reservation and settlement.",
+        "description": "Returns one durable x402 payment attempt joined to its wallet hold and its captured wallet settlement (#352 E2E evidence: attempt, hold, wallet settlement, policy revision, transaction evidence). Tenancy fails closed BOTH ways: a tenant-scoped key is scoped to its own tenant unless it names one, so another tenant's attempt is indistinguishable from a missing one and returns 404 without disclosing that the payment exists; naming a tenant the key does not own is 403. A platform-operator key may omit tenant_id, in which case the owner is resolved from the attempt. Read-only: no hold is released or captured by this call.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Payment attempt (idempotency) id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "description": "Owning tenant. Optional: defaults to the caller's own tenant, and may be omitted entirely by a platform-operator key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attempt with its linked reservation and settlement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPaymentAttemptLinks"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -28267,6 +28409,353 @@
           "spent",
           "decision"
         ]
+      },
+      "AdminPaymentAttempt": {
+        "type": "object",
+        "description": "One durable x402 payment attempt (#352): the complete immutable audit tuple (wire-contract identity + #351 policy decision) plus the mutable state/evidence tail. Money keeps its stored representation exactly: atomic_amount and settled_atomic_amount are canonical decimal STRINGS of the on-chain u64 atomic units (a u64 does not survive JSON's double), and credits_amount is the integer internal wallet-credit hold. Nothing here is rounded or recomputed.",
+        "required": [
+          "object",
+          "id",
+          "tenant_id",
+          "method",
+          "resource_url",
+          "challenge_hash",
+          "x402_version",
+          "scheme",
+          "network_caip2",
+          "mint",
+          "atomic_amount",
+          "recipient",
+          "policy_revision",
+          "decision",
+          "reason_code",
+          "state",
+          "generation",
+          "created_at_unix",
+          "updated_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "payment_attempt"
+          },
+          "id": {
+            "type": "string",
+            "description": "Attempt / idempotency id."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "workspace_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "run_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "worker_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "request_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "trace_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "method": {
+            "type": "string",
+            "description": "HTTP method of the egress request the payment unlocks."
+          },
+          "resource_url": {
+            "type": "string",
+            "description": "Canonical resource URL FerroGate authorized egress to."
+          },
+          "request_body_hash": {
+            "type": "string",
+            "nullable": true,
+            "description": "Hex SHA-256 of the authorized request body."
+          },
+          "challenge_hash": {
+            "type": "string",
+            "description": "Deterministic hex challenge hash from the frozen wire contract."
+          },
+          "x402_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "network_caip2": {
+            "type": "string",
+            "description": "CAIP-2 network identifier."
+          },
+          "mint": {
+            "type": "string",
+            "description": "SPL token mint (base58)."
+          },
+          "atomic_amount": {
+            "type": "string",
+            "pattern": "^[0-9]{1,20}$",
+            "description": "ORIGINAL on-chain atomic amount, canonical decimal u64 string."
+          },
+          "recipient": {
+            "type": "string",
+            "description": "payTo recipient (base58)."
+          },
+          "credits_amount": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "minimum": 0,
+            "description": "Internal wallet credits held for this payment."
+          },
+          "conversion_version": {
+            "type": "string",
+            "nullable": true,
+            "description": "Conversion-rule version tag in effect at decision time (#351)."
+          },
+          "policy_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "approval_required",
+              "deny"
+            ]
+          },
+          "reason_code": {
+            "type": "string",
+            "description": "Stable x402_* policy reason code."
+          },
+          "hold_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Linked wallet reservation (hold) id. Absent on a denied attempt."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "challenged",
+              "authorized",
+              "submitted",
+              "settled",
+              "denied",
+              "released",
+              "failed",
+              "outcome_unknown"
+            ],
+            "description": "Attempt state. outcome_unknown is NON-TERMINAL and RETAINS the wallet hold: after proof submission a timeout or RPC ambiguity is not proof the money did not move."
+          },
+          "generation": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic CAS operation token, bumped by every applied transition."
+          },
+          "submitted_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "transaction_signature": {
+            "type": "string",
+            "nullable": true,
+            "description": "Base58 on-chain transaction signature recorded on settle."
+          },
+          "settled_atomic_amount": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9]{1,20}$"
+          },
+          "settlement_response": {
+            "type": "string",
+            "nullable": true,
+            "description": "Raw settlement evidence blob, when captured."
+          },
+          "failure_code": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPaymentAttemptReservation": {
+        "type": "object",
+        "description": "The wallet hold (#281 reservation) this attempt reserved. status is reported as STORED; available balance separately ignores a hold past expires_at_unix, so an active row with an elapsed expiry no longer counts against the wallet.",
+        "required": [
+          "object",
+          "id",
+          "tenant_id",
+          "amount_credits",
+          "status",
+          "expires_at_unix",
+          "created_at_unix",
+          "updated_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "wallet_reservation"
+          },
+          "id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "amount_credits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "settled",
+              "released"
+            ]
+          },
+          "expires_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "settlement_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPaymentAttemptSettlement": {
+        "type": "object",
+        "description": "The captured wallet settlement (the ledger charge the hold produced).",
+        "required": [
+          "object",
+          "id",
+          "tenant_id",
+          "delta_credits",
+          "created_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "wallet_settlement"
+          },
+          "id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "delta_credits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "balance_after_credits": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPaymentAttemptLinks": {
+        "type": "object",
+        "description": "An attempt joined to its wallet hold and captured settlement -- the #352 E2E evidence chain (attempt, hold, wallet settlement, policy revision, transaction evidence) in one read.",
+        "required": [
+          "object",
+          "attempt"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "payment_attempt_links"
+          },
+          "attempt": {
+            "$ref": "#/components/schemas/AdminPaymentAttempt"
+          },
+          "reservation": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AdminPaymentAttemptReservation"
+              }
+            ],
+            "nullable": true,
+            "description": "Absent when the attempt records no hold (denied) or the hold row is gone."
+          },
+          "settlement": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AdminPaymentAttemptSettlement"
+              }
+            ],
+            "nullable": true,
+            "description": "Absent until the hold is captured."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPaymentAttemptList": {
+        "type": "object",
+        "description": "One BOUNDED page of a tenant's attempts, newest-first. payment_attempts grows one row per paid egress request, so there is no unbounded listing: limit is clamped server-side and paging is a keyset cursor over (created_at_unix, id), never an OFFSET scan.",
+        "required": [
+          "object",
+          "data",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminPaymentAttempt"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "description": "The page size actually applied, after clamping."
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Opaque cursor to pass back as ?cursor= for the next page. Null at the definitive end of the listing."
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

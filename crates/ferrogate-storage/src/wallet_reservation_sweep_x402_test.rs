@@ -3,15 +3,21 @@
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-23
 // description: Money-safety coverage for `sweep_expired_wallet_reservations`
-// (#396). The blunt #281 TTL sweeper released ANY active hold past its TTL,
-// ignoring the owning x402 payment attempt's state -- so if ever scheduled it
-// could release a `submitted`/`outcome_unknown` attempt's hold whose stablecoin
-// transfer may already be on-chain, double-charging or losing the hold. These
-// tests pin the new attempt-state-aware guard: a hold bound to a NON
-// pre-submission x402 attempt is never swept, while a pre-submission
-// (`authorized`/`challenged`) hold and a genuinely non-x402 reservation still
-// are. Expiry is driven by an injected `now_unix`, never a timing sleep; the
-// in-memory backend is the mirror of the Postgres `NOT EXISTS` guard.
+// (#396, narrowed by the #352 review §3 when the sweep was finally SCHEDULED).
+// The blunt #281 sweeper released ANY active hold past its TTL, ignoring the
+// owning x402 payment attempt -- so once scheduled it could release a
+// `submitted`/`outcome_unknown` attempt's hold whose stablecoin transfer may
+// already be on-chain (double-charging or losing the hold), and it could also
+// release a PRE-submission attempt's hold behind that attempt's back, which is
+// just as bad in a subtler way: `list_expirable_due_payment_attempts` joins on
+// `wr.status = 'active'`, so an attempt whose hold this sweep released becomes
+// permanently invisible to the loop that owns its state and is stranded in
+// `authorized` forever. These tests pin the narrowed guard: a hold that ANY
+// payment attempt owns is never swept here, and what IS swept is the orphan --
+// a reserve that committed while its `create_payment_attempt` did not, plus
+// genuinely non-x402 reservations. Expiry is driven by an injected `now_unix`,
+// never a timing sleep; the in-memory backend is the mirror of the Postgres
+// `NOT EXISTS` guard.
 
 use crate::schema_routing_test_support::block_on;
 use crate::{
@@ -128,10 +134,17 @@ fn sweep_does_not_release_hold_bound_to_submitted_x402_attempt() {
     );
 }
 
-/// A hold bound to a pre-submission (`authorized`/`challenged`) x402 attempt IS
-/// still sweepable -- exactly the pre-submission set the #354 sweeper expires.
+/// A hold bound to a PRE-submission (`authorized`/`challenged`) attempt is NOT
+/// swept here either (#352 review §3). It is owned by the attempt-driven TTL
+/// pass, which releases the hold and moves the attempt to `released` in one
+/// re-driveable edge. Releasing it from this sweep would strand the attempt: the
+/// attempt-side due query joins on `wr.status = 'active'`, so the loop that owns
+/// its state would never see it again.
+///
+/// Delete the `NOT EXISTS` guard (Postgres) or the `protected` set (memory) and
+/// this test goes red on the first iteration.
 #[test]
-fn sweep_releases_hold_bound_to_pre_submission_x402_attempt() {
+fn sweep_does_not_release_hold_owned_by_a_pre_submission_attempt() {
     for pre_submission in [PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED] {
         let repositories = repositories_with_wallet("tenant-b", 1_000);
         block_on(repositories.reserve_wallet_credits("hold-pre", "tenant-b", 250, 10, 1)).unwrap();
@@ -144,27 +157,74 @@ fn sweep_releases_hold_bound_to_pre_submission_x402_attempt() {
         .unwrap();
 
         let swept = block_on(repositories.sweep_expired_wallet_reservations(100)).unwrap();
-        assert_eq!(
-            swept,
-            vec!["hold-pre".to_string()],
-            "a pre-submission ({pre_submission}) hold past TTL is still expirable"
+        assert!(
+            swept.is_empty(),
+            "a hold owned by a {pre_submission} attempt belongs to the attempt-driven pass, \
+             not to this sweep: {swept:?}"
         );
+        // And it is still `active`, i.e. still visible to the attempt-driven
+        // due query that joins on `wr.status = 'active'`.
+        let reservation = block_on(repositories.list_wallet_reservations("tenant-b"))
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == "hold-pre")
+            .expect("hold present");
+        assert_eq!(reservation.status, WALLET_RESERVATION_ACTIVE);
     }
 }
 
-/// A genuinely non-x402 reservation (no bound payment attempt) keeps the
-/// original #281 sweep behavior: expired holds are reclaimed.
+/// The ORPHAN this sweep exists for (#352 review §3): `reserve_wallet_credits`
+/// committed and `create_payment_attempt` never did, because the process died in
+/// the window between the two transactions. Nothing else re-drives that row --
+/// the attempt-driven pass is an INNER JOIN from the attempt side, so a hold with
+/// no attempt is structurally invisible to it -- and available balance
+/// self-heals, so the wallet is not oversold but every consumer reading `status`
+/// reports a phantom live hold forever.
+///
+/// This is the same shape as a genuinely non-x402 reservation, which keeps the
+/// original #281 behavior.
 #[test]
-fn sweep_releases_expired_non_x402_reservation() {
+fn sweep_releases_an_expired_hold_no_attempt_owns() {
     let repositories = repositories_with_wallet("tenant-c", 1_000);
-    // No payment attempt references this hold at all.
+    // The crash window: the reserve committed, the attempt create did not.
     block_on(repositories.reserve_wallet_credits("hold-plain", "tenant-c", 250, 10, 1)).unwrap();
 
     let swept = block_on(repositories.sweep_expired_wallet_reservations(100)).unwrap();
     assert_eq!(
         swept,
         vec!["hold-plain".to_string()],
-        "a non-x402 expired reservation must still be swept"
+        "an expired hold that no payment attempt owns must be reclaimed"
+    );
+    let reservation = block_on(repositories.list_wallet_reservations("tenant-c"))
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "hold-plain")
+        .expect("hold present");
+    assert_eq!(
+        reservation.status,
+        crate::WALLET_RESERVATION_RELEASED,
+        "the orphan stops reporting itself as a live hold"
+    );
+
+    // Idempotent: a second pass finds nothing left to release.
+    let again = block_on(repositories.sweep_expired_wallet_reservations(100)).unwrap();
+    assert!(
+        again.is_empty(),
+        "the orphan sweep must be idempotent: {again:?}"
+    );
+}
+
+/// A hold no attempt owns but that has NOT yet expired is left alone: this sweep
+/// reclaims overdue orphans, it does not cancel live ones.
+#[test]
+fn sweep_leaves_an_unexpired_orphan_hold_alone() {
+    let repositories = repositories_with_wallet("tenant-e", 1_000);
+    block_on(repositories.reserve_wallet_credits("hold-live", "tenant-e", 250, 500, 1)).unwrap();
+
+    let swept = block_on(repositories.sweep_expired_wallet_reservations(100)).unwrap();
+    assert!(
+        swept.is_empty(),
+        "a hold whose TTL has not elapsed must not be released: {swept:?}"
     );
 }
 

@@ -39,6 +39,9 @@ pub(crate) struct X402SweepReport {
     pub(crate) outcome_unknown: u64,
     /// Per-attempt errors, isolated so one failure never aborts the batch.
     pub(crate) failed: u64,
+    /// Overdue wallet holds that NO payment attempt owns, released by the
+    /// orphan sweep this tick (see [`AppState::sweep_orphaned_x402_holds`]).
+    pub(crate) orphan_holds_released: u64,
 }
 
 impl AppState {
@@ -75,16 +78,64 @@ impl AppState {
             }
         };
 
-        let report = self.expire_x402_attempt_batch(&candidates, now_unix).await;
+        let mut report = self.expire_x402_attempt_batch(&candidates, now_unix).await;
+        // Second, disjoint pass: the holds no attempt owns. The attempt-driven
+        // pass above cannot see them -- `list_expirable_due_payment_attempts` is
+        // an INNER JOIN driven from the attempt side, so a hold whose attempt row
+        // never committed is structurally invisible to it.
+        self.sweep_orphaned_x402_holds(due_before, &mut report)
+            .await;
         tracing::info!(
             scanned = report.scanned,
             released = report.released,
             skipped = report.skipped,
             outcome_unknown = report.outcome_unknown,
             failed = report.failed,
+            orphan_holds_released = report.orphan_holds_released,
             "x402 ttl sweep complete"
         );
         report
+    }
+
+    /// Reclaims overdue wallet holds that NO payment attempt owns (#352 review
+    /// §3), folding the count and per-hold audit evidence into `report`.
+    ///
+    /// The crash window this closes is real and documented: `open()` commits the
+    /// wallet reserve and then, in a SECOND transaction, commits the attempt row.
+    /// A process death between the two leaves a `status = 'active'` reservation
+    /// with no attempt. Available balance self-heals (it sums only unexpired
+    /// holds), so this is not an oversell -- but every consumer that reads
+    /// `status` instead of recomputing expiry reports a phantom live hold against
+    /// the customer's wallet, forever, because nothing re-drives that row.
+    ///
+    /// Money-safety is enforced in the storage predicate, not here:
+    /// `sweep_expired_wallet_reservations` releases only holds with NO
+    /// `payment_attempts` row, so a `submitted`/`outcome_unknown` attempt's hold
+    /// (whose stablecoin may already have moved on-chain) and a pre-submission
+    /// attempt's hold (owned by the attempt-driven pass above) are both excluded
+    /// by construction. The release is idempotent -- an already-`released` row is
+    /// not `active` and is not re-swept -- so this is safe on every gateway
+    /// instance concurrently, like the rest of the tick.
+    async fn sweep_orphaned_x402_holds(&self, due_before: i64, report: &mut X402SweepReport) {
+        match self
+            .repositories
+            .sweep_expired_wallet_reservations(due_before)
+            .await
+        {
+            Ok(released) => {
+                report.orphan_holds_released = released.len() as u64;
+                for hold_id in &released {
+                    self.record_x402_orphan_hold_audit(hold_id);
+                }
+            }
+            Err(error) => {
+                report.failed = report.failed.saturating_add(1);
+                tracing::warn!(
+                    error = %error,
+                    "x402 ttl sweep: failed to sweep orphaned wallet holds (isolated)"
+                );
+            }
+        }
     }
 
     /// Drives the loop's release edge for one already-fetched batch, with
@@ -169,6 +220,31 @@ impl AppState {
                 "released overdue pre-submission x402 hold {} (attempt state {}) via TTL sweep",
                 attempt.hold_id.as_deref().unwrap_or("-"),
                 attempt.state,
+            ),
+        });
+    }
+
+    /// Emit the audit event for one orphan-hold release. The hold has no attempt
+    /// row, so there is no tenant/project chain to attribute it to -- the
+    /// evidence is deliberately the bare hold id plus the reason it was
+    /// reclaimable, rather than a guessed tenancy.
+    fn record_x402_orphan_hold_audit(&self, hold_id: &str) {
+        self.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            action_identity: Default::default(),
+            request_id: format!("x402-orphan-hold-sweep-{}", now_unix_seconds().unwrap_or(0)),
+            trace_id: None,
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            actor_api_key_id: None,
+            tenant: ferrogate_core::TenantContext::default(),
+            action: "x402.hold.orphan_expired".to_string(),
+            target: hold_id.to_string(),
+            outcome: "committed".to_string(),
+            message: format!(
+                "released overdue wallet hold {hold_id}: past its TTL and owned by no payment \
+                 attempt (reserve committed, attempt create did not)"
             ),
         });
     }

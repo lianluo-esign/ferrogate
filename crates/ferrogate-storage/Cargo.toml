@@ -25,6 +25,10 @@ deadpool-postgres.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-core = { path = "../ferrogate-core" }
+# #352: the x402 payment-attempt state alphabet lives in `ferrogate-payments`
+# ("state/transition types only; no SQL"). Acyclic -- `ferrogate-payments`
+# declares no FerroGate dependency of its own.
+ferrogate-payments = { path = "../ferrogate-payments" }
 native-tls.workspace = true
 postgres-native-tls.workspace = true
 serde.workspace = true

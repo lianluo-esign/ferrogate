@@ -2379,7 +2379,8 @@ impl ControlPlaneStore for D1ControlPlaneStore {
     async fn list_payment_attempts(
         &self,
         _tenant_id: &str,
-    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        _query: &PaymentAttemptQuery,
+    ) -> Result<PaymentAttemptPage, StorageError> {
         Err(unimplemented_surface("list_payment_attempts"))
     }
 

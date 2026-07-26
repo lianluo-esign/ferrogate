@@ -1076,6 +1076,11 @@ fn expect_payment_attempt_schema(schema: &str) -> Result<()> {
         "idx_payment_attempts_hold",
         // Partial index over the in-flight states the reconciler drains.
         "idx_payment_attempts_reconcile",
+        // Migration 59: one on-chain transfer may back at most ONE attempt, so a
+        // single stablecoin payment can never be used as proof to capture two
+        // wallet holds. Partial (NULL not indexed) so unsettled attempts are
+        // unaffected.
+        "idx_payment_attempts_transaction_signature",
     ] {
         let count = postgres_scalar(&format!(
             "SELECT count(*) FROM pg_indexes \
@@ -1085,6 +1090,29 @@ fn expect_payment_attempt_schema(schema: &str) -> Result<()> {
         ))?;
         if count.trim() != "1" {
             bail!("expected schema index {schema}.{index}, got count {count}");
+        }
+    }
+
+    // Migration 59: the money columns have a DOMAIN, enforced by the database
+    // and not only by the application. Without these an empty, signed or
+    // exponent-shaped `atomic_amount`, or a negative `credits_amount`, is
+    // storable into the durable audit record.
+    for constraint in [
+        "payment_attempts_atomic_amount_canonical",
+        "payment_attempts_settled_amount_canonical",
+        "payment_attempts_credits_amount_non_negative",
+    ] {
+        let count = postgres_scalar(&format!(
+            "SELECT count(*) FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = '{}' AND t.relname = 'payment_attempts' \
+               AND c.conname = '{}' AND c.contype = 'c'",
+            sql_literal(schema),
+            sql_literal(constraint)
+        ))?;
+        if count.trim() != "1" {
+            bail!("expected schema CHECK constraint {schema}.{constraint}, got count {count}");
         }
     }
 
@@ -1401,8 +1429,20 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
          WHERE version = (SELECT MAX(version) FROM {schema}.storage_schema_migrations)",
         schema = quote_ident(schema),
     ))?;
-    if migration_version.trim() != "50:050_bucket_backed_asset_size_constraint" {
-        bail!("unexpected latest Supabase migration: {migration_version}");
+    // Derived from the runtime authority, never a hardcoded copy: the literal
+    // this used to carry stayed pinned at 50 while `001_init_postgres.sql`
+    // reached 58, so `supabase-restart` bailed here before reaching anything
+    // else. Reading the constant means the next migration cannot re-break it.
+    let expected_migration = format!(
+        "{}:{}",
+        ferrogate_storage::POSTGRES_SCHEMA_VERSION,
+        ferrogate_storage::POSTGRES_SCHEMA_NAME
+    );
+    if migration_version.trim() != expected_migration {
+        bail!(
+            "unexpected latest Supabase migration: {migration_version}, expected \
+             {expected_migration}"
+        );
     }
 
     let asset_size_constraint = postgres_scalar(&format!(

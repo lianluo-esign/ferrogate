@@ -2612,3 +2612,54 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 59 (#352 review §4/§5): give the payment-attempt money columns a
+-- DOMAIN, and make an on-chain transaction signature single-use.
+--
+-- §4. `atomic_amount`/`settled_atomic_amount` are TEXT for a good reason -- an
+-- on-chain u64 exceeds BIGINT's i64 range -- but TEXT with no CHECK accepted
+-- '', '-5' and '1e9' into the durable audit record, and neither create path
+-- validated them (both validated only `state`). `evidence_conflict` then
+-- compares those values as opaque strings and the reconciler parses them
+-- downstream, so a non-numeric amount is a money bug waiting on a parse.
+-- `^[0-9]{1,20}$` is exactly the canonical decimal u64 shape the wire contract
+-- emits (20 digits covers u64::MAX = 18446744073709551615); it forbids leading
+-- signs, exponents, whitespace and the empty string. `credits_amount` is the
+-- internal wallet-credit hold size and a hold is never negative.
+--
+-- §5. Two distinct attempts could record the SAME transaction_signature -- one
+-- stablecoin transfer used as proof to capture two wallet holds. The existing
+-- fail-closed contract only promises conflict detection under the same
+-- idempotency id, so this was a gap in the contract rather than a violation of
+-- it; a partial UNIQUE index closes it AT THE DATABASE, which is the only place
+-- two concurrent settles can be serialized. NULL is not indexed, so the many
+-- unsettled attempts are unaffected.
+--
+-- Added via the insert-first/IF FOUND gate so only the startup that records the
+-- migration runs the DDL, and a failed statement rolls the ledger row back for a
+-- clean retry. The CHECKs are NOT VALID-free (the table is young and the
+-- application already refuses these values as of this change), so an existing
+-- row violating them fails the migration loudly rather than being silently
+-- grandfathered into the audit record.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (59, '059_payment_attempt_amount_domains')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE payment_attempts
+            ADD CONSTRAINT payment_attempts_atomic_amount_canonical
+            CHECK (atomic_amount ~ '^[0-9]{1,20}$');
+        ALTER TABLE payment_attempts
+            ADD CONSTRAINT payment_attempts_settled_amount_canonical
+            CHECK (settled_atomic_amount IS NULL
+                   OR settled_atomic_amount ~ '^[0-9]{1,20}$');
+        ALTER TABLE payment_attempts
+            ADD CONSTRAINT payment_attempts_credits_amount_non_negative
+            CHECK (credits_amount IS NULL OR credits_amount >= 0);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_attempts_transaction_signature
+            ON payment_attempts(transaction_signature)
+            WHERE transaction_signature IS NOT NULL;
+    END IF;
+END
+$$;

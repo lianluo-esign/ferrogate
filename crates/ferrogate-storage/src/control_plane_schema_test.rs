@@ -908,11 +908,13 @@ fn live_initialize_schema_provisions_the_configured_schema_not_public() {
             &dsn,
             &format!(
                 "SELECT COUNT(*)::BIGINT FROM \"{schema}\".storage_schema_migrations \
-                 WHERE version = 50 AND name = '050_bucket_backed_asset_size_constraint'"
+                 WHERE version = {version} AND name = '{name}'",
+                version = crate::POSTGRES_SCHEMA_VERSION,
+                name = crate::POSTGRES_SCHEMA_NAME
             )
         ),
         1,
-        "the configured schema's migration ledger must record head 50",
+        "the configured schema's migration ledger must record the current head",
     );
 
     // Teardown is handled by `_guard` (RAII), which also runs on panic.

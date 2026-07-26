@@ -473,6 +473,7 @@ Subcommands:
 - `payment-methods` — Manage stored payment methods
 - `billing-events` — Inspect billing events and outbox dead letters
 - `usage` — Inspect usage aggregates, reports, metering, and agent cost-burn
+- `payment-attempts` — Inspect durable x402 payment attempts and their wallet holds
 - `request-logs` — Inspect and export retained request logs
 - `audit-events` — List retained Admin API audit events
 - `observed-agent-activity` — List observed agent/run activity correlations
@@ -6331,6 +6332,69 @@ Options:
 ##### `ferrogate ctl usage cost-burn`
 
 List per-agent runtime cost-burn for a billing period (--filter period=YYYY-MM)
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+#### `ferrogate ctl payment-attempts`
+
+Inspect durable x402 payment attempts and their wallet holds
+
+Subcommands:
+
+- `list` — List a tenant's payment attempts (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])
+- `get` — Show one payment attempt with its wallet reservation and settlement
+
+##### `ferrogate ctl payment-attempts list`
+
+List a tenant's payment attempts (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl payment-attempts get`
+
+Show one payment attempt with its wallet reservation and settlement
 
 Arguments:
 
