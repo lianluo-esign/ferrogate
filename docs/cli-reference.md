@@ -6362,12 +6362,12 @@ Inspect durable x402 payment attempts and their wallet holds
 
 Subcommands:
 
-- `list` — List a tenant's payment attempts (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])
+- `list` — List a tenant's payment attempts — CURSOR-paged, so --offset and --all-pages do not apply (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])
 - `get` — Show one payment attempt with its wallet reservation and settlement
 
 ##### `ferrogate ctl payment-attempts list`
 
-List a tenant's payment attempts (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])
+List a tenant's payment attempts — CURSOR-paged, so --offset and --all-pages do not apply (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])
 
 Arguments:
 
