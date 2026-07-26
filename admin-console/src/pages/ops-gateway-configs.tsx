@@ -40,6 +40,7 @@ import {
 import { BoolBadge } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n, type TranslationKey } from "@/i18n";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import {
   adminDelete,
   adminGet,
@@ -116,6 +117,7 @@ function mutationBody(form: FormState): AdminSchema<"AdminGatewayConfigMutation"
 export default function OpsGatewayConfigsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["ops-gateway-configs"];
@@ -152,7 +154,7 @@ export default function OpsGatewayConfigsPage() {
       setDialogOpen(false);
       queryClient.invalidateQueries({ queryKey });
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const deleteMutation = useMutation({
@@ -164,7 +166,7 @@ export default function OpsGatewayConfigsPage() {
       toast.success(t("page.opsGatewayConfigs.toast.deleted"));
       queryClient.invalidateQueries({ queryKey });
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   function openCreate() {

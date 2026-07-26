@@ -14,12 +14,12 @@ import {
 import {
   BoolBadge,
   DefinitionRow,
-  formatUnix,
   HealthBadge,
   StatTile,
 } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type AdminStatus = AdminSchema<"AdminStatus">;
@@ -29,6 +29,7 @@ const STATUS_REFETCH_INTERVAL_MS = 10_000;
 
 function AcmeCard({ acme }: { acme: AdminAcmeStatus | null | undefined }) {
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
   return (
     <Card>
       <CardHeader>
@@ -109,7 +110,8 @@ function AcmeCard({ acme }: { acme: AdminAcmeStatus | null | undefined }) {
 }
 
 function ClusterCard({ cluster }: { cluster: AdminStatus["cluster"] }) {
-  const { t } = useI18n();
+  const { t, format } = useI18n();
+  const formatUnix = useFormatUnix();
   return (
     <Card>
       <CardHeader>
@@ -181,6 +183,15 @@ function ClusterCard({ cluster }: { cluster: AdminStatus["cluster"] }) {
             value={
               <span className="flex items-center gap-2">
                 {formatUnix(cluster.last_sync_at_unix)}
+                {cluster.last_sync_at_unix ? (
+                  // How long ago, in the operator's language ("3 minutes ago" /
+                  // "3分钟前"). The absolute timestamp stays; this answers the
+                  // staleness question the `stale` badge raises without making
+                  // the operator subtract two clocks.
+                  <span className="text-xs text-muted-foreground">
+                    {format.relativeTime(cluster.last_sync_at_unix * 1000)}
+                  </span>
+                ) : null}
                 {cluster.stale ? (
                   <Badge variant="destructive">{t("page.opsStatus.cluster.stale")}</Badge>
                 ) : null}
@@ -202,6 +213,7 @@ function ClusterCard({ cluster }: { cluster: AdminStatus["cluster"] }) {
 export default function OpsStatusPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({

@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n, type BoundFormatters } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 import { tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
 
@@ -52,11 +53,6 @@ interface DeadLetterEntry {
   dead_lettered_at_unix: number | null;
 }
 
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "—";
-  return new Date(unix * 1000).toLocaleString();
-}
-
 // `cost_usd` is the API's exact USD amount; render it through the locale
 // currency formatter without any local recomputation or rounding.
 function formatCost(
@@ -70,6 +66,7 @@ function formatCost(
 export default function BillingDeadLettersPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
+  const formatUnix = useFormatUnix("—");
   const apiKey = session!.gatewayApiKey;
 
   const [filter, setFilter] = useState("");

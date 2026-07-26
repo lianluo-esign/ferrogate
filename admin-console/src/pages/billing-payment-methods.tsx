@@ -44,19 +44,17 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import { DISABLED_WHEN_STATUS_NOT_ACTIVE } from "@/lib/resource-config";
 
 type AdminPaymentMethod = AdminSchema<"AdminPaymentMethod">;
 
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "—";
-  return new Date(unix * 1000).toLocaleString();
-}
-
 function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
   const { session } = useAuth();
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -90,7 +88,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
     },
     onError: (err: Error) => {
       setError(err.message);
-      toast.error(err.message);
+      toastError(err);
     },
   });
 
@@ -178,6 +176,8 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
 export default function BillingPaymentMethodsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix("—");
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -207,7 +207,7 @@ export default function BillingPaymentMethodsPage() {
       setPendingDelete(null);
     },
     onError: (err: Error) => {
-      toast.error(err.message);
+      toastError(err);
       setPendingDelete(null);
     },
   });

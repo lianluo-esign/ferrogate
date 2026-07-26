@@ -128,6 +128,8 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { LocalizedError } from "@/lib/localized-error";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { APP_ROUTES } from "@/lib/app-routes";
 import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
 import {
@@ -636,6 +638,7 @@ function SiteDetailSheet({
   onUnpublish: () => void;
 }) {
   const { t, format } = useI18n();
+  const { toastError } = useOperatorError();
   const queryClient = useQueryClient();
   const manifest = row?.manifest;
   const files = useMemo(
@@ -814,7 +817,7 @@ function SiteDetailSheet({
     // bind targeting a site the tenant does not own).
     onError: (error: Error) => {
       setBindError(error.message);
-      toast.error(error.message);
+      toastError(error);
     },
   });
 
@@ -831,7 +834,7 @@ function SiteDetailSheet({
       queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastError(error);
       setPendingUnbind(null);
     },
   });
@@ -840,7 +843,7 @@ function SiteDetailSheet({
     setBindError(null);
     const check = validateSiteDomainHostname(bindHostname);
     if (check.error !== null) {
-      setBindError(check.error);
+      setBindError(t(check.error.key, check.error.values));
       return;
     }
     bindMutation.mutate(check.hostname);
@@ -1239,7 +1242,7 @@ function SiteDetailSheet({
                     role="alert"
                     className="text-xs text-destructive"
                   >
-                    {hostnameCheck.error}
+                    {t(hostnameCheck.error.key, hostnameCheck.error.values)}
                   </p>
                 ) : bindError ? (
                   <p
@@ -1366,6 +1369,7 @@ function SiteDetailSheet({
 export default function StaticSitesPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const tenantId = session!.tenant.id;
   // Label for the read-only publish-target tenant: the session tenant is the
@@ -1630,7 +1634,7 @@ export default function StaticSitesPage() {
 
   const publishMutation = useMutation({
     mutationFn: async () => {
-      if (!file) throw new Error(t("page.staticSites.validation.bundleRequired"));
+      if (!file) throw new LocalizedError(t("page.staticSites.validation.bundleRequired"));
       // Derive the target URL + header NAMES from the generated `putAsset`
       // operation (the enforced OpenAPI client, #446) instead of hand-encoding
       // them: `resolveAdminPath` substitutes the typed path params (the same
@@ -1667,7 +1671,7 @@ export default function StaticSitesPage() {
       // already use, so the alert, the toast and the untouched form behave
       // identically to an outright rejection.
       if (!isBundleCommit(envelope)) {
-        throw new Error(
+        throw new LocalizedError(
           await explainUncommittedPublish(t, apiKey, site.trim(), version.trim()),
         );
       }
@@ -1697,7 +1701,7 @@ export default function StaticSitesPage() {
     onError: (error: Error) => {
       setUploadProgress(null);
       setPublishError(error.message);
-      toast.error(error.message);
+      toastError(error);
     },
   });
 
@@ -1756,7 +1760,7 @@ export default function StaticSitesPage() {
         .filter((version) => version !== SITE_MANIFEST_VERSION);
       const total = registry.channels.length + versions.length + 1;
       const halt = (failures: string[]): never => {
-        throw new Error(
+        throw new LocalizedError(
           t("page.staticSites.unpublish.partial", {
             site: name,
             failed: failures.length,
@@ -1813,7 +1817,7 @@ export default function StaticSitesPage() {
     // list the retry walks (the already-deleted rows are gone from it) and keep
     // the confirm dialog open so the operator can immediately re-drive it.
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastError(error);
       queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
       if (unpublishSite)
         queryClient.invalidateQueries({

@@ -36,6 +36,7 @@ import { ResourceForm } from "@/components/resource/resource-form";
 import { ResourceTable } from "@/components/resource/resource-table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import type { TranslationKey } from "@/i18n";
 import {
   adminDelete,
@@ -132,6 +133,7 @@ function runAction(
 export default function VirtualKeysPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["resource", "virtual-keys"];
@@ -164,7 +166,7 @@ export default function VirtualKeysPage() {
       const secret = extractSecret(response);
       if (secret) setRevealedSecret(secret);
     },
-    onError: (error: Error) => toast.error(error.message),
+    onError: (error: Error) => toastError(error),
   });
 
   const actionMutation = useMutation({
@@ -182,7 +184,7 @@ export default function VirtualKeysPage() {
     onError: (error: Error) => {
       // Keep the confirm dialog open so a 403 (e.g. tenant-scope denial, #232)
       // stays visible instead of silently closing.
-      toast.error(error.message);
+      toastError(error);
     },
   });
 

@@ -129,7 +129,7 @@ function CorrelationGroup({ group }: { group: InvestigationActionCorrelation }) 
 
 export default function InvestigationsPage() {
   const { session } = useAuth();
-  const { t } = useI18n();
+  const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const selectorLabels: Record<SelectorKind, string> = {
@@ -227,7 +227,10 @@ export default function InvestigationsPage() {
                 <span className="text-muted-foreground">
                   {t("page.investigations.totalCost")}
                 </span>{" "}
-                ${data.total_cost_usd.toFixed(4)}
+                {format.currency(data.total_cost_usd, "USD", {
+                  minimumFractionDigits: 4,
+                  maximumFractionDigits: 4,
+                })}
               </span>
               {data.identity && (
                 <span className="font-mono text-xs">
@@ -438,10 +441,13 @@ export default function InvestigationsPage() {
                     <TableRow key={`${billing.request_id}-${index}`}>
                       <TableCell>{billing.logical_model}</TableCell>
                       <TableCell>{billing.provider}</TableCell>
-                      <TableCell>{billing.usage.total_tokens}</TableCell>
+                      <TableCell>{format.tokens(billing.usage.total_tokens)}</TableCell>
                       <TableCell>
                         {billing.cost_usd !== null && billing.cost_usd !== undefined
-                          ? `$${billing.cost_usd.toFixed(4)}`
+                          ? format.currency(billing.cost_usd, "USD", {
+                              minimumFractionDigits: 4,
+                              maximumFractionDigits: 4,
+                            })
                           : "—"}
                       </TableCell>
                       <TableCell>{billing.wallet_delta_credits ?? "—"}</TableCell>

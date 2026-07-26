@@ -36,6 +36,7 @@ import {
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import type { ColumnConfig } from "@/lib/resource-config";
 
@@ -82,6 +83,7 @@ function buildRegistrationBody(
 
 export default function SelfHostedWorkersOpsPage() {
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
@@ -203,7 +205,7 @@ export default function SelfHostedWorkersOpsPage() {
     },
     onError: (err: Error) => {
       setFormError(err.message);
-      toast.error(err.message);
+      toastError(err);
     },
   });
 

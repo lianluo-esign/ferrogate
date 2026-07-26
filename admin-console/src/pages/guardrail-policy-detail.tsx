@@ -41,6 +41,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminGet, adminPost } from "@/lib/gateway-client";
 import {
   describeActions,
@@ -106,6 +107,7 @@ export default function GuardrailPolicyDetailPage() {
   const { policyId = "" } = useParams<{ policyId: string }>();
   const { session } = useAuth();
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const historyQueryKey = ["guardrail-policy-revisions", policyId];
@@ -150,7 +152,7 @@ export default function GuardrailPolicyDetailPage() {
         }),
       );
     },
-    onError: (activateError: Error) => toast.error(activateError.message),
+    onError: (activateError: Error) => toastError(activateError),
   });
 
   // --- Rollback (confirmation dialog -> POST .../rollback) ---
@@ -172,7 +174,7 @@ export default function GuardrailPolicyDetailPage() {
         }),
       );
     },
-    onError: (rollbackError: Error) => toast.error(rollbackError.message),
+    onError: (rollbackError: Error) => toastError(rollbackError),
   });
 
   // --- Dry-run panel (POST .../dry-run) ---
@@ -208,7 +210,7 @@ export default function GuardrailPolicyDetailPage() {
         { params: { policy_id: policyId } },
       ),
     onSuccess: (result) => setDryRunResult(result),
-    onError: (dryRunError: Error) => toast.error(dryRunError.message),
+    onError: (dryRunError: Error) => toastError(dryRunError),
   });
 
   return (

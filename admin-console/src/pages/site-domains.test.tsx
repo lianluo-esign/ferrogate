@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { MemoryRouter } from "react-router-dom";
@@ -6,7 +7,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
-import { I18nProvider } from "@/i18n";
+import { I18nProvider, type Locale } from "@/i18n";
 import SiteDomainsPage from "@/pages/site-domains";
 import type { AdminSchema } from "@/lib/gateway-client";
 import { gatewayUrl, server } from "@/test/msw";
@@ -65,10 +66,10 @@ function mockList(domains: SiteDomain[]): void {
   );
 }
 
-function renderPage() {
+function renderPage(locale?: Locale) {
   return render(
     <MemoryRouter>
-      <I18nProvider>
+      <I18nProvider initialLocale={locale}>
         <AuthProvider>
           <QueryClientProvider client={createTestQueryClient()}>
             <SiteDomainsPage />
@@ -368,12 +369,47 @@ describe("SiteDomainsPage", () => {
     // Wildcard is rejected by the mirrored client-side rules.
     await user.type(screen.getByLabelText("Hostname (FQDN)"), "*.example.com");
     expect(
-      await screen.findByText("wildcard hostnames cannot be bound to a site"),
+      await screen.findByText("Wildcard hostnames cannot be bound to a site"),
     ).toBeInTheDocument();
 
     // Bind button is disabled while the hostname is invalid.
     expect(screen.getByRole("button", { name: "Bind hostname" })).toBeDisabled();
     expect(posted).toBe(false);
+  });
+
+  // #348: the rejection reason is `lib/`-owned (src/lib/hostname.ts) and renders
+  // in a live role="alert" between a localized label and a localized hint. It
+  // returns a TranslationKey, so it must localize with the rest of the form —
+  // an English sentence here is a mixed-language field, and the
+  // `no-untranslated-literal` lint rule cannot see it (not JSX text, not a
+  // toast argument).
+  it("localizes the lib-owned hostname validation error in zh-CN", async () => {
+    mockList([]);
+    const user = userEvent.setup();
+    renderPage("zh-CN");
+    await screen.findByText("暂无已绑定的主机名。");
+
+    await user.type(screen.getByLabelText("主机名（FQDN）"), "*.example.com");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("通配符主机名无法绑定到站点");
+    // No English leaks into the Chinese form.
+    expect(
+      screen.queryByText("Wildcard hostnames cannot be bound to a site"),
+    ).not.toBeInTheDocument();
+  });
+
+  // The interpolated variant: the operator's own hostname is echoed back
+  // verbatim (an identifier) inside the localized sentence.
+  it("interpolates the hostname into the localized non-FQDN error", async () => {
+    mockList([]);
+    const user = userEvent.setup();
+    renderPage("zh-CN");
+    await screen.findByText("暂无已绑定的主机名。");
+
+    await user.type(screen.getByLabelText("主机名（FQDN）"), "localhost");
+    expect(
+      await screen.findByText("主机名 localhost 必须是完全限定域名"),
+    ).toBeInTheDocument();
   });
 
   it("rejects a single-label (non-FQDN) hostname", async () => {
@@ -387,6 +423,39 @@ describe("SiteDomainsPage", () => {
       await screen.findByText(/must be a fully qualified domain name/),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Bind hostname" })).toBeDisabled();
+  });
+
+  // #348: a failing mutation used to call `toast.error(err.message)`, putting
+  // the gateway's English sentence on a Chinese page with no localized headline
+  // at all. The page now routes it through `useOperatorError`, so the headline
+  // is catalog copy and the server's own words survive as marked technical
+  // detail. Proves the adoption at a real call site, not only in the hook.
+  it("localizes a failed unbind and keeps the gateway verdict verbatim", async () => {
+    mockList([domain()]);
+    server.use(
+      http.delete(gatewayUrl("/admin/v1/site-domains/app.example.com"), () =>
+        HttpResponse.json(
+          { error: { code: "unknown_error", message: "certificate store is locked" } },
+          { status: 500 },
+        ),
+      ),
+    );
+    const errorToast = vi.spyOn(toast, "error");
+    const user = userEvent.setup();
+    renderPage("zh-CN");
+
+    await screen.findByTestId("site-domain-app.example.com");
+    await user.click(screen.getByRole("button", { name: "解绑" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "解绑" }));
+
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    expect(errorToast.mock.calls[0][0]).toBe("服务器遇到错误。请稍后重试。");
+    expect(errorToast.mock.calls[0][0]).not.toBe("certificate store is locked");
+    // The gateway's own wording is retained as the technical detail.
+    const options = errorToast.mock.calls[0][1] as { description?: ReactNode };
+    const { container } = render(<>{options.description}</>);
+    expect(container.textContent).toBe("certificate store is locked");
   });
 
   it("unbinds a hostname after confirmation", async () => {

@@ -55,19 +55,18 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import { validateSiteDomainHostname } from "@/lib/hostname";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "-";
-  return new Date(unix * 1000).toLocaleString();
-}
-
 export default function SiteDomainsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["site-domains"];
@@ -156,7 +155,7 @@ export default function SiteDomainsPage() {
     },
     onError: (err: Error) => {
       setBindError(err.message);
-      toast.error(err.message);
+      toastError(err);
     },
   });
 
@@ -171,7 +170,7 @@ export default function SiteDomainsPage() {
       queryClient.invalidateQueries({ queryKey });
     },
     onError: (err: Error) => {
-      toast.error(err.message);
+      toastError(err);
       setPendingUnbind(null);
     },
   });
@@ -180,7 +179,7 @@ export default function SiteDomainsPage() {
     setBindError(null);
     const check = validateSiteDomainHostname(hostname);
     if (check.error !== null) {
-      setBindError(check.error);
+      setBindError(t(check.error.key, check.error.values));
       return;
     }
     if (tenantId.trim() === "") {
@@ -226,7 +225,7 @@ export default function SiteDomainsPage() {
             />
             {hostnameCheck?.error ? (
               <p className="text-xs text-destructive" role="alert">
-                {hostnameCheck.error}
+                {t(hostnameCheck.error.key, hostnameCheck.error.values)}
               </p>
             ) : (
               <p className="text-xs text-muted-foreground">

@@ -32,11 +32,13 @@ import {
 import {
   BoolBadge,
   DefinitionRow,
-  formatUnix,
   HealthBadge,
 } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { LocalizedError } from "@/lib/localized-error";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
@@ -69,6 +71,8 @@ function buildExportUrl(filters: ExportFilters): string {
 export default function OpsObservabilityPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
@@ -113,7 +117,7 @@ export default function OpsObservabilityPage() {
         headers: { Authorization: `Bearer ${apiKey}` },
       });
       if (!response.ok) {
-        throw new Error(
+        throw new LocalizedError(
           t("page.opsObservability.exportFailed", { status: response.status }),
         );
       }
@@ -124,7 +128,7 @@ export default function OpsObservabilityPage() {
       setPreview({ recordCount, body });
       toast.success(t("page.opsObservability.toast.fetched", { count: recordCount }));
     } catch (err) {
-      toast.error((err as Error).message);
+      toastError(err);
     } finally {
       setExporting(false);
     }

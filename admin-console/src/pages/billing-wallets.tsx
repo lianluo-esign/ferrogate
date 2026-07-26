@@ -41,6 +41,8 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n, type BoundFormatters } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AdminWallet = AdminSchema<"AdminWallet">;
@@ -74,11 +76,6 @@ function formatCredits(
   return format.number(value);
 }
 
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "—";
-  return new Date(unix * 1000).toLocaleString();
-}
-
 /** Parses a signed integer string; returns null when not a clean integer. */
 function parseIntStrict(raw: string): number | null {
   const trimmed = raw.trim();
@@ -96,6 +93,7 @@ function AdjustDialog({
 }) {
   const { session } = useAuth();
   const { t, format } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const [delta, setDelta] = useState("");
@@ -124,7 +122,7 @@ function AdjustDialog({
     },
     onError: (err: Error) => {
       setError(err.message);
-      toast.error(err.message);
+      toastError(err);
     },
   });
 
@@ -198,6 +196,7 @@ function ChargeDialog({
 }) {
   const { session } = useAuth();
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const [amount, setAmount] = useState("");
@@ -245,7 +244,7 @@ function ChargeDialog({
     },
     onError: (err: Error) => {
       setError(err.message);
-      toast.error(err.message);
+      toastError(err);
     },
   });
 
@@ -338,6 +337,7 @@ function ChargeDialog({
 function WalletLedger({ tenantId }: { tenantId: string }) {
   const { session } = useAuth();
   const { t, format } = useI18n();
+  const formatUnix = useFormatUnix("—");
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
@@ -427,6 +427,7 @@ function WalletLedger({ tenantId }: { tenantId: string }) {
 export default function BillingWalletsPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
+  const formatUnix = useFormatUnix("—");
   const apiKey = session!.gatewayApiKey;
 
   const [selectedTenant, setSelectedTenant] = useState<string | null>(null);

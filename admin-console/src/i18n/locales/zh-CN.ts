@@ -1862,7 +1862,6 @@ export const zhCN = {
     "该文件为 {size}，超过内联推送上限 {max}。请使用下方的大对象上传——它会预签名一个 URL 并将字节直接发送到存储。",
   "page.assets.error.chooseFile": "请选择要上传的文件",
   "page.assets.error.nameVersionRequired": "名称和版本为必填项",
-  "page.assets.error.downloadFailed": "下载失败",
   "page.assets.toast.pushed": "资产已推送",
   "page.assets.toast.deleted": "资产已删除",
   "page.assets.list.error": "加载资产失败：{message}",
@@ -2216,6 +2215,16 @@ export const zhCN = {
   "error.http.unavailable": "服务暂时不可用。请稍后重试。",
   "error.code.invalidCredentials": "邮箱或密码不正确。",
   "error.technicalDetail": "技术细节",
+
+  // `lib/` 拥有的共享客户端校验文案（#348）：src/lib/hostname.ts 镜像网关的
+  // 站点域名规则，站点域名页与静态站点抽屉都会渲染它，因此放在共享的
+  // validation.* 命名空间下。{hostname} 是运维人员自己输入的主机名，原样回显。
+  "validation.hostname.required": "请填写主机名",
+  "validation.hostname.tooLong": "主机名 {hostname} 超过 253 个字符",
+  "validation.hostname.wildcard": "通配符主机名无法绑定到站点",
+  "validation.hostname.ipAddress": "IP 地址无法绑定到站点",
+  "validation.hostname.notFqdn": "主机名 {hostname} 必须是完全限定域名",
+  "validation.hostname.invalidDns": "主机名 {hostname} 不是有效的 DNS 名称",
   // `satisfies` (not a `: Messages` annotation) validates completeness AND drift
   // here while keeping `typeof zhCN` a precise literal type, so the type-only
   // completeness gate in `../catalog.ts` (`_ZhCatalogIsComplete`) stays a real

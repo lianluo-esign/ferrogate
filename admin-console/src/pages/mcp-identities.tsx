@@ -34,6 +34,8 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AuthorizeResponse = AdminSchema<"McpOauthAuthorizeResponse">;
@@ -41,11 +43,6 @@ type AuthorizeResponse = AdminSchema<"McpOauthAuthorizeResponse">;
 // Identity types that can complete an interactive OAuth authorization-code flow
 // from this console; the rest surface status only (no Connect action).
 const OAUTH_AUTH_TYPES = new Set(["oauth", "per_user_oauth"]);
-
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "-";
-  return new Date(unix * 1000).toLocaleString();
-}
 
 function StatusField({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -59,6 +56,8 @@ function StatusField({ label, children }: { label: string; children: React.React
 export default function McpIdentitiesPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -98,7 +97,7 @@ export default function McpIdentitiesPage() {
       setAuthorization(response);
       toast.success(t("page.mcpIdentities.toast.authInitiated"));
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const revokeMutation = useMutation({
@@ -109,7 +108,7 @@ export default function McpIdentitiesPage() {
       setAuthorization(null);
       queryClient.invalidateQueries({ queryKey: identityQueryKey });
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   function loadServer(name: string) {

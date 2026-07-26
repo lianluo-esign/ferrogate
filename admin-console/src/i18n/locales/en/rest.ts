@@ -34,6 +34,19 @@ export const enRest = {
   "error.code.invalidCredentials": "The email or password is incorrect.",
   "error.technicalDetail": "Technical detail",
 
+  // Shared client-side validation copy owned by a `lib/` module rather than a
+  // page (#348). `src/lib/hostname.ts` mirrors the gateway's site-domain rules
+  // and is consumed by BOTH the site-domains bind form and the static-sites
+  // drawer, so its reasons live in a shared `validation.*` namespace instead of
+  // either page's. `{hostname}` is the operator's own normalized input — echoed
+  // back verbatim, never translated.
+  "validation.hostname.required": "Hostname is required",
+  "validation.hostname.tooLong": "Hostname {hostname} exceeds 253 characters",
+  "validation.hostname.wildcard": "Wildcard hostnames cannot be bound to a site",
+  "validation.hostname.ipAddress": "An IP address cannot be bound to a site",
+  "validation.hostname.notFqdn": "Hostname {hostname} must be a fully qualified domain name",
+  "validation.hostname.invalidDns": "Hostname {hostname} is not a valid DNS name",
+
   // Dashboard — global control-plane cockpit (#343). Consumes the scoped
   // GET /admin/v1/overview contract (#339); values are labelled with their
   // exact scope/period and N/A is kept distinct from unavailable and from zero.
@@ -1880,7 +1893,6 @@ export const enRest = {
     "This file is {size}, over the {max} inline push limit. Use the large-object upload below — it presigns a URL and sends the bytes straight to storage.",
   "page.assets.error.chooseFile": "Choose a file to upload",
   "page.assets.error.nameVersionRequired": "Name and version are required",
-  "page.assets.error.downloadFailed": "Download failed",
   "page.assets.toast.pushed": "Asset pushed",
   "page.assets.toast.deleted": "Asset deleted",
   "page.assets.list.error": "Failed to load assets: {message}",

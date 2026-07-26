@@ -14,9 +14,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { BoolBadge, formatUnix, HealthBadge } from "@/components/ops/ops-primitives";
+import { BoolBadge, HealthBadge } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type ProviderHealthCheck = AdminSchema<"ProviderHealthCheck">;
@@ -35,6 +36,7 @@ function ErrorLine({ error }: { error: unknown }) {
 
 function ProviderHealthTab({ apiKey }: { apiKey: string }) {
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
   const { data, isLoading, error } = useQuery({
     queryKey: ["ops-provider-health"],
     queryFn: () => adminGet(apiKey, "/admin/v1/provider-health"),

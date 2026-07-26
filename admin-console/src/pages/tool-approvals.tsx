@@ -33,6 +33,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import type { ColumnConfig } from "@/lib/resource-config";
 
@@ -114,11 +116,6 @@ function formatDuration(totalSeconds: number): string {
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
-}
-
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "-";
-  return new Date(unix * 1000).toLocaleString();
 }
 
 /** Compact "who asked" line from the actor key + non-null tenant context ids. */
@@ -231,6 +228,7 @@ function ApprovalDetailDialog({
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
   return (
     <Dialog open={record !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
@@ -345,6 +343,8 @@ function ApprovalDetailDialog({
 export default function ToolApprovalsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["tool-approvals"];
@@ -422,7 +422,7 @@ export default function ToolApprovalsPage() {
       // Keep the dialog (and the queue row) in place: a fingerprint mismatch
       // or already-terminal rejection must stay visible, not silently vanish.
       setDecisionError(error.message);
-      toast.error(error.message);
+      toastError(error);
       queryClient.invalidateQueries({ queryKey });
     },
   });

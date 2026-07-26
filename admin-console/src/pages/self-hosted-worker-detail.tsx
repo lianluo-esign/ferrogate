@@ -47,6 +47,7 @@ import {
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 function OverviewField({
@@ -100,6 +101,7 @@ export default function SelfHostedWorkerDetailPage() {
   const { workerId = "" } = useParams<{ workerId: string }>();
   const { session } = useAuth();
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -149,7 +151,7 @@ export default function SelfHostedWorkerDetailPage() {
     },
     onError: (err: Error) => {
       setRotateError(err.message);
-      toast.error(err.message);
+      toastError(err);
     },
   });
 

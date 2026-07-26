@@ -30,7 +30,7 @@ interface ResolvedDefaults {
 
 export default function TenantResolvedDefaultsPage() {
   const { session } = useAuth();
-  const { t } = useI18n();
+  const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const [tenantIdInput, setTenantIdInput] = useState("");
   const [lookupTenantId, setLookupTenantId] = useState<string | null>(null);
@@ -39,7 +39,7 @@ export default function TenantResolvedDefaultsPage() {
   // shows the localized "unlimited" copy and flags reuse the shared #385
   // enabled/disabled state keys.
   const formatLimit = (value: number | null): string =>
-    value === null ? t("page.resolvedDefaults.value.unlimited") : value.toLocaleString();
+    value === null ? t("page.resolvedDefaults.value.unlimited") : format.number(value);
   const formatFlag = (value: boolean): string =>
     value ? t("common.enabled") : t("common.disabled");
 
@@ -182,7 +182,7 @@ export default function TenantResolvedDefaultsPage() {
                   <dd>
                     {data.monthly_budget_usd === null
                       ? t("page.resolvedDefaults.value.unlimited")
-                      : `$${data.monthly_budget_usd.toLocaleString()}`}
+                      : format.currency(data.monthly_budget_usd, "USD")}
                   </dd>
                 </div>
                 <div className="flex justify-between">

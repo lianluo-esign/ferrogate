@@ -19,12 +19,8 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
 import { adminGet } from "@/lib/gateway-client";
-
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "-";
-  return new Date(unix * 1000).toLocaleString();
-}
 
 function outcomeVariant(outcome: string): "default" | "secondary" | "destructive" | "outline" {
   const value = outcome.toLowerCase();
@@ -40,6 +36,7 @@ function outcomeVariant(outcome: string): "default" | "secondary" | "destructive
 export default function ToolSessionsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
   const apiKey = session!.gatewayApiKey;
 
   const [sessionInput, setSessionInput] = useState("");

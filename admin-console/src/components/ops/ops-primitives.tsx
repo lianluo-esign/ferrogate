@@ -2,20 +2,19 @@
 //
 // The ops pages (status, config reload, drain, gateway configs, provider
 // health, observability) all render the same kinds of read-only status
-// evidence: labelled counters, boolean posture chips, health-coloured badges
-// and unix timestamps. These primitives keep that rendering consistent across
-// the group without each page re-deriving the same formatting.
+// evidence: labelled counters, boolean posture chips and health-coloured
+// badges. These primitives keep that rendering consistent across the group
+// without each page re-deriving the same formatting.
+//
+// Timestamps used to live here too, as a `formatUnix` built on a bare
+// `toLocaleString()` — i.e. formatted in the BROWSER's language rather than the
+// console's. #348 moved that to `useFormatUnix` (src/hooks/use-format-unix.ts),
+// which needs the active locale and therefore has to be a hook.
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
-
-/** Formats a unix-seconds timestamp for display, tolerating null/undefined. */
-export function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "-";
-  return new Date(unix * 1000).toLocaleString();
-}
 
 /** A labelled counter tile for the status dashboard grids. */
 export function StatTile({

@@ -53,6 +53,39 @@ describe("OpsStatusPage", () => {
     expect(await screen.findByText("reload required")).toBeInTheDocument();
   });
 
+  // #348: the cluster last-sync cell used a bare `toLocaleString()`, so it was
+  // formatted in the BROWSER's language regardless of the console locale (jsdom
+  // and CI both default to en-US). It now resolves through `format.date` under
+  // the ACTIVE locale, and carries the relative "how stale is this?" reading
+  // `format.relativeTime` exists for — which had no app consumer at all before.
+  //
+  // The absolute assertion is deliberately shape-based, not a pinned wall-clock
+  // string: the rendering is timezone-dependent, but "年" (and the absence of an
+  // en-US `M/D/YYYY, h:mm AM` form) can only come from a zh-CN formatter.
+  it("renders the cluster last-sync timestamp AND its relative age in the active locale", async () => {
+    // Three hours before "now" — so the relative reading is exact without
+    // faking the clock (faking Date stalls MSW + react-query here).
+    const threeHoursAgo = Math.floor(Date.now() / 1000) - 3 * 60 * 60;
+    const base = adminStatus();
+    server.use(
+      http.get(gatewayUrl("/admin/v1/status"), () =>
+        HttpResponse.json(
+          adminStatus({ cluster: { ...base.cluster, last_sync_at_unix: threeHoursAgo } }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<OpsStatusPage />, { locale: "zh-CN" });
+
+    expect(await screen.findByText("3小时前")).toBeInTheDocument();
+    // Every timestamp on the board (cluster sync, ACME renewal/expiry/next
+    // check, analytics) goes through the same helper, so they are ALL zh-CN.
+    expect(screen.getAllByText(/年.*月.*日/).length).toBeGreaterThanOrEqual(4);
+    // No en-US `7/9/2025, 2:40:00 AM` rendering of the same instant.
+    expect(screen.queryByText(/\d+\/\d+\/\d{4}/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\b(AM|PM)\b/)).not.toBeInTheDocument();
+  });
+
   it("surfaces a load error", async () => {
     server.use(
       http.get(gatewayUrl("/admin/v1/status"), () =>

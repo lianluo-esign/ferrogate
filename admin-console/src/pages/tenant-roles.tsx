@@ -31,19 +31,18 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import { DISABLED_WHEN_STATUS_NOT_ACTIVE } from "@/lib/resource-config";
 
 type AdminTenantRoleBinding = AdminSchema<"AdminTenantRoleBinding">;
 
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "-";
-  return new Date(unix * 1000).toLocaleString();
-}
-
 export default function TenantRolesPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -76,7 +75,7 @@ export default function TenantRolesPage() {
       toast.success(t("page.tenantRoles.toast.assigned"));
       setRoleId("");
     },
-    onError: (error: Error) => toast.error(error.message),
+    onError: (error: Error) => toastError(error),
   });
 
   const removeMutation = useMutation({
@@ -89,7 +88,7 @@ export default function TenantRolesPage() {
       toast.success(t("page.tenantRoles.toast.removed"));
       setRemoving(null);
     },
-    onError: (error: Error) => toast.error(error.message),
+    onError: (error: Error) => toastError(error),
   });
 
   return (

@@ -25,6 +25,7 @@ import { ResourceForm } from "@/components/resource/resource-form";
 import { ResourceTable } from "@/components/resource/resource-table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import {
   gatewayDelete,
   gatewayGet,
@@ -47,6 +48,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   // Per-resource copy resolves the typed catalog key when present (migrated
   // resources) and falls back to the legacy inline literal otherwise (#348).
   const title = resolveConfigText(t, config.titleKey, config.title);
@@ -120,7 +122,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
       setDeletingRow(null);
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastError(error);
     },
   });
 

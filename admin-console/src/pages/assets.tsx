@@ -74,6 +74,8 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n, type TranslationKey } from "@/i18n";
+import { LocalizedError } from "@/lib/localized-error";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import type { ColumnConfig } from "@/lib/resource-config";
 import { ApiError } from "@/types/auth";
 import {
@@ -369,6 +371,7 @@ function AssetDetailDialog({
   onClose: () => void;
 }) {
   const { t, format } = useI18n();
+  const { toastError } = useOperatorError();
   const queryClient = useQueryClient();
   const open = resource !== null;
 
@@ -571,9 +574,10 @@ function AssetDetailDialog({
       link.remove();
       URL.revokeObjectURL(url);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : t("page.assets.error.downloadFailed"),
-      );
+      // Localized headline + the verbatim gateway/network detail (#348). A
+      // non-Error throwable falls back to the generic localized headline
+      // (`error.unknown`) rather than to a raw English sentence.
+      toastError(error);
     }
   }
 
@@ -1718,6 +1722,7 @@ function PresignedUploadCard({
 export default function AssetsPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -1775,14 +1780,14 @@ export default function AssetsPage() {
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
-      if (!file) throw new Error(t("page.assets.error.chooseFile"));
+      if (!file) throw new LocalizedError(t("page.assets.error.chooseFile"));
       if (!name.trim() || !version.trim())
-        throw new Error(t("page.assets.error.nameVersionRequired"));
+        throw new LocalizedError(t("page.assets.error.nameVersionRequired"));
       // Backend-capability routing: the gateway buffers at most
       // inline_upload_max_bytes on this path and rejects the rest, so refuse
       // locally with the actionable instruction instead of burning the upload.
       if (inlineMaxBytes !== null && file.size > inlineMaxBytes)
-        throw new Error(
+        throw new LocalizedError(
           t("page.assets.push.tooLargeForInline", {
             size: format.bytes(file.size),
             max: format.bytes(inlineMaxBytes),
@@ -1804,7 +1809,7 @@ export default function AssetsPage() {
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
-    onError: (uploadError: Error) => toast.error(uploadError.message),
+    onError: (uploadError: Error) => toastError(uploadError),
   });
 
   // Group ONCE, then filter the logical packages. Grouping is keyed on

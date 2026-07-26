@@ -19,19 +19,16 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { useFormatUnix } from "@/hooks/use-format-unix";
 import { adminGet } from "@/lib/gateway-client";
 import { tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
 
 const PAGE_SIZE = 50;
 
-function formatUnix(unix: number | null | undefined): string {
-  if (unix === null || unix === undefined) return "—";
-  return new Date(unix * 1000).toLocaleString();
-}
-
 function MeteringEventsTab() {
   const { session } = useAuth();
   const { t, format } = useI18n();
+  const formatUnix = useFormatUnix("—");
   const apiKey = session!.gatewayApiKey;
   const [offset, setOffset] = useState(0);
 
@@ -154,6 +151,7 @@ function MeteringEventsTab() {
 function ExportStatusTab() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const formatUnix = useFormatUnix("—");
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({

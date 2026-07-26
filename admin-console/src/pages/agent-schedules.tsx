@@ -56,6 +56,8 @@ import {
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { LocalizedError } from "@/lib/localized-error";
+import { useOperatorError } from "@/hooks/use-operator-error";
 import type { InterpolationValues, TranslationKey } from "@/i18n";
 import {
   adminDelete,
@@ -127,13 +129,13 @@ function mutationFromForm(form: ScheduleFormState, t: Translate): ScheduleMutati
   try {
     target = JSON.parse(form.target || "{}") as ScheduleMutation["target"];
   } catch {
-    throw new Error(t("page.agentSchedules.validation.targetJson"));
+    throw new LocalizedError(t("page.agentSchedules.validation.targetJson"));
   }
   if (!form.tenant_id.trim()) {
-    throw new Error(t("page.agentSchedules.validation.tenantRequired"));
+    throw new LocalizedError(t("page.agentSchedules.validation.tenantRequired"));
   }
   if (!form.workspace_id.trim()) {
-    throw new Error(t("page.agentSchedules.validation.workspaceRequired"));
+    throw new LocalizedError(t("page.agentSchedules.validation.workspaceRequired"));
   }
   const body: ScheduleMutation = {
     name: form.name.trim(),
@@ -150,12 +152,12 @@ function mutationFromForm(form: ScheduleFormState, t: Translate): ScheduleMutati
   };
   if (form.spec_kind === "cron") {
     if (!form.cron_expr.trim()) {
-      throw new Error(t("page.agentSchedules.validation.cronRequired"));
+      throw new LocalizedError(t("page.agentSchedules.validation.cronRequired"));
     }
     body.cron_expr = form.cron_expr.trim();
   } else {
     if (!form.interval_secs.trim()) {
-      throw new Error(t("page.agentSchedules.validation.intervalRequired"));
+      throw new LocalizedError(t("page.agentSchedules.validation.intervalRequired"));
     }
     body.interval_secs = Number(form.interval_secs);
   }
@@ -189,6 +191,7 @@ function scheduleSpecLabel(schedule: AdminAgentSchedule, t: Translate): string {
 export default function AgentSchedulesPage() {
   const { session } = useAuth();
   const { t } = useI18n();
+  const { toastError } = useOperatorError();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const listQueryKey = ["agent-schedules"];
@@ -239,7 +242,7 @@ export default function AgentSchedulesPage() {
       setEditing(null);
       setForm(EMPTY_FORM);
     },
-    onError: (saveError: Error) => toast.error(saveError.message),
+    onError: (saveError: Error) => toastError(saveError),
   });
 
   const runNowMutation = useMutation({
@@ -255,7 +258,7 @@ export default function AgentSchedulesPage() {
       queryClient.invalidateQueries({ queryKey: listQueryKey });
       queryClient.invalidateQueries({ queryKey: ["agent-schedule-fires", schedule.id] });
     },
-    onError: (runError: Error) => toast.error(runError.message),
+    onError: (runError: Error) => toastError(runError),
   });
 
   const deleteMutation = useMutation({
@@ -268,7 +271,7 @@ export default function AgentSchedulesPage() {
       if (firesFor?.id === schedule.id) setFiresFor(null);
       toast.success(t("page.agentSchedules.toast.deleted"));
     },
-    onError: (deleteError: Error) => toast.error(deleteError.message),
+    onError: (deleteError: Error) => toastError(deleteError),
   });
 
   function openCreate() {
