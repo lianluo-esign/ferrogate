@@ -64,6 +64,15 @@ so any contract change must regenerate the client types to pass.
 npm run lint   # eslint . — CI runs this via scripts/check-admin-console.sh
 ```
 
+### Authoring i18n copy
+
+Key naming, namespace ownership (and why `bootstrap` vs `rest` is a bundle
+boundary), the Simplified Chinese glossary, what must NOT be translated, and the
+add-a-locale procedure live in
+[`docs/admin-console-i18n.md`](../docs/admin-console-i18n.md). The glossary is
+executable — `src/i18n/glossary.ts` + `glossary.test.ts` fail the suite when a
+term gains a second Chinese rendering.
+
 ### i18n regression guard (`ferrogate/no-untranslated-literal`, #380)
 
 `npm run lint` rejects **newly introduced** hard-coded operator-facing strings
