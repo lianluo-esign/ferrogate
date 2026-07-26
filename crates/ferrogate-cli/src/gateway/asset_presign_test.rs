@@ -18,9 +18,9 @@ use ferrogate_storage::{sha256_hex, stored_asset_id, StorageError, StoredAsset};
 use super::{
     asset_create_failure_disposition, classify_abort, effective_max_object_bytes,
     existing_asset_matches_commit, final_object_prefix, is_upload_id, new_upload_id,
-    staging_object_key, verify_and_fetch_committed_object, AbortReason, AbortRecord,
-    AssetCreateFailureDisposition, CommitVerification, PresignAbortRequest, PresignCommitRequest,
-    PresignUploadIntentRequest, StagingReclamation,
+    staging_object_key, verify_committed_object, AbortReason, AbortRecord,
+    AssetCreateFailureDisposition, CommitVerification, CommitVerificationRequest,
+    PresignAbortRequest, PresignCommitRequest, PresignUploadIntentRequest, StagingReclamation,
 };
 use crate::gateway::asset_bucket::{AssetBucketClient, AssetBucketConfig};
 
@@ -28,6 +28,17 @@ use crate::gateway::asset_bucket::{AssetBucketClient, AssetBucketConfig};
 /// `asset_security` scans for, reproduced here to prove the built-in content
 /// check runs against the uploaded bytes (not just the inline path).
 const EICAR: &[u8] = br#"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"#;
+
+/// The shipped default for `[asset_bucket].max_gateway_buffer_bytes`. Every
+/// payload in the buffered-path tests below is a few dozen bytes, so they take
+/// the buffered branch under the real default rather than under a value chosen
+/// to make them pass.
+const DEFAULT_BUFFER_LIMIT: u64 = crate::gateway::assets::INLINE_ASSET_MAX_BYTES;
+
+/// The buffered path never touches the copy destination -- it hands the
+/// verified bytes back and leaves the final PUT to the caller. A key that
+/// would fail loudly if that ever stopped being true.
+const UNUSED_FINAL_KEY: &str = ".ferrogate/objects/unused-by-the-buffered-path/obj_never";
 
 #[derive(Clone)]
 struct ScriptedResponse {
@@ -169,14 +180,18 @@ async fn commit_verify_accepts_a_matching_object_without_deleting_it() {
     let (endpoint, methods) = spawn_scripted_mock(vec![head_ok(content.len()), get_ok(content)]);
     let bucket = test_bucket(endpoint);
 
-    let verification = verify_and_fetch_committed_object(
+    let verification = verify_committed_object(
         &bucket,
-        "tenant-a:cli_tool:hello:1.0.0",
-        content.len() as u64,
-        &sha,
-        "cli_tool",
-        "text/plain",
-        10 * 1024 * 1024,
+        &CommitVerificationRequest {
+            staging_key: "tenant-a:cli_tool:hello:1.0.0",
+            final_key: UNUSED_FINAL_KEY,
+            expected_size: content.len() as u64,
+            expected_sha256: &sha,
+            asset_type: "cli_tool",
+            content_type: "text/plain",
+            max_object_bytes: 10 * 1024 * 1024,
+            buffer_limit: DEFAULT_BUFFER_LIMIT,
+        },
     )
     .await
     .unwrap();
@@ -200,14 +215,18 @@ async fn commit_verify_rejects_and_deletes_on_sha256_mismatch() {
         spawn_scripted_mock(vec![head_ok(content.len()), get_ok(content), delete_ok()]);
     let bucket = test_bucket(endpoint);
 
-    let verification = verify_and_fetch_committed_object(
+    let verification = verify_committed_object(
         &bucket,
-        "tenant-a:cli_tool:hello:1.0.0",
-        content.len() as u64,
-        &registered_but_wrong,
-        "cli_tool",
-        "text/plain",
-        10 * 1024 * 1024,
+        &CommitVerificationRequest {
+            staging_key: "tenant-a:cli_tool:hello:1.0.0",
+            final_key: UNUSED_FINAL_KEY,
+            expected_size: content.len() as u64,
+            expected_sha256: &registered_but_wrong,
+            asset_type: "cli_tool",
+            content_type: "text/plain",
+            max_object_bytes: 10 * 1024 * 1024,
+            buffer_limit: DEFAULT_BUFFER_LIMIT,
+        },
     )
     .await
     .unwrap();
@@ -227,14 +246,19 @@ async fn commit_verify_rejects_and_deletes_on_size_mismatch_without_downloading(
     let (endpoint, methods) = spawn_scripted_mock(vec![head_ok(9_999), delete_ok()]);
     let bucket = test_bucket(endpoint);
 
-    let verification = verify_and_fetch_committed_object(
+    let verification = verify_committed_object(
         &bucket,
-        "tenant-a:cli_tool:hello:1.0.0",
-        100, // registered intent size differs from the HEAD size
-        &sha256_hex(b"irrelevant"),
-        "cli_tool",
-        "text/plain",
-        10 * 1024 * 1024,
+        &CommitVerificationRequest {
+            staging_key: "tenant-a:cli_tool:hello:1.0.0",
+            final_key: UNUSED_FINAL_KEY,
+            // registered intent size differs from the HEAD size
+            expected_size: 100,
+            expected_sha256: &sha256_hex(b"irrelevant"),
+            asset_type: "cli_tool",
+            content_type: "text/plain",
+            max_object_bytes: 10 * 1024 * 1024,
+            buffer_limit: DEFAULT_BUFFER_LIMIT,
+        },
     )
     .await
     .unwrap();
@@ -256,14 +280,18 @@ async fn commit_verify_enforces_the_per_object_ceiling() {
 
     // Size matches the registered intent (2000) but exceeds the per-object
     // ceiling (1000), so it is rejected and deleted.
-    let verification = verify_and_fetch_committed_object(
+    let verification = verify_committed_object(
         &bucket,
-        "tenant-a:cli_tool:big:1.0.0",
-        2_000,
-        &sha256_hex(b"irrelevant"),
-        "cli_tool",
-        "text/plain",
-        1_000,
+        &CommitVerificationRequest {
+            staging_key: "tenant-a:cli_tool:big:1.0.0",
+            final_key: UNUSED_FINAL_KEY,
+            expected_size: 2_000,
+            expected_sha256: &sha256_hex(b"irrelevant"),
+            asset_type: "cli_tool",
+            content_type: "text/plain",
+            max_object_bytes: 1_000,
+            buffer_limit: DEFAULT_BUFFER_LIMIT,
+        },
     )
     .await
     .unwrap();
@@ -284,14 +312,18 @@ async fn commit_verify_runs_built_in_content_checks_on_the_committed_object() {
 
     // Size + sha256 match, but the committed bytes carry the EICAR malware
     // test signature: the built-in content check must reject and delete it.
-    let verification = verify_and_fetch_committed_object(
+    let verification = verify_committed_object(
         &bucket,
-        "tenant-a:cli_tool:hello:1.0.0",
-        EICAR.len() as u64,
-        &sha,
-        "cli_tool",
-        "text/plain",
-        10 * 1024 * 1024,
+        &CommitVerificationRequest {
+            staging_key: "tenant-a:cli_tool:hello:1.0.0",
+            final_key: UNUSED_FINAL_KEY,
+            expected_size: EICAR.len() as u64,
+            expected_sha256: &sha,
+            asset_type: "cli_tool",
+            content_type: "text/plain",
+            max_object_bytes: 10 * 1024 * 1024,
+            buffer_limit: DEFAULT_BUFFER_LIMIT,
+        },
     )
     .await
     .unwrap();
@@ -310,14 +342,18 @@ async fn commit_verify_reports_not_uploaded_when_the_object_is_absent() {
     let (endpoint, methods) = spawn_scripted_mock(vec![head_404()]);
     let bucket = test_bucket(endpoint);
 
-    let verification = verify_and_fetch_committed_object(
+    let verification = verify_committed_object(
         &bucket,
-        "tenant-a:cli_tool:missing:1.0.0",
-        100,
-        &sha256_hex(b"whatever"),
-        "cli_tool",
-        "text/plain",
-        10 * 1024 * 1024,
+        &CommitVerificationRequest {
+            staging_key: "tenant-a:cli_tool:missing:1.0.0",
+            final_key: UNUSED_FINAL_KEY,
+            expected_size: 100,
+            expected_sha256: &sha256_hex(b"whatever"),
+            asset_type: "cli_tool",
+            content_type: "text/plain",
+            max_object_bytes: 10 * 1024 * 1024,
+            buffer_limit: DEFAULT_BUFFER_LIMIT,
+        },
     )
     .await
     .unwrap();
@@ -325,6 +361,310 @@ async fn commit_verify_reports_not_uploaded_when_the_object_is_absent() {
     assert!(matches!(verification, CommitVerification::NotUploaded));
     // A never-uploaded object has nothing to delete.
     assert_eq!(*methods.lock().unwrap(), vec!["HEAD"]);
+}
+
+/// The staging key used by the streamed-path tests, plus the private final key
+/// the same pass copies into.
+const STREAM_STAGING_KEY: &str = ".ferrogate/staging/streamed";
+const STREAM_FINAL_KEY: &str = ".ferrogate/objects/streamed/obj_0123456789abcdef";
+
+/// A payload comfortably above the streaming threshold the tests configure,
+/// so the bytes really do cross several chunks.
+fn large_payload(len: usize) -> Vec<u8> {
+    (0..len).map(|index| (index % 251) as u8).collect()
+}
+
+/// An in-memory object store for the streamed path.
+///
+/// The scripted HTTP mock above deliberately serves one request at a time,
+/// which the streamed commit cannot use: its GET and its PUT are *concurrent*
+/// by construction (the PUT's body is the GET's stream). This fake records the
+/// operation sequence WITH the key each one targeted -- a stricter assertion
+/// than the HTTP mock's method-only log, because "which object did the
+/// fail-closed cleanup actually delete?" is the question that matters.
+#[derive(Default)]
+struct RecordingStreamStore {
+    objects: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl RecordingStreamStore {
+    fn with_staged(bytes: &[u8]) -> Self {
+        let store = Self::default();
+        store
+            .objects
+            .lock()
+            .unwrap()
+            .insert(STREAM_STAGING_KEY.to_string(), bytes.to_vec());
+        store
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn object(&self, key: &str) -> Option<Vec<u8>> {
+        self.objects.lock().unwrap().get(key).cloned()
+    }
+}
+
+fn stream_store_unsupported(operation: &str) -> anyhow::Error {
+    anyhow::anyhow!("RecordingStreamStore does not implement {operation}")
+}
+
+#[async_trait::async_trait]
+impl crate::gateway::asset_bucket::AssetObjectStore for RecordingStreamStore {
+    async fn put_object(
+        &self,
+        _key: &str,
+        _body: &[u8],
+        _content_type: &str,
+    ) -> anyhow::Result<()> {
+        Err(stream_store_unsupported("put_object"))
+    }
+    async fn put_object_owned(
+        &self,
+        _key: &str,
+        _body: Vec<u8>,
+        _content_type: &str,
+    ) -> anyhow::Result<()> {
+        Err(stream_store_unsupported("put_object_owned"))
+    }
+    async fn get_object(&self, _key: &str) -> anyhow::Result<Vec<u8>> {
+        Err(stream_store_unsupported("get_object"))
+    }
+    async fn get_object_if_present(&self, _key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        // The streamed path must never take the buffering read; if it does,
+        // this records it and the sequence assertion fails loudly.
+        self.calls.lock().unwrap().push("GET_BUFFERED".to_string());
+        Ok(self.object(_key))
+    }
+    async fn get_object_stream(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<Option<crate::gateway::asset_bucket::ObjectByteStream>> {
+        self.calls.lock().unwrap().push(format!("GET:{key}"));
+        let Some(bytes) = self.object(key) else {
+            return Ok(None);
+        };
+        let chunks: Vec<anyhow::Result<bytes::Bytes>> = bytes
+            .chunks(8 * 1024)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect();
+        Ok(Some(Box::pin(futures_util::stream::iter(chunks))))
+    }
+    async fn put_object_stream(
+        &self,
+        key: &str,
+        _content_type: &str,
+        _content_length: u64,
+        _content_sha256_hex: &str,
+        mut body: crate::gateway::asset_bucket::ObjectByteStream,
+    ) -> anyhow::Result<()> {
+        use futures_util::StreamExt;
+        let mut received = Vec::new();
+        while let Some(chunk) = body.next().await {
+            received.extend_from_slice(&chunk?);
+        }
+        self.calls.lock().unwrap().push(format!("PUT:{key}"));
+        self.objects
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), received);
+        Ok(())
+    }
+    async fn delete_object(&self, key: &str) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("DELETE:{key}"));
+        self.objects.lock().unwrap().remove(key);
+        Ok(())
+    }
+    async fn head_object(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        self.calls.lock().unwrap().push(format!("HEAD:{key}"));
+        Ok(self.object(key).map(|bytes| bytes.len() as u64))
+    }
+    async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
+        Err(stream_store_unsupported("list_objects"))
+    }
+    fn presign_put(
+        &self,
+        _key: &str,
+        _expires_secs: u64,
+        _timestamp_unix: u64,
+        _size_bytes: u64,
+        _content_sha256_hex: &str,
+    ) -> anyhow::Result<crate::gateway::asset_bucket::PresignedUpload> {
+        Err(stream_store_unsupported("presign_put"))
+    }
+    fn presign_get(
+        &self,
+        _key: &str,
+        _expires_secs: u64,
+        _timestamp_unix: u64,
+    ) -> anyhow::Result<String> {
+        Err(stream_store_unsupported("presign_get"))
+    }
+}
+
+fn streamed_request<'a>(
+    expected_size: u64,
+    expected_sha256: &'a str,
+    asset_type: &'a str,
+) -> CommitVerificationRequest<'a> {
+    CommitVerificationRequest {
+        staging_key: STREAM_STAGING_KEY,
+        final_key: STREAM_FINAL_KEY,
+        expected_size,
+        expected_sha256,
+        asset_type,
+        content_type: "application/octet-stream",
+        max_object_bytes: 10 * 1024 * 1024,
+        // Far below every payload here, so the streamed branch is taken.
+        buffer_limit: 4096,
+    }
+}
+
+#[tokio::test]
+async fn a_large_object_is_verified_and_copied_without_the_gateway_holding_it() {
+    // #259 acceptance: above `max_gateway_buffer_bytes` the commit must not
+    // fetch the object into a `Vec`. One HEAD, one streaming GET, one streaming
+    // PUT -- no buffering read at all -- and the verified result carries FACTS
+    // about the object rather than the object, which is what makes the
+    // peak-memory bound structural instead of a promise in a comment.
+    let payload = large_payload(256 * 1024);
+    let sha = sha256_hex(&payload);
+    let store = RecordingStreamStore::with_staged(&payload);
+
+    let verification = verify_committed_object(
+        &store,
+        &streamed_request(payload.len() as u64, &sha, "cli_tool"),
+    )
+    .await
+    .unwrap();
+
+    match verification {
+        CommitVerification::VerifiedStreamed {
+            size_bytes,
+            sha256,
+            eicar_found,
+        } => {
+            assert_eq!(size_bytes, payload.len() as u64);
+            assert_eq!(sha256, sha);
+            assert!(!eicar_found);
+        }
+        _ => panic!("an object above the buffer limit must take the streamed path"),
+    }
+    assert_eq!(
+        store.calls(),
+        vec![
+            format!("HEAD:{STREAM_STAGING_KEY}"),
+            format!("GET:{STREAM_STAGING_KEY}"),
+            format!("PUT:{STREAM_FINAL_KEY}"),
+        ],
+        "the streamed commit must never take the buffering read, and must not \
+         delete a valid object"
+    );
+    // The copy is byte-exact, so the caller owes no second PUT.
+    assert_eq!(
+        store.object(STREAM_FINAL_KEY).as_deref(),
+        Some(&payload[..])
+    );
+}
+
+#[tokio::test]
+async fn a_streamed_object_that_contradicts_its_intent_is_rejected_and_both_keys_reclaimed() {
+    // The store here happily accepts the mismatched payload (a permissive
+    // backend would too). Admission must therefore rest on the gateway's OWN
+    // incremental hash, and the fail-closed cleanup has to reclaim the final
+    // candidate the streaming pass already wrote as well as the staging object.
+    let payload = large_payload(128 * 1024);
+    let registered_but_wrong = sha256_hex(b"what the client claimed it uploaded");
+    let store = RecordingStreamStore::with_staged(&payload);
+
+    let verification = verify_committed_object(
+        &store,
+        &streamed_request(payload.len() as u64, &registered_but_wrong, "cli_tool"),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        verification,
+        CommitVerification::Rejected(rejection) if rejection.code == "asset_commit_hash_mismatch"
+    ));
+    assert_eq!(
+        store.calls(),
+        vec![
+            format!("HEAD:{STREAM_STAGING_KEY}"),
+            format!("GET:{STREAM_STAGING_KEY}"),
+            format!("PUT:{STREAM_FINAL_KEY}"),
+            format!("DELETE:{STREAM_FINAL_KEY}"),
+            format!("DELETE:{STREAM_STAGING_KEY}"),
+        ],
+        "a rejected streamed commit must reclaim the final candidate AND staging"
+    );
+    assert!(store.object(STREAM_FINAL_KEY).is_none());
+    assert!(store.object(STREAM_STAGING_KEY).is_none());
+}
+
+#[tokio::test]
+async fn the_malware_screen_still_runs_over_every_byte_of_a_streamed_object() {
+    // The buffered path finds EICAR with `contains_eicar(&whole_object)`. The
+    // streamed path never has the whole object, so this pins that it finds the
+    // same signature buried deep mid-stream -- if it only screened, say, the
+    // first chunk, a large infected upload would publish.
+    let mut payload = large_payload(64 * 1024);
+    payload.extend_from_slice(EICAR);
+    payload.extend_from_slice(&large_payload(64 * 1024));
+    let sha = sha256_hex(&payload);
+    let store = RecordingStreamStore::with_staged(&payload);
+
+    let verification = verify_committed_object(
+        &store,
+        &streamed_request(payload.len() as u64, &sha, "cli_tool"),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        verification,
+        CommitVerification::Rejected(rejection) if rejection.code == "asset_rejected"
+    ));
+    assert_eq!(
+        store.calls(),
+        vec![
+            format!("HEAD:{STREAM_STAGING_KEY}"),
+            format!("GET:{STREAM_STAGING_KEY}"),
+            format!("PUT:{STREAM_FINAL_KEY}"),
+            format!("DELETE:{STREAM_FINAL_KEY}"),
+            format!("DELETE:{STREAM_STAGING_KEY}"),
+        ]
+    );
+    assert!(store.object(STREAM_FINAL_KEY).is_none());
+}
+
+#[tokio::test]
+async fn an_object_at_the_buffer_limit_still_takes_the_full_fidelity_buffered_path() {
+    // The boundary is `>`, not `>=`: an object the gateway IS willing to hold
+    // keeps whole-file signature verification and out-of-process scanning. A
+    // regression that streamed everything would silently drop those controls
+    // for ordinary small pushes.
+    let payload = large_payload(4096);
+    let sha = sha256_hex(&payload);
+    let store = RecordingStreamStore::with_staged(&payload);
+
+    let verification = verify_committed_object(&store, &streamed_request(4096, &sha, "cli_tool"))
+        .await
+        .unwrap();
+
+    assert!(matches!(verification, CommitVerification::Verified { .. }));
+    assert_eq!(
+        store.calls(),
+        vec![
+            format!("HEAD:{STREAM_STAGING_KEY}"),
+            "GET_BUFFERED".to_string()
+        ],
+        "an object at (not above) the limit must use the buffering read"
+    );
 }
 
 #[test]

@@ -64,9 +64,22 @@ impl AssetError {
 /// Largest object the inline (in-memory, Pingora hot-path) push will
 /// buffer. Objects at or below this stay on the simple inline path;
 /// larger objects must use the presigned direct path (issue #259,
-/// `gateway/asset_presign.rs`), which streams straight to the bucket so
-/// bytes never buffer in the gateway. The tenant's cumulative
-/// `asset_storage_quota_bytes` is enforced separately, on top of this.
+/// `gateway/asset_presign.rs`).
+///
+/// On that path the client's bytes travel **directly** between the client and
+/// the bucket over presigned URLs, and never traverse the gateway. The
+/// gateway's own commit-time leg -- it must read the staged object back to
+/// verify its SHA-256 and screen it before publishing -- is bounded rather
+/// than absent: objects above `[asset_bucket].max_gateway_buffer_bytes`
+/// (default: this constant) are verified and copied to their final key in a
+/// single streaming pass whose resident cost is one HTTP chunk, and objects at
+/// or below it are buffered so the whole-file controls (detached-signature
+/// verification, out-of-process malware scanning, `mcp_manifest` transport
+/// parsing) still get their bytes. Nothing on either path buffers a whole
+/// large object in the gateway.
+///
+/// The tenant's cumulative `asset_storage_quota_bytes` is enforced separately,
+/// on top of this.
 pub(crate) const INLINE_ASSET_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Default `Cache-Control` for a pulled asset (issues #258/#301): assets are
@@ -607,7 +620,7 @@ impl FerroGateway {
                 tenant_id: &tenant_id,
                 asset_type,
                 content_type: &content_type,
-                content: &content,
+                content: super::asset_security::ScreenedContent::Buffered(&content),
                 content_sha256: &screen_hash,
                 signature: signature_input,
                 visibility,
@@ -1820,14 +1833,55 @@ impl FerroGateway {
                 )
                 .await;
             };
+            // Issue #259: the registry pull serves from a full in-memory copy
+            // (it re-verifies the hash and supports conditional/Range replies),
+            // so it MUST NOT be reachable for an object the gateway refuses to
+            // hold. Without this bound a presign-committed object of up to
+            // `presign_max_object_bytes` -- 5 GiB by default -- was buffered in
+            // full on an unauthenticated-size read path, which is the same
+            // OOM/DoS the commit path had. Large objects are pulled the way
+            // they were pushed: directly from the bucket over a gateway-issued
+            // presigned URL.
+            let buffer_limit = state.asset_max_gateway_buffer_bytes();
+            if asset.size_bytes > buffer_limit {
+                return write_json_error(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "asset_too_large_for_inline_pull",
+                    format!(
+                        "asset {}/{}/{} is {} bytes, above the gateway's {buffer_limit}-byte \
+                         in-memory limit; fetch it with GET /v1/assets/presign/download/{}/{}/{} \
+                         and download the returned presigned URL directly",
+                        asset.asset_type,
+                        asset.name,
+                        asset.version,
+                        asset.size_bytes,
+                        asset.asset_type,
+                        asset.name,
+                        asset.version,
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
             match bucket.get_object(storage_uri).await {
                 Ok(content) => content,
                 Err(error) => {
+                    // The bucket error's Display embeds the request URL, which
+                    // would leak the internal object key and bucket endpoint to
+                    // the caller (issue #259 review finding 4).
+                    tracing::warn!(
+                        request_id = %ctx.request_id,
+                        asset_id = %asset.id,
+                        error = %error,
+                        "failed to read a bucket-backed asset for the registry pull"
+                    );
                     return write_json_error(
                         session,
                         StatusCode::SERVICE_UNAVAILABLE,
                         "asset_bucket_unavailable",
-                        error.to_string(),
+                        "the asset object bucket is unavailable; retry, or fetch the object \
+                         through GET /v1/assets/presign/download/{asset_type}/{name}/{version}",
                         &ctx.request_id,
                     )
                     .await;

@@ -27,11 +27,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use bytes::Bytes;
 use ferrogate_cloudflare::{CloudflareClient, HttpMethod};
 use ferrogate_providers::{
-    presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_with_content_hash_header,
-    AwsCredentials, PresignBoundPayload, PresignRequest, SigningRequest,
+    presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_streamed_with_content_hash_header,
+    sign_sigv4_with_content_hash_header, AwsCredentials, PresignBoundPayload, PresignRequest,
+    SigningRequest, StreamedSigningRequest,
 };
+use futures_util::TryStreamExt;
 
 use super::dispatch::provider_http_client;
 
@@ -246,6 +249,17 @@ pub(crate) struct PresignedUpload {
     pub(crate) required_headers: Vec<(&'static str, String)>,
 }
 
+/// A bounded-memory stream of an object's bytes (issue #259).
+///
+/// The unit of transfer is one HTTP body chunk, so a holder of this stream
+/// never has more than a single chunk resident regardless of object size —
+/// which is the whole point: the presigned commit path used to materialize the
+/// entire staged object (up to `presign_max_object_bytes`, default 5 GiB) in
+/// gateway memory to hash and re-PUT it, making N concurrent commits an OOM on
+/// the Pingora process.
+pub(crate) type ObjectByteStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<Bytes>> + Send>>;
+
 /// The object-storage backend seam for `/v1/assets/*` content (issue #411).
 ///
 /// Extracted from [`AssetBucketClient`]'s inherent methods so the asset
@@ -270,6 +284,27 @@ pub(crate) trait AssetObjectStore: Send + Sync {
     ) -> anyhow::Result<()>;
     async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>>;
     async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>>;
+    /// Opens a *streaming* read of `key` — the bounded-memory counterpart of
+    /// [`get_object_if_present`](Self::get_object_if_present). `Ok(None)` is
+    /// the same 404-means-absent result, preserved so the commit-race
+    /// reconciliation reads identically on both paths (issue #259).
+    async fn get_object_stream(&self, key: &str) -> anyhow::Result<Option<ObjectByteStream>>;
+    /// PUTs an object from a byte stream instead of a buffer (issue #259).
+    ///
+    /// `content_length` and `content_sha256_hex` must describe the bytes
+    /// `body` will yield: SigV4 signs the payload hash *before* the body is
+    /// sent, so the hash is supplied rather than computed. An S3-compatible
+    /// bucket recomputes it and refuses a mismatch, which is the intended
+    /// fail-closed layer — the caller additionally verifies the hash
+    /// incrementally as the same bytes flow past.
+    async fn put_object_stream(
+        &self,
+        key: &str,
+        content_type: &str,
+        content_length: u64,
+        content_sha256_hex: &str,
+        body: ObjectByteStream,
+    ) -> anyhow::Result<()>;
     async fn delete_object(&self, key: &str) -> anyhow::Result<()>;
     async fn head_object(&self, key: &str) -> anyhow::Result<Option<u64>>;
     async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>>;
@@ -313,6 +348,21 @@ impl AssetObjectStore for Box<dyn AssetObjectStore> {
     }
     async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         self.as_ref().get_object_if_present(key).await
+    }
+    async fn get_object_stream(&self, key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
+        self.as_ref().get_object_stream(key).await
+    }
+    async fn put_object_stream(
+        &self,
+        key: &str,
+        content_type: &str,
+        content_length: u64,
+        content_sha256_hex: &str,
+        body: ObjectByteStream,
+    ) -> anyhow::Result<()> {
+        self.as_ref()
+            .put_object_stream(key, content_type, content_length, content_sha256_hex, body)
+            .await
     }
     async fn delete_object(&self, key: &str) -> anyhow::Result<()> {
         self.as_ref().delete_object(key).await
@@ -370,6 +420,27 @@ impl AssetObjectStore for AssetBucketClient {
     }
     async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         AssetBucketClient::get_object_if_present(self, key).await
+    }
+    async fn get_object_stream(&self, key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
+        AssetBucketClient::get_object_stream(self, key).await
+    }
+    async fn put_object_stream(
+        &self,
+        key: &str,
+        content_type: &str,
+        content_length: u64,
+        content_sha256_hex: &str,
+        body: ObjectByteStream,
+    ) -> anyhow::Result<()> {
+        AssetBucketClient::put_object_stream(
+            self,
+            key,
+            content_type,
+            content_length,
+            content_sha256_hex,
+            body,
+        )
+        .await
     }
     async fn delete_object(&self, key: &str) -> anyhow::Result<()> {
         AssetBucketClient::delete_object(self, key).await
@@ -486,6 +557,98 @@ impl AssetBucketClient {
             anyhow::bail!("asset bucket GET failed (HTTP {status}): {text}");
         }
         Ok(Some(response.bytes().await?.to_vec()))
+    }
+
+    /// Opens a streaming GET so the caller can verify and copy an object of
+    /// arbitrary size without materializing it (issue #259). The response
+    /// headers are consumed here (so a 404/5xx is still a normal
+    /// `Ok(None)`/`Err` before any byte flows); the body is handed back as a
+    /// chunk stream.
+    pub(crate) async fn get_object_stream(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<Option<ObjectByteStream>> {
+        let (scheme, host) = self.scheme_and_host()?;
+        let path = self.object_path(key);
+        let signed = self.sign("GET", &path, &host, b"");
+        let client = provider_http_client()?;
+        let mut request = client
+            .get(format!("{scheme}://{host}{path}"))
+            .header("host", host.clone())
+            .header("x-amz-date", signed.x_amz_date.clone())
+            .header("authorization", signed.authorization.clone());
+        if let Some(content_sha256) = &signed.x_amz_content_sha256 {
+            request = request.header("x-amz-content-sha256", content_sha256.clone());
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("asset bucket GET failed (HTTP {status}): {text}");
+        }
+        Ok(Some(Box::pin(
+            response.bytes_stream().map_err(anyhow::Error::from),
+        )))
+    }
+
+    /// PUTs an object straight from a byte stream (issue #259).
+    ///
+    /// `Content-Length` is set explicitly rather than left to the body's size
+    /// hint: a streamed reqwest body has no known length, and hyper would fall
+    /// back to `Transfer-Encoding: chunked`, which S3-compatible endpoints
+    /// reject unless it is the `aws-chunked` framing (which this is not).
+    pub(crate) async fn put_object_stream(
+        &self,
+        key: &str,
+        content_type: &str,
+        content_length: u64,
+        content_sha256_hex: &str,
+        body: ObjectByteStream,
+    ) -> anyhow::Result<()> {
+        let (scheme, host) = self.scheme_and_host()?;
+        let path = self.object_path(key);
+        let timestamp_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let signed = sign_sigv4_streamed_with_content_hash_header(
+            &StreamedSigningRequest {
+                method: "PUT",
+                path: &path,
+                host: &host,
+                region: &self.config.region,
+                service: "s3",
+                payload_sha256_hex: content_sha256_hex,
+                timestamp_unix,
+            },
+            &AwsCredentials {
+                access_key_id: self.config.access_key_id.clone(),
+                secret_access_key: self.config.secret_access_key.clone(),
+                session_token: None,
+            },
+        );
+        let client = provider_http_client()?;
+        let mut request = client
+            .put(format!("{scheme}://{host}{path}"))
+            .header("host", host.clone())
+            .header("x-amz-date", signed.x_amz_date.clone())
+            .header("authorization", signed.authorization.clone())
+            .header("content-type", content_type)
+            .header(http::header::CONTENT_LENGTH, content_length)
+            .body(reqwest::Body::wrap_stream(body));
+        if let Some(content_sha256) = &signed.x_amz_content_sha256 {
+            request = request.header("x-amz-content-sha256", content_sha256.clone());
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("asset bucket PUT failed (HTTP {status}): {text}");
+        }
+        Ok(())
     }
 
     pub(crate) async fn delete_object(&self, key: &str) -> anyhow::Result<()> {
@@ -1222,6 +1385,19 @@ impl AssetObjectStore for WorkersStaticAssetsStore {
     }
     async fn get_object_if_present(&self, _key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         Err(workers_static_assets_unsupported("object GET by key"))
+    }
+    async fn get_object_stream(&self, _key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
+        Err(workers_static_assets_unsupported("streaming object GET"))
+    }
+    async fn put_object_stream(
+        &self,
+        _key: &str,
+        _content_type: &str,
+        _content_length: u64,
+        _content_sha256_hex: &str,
+        _body: ObjectByteStream,
+    ) -> anyhow::Result<()> {
+        Err(workers_static_assets_unsupported("streaming object PUT"))
     }
     async fn delete_object(&self, _key: &str) -> anyhow::Result<()> {
         Err(workers_static_assets_unsupported("object DELETE by key"))

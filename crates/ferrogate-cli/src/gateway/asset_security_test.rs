@@ -71,7 +71,7 @@ fn base_request<'a>(
         tenant_id: "tenant-a",
         asset_type: "cli_tool",
         content_type: "text/plain",
-        content,
+        content: ScreenedContent::Buffered(content),
         content_sha256: sha,
         signature: None,
         visibility: PublishVisibility::TenantPrivate,
@@ -219,4 +219,147 @@ async fn cross_tenant_publish_with_approval_is_allowed() {
         .audit_detail()
         .contains("visibility_gate=approved"));
     assert!(screening.audit_detail().contains("approval-1"));
+}
+
+// ---- streamed screening (issue #259) ----------------------------------------
+//
+// An object above the gateway's in-memory budget is verified and copied in a
+// bounded pass, so the screener is handed the facts that pass established
+// instead of the bytes. These pin which controls survive that, and -- more
+// importantly -- that the ones which cannot are FAILED CLOSED rather than
+// quietly skipped.
+
+fn streamed_request<'a>(
+    asset_id: &'a str,
+    size_bytes: u64,
+    eicar_found: bool,
+    sha: &'a str,
+) -> AssetPushScreeningRequest<'a> {
+    AssetPushScreeningRequest {
+        asset_id,
+        tenant_id: "tenant-a",
+        asset_type: "cli_tool",
+        content_type: "application/octet-stream",
+        content: ScreenedContent::Streamed {
+            size_bytes,
+            eicar_found,
+        },
+        content_sha256: sha,
+        signature: None,
+        visibility: PublishVisibility::TenantPrivate,
+        approval: None,
+        now_unix: 1000,
+    }
+}
+
+#[tokio::test]
+async fn a_clean_streamed_object_is_visible_and_reports_its_streamed_size() {
+    let context = eicar_context(false, PublisherKeyRegistry::new());
+    let screening = screen_asset_push(&context, streamed_request("s1", 104_857_600, false, "hash"))
+        .await
+        .expect("a clean streamed object is admitted");
+    assert!(screening.is_visible());
+    assert_eq!(screening.visibility(), AssetVisibility::Visible);
+    // The manifest's size must come from the streamed accounting, not from a
+    // buffer length that no longer exists.
+    assert_eq!(screening.manifest_json()["size_bytes"], 104_857_600_u64);
+}
+
+#[tokio::test]
+async fn a_streamed_object_whose_stream_matched_malware_is_rejected() {
+    // The offline signature scan ran over every byte during the copy pass; its
+    // verdict must reject exactly as `contains_eicar(&buffer)` does.
+    let context = eicar_context(false, PublisherKeyRegistry::new());
+    let rejection = screen_asset_push(&context, streamed_request("s2", 104_857_600, true, "hash"))
+        .await
+        .expect_err("a streamed malware match must be rejected");
+    assert_eq!(rejection.code, "asset_rejected");
+    assert_eq!(rejection.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn a_signed_streamed_object_is_rejected_rather_than_downgraded_to_unsigned() {
+    // A detached signature is a claim about the whole file. With no bytes to
+    // check it against, the only two options are "reject" and "pretend it was
+    // never presented" -- and the second silently voids a publisher's signing
+    // requirement for exactly the largest, highest-value artifacts.
+    let context = eicar_context(false, PublisherKeyRegistry::new());
+    let mut req = streamed_request("s3", 104_857_600, false, "hash");
+    req.signature = Some(AssetSignatureInput {
+        format: SignatureFormat::Ed25519,
+        material: BASE64.encode([7_u8; 64]),
+        key_id: Some("pub-1".to_string()),
+    });
+    let rejection = screen_asset_push(&context, req)
+        .await
+        .expect_err("a signature that cannot be verified must not be ignored");
+    assert_eq!(rejection.code, "asset_signature_requires_buffering");
+    assert_eq!(rejection.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn a_signed_only_tenant_still_rejects_an_unsigned_streamed_object() {
+    // The signature REQUIREMENT is unaffected by streaming: it is enforced on
+    // the absence of a verified signature, which streaming can only ever make
+    // more likely, never less.
+    let context = eicar_context(true, PublisherKeyRegistry::new());
+    let rejection = screen_asset_push(&context, streamed_request("s4", 104_857_600, false, "hash"))
+        .await
+        .expect_err("signed-only must still reject an unsigned streamed object");
+    assert_eq!(rejection.code, "asset_signature_required");
+}
+
+#[tokio::test]
+async fn an_out_of_process_scanner_withholds_a_streamed_object_instead_of_calling_it_clean() {
+    // ClamAV/HTTP backends need bytes the streamed path never has. The object
+    // is stored but WITHHELD (`pending_scan`, not downloadable) until an
+    // out-of-band scan proves it -- the same store-but-withhold semantics the
+    // async threshold already expresses, and never a silent pass.
+    let scan_config = AssetScanConfig {
+        backend: ScanBackend::ClamAv {
+            addr: "240.0.0.1:1".to_string(),
+            timeout_secs: 1,
+        },
+        unavailable_policy: ScannerUnavailablePolicy::FailClosed,
+        async_threshold_bytes: None,
+    };
+    let context = AssetSecurityContext::for_test(scan_config, PublisherKeyRegistry::new(), false);
+    let screening = screen_asset_push(&context, streamed_request("s5", 104_857_600, false, "hash"))
+        .await
+        .expect("a streamed object is stored, withheld");
+    assert!(!screening.is_visible());
+    assert_eq!(screening.visibility(), AssetVisibility::PendingScan);
+    assert!(!screening.visibility().is_downloadable());
+    assert!(screening
+        .audit_detail()
+        .contains("backend=deferred_streaming"));
+}
+
+#[tokio::test]
+async fn a_streamed_mcp_manifest_is_refused_because_its_transport_cannot_be_parsed() {
+    // A `stdio` manifest makes a CONSUMING agent's MCP client spawn an
+    // arbitrary local process. That check needs the whole JSON document, so a
+    // manifest too large to hold is refused rather than admitted unread.
+    let context = eicar_context(false, PublisherKeyRegistry::new());
+    let mut req = streamed_request("s6", 104_857_600, false, "hash");
+    req.asset_type = "mcp_manifest";
+    req.content_type = "application/json";
+    let rejection = screen_asset_push(&context, req)
+        .await
+        .expect_err("an unparseable manifest must not be admitted");
+    assert_eq!(rejection.code, "asset_rejected");
+    assert!(rejection.message.contains("stdio"));
+}
+
+#[test]
+fn the_streamed_content_validator_agrees_with_the_buffered_one_where_it_can() {
+    // Same allowlist, same malware verdict; the only divergence is the
+    // manifest rule, and it diverges in the safe direction.
+    assert!(validate_streamed_asset_content("cli_tool", "text/plain", false).is_ok());
+    assert!(validate_streamed_asset_content("cli_tool", "application/json", false).is_err());
+    assert!(validate_streamed_asset_content("cli_tool", "text/plain", true).is_err());
+    assert!(
+        validate_streamed_asset_content("future_type", "application/x-whatever", false).is_ok()
+    );
+    assert!(validate_streamed_asset_content("mcp_manifest", "application/json", false).is_err());
 }

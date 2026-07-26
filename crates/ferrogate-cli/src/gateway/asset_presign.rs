@@ -701,31 +701,70 @@ impl FerroGateway {
             .await;
         };
 
-        // Verify the staging object and retain the exact verified bytes. The
-        // later private PUT uses this buffer, so a replay of the client-facing
-        // staging URL cannot race a different payload into the durable object.
-        let verification = verify_and_fetch_committed_object(
+        // The private immutable destination is named before verification
+        // because the streaming path fuses the copy with the verification: one
+        // bounded pass reads staging, hashes and screens every byte, and writes
+        // those same bytes here. The name is fresh 128-bit randomness under an
+        // intent-derived prefix, so nothing can reference it until the
+        // `stored_assets` row is created below.
+        let final_key = match new_final_object_key(&id, &commit.upload_id) {
+            Ok(final_key) => final_key,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "asset_bucket_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        // Verify the staging object. Below the gateway's in-memory budget the
+        // exact verified bytes are retained and re-PUT here, so a replay of the
+        // client-facing staging URL cannot race a different payload into the
+        // durable object. Above it, the same guarantee holds without the buffer:
+        // the copy is driven from the verified stream itself.
+        let verification = verify_committed_object(
             &bucket,
-            &staging_key,
-            commit.size_bytes,
-            &expected_sha256,
-            asset_type,
-            &content_type,
-            // Same plan/quota-driven per-object ceiling the intent was checked
-            // against (issue #259): the commit-time size verification tightens
-            // the global ceiling to BOTH the tenant's dedicated per-object
-            // ceiling and its cumulative asset-storage quota, so a committed
-            // object can never exceed either even if a stale intent was issued
-            // under a larger prior ceiling.
-            effective_max_object_bytes(
-                state.asset_presign_max_object_bytes(),
-                auth.effective_quota.asset_max_object_bytes,
-                auth.effective_quota.asset_storage_quota_bytes,
-            ),
+            &CommitVerificationRequest {
+                staging_key: &staging_key,
+                final_key: &final_key,
+                expected_size: commit.size_bytes,
+                expected_sha256: &expected_sha256,
+                asset_type,
+                content_type: &content_type,
+                // Same plan/quota-driven per-object ceiling the intent was
+                // checked against (issue #259): the commit-time size
+                // verification tightens the global ceiling to BOTH the tenant's
+                // dedicated per-object ceiling and its cumulative asset-storage
+                // quota, so a committed object can never exceed either even if a
+                // stale intent was issued under a larger prior ceiling.
+                max_object_bytes: effective_max_object_bytes(
+                    state.asset_presign_max_object_bytes(),
+                    auth.effective_quota.asset_max_object_bytes,
+                    auth.effective_quota.asset_storage_quota_bytes,
+                ),
+                buffer_limit: state.asset_max_gateway_buffer_bytes(),
+            },
         )
         .await;
-        let (verified_bytes, actual_sha256) = match verification {
-            Ok(CommitVerification::Verified { bytes, sha256 }) => (bytes, sha256),
+        let verified = match verification {
+            Ok(CommitVerification::Verified { bytes, sha256 }) => VerifiedCommit::Buffered {
+                actual_size: bytes.len() as u64,
+                bytes,
+                sha256,
+            },
+            Ok(CommitVerification::VerifiedStreamed {
+                size_bytes,
+                sha256,
+                eicar_found,
+            }) => VerifiedCommit::Streamed {
+                actual_size: size_bytes,
+                sha256,
+                eicar_found,
+            },
             verification_failure => {
                 // A concurrent identical commit can publish metadata and
                 // remove staging after our early lookup. Reconcile every
@@ -836,20 +875,38 @@ impl FerroGateway {
                         .await;
                     }
                     Err(error) => {
+                        // Honesty fix (#259 review): a bucket transport failure
+                        // is NOT serialized to the caller. `reqwest::Error`'s
+                        // Display embeds the request URL, which would leak the
+                        // internal `.ferrogate/objects/<digest>/obj_<rand>` key
+                        // and the bucket endpoint into a 503 body -- exactly
+                        // what the private-bucket runbook promises never
+                        // happens. The detail goes to the operator log instead.
+                        tracing::warn!(
+                            request_id = %ctx.request_id,
+                            asset_id = %id,
+                            upload_id = %commit.upload_id,
+                            staging_key = %staging_key,
+                            final_key = %final_key,
+                            error = %error,
+                            "asset commit verification failed against the object bucket"
+                        );
                         return write_json_error(
                             session,
                             StatusCode::SERVICE_UNAVAILABLE,
                             "asset_bucket_unavailable",
-                            error.to_string(),
+                            BUCKET_TRANSPORT_ERROR_MESSAGE,
                             &ctx.request_id,
                         )
                         .await;
                     }
-                    Ok(CommitVerification::Verified { .. }) => unreachable!(),
+                    Ok(CommitVerification::Verified { .. })
+                    | Ok(CommitVerification::VerifiedStreamed { .. }) => unreachable!(),
                 }
             }
         };
-        let actual_size = verified_bytes.len() as u64;
+        let actual_size = verified.actual_size();
+        let actual_sha256 = verified.sha256().to_string();
 
         // #366: full trust screening over the FINAL verified bytes -- the exact
         // signature/approval/scanner/content-policy service the inline path runs
@@ -877,7 +934,7 @@ impl FerroGateway {
                 tenant_id: &tenant_id,
                 asset_type,
                 content_type: &content_type,
-                content: &verified_bytes,
+                content: verified.screened_content(),
                 content_sha256: &actual_sha256,
                 signature: signature_input,
                 visibility,
@@ -889,6 +946,15 @@ impl FerroGateway {
         {
             Ok(screening) => screening,
             Err(rejection) => {
+                // Fail closed on BOTH shapes. The streamed path has already
+                // written the final candidate (the copy is fused with the
+                // verification pass), so a screening rejection must reclaim it
+                // too -- otherwise a rejected large object would leave full-size
+                // bytes in the bucket until the lifecycle GC. Nothing references
+                // it, so the delete is unconditionally safe here.
+                if verified.final_object_written() {
+                    let _ = best_effort_delete(&bucket, &final_key).await;
+                }
                 let _ = best_effort_delete(&bucket, &staging_key).await;
                 state.record_asset_presign_outcome(
                     crate::state::AssetPresignOutcome::CommitRejected,
@@ -924,43 +990,37 @@ impl FerroGateway {
         // insert share one conditional statement. The commit-time quota rejection
         // (#368) is unchanged in shape -- it is just now atomic with publication.
         let now = now_unix_seconds();
-        let final_key = match new_final_object_key(&id, &commit.upload_id) {
-            Ok(final_key) => final_key,
-            Err(error) => {
+        // The buffered path still owes the final PUT; the streamed path already
+        // wrote it from the same pass that verified it.
+        if let VerifiedCommit::Buffered { bytes, .. } = verified {
+            if let Err(error) = bucket
+                .put_object_owned(&final_key, bytes, &content_type)
+                .await
+            {
+                // A transport failure does not prove the object PUT failed before
+                // commit. Preserve both candidates for a retry or the grace-based
+                // orphan reconciler instead of deleting possibly-written bytes.
+                tracing::warn!(
+                    request_id = %ctx.request_id,
+                    asset_id = %id,
+                    upload_id = %commit.upload_id,
+                    staging_key = %staging_key,
+                    final_key = %final_key,
+                    error = %error,
+                    "private asset object PUT failed with an unknown object outcome; preserving candidates"
+                );
+                // Honesty fix (#259 review): the bucket error's Display embeds
+                // the request URL, so returning it verbatim published the
+                // internal final key and the bucket endpoint in a 503 body.
                 return write_json_error(
                     session,
                     StatusCode::SERVICE_UNAVAILABLE,
                     "asset_bucket_unavailable",
-                    error.to_string(),
+                    BUCKET_TRANSPORT_ERROR_MESSAGE,
                     &ctx.request_id,
                 )
                 .await;
             }
-        };
-        if let Err(error) = bucket
-            .put_object_owned(&final_key, verified_bytes, &content_type)
-            .await
-        {
-            // A transport failure does not prove the object PUT failed before
-            // commit. Preserve both candidates for a retry or the grace-based
-            // orphan reconciler instead of deleting possibly-written bytes.
-            tracing::warn!(
-                request_id = %ctx.request_id,
-                asset_id = %id,
-                upload_id = %commit.upload_id,
-                staging_key = %staging_key,
-                final_key = %final_key,
-                error = %error,
-                "private asset object PUT failed with an unknown object outcome; preserving candidates"
-            );
-            return write_json_error(
-                session,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "asset_bucket_unavailable",
-                error.to_string(),
-                &ctx.request_id,
-            )
-            .await;
         }
 
         // Publish with a create-only repository primitive. A normal upsert is
@@ -1296,11 +1356,21 @@ impl FerroGateway {
         let staged = match bucket.head_object(&staging_key).await {
             Ok(staged) => staged.is_some(),
             Err(error) => {
+                // Generic body, detailed log: the bucket error embeds the
+                // request URL, i.e. the internal staging key + endpoint.
+                tracing::warn!(
+                    request_id = %ctx.request_id,
+                    asset_id = %id,
+                    upload_id = %abort.upload_id,
+                    staging_key = %staging_key,
+                    error = %error,
+                    "failed to corroborate an abort against the staging object"
+                );
                 return write_json_error(
                     session,
                     StatusCode::SERVICE_UNAVAILABLE,
                     "asset_bucket_unavailable",
-                    error.to_string(),
+                    BUCKET_TRANSPORT_ERROR_MESSAGE,
                     &ctx.request_id,
                 )
                 .await;
@@ -1711,6 +1781,74 @@ fn classify_abort(reason: AbortReason, reclamation: StagingReclamation) -> Abort
 /// arrives as an additive enum value in the published contract.
 const SINGLE_PUT_UPLOAD_PROTOCOL: &str = "single_put";
 
+/// The single message a caller ever sees for an object-bucket transport
+/// failure (issue #259 review finding 4).
+///
+/// Bucket errors used to be serialized verbatim via `error.to_string()`.
+/// `reqwest::Error`'s `Display` embeds the request URL, so a 503 body could
+/// carry the internal `.ferrogate/objects/<digest>/obj_<rand>` final key and
+/// the bucket endpoint straight back to the client -- contradicting the
+/// private-bucket runbook's promise that the final key is never serialized in
+/// a response, and handing an attacker the storage topology for free. The
+/// diagnostic detail is logged with the request id instead, where the operator
+/// (and only the operator) can correlate it.
+const BUCKET_TRANSPORT_ERROR_MESSAGE: &str =
+    "the asset object bucket is unavailable; retry the same upload_id (see the gateway logs for \
+     the correlated request_id)";
+
+/// A staged object that passed commit verification, in the shape the rest of
+/// the publish flow needs -- which differs by how it was verified.
+enum VerifiedCommit {
+    /// Small enough for the gateway's in-memory budget: the exact verified
+    /// bytes are held, and the final PUT has NOT happened yet.
+    Buffered {
+        bytes: Vec<u8>,
+        actual_size: u64,
+        sha256: String,
+    },
+    /// Above the budget: verified and copied to the final key in one bounded
+    /// pass, so the gateway holds facts about the object rather than the object.
+    Streamed {
+        actual_size: u64,
+        sha256: String,
+        eicar_found: bool,
+    },
+}
+
+impl VerifiedCommit {
+    fn actual_size(&self) -> u64 {
+        match self {
+            Self::Buffered { actual_size, .. } | Self::Streamed { actual_size, .. } => *actual_size,
+        }
+    }
+
+    fn sha256(&self) -> &str {
+        match self {
+            Self::Buffered { sha256, .. } | Self::Streamed { sha256, .. } => sha256,
+        }
+    }
+
+    /// Whether the private final object already exists in the bucket. Decides
+    /// whether a later rejection has a final candidate to reclaim.
+    fn final_object_written(&self) -> bool {
+        matches!(self, Self::Streamed { .. })
+    }
+
+    fn screened_content(&self) -> super::asset_security::ScreenedContent<'_> {
+        match self {
+            Self::Buffered { bytes, .. } => super::asset_security::ScreenedContent::Buffered(bytes),
+            Self::Streamed {
+                actual_size,
+                eicar_found,
+                ..
+            } => super::asset_security::ScreenedContent::Streamed {
+                size_bytes: *actual_size,
+                eicar_found: *eicar_found,
+            },
+        }
+    }
+}
+
 enum QuotaStatus {
     Ok,
     Exceeded(u64),
@@ -1725,9 +1863,20 @@ struct CommitRejection {
 }
 
 enum CommitVerification {
-    Verified {
-        bytes: Vec<u8>,
+    /// The object fit the gateway's in-memory budget: the verified bytes are
+    /// in hand and the caller still owes the final PUT.
+    Verified { bytes: Vec<u8>, sha256: String },
+    /// The object exceeded the in-memory budget: it was verified AND copied to
+    /// the final key in a single bounded pass, so the caller owes no PUT. The
+    /// gateway never held it, which is why the screening evidence travels here
+    /// as facts rather than as bytes.
+    VerifiedStreamed {
+        size_bytes: u64,
         sha256: String,
+        /// Always `false` on this variant (a match is rejected before it is
+        /// built); carried so the trust screening is handed real evidence from
+        /// the pass rather than a hardcoded assumption.
+        eicar_found: bool,
     },
     /// No object was uploaded to the presigned URL (bucket 404).
     NotUploaded,
@@ -1822,56 +1971,100 @@ async fn write_asset_version_immutable(
     .await
 }
 
-/// Verifies a presigned-uploaded staging object against its registered intent and
-/// built-in type/EICAR/manifest content checks, fetching the bytes once (the
-/// intended commit-side cost for large objects; the upload/download data path
-/// itself never touches the gateway). Fails closed: on any size, sha256,
-/// per-object-ceiling, or `asset_security` violation it attempts to delete the
-/// orphaned object before returning [`CommitVerification::Rejected`].
-///
-/// The outer `Err` is reserved for bucket-infrastructure failures (HEAD/GET
-/// transport errors) which the caller maps to 503; validation failures are
-/// the inner `Rejected` variant (mapped to 422).
-async fn verify_and_fetch_committed_object(
-    bucket: &dyn super::asset_bucket::AssetObjectStore,
-    staging_key: &str,
+/// Everything the commit-time verification needs to decide about one staged
+/// object. Grouped into a struct because the decision has two independent
+/// dimensions -- what the intent registered, and what the gateway is willing
+/// to hold in memory -- and threading eight positional arguments through the
+/// call is how one of them ends up silently transposed.
+struct CommitVerificationRequest<'a> {
+    /// The server-derived key the client's direct PUT targeted.
+    staging_key: &'a str,
+    /// The private immutable key verified bytes are copied to. Used only by
+    /// the streaming path, which fuses the copy with the verification; the
+    /// buffered path leaves the copy to the caller.
+    final_key: &'a str,
     expected_size: u64,
-    expected_sha256: &str,
-    asset_type: &str,
-    content_type: &str,
+    expected_sha256: &'a str,
+    asset_type: &'a str,
+    content_type: &'a str,
+    /// The plan/quota-derived per-object ceiling (issue #259).
     max_object_bytes: u64,
+    /// The largest object the gateway will hold in memory
+    /// (`[asset_bucket].max_gateway_buffer_bytes`). At or below it, the
+    /// object is buffered and screened at full fidelity; above it, it is
+    /// verified and copied in a single bounded-memory pass.
+    buffer_limit: u64,
+}
+
+/// Verifies a presigned-uploaded staging object against its registered intent
+/// and the built-in type/EICAR/manifest content checks, then hands the caller
+/// what it needs to publish.
+///
+/// Two paths, chosen by [`CommitVerificationRequest::buffer_limit`]:
+///
+/// - **Buffered** (object at or below the limit) -- the object is fetched
+///   once, one-shot hashed, and content-validated. Unchanged from before
+///   issue #259's streaming work, and still the path that gives whole-file
+///   signature verification and out-of-process malware scanning their bytes.
+/// - **Streamed** (object above the limit) -- the object is read in chunks
+///   that feed an incremental SHA-256 and an incremental content screen and
+///   are forwarded straight into the final PUT, so peak resident memory is one
+///   HTTP chunk regardless of object size. This is what makes a 100 MB (or 5
+///   GiB) commit safe: before it, peak RSS per commit was the object size,
+///   with no cap on concurrent commits.
+///
+/// Fails closed identically on both paths: on any size, sha256,
+/// per-object-ceiling, or content violation it attempts to delete the orphaned
+/// staging object -- plus, on the streamed path, the final candidate it had
+/// already written -- before returning [`CommitVerification::Rejected`]. The
+/// final key is a fresh 128-bit-random name nothing can reference until the
+/// `stored_assets` row is created, so unverified bytes are never reachable.
+///
+/// The outer `Err` is reserved for bucket-infrastructure failures (HEAD/GET/PUT
+/// transport errors) which the caller maps to 503; validation failures are the
+/// inner `Rejected` variant (mapped to 422).
+async fn verify_committed_object(
+    bucket: &dyn super::asset_bucket::AssetObjectStore,
+    request: &CommitVerificationRequest<'_>,
 ) -> anyhow::Result<CommitVerification> {
-    // 1. HEAD gates the object's size before we download it.
-    let Some(actual_size) = bucket.head_object(staging_key).await? else {
+    // 1. HEAD gates the object's size before we transfer a single byte.
+    let Some(actual_size) = bucket.head_object(request.staging_key).await? else {
         return Ok(CommitVerification::NotUploaded);
     };
-    if actual_size != expected_size || actual_size > max_object_bytes {
-        let _ = best_effort_delete(bucket, staging_key).await;
+    if actual_size != request.expected_size || actual_size > request.max_object_bytes {
+        let _ = best_effort_delete(bucket, request.staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_commit_size_mismatch",
             message: format!(
-                "committed object size {actual_size} does not match the registered {expected_size} bytes"
+                "committed object size {actual_size} does not match the registered {} bytes",
+                request.expected_size
             ),
         }));
     }
 
+    if actual_size > request.buffer_limit {
+        return verify_and_copy_committed_object(bucket, request).await;
+    }
+
     // 2. Fetch to verify sha256 and run built-in content checks on real bytes.
-    let Some(content) = bucket.get_object_if_present(staging_key).await? else {
+    let Some(content) = bucket.get_object_if_present(request.staging_key).await? else {
         return Ok(CommitVerification::NotUploaded);
     };
     let actual_sha256 = sha256_hex(&content);
-    if actual_sha256 != expected_sha256 || content.len() as u64 != expected_size {
-        let _ = best_effort_delete(bucket, staging_key).await;
+    if actual_sha256 != request.expected_sha256 || content.len() as u64 != request.expected_size {
+        let _ = best_effort_delete(bucket, request.staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_commit_hash_mismatch",
             message: "committed object sha256/size does not match the registered intent"
                 .to_string(),
         }));
     }
-    if let Err(message) =
-        super::asset_security::validate_asset_content(asset_type, content_type, &content)
-    {
-        let _ = best_effort_delete(bucket, staging_key).await;
+    if let Err(message) = super::asset_security::validate_asset_content(
+        request.asset_type,
+        request.content_type,
+        &content,
+    ) {
+        let _ = best_effort_delete(bucket, request.staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_rejected",
             message,
@@ -1881,6 +2074,63 @@ async fn verify_and_fetch_committed_object(
     Ok(CommitVerification::Verified {
         bytes: content,
         sha256: actual_sha256,
+    })
+}
+
+/// The bounded-memory half of [`verify_committed_object`]: one pass that
+/// hashes, screens, and copies the staged object to its final key without ever
+/// holding it.
+///
+/// The copy runs *before* the verdict is known, which is safe and deliberate:
+/// the destination is a fresh `obj_<128-bit-random>` under an intent-derived
+/// prefix that no published row references, so a rejection simply deletes it.
+/// The alternative -- a verify pass followed by a copy pass -- would double the
+/// bucket egress for every large object and still not hold the bytes.
+async fn verify_and_copy_committed_object(
+    bucket: &dyn super::asset_bucket::AssetObjectStore,
+    request: &CommitVerificationRequest<'_>,
+) -> anyhow::Result<CommitVerification> {
+    let copy = super::asset_stream::copy_object_with_incremental_screen(
+        bucket,
+        request.staging_key,
+        request.final_key,
+        request.expected_size,
+        request.expected_sha256,
+        request.content_type,
+    )
+    .await?;
+    let verdict = match copy {
+        super::asset_stream::StreamedCopy::SourceMissing => {
+            return Ok(CommitVerification::NotUploaded);
+        }
+        super::asset_stream::StreamedCopy::RejectedByPayloadMismatch(verdict)
+        | super::asset_stream::StreamedCopy::Copied(verdict) => verdict,
+    };
+    if !verdict.matches(request.expected_size, request.expected_sha256) {
+        let _ = best_effort_delete(bucket, request.final_key).await;
+        let _ = best_effort_delete(bucket, request.staging_key).await;
+        return Ok(CommitVerification::Rejected(CommitRejection {
+            code: "asset_commit_hash_mismatch",
+            message: "committed object sha256/size does not match the registered intent"
+                .to_string(),
+        }));
+    }
+    if let Err(message) = super::asset_security::validate_streamed_asset_content(
+        request.asset_type,
+        request.content_type,
+        verdict.eicar_found,
+    ) {
+        let _ = best_effort_delete(bucket, request.final_key).await;
+        let _ = best_effort_delete(bucket, request.staging_key).await;
+        return Ok(CommitVerification::Rejected(CommitRejection {
+            code: "asset_rejected",
+            message,
+        }));
+    }
+    Ok(CommitVerification::VerifiedStreamed {
+        size_bytes: verdict.size_bytes,
+        sha256: verdict.sha256,
+        eicar_found: verdict.eicar_found,
     })
 }
 

@@ -41,10 +41,11 @@ pub use registry::ProviderAdapterRegistry;
 pub use sigv4::{
     canonical_query_string as sigv4_canonical_query_string, presign_query as presign_sigv4_query,
     presign_query_bound as presign_sigv4_query_bound, sign as sign_sigv4,
+    sign_streamed_with_content_hash_header as sign_sigv4_streamed_with_content_hash_header,
     sign_with_content_hash_header as sign_sigv4_with_content_hash_header,
     sign_with_content_hash_header_and_query as sign_sigv4_with_content_hash_header_and_query,
     AwsCredentials, BoundPresignedUpload, PresignBoundPayload, PresignRequest, SignedHeaders,
-    SigningRequest,
+    SigningRequest, StreamedSigningRequest,
 };
 pub use types::{
     canonical_provider_adapter_family, is_openai_compatible_provider_kind,

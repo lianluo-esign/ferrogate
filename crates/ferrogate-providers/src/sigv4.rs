@@ -85,6 +85,58 @@ pub fn sign_with_content_hash_header(
     sign_internal(request, credentials, true, "")
 }
 
+/// Everything needed to sign a request whose body the caller will *stream*
+/// rather than hold: identical to [`SigningRequest`] except the payload is
+/// named by its already-known hex SHA-256 instead of by its bytes.
+///
+/// This exists so the asset large-file path (issue #259) can PUT a
+/// multi-gigabyte object to an S3-compatible bucket without ever materializing
+/// it in gateway memory. SigV4 needs the payload hash *before* the body is
+/// sent, which normally forces the signer to hold the whole body; the presigned
+/// commit path already knows the object's SHA-256 (the client declared it and
+/// the gateway verifies it byte-by-byte as it streams), so it can supply the
+/// hash directly.
+///
+/// The caller is responsible for the hash actually matching the bytes it sends:
+/// an S3-compatible bucket recomputes it and rejects a mismatch, which is the
+/// desired fail-closed behavior, not something this signer papers over.
+#[derive(Clone, Copy)]
+pub struct StreamedSigningRequest<'a> {
+    pub method: &'a str,
+    /// Absolute path only (no scheme/host/query), e.g. `/bucket/key`.
+    pub path: &'a str,
+    pub host: &'a str,
+    pub region: &'a str,
+    pub service: &'a str,
+    /// Lowercase hex SHA-256 of the payload the caller will stream.
+    pub payload_sha256_hex: &'a str,
+    pub timestamp_unix: u64,
+}
+
+/// Same as [`sign_with_content_hash_header`], but takes the payload's SHA-256
+/// instead of the payload -- see [`StreamedSigningRequest`]. Produces a
+/// byte-identical `Authorization` header to
+/// [`sign_with_content_hash_header`] for the same request whose body hashes to
+/// `payload_sha256_hex` (pinned by
+/// `streamed_signing_matches_buffered_signing_for_the_same_payload`).
+pub fn sign_streamed_with_content_hash_header(
+    request: &StreamedSigningRequest<'_>,
+    credentials: &AwsCredentials,
+) -> SignedHeaders {
+    sign_canonical(
+        request.method,
+        request.path,
+        request.host,
+        request.region,
+        request.service,
+        request.timestamp_unix,
+        credentials,
+        true,
+        "",
+        request.payload_sha256_hex.to_string(),
+    )
+}
+
 /// Same as [`sign_with_content_hash_header`], but folds a pre-built canonical
 /// query string into the signature -- required for S3 collection operations
 /// like `ListObjectsV2` (`GET /{bucket}?list-type=2&...`, the #263 GC reconcile
@@ -124,31 +176,55 @@ fn sign_internal(
     include_content_hash_header: bool,
     canonical_query: &str,
 ) -> SignedHeaders {
-    let (amz_date, date_stamp) = format_timestamps(request.timestamp_unix);
-    let credential_scope = format!(
-        "{date_stamp}/{}/{}/aws4_request",
-        request.region, request.service
-    );
+    sign_canonical(
+        request.method,
+        request.path,
+        request.host,
+        request.region,
+        request.service,
+        request.timestamp_unix,
+        credentials,
+        include_content_hash_header,
+        canonical_query,
+        hex_sha256(request.body),
+    )
+}
 
-    let hashed_payload = hex_sha256(request.body);
+/// The one SigV4 header-auth derivation, parameterized by the *already
+/// computed* payload hash. Both the buffered ([`sign_internal`]) and the
+/// streamed ([`sign_streamed_with_content_hash_header`]) entry points funnel
+/// through here so a streamed upload can never drift from the signature a
+/// buffered upload of the same bytes would produce.
+#[allow(clippy::too_many_arguments)]
+fn sign_canonical(
+    method: &str,
+    path: &str,
+    host: &str,
+    region: &str,
+    service: &str,
+    timestamp_unix: u64,
+    credentials: &AwsCredentials,
+    include_content_hash_header: bool,
+    canonical_query: &str,
+    hashed_payload: String,
+) -> SignedHeaders {
+    let (amz_date, date_stamp) = format_timestamps(timestamp_unix);
+    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+
     let (signed_header_names, canonical_headers) = if include_content_hash_header {
         (
             "host;x-amz-content-sha256;x-amz-date",
-            format!(
-                "host:{}\nx-amz-content-sha256:{hashed_payload}\nx-amz-date:{amz_date}\n",
-                request.host
-            ),
+            format!("host:{host}\nx-amz-content-sha256:{hashed_payload}\nx-amz-date:{amz_date}\n"),
         )
     } else {
         (
             "host;x-amz-date",
-            format!("host:{}\nx-amz-date:{amz_date}\n", request.host),
+            format!("host:{host}\nx-amz-date:{amz_date}\n"),
         )
     };
     let canonical_request = format!(
-        "{}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_header_names}\n{hashed_payload}",
-        request.method,
-        canonical_uri(request.path),
+        "{method}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_header_names}\n{hashed_payload}",
+        canonical_uri(path),
     );
 
     let string_to_sign = format!(
@@ -156,12 +232,8 @@ fn sign_internal(
         hex_sha256(canonical_request.as_bytes())
     );
 
-    let signing_key = derive_signing_key(
-        &credentials.secret_access_key,
-        &date_stamp,
-        request.region,
-        request.service,
-    );
+    let signing_key =
+        derive_signing_key(&credentials.secret_access_key, &date_stamp, region, service);
     let signature = hex_hmac(&signing_key, string_to_sign.as_bytes());
 
     let authorization = format!(
@@ -1180,6 +1252,69 @@ mod tests {
         )
         .expect("the host-only presign must remain verifiable");
         assert_eq!(recomputed, presented);
+    }
+
+    #[test]
+    fn streamed_signing_matches_buffered_signing_for_the_same_payload() {
+        // The asset large-file path (issue #259) signs a multi-gigabyte PUT it
+        // will never hold, by naming the payload's SHA-256 instead of passing
+        // the payload. If that produced a different signature than signing the
+        // bytes does, every streamed upload would be refused by the bucket --
+        // and the failure would look like data corruption, not a signer bug.
+        let credentials = AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        };
+        let body = b"a staged asset object the gateway refuses to buffer";
+        let buffered = sign_with_content_hash_header(
+            &SigningRequest {
+                method: "PUT",
+                path: "/my-bucket/.ferrogate/objects/abc/obj_deadbeef",
+                host: "storage.example.test",
+                region: "us-east-1",
+                service: "s3",
+                body,
+                timestamp_unix: 1_440_938_160,
+            },
+            &credentials,
+        );
+        let streamed = sign_streamed_with_content_hash_header(
+            &StreamedSigningRequest {
+                method: "PUT",
+                path: "/my-bucket/.ferrogate/objects/abc/obj_deadbeef",
+                host: "storage.example.test",
+                region: "us-east-1",
+                service: "s3",
+                payload_sha256_hex: &hex_sha256(body),
+                timestamp_unix: 1_440_938_160,
+            },
+            &credentials,
+        );
+
+        assert_eq!(streamed.authorization, buffered.authorization);
+        assert_eq!(streamed.x_amz_date, buffered.x_amz_date);
+        assert_eq!(streamed.x_amz_content_sha256, buffered.x_amz_content_sha256);
+        assert_eq!(
+            streamed.x_amz_content_sha256.as_deref(),
+            Some(hex_sha256(body).as_str())
+        );
+
+        // ...and a DIFFERENT declared hash must produce a different signature,
+        // so the bucket's own payload check is what refuses a lying caller.
+        let lying = sign_streamed_with_content_hash_header(
+            &StreamedSigningRequest {
+                method: "PUT",
+                path: "/my-bucket/.ferrogate/objects/abc/obj_deadbeef",
+                host: "storage.example.test",
+                region: "us-east-1",
+                service: "s3",
+                payload_sha256_hex: &hex_sha256(b"different bytes"),
+                timestamp_unix: 1_440_938_160,
+            },
+            &credentials,
+        );
+        assert_ne!(lying.authorization, buffered.authorization);
     }
 
     #[test]

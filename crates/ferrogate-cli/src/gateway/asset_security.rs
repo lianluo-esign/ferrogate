@@ -24,7 +24,7 @@ use super::asset_publish_gate::{
     evaluate_publish_gate, PublishApprovalEvidence, PublishGateDecision, PublishVisibility,
 };
 use super::asset_scan::{
-    contains_eicar, resolve_scan_outcome, AssetScanConfig, ScanOutcome, ScanState,
+    contains_eicar, resolve_scan_outcome, AssetScanConfig, ScanBackend, ScanOutcome, ScanState,
 };
 use super::asset_signature::{
     verify_asset_signature, AssetSignatureInput, PublisherKeyRegistry, SignatureStatus,
@@ -63,6 +63,43 @@ pub(super) fn validate_asset_content(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// The streamed counterpart of [`validate_asset_content`] (issue #259), for an
+/// object the gateway verified byte-by-byte without ever holding it.
+///
+/// Two of the three rules answer identically from streamed evidence: the
+/// content-type allowlist never needed the bytes, and the malware-signature
+/// match was computed over every byte during the bounded pass. The third does
+/// not: an `mcp_manifest`'s declared transport can only be read by parsing the
+/// whole JSON document, so a manifest too large for the gateway's in-memory
+/// budget is REJECTED rather than admitted with its most dangerous field
+/// unread -- a `stdio` manifest makes a *consuming* agent's MCP client spawn an
+/// arbitrary local process, which is precisely the check that must not become
+/// optional above a size threshold.
+pub(super) fn validate_streamed_asset_content(
+    asset_type: &str,
+    content_type: &str,
+    eicar_found: bool,
+) -> Result<(), String> {
+    if !content_type_allowed(asset_type, content_type) {
+        return Err(format!(
+            "content-type {content_type} is not allowed for asset_type {asset_type}"
+        ));
+    }
+    if eicar_found {
+        return Err("content matched a known malware test signature".to_string());
+    }
+    if asset_type == "mcp_manifest" {
+        return Err(
+            "mcp_manifest assets larger than the gateway's in-memory screening budget \
+             ([asset_bucket].max_gateway_buffer_bytes) are not allowed: the declared transport \
+             can only be checked by parsing the whole manifest, and an unchecked stdio manifest \
+             causes the consuming agent's MCP client to spawn an arbitrary local process"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -172,13 +209,46 @@ impl AssetSecurityContext {
     }
 }
 
+/// How the object being screened is available to the screener (issue #259).
+///
+/// The inline push and any object small enough for the gateway's in-memory
+/// budget arrive as [`ScreenedContent::Buffered`] and are screened at full
+/// fidelity. An object above that budget is verified and copied in a single
+/// bounded-memory pass (`asset_stream`), so the gateway never holds it: it
+/// arrives as [`ScreenedContent::Streamed`] carrying the facts that pass
+/// already established over *every* byte. The distinction is explicit in the
+/// type rather than implied by a size argument so no control can be silently
+/// skipped -- [`screen_asset_push`] must decide, per control, whether it can
+/// be answered from streamed evidence, and fails closed where it cannot.
+pub(super) enum ScreenedContent<'a> {
+    /// The gateway holds the whole object.
+    Buffered(&'a [u8]),
+    /// The gateway never held the object; these are the bounded-pass results.
+    Streamed {
+        size_bytes: u64,
+        /// True when the offline malware-signature scan matched somewhere in
+        /// the stream. Computed over every byte, with a carry window across
+        /// chunk boundaries -- not a sample.
+        eicar_found: bool,
+    },
+}
+
+impl ScreenedContent<'_> {
+    fn size_bytes(&self) -> u64 {
+        match self {
+            Self::Buffered(bytes) => bytes.len() as u64,
+            Self::Streamed { size_bytes, .. } => *size_bytes,
+        }
+    }
+}
+
 /// Per-request inputs to [`screen_asset_push`].
 pub(super) struct AssetPushScreeningRequest<'a> {
     pub(super) asset_id: &'a str,
     pub(super) tenant_id: &'a str,
     pub(super) asset_type: &'a str,
     pub(super) content_type: &'a str,
-    pub(super) content: &'a [u8],
+    pub(super) content: ScreenedContent<'a>,
     pub(super) content_sha256: &'a str,
     pub(super) signature: Option<AssetSignatureInput>,
     pub(super) visibility: PublishVisibility,
@@ -270,9 +340,15 @@ pub(super) async fn screen_asset_push(
     request: AssetPushScreeningRequest<'_>,
 ) -> Result<AssetScreening, ScreeningRejection> {
     // (1) Cheap synchronous gates first.
-    if let Err(message) =
-        validate_asset_content(request.asset_type, request.content_type, request.content)
-    {
+    let validation = match &request.content {
+        ScreenedContent::Buffered(content) => {
+            validate_asset_content(request.asset_type, request.content_type, content)
+        }
+        ScreenedContent::Streamed { eicar_found, .. } => {
+            validate_streamed_asset_content(request.asset_type, request.content_type, *eicar_found)
+        }
+    };
+    if let Err(message) = validation {
         return Err(ScreeningRejection {
             code: "asset_rejected",
             message,
@@ -280,10 +356,33 @@ pub(super) async fn screen_asset_push(
         });
     }
 
-    // (2) Signature verification.
-    let signature = match request.signature {
-        Some(input) => verify_asset_signature(request.content, &input, &context.keys),
-        None => SignatureStatus::Unsigned,
+    // (2) Signature verification. A detached signature is a claim about the
+    // whole file, so it cannot be verified from streamed evidence: an object
+    // the gateway refused to hold and that presents a signature is REJECTED
+    // rather than silently downgraded to `unsigned`, which would let a
+    // publisher's signature requirement evaporate above a size threshold.
+    // Operators who need signature verification for objects this large raise
+    // `[asset_bucket].max_gateway_buffer_bytes` and accept the memory cost
+    // explicitly.
+    let signature = match (&request.content, request.signature) {
+        (ScreenedContent::Buffered(content), Some(input)) => {
+            verify_asset_signature(content, &input, &context.keys)
+        }
+        (ScreenedContent::Buffered(_), None) | (ScreenedContent::Streamed { .. }, None) => {
+            SignatureStatus::Unsigned
+        }
+        (ScreenedContent::Streamed { size_bytes, .. }, Some(_)) => {
+            return Err(ScreeningRejection {
+                code: "asset_signature_requires_buffering",
+                message: format!(
+                    "a detached signature covers the whole object, and this {size_bytes}-byte \
+                     object exceeds the gateway's in-memory screening budget \
+                     ([asset_bucket].max_gateway_buffer_bytes), so the signature cannot be \
+                     verified; publish it unsigned or raise that budget"
+                ),
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+            });
+        }
     };
     if context.require_signature && !signature.is_verified() {
         let detail = match &signature {
@@ -322,24 +421,45 @@ pub(super) async fn screen_asset_push(
 
     // (4) Malware scan -- deferred for large objects, inline otherwise.
     let scanner = context.scan_config.build_scanner();
-    let scan_backend = scanner.backend_name();
-    let scan_state = if context.scan_config.should_defer_scan(request.content.len()) {
+    let mut scan_backend = scanner.backend_name();
+    let size_bytes = request.content.size_bytes();
+    let deferred = context
+        .scan_config
+        .should_defer_scan(usize::try_from(size_bytes).unwrap_or(usize::MAX));
+    let scan_state = match (&request.content, deferred) {
         // Large object: admit to `pending_scan` (invisible) and let an
         // out-of-band scan promote it to clean once verified.
-        ScanState::PendingScan
-    } else {
-        let verdict = scanner.scan(request.content).await;
-        match resolve_scan_outcome(verdict, context.scan_config.unavailable_policy) {
-            ScanOutcome::Admit => ScanState::Clean,
-            ScanOutcome::Quarantine(_) => ScanState::Quarantined,
-            ScanOutcome::Reject(reason) => {
-                return Err(ScreeningRejection {
-                    code: "asset_scan_rejected",
-                    message: reason,
-                    status: StatusCode::UNPROCESSABLE_ENTITY,
-                });
+        (_, true) => ScanState::PendingScan,
+        (ScreenedContent::Buffered(content), false) => {
+            let verdict = scanner.scan(content).await;
+            match resolve_scan_outcome(verdict, context.scan_config.unavailable_policy) {
+                ScanOutcome::Admit => ScanState::Clean,
+                ScanOutcome::Quarantine(_) => ScanState::Quarantined,
+                ScanOutcome::Reject(reason) => {
+                    return Err(ScreeningRejection {
+                        code: "asset_scan_rejected",
+                        message: reason,
+                        status: StatusCode::UNPROCESSABLE_ENTITY,
+                    });
+                }
             }
         }
+        // Streamed: the offline signature scan already ran over every byte in
+        // the bounded pass (its verdict is `eicar_found`, and a match was
+        // rejected above), so the built-in backend's answer is known without
+        // re-reading the object. An out-of-process backend (ClamAV / HTTP)
+        // needs the bytes it will never get here, so the object is admitted
+        // `pending_scan` -- stored but WITHHELD from every read path until an
+        // out-of-band scan proves it clean. That is the same store-but-withhold
+        // semantics the configured async threshold already expresses; it is
+        // never silently treated as clean.
+        (ScreenedContent::Streamed { .. }, false) => match context.scan_config.backend {
+            ScanBackend::Eicar => ScanState::Clean,
+            _ => {
+                scan_backend = "deferred_streaming";
+                ScanState::PendingScan
+            }
+        },
     };
 
     let evidence = PublishApprovalEvidence::from_decision(
@@ -354,7 +474,7 @@ pub(super) async fn screen_asset_push(
         object: "asset.verification_manifest",
         asset_id: request.asset_id.to_string(),
         content_sha256: request.content_sha256.to_string(),
-        size_bytes: request.content.len() as u64,
+        size_bytes,
         scan_state: scan_state.as_str(),
         scan_backend,
         signature: signature.clone(),

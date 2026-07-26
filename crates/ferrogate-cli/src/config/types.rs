@@ -566,6 +566,18 @@ pub(crate) struct AssetBucketConfig {
     /// `asset_storage_quota_bytes` cap. Defaults to 5 GiB when unset.
     #[serde(default)]
     pub(crate) presign_max_object_bytes: Option<u64>,
+    /// The largest object the gateway will ever hold in memory for an asset
+    /// operation (issue #259). Objects at or below it keep the buffered,
+    /// full-fidelity path (whole-file signature verification, out-of-process
+    /// malware scanning, `mcp_manifest` transport parsing). Larger objects are
+    /// verified and copied in a single bounded-memory streaming pass at commit
+    /// time, and are pulled through the presigned direct-download endpoint
+    /// rather than the gateway hot path. Defaults to
+    /// `INLINE_ASSET_MAX_BYTES` (10 MiB) when unset, so an inline-stored asset
+    /// is never affected. Raising it re-enables whole-file controls for larger
+    /// objects at a proportional, explicitly-accepted memory cost.
+    #[serde(default)]
+    pub(crate) max_gateway_buffer_bytes: Option<u64>,
     /// Cloudflare account id for the `workers-static-assets` backend (#411).
     /// Ignored by the default S3 backend.
     #[serde(default)]

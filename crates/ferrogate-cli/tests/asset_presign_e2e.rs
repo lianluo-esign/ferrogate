@@ -189,10 +189,21 @@ fn handle_bucket_connection(mut stream: TcpStream, server_state: Arc<Mutex<Bucke
             Some(bytes) => write_http_response(&mut stream, "200 OK", b"", Some(bytes.len())),
             None => write_http_response(&mut stream, "404 Not Found", b"", None),
         },
-        "GET" => match state.objects.get(path) {
-            Some(bytes) => write_http_response(&mut stream, "200 OK", bytes, None),
-            None => write_http_response(&mut stream, "404 Not Found", b"", None),
-        },
+        "GET" => {
+            // Copy out and RELEASE the state lock before writing the body.
+            // Streaming a large object makes the gateway's verification GET and
+            // its copy PUT concurrent by construction, and writing a
+            // multi-megabyte body blocks until the reader drains it -- holding
+            // the lock across that write deadlocks the PUT connection's handler
+            // against the GET connection's, which is the bucket-side analogue of
+            // the bug this whole change is about.
+            let object = state.objects.get(path).cloned();
+            drop(state);
+            match object {
+                Some(bytes) => write_http_response(&mut stream, "200 OK", &bytes, None),
+                None => write_http_response(&mut stream, "404 Not Found", b"", None),
+            }
+        }
         "DELETE" if state.refuse_delete_paths.contains(path) => {
             // The object survives: this is the "the bucket said no" case, not
             // a no-op. `delete_object` errors on any non-2xx/404.
@@ -1866,5 +1877,406 @@ fn aborting_an_intent_reclaims_staging_and_records_a_corroborated_rejection_clas
             .iter()
             .any(|event| event["action"] == "asset.push" && event["outcome"] == "rejected_bucket"),
         "commit-time absence must NOT be audited as a bucket rejection: {audit}"
+    );
+}
+
+// ---- 100 MB lifecycle with a measured RSS ceiling (issue #259) ---------------
+
+/// Bytes in the large-object lifecycle proof: the acceptance criterion's
+/// "100MB binary", spelled exactly.
+const LARGE_OBJECT_BYTES: usize = 100 * 1024 * 1024;
+
+/// The gateway's in-memory budget for the run below. Two orders of magnitude
+/// under the object, so the commit is forced onto the streaming path.
+const LARGE_RUN_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+/// How much resident memory the gateway is allowed to gain across the whole
+/// 100 MB commit.
+///
+/// This is the assertion the acceptance criterion turns on, so its value is
+/// argued rather than tuned. The pre-#259 commit did
+/// `response.bytes().await?.to_vec()` (one full copy, plus reqwest's own
+/// `Bytes` buffer before the `to_vec`) and then re-PUT that buffer, so its
+/// floor was ~100 MB and its realistic peak ~200 MB. The streaming commit's
+/// resident cost is one HTTP chunk plus a 67-byte carry window. 32 MiB sits
+/// far above the streaming path's real cost (allocator slack, connection
+/// buffers, the tokio runtime's own growth under load) and far below the
+/// buffering path's floor -- there is no value of "chunk size" that lets the
+/// old code pass this, and no plausible allocator behavior that makes the new
+/// code fail it.
+const LARGE_RUN_RSS_CEILING_BYTES: u64 = 32 * 1024 * 1024;
+
+fn write_large_object_config(path: &std::path::Path, gateway_addr: &str, bucket_endpoint: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[asset_bucket]
+enabled = true
+endpoint = "{bucket_endpoint}"
+bucket = "{BUCKET}"
+region = "{REGION}"
+access_key_id = "{ACCESS_KEY_ID}"
+secret_access_key_env = "{SECRET_ENV}"
+presign_ttl_secs = {PRESIGN_TTL_SECS}
+presign_max_object_bytes = {}
+max_gateway_buffer_bytes = {LARGE_RUN_BUFFER_BYTES}
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "asset-client"
+name = "Asset client"
+key = "asset-secret"
+scopes = ["assets.read", "assets.write"]
+organization_id = "tenant-presign-e2e"
+"#,
+            LARGE_OBJECT_BYTES * 2
+        ),
+    )
+    .unwrap();
+}
+
+/// Resident set size of `pid`, read straight from `/proc/<pid>/statm`.
+///
+/// Read in-process rather than shelled out to `ps`: no subprocess per sample
+/// (which would itself perturb the measurement and cap the sampling rate), no
+/// dependence on `ps` output formatting, and no PATH assumptions. Field 2 of
+/// `statm` is resident pages.
+#[cfg(target_os = "linux")]
+fn resident_bytes(pid: u32) -> u64 {
+    let Ok(statm) = std::fs::read_to_string(format!("/proc/{pid}/statm")) else {
+        return 0;
+    };
+    let pages: u64 = statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|field| field.parse().ok())
+        .unwrap_or(0);
+    pages * 4096
+}
+
+/// Samples `pid`'s RSS until told to stop, returning the maximum observed.
+///
+/// Sampling (rather than a before/after difference) is the only honest way to
+/// measure this: a 100 MB `Vec` is `mmap`ed by glibc and returned to the OS the
+/// moment it is dropped, so a buffering implementation's peak is completely
+/// invisible to a post-hoc reading. The 2 ms interval is far finer than the
+/// hundreds of milliseconds a 100 MB buffer would have to stay resident for
+/// (it lives across the whole GET, the hash, the screen and the re-PUT).
+#[cfg(target_os = "linux")]
+struct RssSampler {
+    stop: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<u64>,
+}
+
+#[cfg(target_os = "linux")]
+impl RssSampler {
+    fn start(pid: u32) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut peak = 0;
+            while !thread_stop.load(Ordering::Relaxed) {
+                peak = peak.max(resident_bytes(pid));
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            peak.max(resident_bytes(pid))
+        });
+        Self { stop, handle }
+    }
+
+    fn finish(self) -> u64 {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.join().expect("rss sampler thread")
+    }
+}
+
+/// Streams a direct bucket `GET` and returns `(status, sha256, byte count)`
+/// without ever holding the body -- the client half of the same discipline the
+/// gateway now follows, so a 100 MB download does not need 100 MB in the test.
+fn direct_bucket_get_streaming_sha256(url: &str) -> (u16, String, u64) {
+    use sha2::{Digest, Sha256};
+
+    let authority_and_target = url
+        .strip_prefix("http://")
+        .expect("the local bucket URL must use http");
+    let (authority, target) = authority_and_target
+        .split_once('/')
+        .expect("presigned URL must have an object path");
+    let mut stream = TcpStream::connect(authority).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /{target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+
+    let mut head = Vec::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let body_start = loop {
+        let read = stream.read(&mut buffer).expect("read bucket response");
+        assert!(read > 0, "bucket closed before sending response headers");
+        head.extend_from_slice(&buffer[..read]);
+        if let Some(position) = head.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+    let status = String::from_utf8_lossy(&head[..body_start])
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+
+    let mut hasher = Sha256::new();
+    let mut length = 0_u64;
+    hasher.update(&head[body_start..]);
+    length += (head.len() - body_start) as u64;
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                hasher.update(&buffer[..read]);
+                length += read as u64;
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(64);
+    for byte in digest {
+        sha256.push_str(&format!("{byte:02x}"));
+    }
+    (status, sha256, length)
+}
+
+/// The #259 acceptance criterion that was reopened twice: a 100 MB object goes
+/// through the presigned lifecycle end-to-end while the gateway's resident
+/// memory stays flat.
+///
+/// What this actually measures, stated plainly so it cannot be over-read:
+///
+/// - The *upload* leg never touched the gateway before this change either --
+///   the client PUTs to the bucket directly. It is exercised here so the run is
+///   a real lifecycle, not to prove anything new.
+/// - The *commit* leg is what the reopen was about. The gateway must read the
+///   staged object back to verify its SHA-256 and screen it, and it used to do
+///   that by materializing the whole object. The sampled RSS ceiling around the
+///   commit request is the proof that it no longer does.
+/// - The *pull* leg is proven two ways: the registry pull refuses to buffer the
+///   object at all (typed 413 pointing at the presigned endpoint), and the
+///   presigned download returns bytes whose SHA-256 matches what was pushed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_100mb_object_completes_the_presigned_lifecycle_with_flat_gateway_rss() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_large_object_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let gateway_pid = gateway.id();
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    // The `free` plan's 10 MiB cumulative asset quota would reject a 100 MB
+    // object at the intent preflight (`effective_max_object_bytes` is the min
+    // of the global ceiling, the per-object ceiling and the cumulative quota),
+    // so give this tenant room. This is deliberately a QUOTA change, not a
+    // ceiling change: the point of the run is the memory bound, and the size
+    // bounds must stay exactly as shipped.
+    let quota = http_request(
+        &gateway_addr,
+        "PUT",
+        "/admin/v1/quota-policies/tenant/tenant-presign-e2e",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"asset_storage_quota_bytes":{},"enabled":true}}"#,
+            LARGE_OBJECT_BYTES * 4
+        ),
+    );
+    assert_status(&quota, 200);
+
+    // A deterministic, incompressible-enough 100 MB "binary".
+    let mut content = vec![0_u8; LARGE_OBJECT_BYTES];
+    let mut lcg = 0x2545_f491_4f6c_dd1d_u64;
+    for byte in content.iter_mut() {
+        lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        *byte = (lcg >> 33) as u8;
+    }
+    let sha256 = sha256_hex(&content);
+
+    let intent_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/big-binary/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(r#"{{"size_bytes":{LARGE_OBJECT_BYTES},"sha256":"{sha256}"}}"#),
+    );
+    assert_status(&intent_response, 200);
+    let intent = response_json(&intent_response);
+    let upload_id = intent["upload_id"].as_str().expect("upload_id").to_string();
+    let upload_url = intent["upload_url"]
+        .as_str()
+        .expect("upload_url")
+        .to_string();
+
+    let upload = direct_bucket_request(
+        "PUT",
+        &upload_url,
+        &content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "direct 100MB upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+    drop(content);
+
+    // Baseline the gateway at rest, then sample it continuously across the
+    // commit -- the one request where the gateway itself handles the object.
+    let baseline_rss = resident_bytes(gateway_pid);
+    assert!(
+        baseline_rss > 8 * 1024 * 1024,
+        "refusing to trust an RSS reading of {baseline_rss} bytes for pid {gateway_pid}: \
+         that is not a running gateway, so the ceiling below would pass vacuously"
+    );
+    let sampler = RssSampler::start(gateway_pid);
+    let commit_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/big-binary/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"upload_id":"{upload_id}","size_bytes":{LARGE_OBJECT_BYTES},"sha256":"{sha256}","content_type":"application/octet-stream"}}"#
+        ),
+    );
+    let peak_rss = sampler.finish();
+
+    assert_status(&commit_response, 200);
+    let committed = response_json(&commit_response);
+    assert_eq!(committed["asset"]["size_bytes"], LARGE_OBJECT_BYTES as u64);
+    assert_eq!(committed["asset"]["content_hash"], sha256);
+    assert_eq!(committed["asset"]["storage_backed"], true);
+    assert_no_bucket_location_fields(&committed);
+
+    let growth = peak_rss.saturating_sub(baseline_rss);
+    assert!(
+        growth < LARGE_RUN_RSS_CEILING_BYTES,
+        "committing a {LARGE_OBJECT_BYTES}-byte object grew gateway RSS by {growth} bytes \
+         (baseline {baseline_rss}, peak {peak_rss}); the ceiling is \
+         {LARGE_RUN_RSS_CEILING_BYTES}. A growth at or above the object size means the \
+         commit path is buffering the whole object again."
+    );
+
+    // The registry pull must REFUSE to buffer an object this size rather than
+    // quietly reintroducing the same unbounded read on the read path.
+    let inline_pull = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/cli_tool/big-binary/1.0.0",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert_json_error(&inline_pull, 413, "asset_too_large_for_inline_pull");
+    assert!(
+        response_json(&inline_pull)["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/v1/assets/presign/download/"),
+        "the refusal must name the endpoint that does work: {inline_pull}"
+    );
+
+    // ...and the presigned download returns the exact bytes that were pushed,
+    // straight from the bucket, with the gateway again staying flat (it only
+    // signs a URL -- it is not in the data path at all).
+    let download_sampler = RssSampler::start(gateway_pid);
+    let download_response = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/presign/download/cli_tool/big-binary/1.0.0",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert_status(&download_response, 200);
+    let download = response_json(&download_response);
+    assert_eq!(download["sha256"], sha256);
+    assert_eq!(download["size_bytes"], LARGE_OBJECT_BYTES as u64);
+    let download_url = download["download_url"]
+        .as_str()
+        .expect("download_url")
+        .to_string();
+
+    let (status, fetched_sha256, fetched_len) = direct_bucket_get_streaming_sha256(&download_url);
+    let download_peak = download_sampler.finish();
+    assert_eq!(status, 200, "the presigned download must serve the object");
+    assert_eq!(fetched_len, LARGE_OBJECT_BYTES as u64);
+    assert_eq!(
+        fetched_sha256, sha256,
+        "the bytes fetched directly from the bucket must be the bytes that were pushed"
+    );
+    let download_growth = download_peak.saturating_sub(baseline_rss);
+    assert!(
+        download_growth < LARGE_RUN_RSS_CEILING_BYTES,
+        "issuing a presigned download for a {LARGE_OBJECT_BYTES}-byte object grew gateway RSS \
+         by {download_growth} bytes; the gateway must not be in the data path"
+    );
+
+    // The bucket saw exactly the traffic the design claims: the client's direct
+    // PUT to staging, the gateway's verification GET, the gateway's copy PUT to
+    // the private final key, the staging reclamation, and the client's direct
+    // GET of the final object. No second full-size PUT, i.e. no second copy.
+    let requests = bucket_state.lock().unwrap();
+    let puts = requests
+        .requests
+        .iter()
+        .filter(|request| request.method == "PUT")
+        .count();
+    assert_eq!(
+        puts, 2,
+        "expected exactly the client's staging PUT and the gateway's single copy PUT"
+    );
+    assert_eq!(
+        requests
+            .requests
+            .iter()
+            .filter(|request| request.method == "GET")
+            .count(),
+        2,
+        "expected exactly the gateway's verification GET and the client's download GET"
     );
 }

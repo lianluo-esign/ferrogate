@@ -30,7 +30,7 @@ Implemented by `crates/ferrogate-cli/src/gateway/asset_presign.rs`,
   `removal_failed`), never what it intended.
 - **Commit** - `POST /v1/assets/presign/commit/{asset_type}/{name}/{version}`
   requires that `upload_id`, verifies the staging object's size (HEAD) and
-  SHA-256 (fetch), and applies the built-in content/type checks. It then copies
+  SHA-256, and applies the built-in content/type checks. It then copies
   verified bytes to a new internal immutable final key and conditionally
   creates the `stored_assets` metadata row. That key is never a client `PUT`
   target and is not serialized in list, manifest, or standalone response
@@ -40,13 +40,73 @@ Implemented by `crates/ferrogate-cli/src/gateway/asset_presign.rs`,
   returns a short-TTL presigned `GET` URL plus the object's `sha256` and
   `size_bytes` so the agent can verify the bytes it fetches directly.
 
-The presigned commit path does **not** provide full parity with inline publish
-supply-chain policy. It does not run detached-signature, approval, or pluggable
-scanner checks. Deployments that require those controls must keep such assets
-on the inline path or add equivalent commit-path enforcement before migration.
+The presigned commit path **does** run the same supply-chain screening service
+as the inline push (`asset_security::screen_asset_push`, added in #366):
+detached-signature verification, the cross-tenant publish approval gate, the
+pluggable malware scanner, and the pending/quarantined store-but-withhold
+states. The commit body carries `signature` / `signature_format` /
+`signature_key_id` / `visibility` / `approval_id`, mirroring the inline path's
+`x-asset-signature*` / `x-asset-visibility` / `x-asset-approval-id` headers
+one-for-one. There is no supply-chain reason to keep signed or approval-gated
+assets off the presigned path.
+
+The one parity limit is a **memory** limit, not a policy one, and it is stated
+in full under "Large objects and the gateway memory bound" below: above
+`[asset_bucket].max_gateway_buffer_bytes` the gateway never holds the object,
+so whole-file controls that need the bytes (detached-signature verification,
+out-of-process scanner backends, `mcp_manifest` transport parsing) cannot run
+and the commit **fails closed** rather than skipping them.
 
 All reads for bucket-backed objects can go through gateway-issued presigned
 GETs, so the public bucket URL is no longer required for correctness.
+
+## Large objects and the gateway memory bound
+
+Object bytes never traverse the gateway on the upload or download legs -- those
+are direct client-to-bucket transfers over presigned URLs. The commit leg is
+different: the gateway has to read the staged object back to verify its SHA-256
+and screen it before publishing. `[asset_bucket].max_gateway_buffer_bytes`
+(default 10 MiB) is the ceiling on how much of an object it will hold while
+doing that, and it splits the commit into two behaviors:
+
+- **At or below the bound** — the object is buffered and screened at full
+  fidelity. Unchanged behavior.
+- **Above the bound** — the object is verified and copied to its final key in a
+  single streaming pass: fixed-size chunks feed an incremental SHA-256 and an
+  incremental malware-signature screen (with a carry window across chunk
+  boundaries, so a signature cannot hide on a boundary) and are handed straight
+  to the final `PUT`. Resident cost is one HTTP chunk regardless of object
+  size. A mismatch deletes the final candidate **and** the staging object and
+  returns the same `422` the buffered path returns; the final key is fresh
+  128-bit randomness that no published row references, so unverified bytes are
+  never reachable.
+
+Three controls cannot be answered from a stream, and each fails closed rather
+than degrading:
+
+| Control | Above the bound |
+|---|---|
+| Detached publisher signature | `422 asset_signature_requires_buffering`. Never downgraded to "unsigned" — that would void a signing requirement for exactly the largest artifacts. |
+| Out-of-process scanner (ClamAV / HTTP backend) | Stored `pending_scan`: **invisible and not downloadable** until an out-of-band scan promotes it. Never treated as clean. The built-in offline signature scan still runs over every byte. |
+| `mcp_manifest` transport | `422 asset_rejected`. The `stdio` check needs the whole JSON document, and an unchecked `stdio` manifest makes a *consuming* agent's MCP client spawn an arbitrary local process. |
+
+Raise `max_gateway_buffer_bytes` to re-enable those controls for larger objects
+and accept the proportional memory cost explicitly. Note the cost is per
+in-flight commit and there is no cap on concurrent commits, so
+`max_gateway_buffer_bytes x expected concurrency` is the number to size against.
+
+The **registry pull** (`GET /v1/assets/{asset_type}/{name}/{version}`) serves
+from a full in-memory copy, so it refuses a bucket-backed object above the same
+bound with `413 asset_too_large_for_inline_pull` and names the presigned
+download endpoint in the message. Large objects are pulled the way they were
+pushed: directly from the bucket.
+
+Bucket transport failures are reported to callers as a generic
+`503 asset_bucket_unavailable` with the diagnostic detail (including the
+internal object key) written to the gateway log against the response's
+`request_id`. The underlying HTTP error's text embeds the request URL, so
+returning it verbatim would publish the internal final key and the bucket
+endpoint — the thing this runbook promises never appears in a response.
 
 ## Replay, retry, and cleanup behavior
 
@@ -94,6 +154,12 @@ authorized download URL encapsulates final-object access.
 - `presign_max_object_bytes` — per-object size ceiling for the presigned
   path; defaults to 5 GiB. Independent of the tenant-wide
   `asset_storage_quota_bytes`.
+- `max_gateway_buffer_bytes` — the largest object the gateway will hold in
+  memory for an asset operation; defaults to 10 MiB (the inline-push cap, so an
+  inline-stored asset is never affected). This is the bound
+  `presign_max_object_bytes` is **not**: the ceiling caps how large an object
+  may be, this caps how much of one is ever resident. See "Large objects and
+  the gateway memory bound" above.
 
 `presign_ttl_secs` is the **URL expiry**: it is signed into `X-Amz-Expires`, so
 the bucket itself refuses a late `PUT` and the client must register a new

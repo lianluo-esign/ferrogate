@@ -329,6 +329,25 @@ impl AppState {
             .unwrap_or(DEFAULT_MAX_OBJECT_BYTES)
     }
 
+    /// The largest object the gateway will hold in memory for an asset
+    /// operation (issue #259), read from
+    /// `[asset_bucket].max_gateway_buffer_bytes`.
+    ///
+    /// This is the memory bound that `presign_max_object_bytes` is NOT: the
+    /// per-object ceiling caps how large an object may be, this caps how much
+    /// of one the gateway may resident-hold. Above it the presigned commit
+    /// verifies and copies in a bounded streaming pass, and the registry pull
+    /// path refuses to buffer at all (the caller uses the presigned direct
+    /// download instead). Defaults to `INLINE_ASSET_MAX_BYTES` so an
+    /// inline-stored asset -- which is already in memory, having come from the
+    /// registry row -- is never affected by the bound.
+    pub(crate) fn asset_max_gateway_buffer_bytes(&self) -> u64 {
+        self.config
+            .asset_bucket
+            .max_gateway_buffer_bytes
+            .unwrap_or(crate::gateway::assets::INLINE_ASSET_MAX_BYTES)
+    }
+
     /// Resolves the object-storage backend for `/v1/assets/*` content behind
     /// the [`AssetObjectStore`](crate::gateway::asset_bucket::AssetObjectStore)
     /// trait (issue #411). Defaults to the S3/R2 SigV4 client; the
