@@ -9,6 +9,8 @@
 
 use super::*;
 
+use ferrogate_storage::{StoredWalletReservation, StoredWalletSettlement};
+
 fn paid_request(path: &str, signature: &str) -> String {
     let proof = base64::engine::general_purpose::STANDARD.encode(
         json!({
@@ -184,27 +186,239 @@ fn a_non_integer_settlement_amount_is_refused_rather_than_coerced() {
         .is_err());
 }
 
+// The former `every_state_the_loop_can_leave_an_attempt_in_is_documented` is
+// deliberately gone rather than repaired. It iterated the same eight constants
+// its subject list was built from, so its own comment -- "if a new state is ever
+// added ... the chain would silently accept it" -- described a failure it could
+// not detect. The all-states list it defended is gone too: the chain now asserts
+// the EXACT expected state per leg, which a membership test can never do.
+
 #[test]
-fn every_state_the_loop_can_leave_an_attempt_in_is_documented() {
-    // The restart assertion is only as good as this list. If a new state is ever
-    // added to the storage contract without being documented here, the chain
-    // would silently accept it as "documented".
+fn a_transfer_that_covers_what_is_owed_settles_including_an_overpayment() {
+    let owed = ALLOWED_ATOMIC_AMOUNT.to_string();
+
+    assert!(
+        covers_owed_amount(&owed, &owed),
+        "an exact transfer settles"
+    );
+    // THE #469 CASE. The x402 SVM `exact` scheme permits a transfer to EXCEED
+    // the required amount, and `classify_settled_amount` returns `Covers` for it
+    // (carrying the excess so the evidence stays honest). A scenario demanding
+    // equality would bail! the chain on a case production deliberately settles.
+    assert!(
+        covers_owed_amount(&owed, "2501"),
+        "a spec-valid overpayment settles"
+    );
+    assert!(
+        covers_owed_amount(&owed, "999999999999"),
+        "a large overpayment still settles"
+    );
+    // Leading zeros are the same integer, which a string comparison would miss.
+    assert!(covers_owed_amount(&owed, "02500"));
+    assert!(covers_owed_amount("02500", &owed));
+}
+
+#[test]
+fn a_transfer_short_of_what_is_owed_never_settles() {
+    let owed = ALLOWED_ATOMIC_AMOUNT.to_string();
+
+    assert!(!covers_owed_amount(&owed, "2499"));
+    assert!(!covers_owed_amount(&owed, "0"));
+    // The mirror-direction string bug: lexically "10" < "9", so a string
+    // comparison would read this 9-unit transfer as covering 10 owed.
+    assert!(!covers_owed_amount("10", "9"));
+    // ...and would read this one as short when it covers.
+    assert!(covers_owed_amount("9", "10"));
+}
+
+#[test]
+fn an_unparseable_amount_is_fail_closed_rather_than_coerced() {
+    let owed = ALLOWED_ATOMIC_AMOUNT.to_string();
+
+    // Every one of these must be refused, never silently taken as covering:
+    // `2.5e3` and `2500.0` are floats (money is never parsed as a float here),
+    // `-1` is signed, and the rest are not amounts at all.
+    for reported in [
+        "2.5e3", "2500.0", "-1", "", " 2500", "2500 ", "0x9c4", "n/a",
+    ] {
+        assert!(
+            !covers_owed_amount(&owed, reported),
+            "{reported:?} must not be read as covering {owed}"
+        );
+    }
+    // Fail-closed on the OWED side too: an unparseable owed amount must not make
+    // everything look like it covers.
+    assert!(!covers_owed_amount("n/a", "2500"));
+}
+
+// ---------------------------------------------------------------------------
+// The resting-state money disposition table
+// ---------------------------------------------------------------------------
+
+fn allowed_authorization() -> Authorization {
+    Authorization {
+        decision: DECISION_ALLOW.to_string(),
+        reason_code: REASON_ALLOWED.to_string(),
+        policy_revision: TENANT_REVISION,
+        atomic_amount: ALLOWED_ATOMIC_AMOUNT,
+        computed_credits: Some(ALLOWED_CREDITS),
+        challenge_hash_hex: "c0ffee".to_string(),
+        request_body_sha256_hex: "beef".to_string(),
+        decision_hash_hex: "d00d".to_string(),
+    }
+}
+
+/// Links for an attempt resting in `state`, holding `hold_status` (if any) and
+/// carrying a capture record when `captured`.
+fn links_in(state: &str, hold_status: Option<&str>, captured: bool) -> PaymentAttemptLinks {
+    let leg = Leg::new("disposition", PATH_SETTLED);
+    let mut attempt = leg.attempt_record(&allowed_authorization(), Some(&leg.hold_id));
+    attempt.state = state.to_string();
+    PaymentAttemptLinks {
+        reservation: hold_status.map(|status| StoredWalletReservation {
+            id: leg.hold_id.clone(),
+            tenant_id: TENANT_ID.to_string(),
+            amount_credits: ALLOWED_CREDITS,
+            status: status.to_string(),
+            expires_at_unix: CHAIN_UNIX + HOLD_TTL_SECONDS,
+            settlement_id: captured.then(|| leg.hold_id.clone()),
+            created_at_unix: CHAIN_UNIX,
+            updated_at_unix: CHAIN_UNIX,
+        }),
+        settlement: captured.then(|| StoredWalletSettlement {
+            id: leg.hold_id.clone(),
+            tenant_id: TENANT_ID.to_string(),
+            delta_credits: -ALLOWED_CREDITS,
+            balance_after_credits: Some(WALLET_BALANCE_CREDITS - ALLOWED_CREDITS),
+            created_at_unix: CHAIN_UNIX,
+        }),
+        attempt,
+    }
+}
+
+#[test]
+fn each_resting_state_admits_only_its_own_money_disposition() {
+    // The dispositions the chain's legs actually come to rest in.
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_SETTLED,
+            Some(WALLET_RESERVATION_SETTLED),
+            true
+        ),
+        PAYMENT_ATTEMPT_SETTLED
+    )
+    .is_ok());
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
+            Some(WALLET_RESERVATION_ACTIVE),
+            false
+        ),
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    )
+    .is_ok());
+    assert!(expect_hold_disposition(
+        &links_in(PAYMENT_ATTEMPT_DENIED, None, false),
+        PAYMENT_ATTEMPT_DENIED
+    )
+    .is_ok());
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_RELEASED,
+            Some(WALLET_RESERVATION_RELEASED),
+            false
+        ),
+        PAYMENT_ATTEMPT_RELEASED
+    )
+    .is_ok());
+
+    // A settled attempt whose hold was never captured is free stablecoin.
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_SETTLED,
+            Some(WALLET_RESERVATION_ACTIVE),
+            false
+        ),
+        PAYMENT_ATTEMPT_SETTLED
+    )
+    .is_err());
+    // THE #354 MONEY RULE: ambiguity RETAINS the hold. Both ways of losing it --
+    // releasing it and capturing it -- are refused.
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
+            Some(WALLET_RESERVATION_RELEASED),
+            false
+        ),
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    )
+    .is_err());
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
+            Some(WALLET_RESERVATION_SETTLED),
+            true
+        ),
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    )
+    .is_err());
+    // A refused payment must cost nothing at all.
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_DENIED,
+            Some(WALLET_RESERVATION_ACTIVE),
+            false
+        ),
+        PAYMENT_ATTEMPT_DENIED
+    )
+    .is_err());
+    // Terminal-without-payment must give the money back, not keep it held...
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_RELEASED,
+            Some(WALLET_RESERVATION_ACTIVE),
+            false
+        ),
+        PAYMENT_ATTEMPT_RELEASED
+    )
+    .is_err());
+    // ...and must certainly not have charged for it.
+    assert!(expect_hold_disposition(
+        &links_in(
+            PAYMENT_ATTEMPT_FAILED,
+            Some(WALLET_RESERVATION_SETTLED),
+            true
+        ),
+        PAYMENT_ATTEMPT_FAILED
+    )
+    .is_err());
+}
+
+#[test]
+fn a_mid_flight_or_invented_resting_state_is_refused_rather_than_ignored() {
+    // These three were an unexamined `_ => {}` before: the chain would come to
+    // rest with a live hold and an in-flight attempt and say nothing. An
+    // authorized-but-never-finished payment is a stuck hold, which is the exact
+    // failure the TTL sweeper exists for.
     for state in [
         PAYMENT_ATTEMPT_CHALLENGED,
         PAYMENT_ATTEMPT_AUTHORIZED,
         PAYMENT_ATTEMPT_SUBMITTED,
-        PAYMENT_ATTEMPT_SETTLED,
-        PAYMENT_ATTEMPT_DENIED,
-        PAYMENT_ATTEMPT_RELEASED,
-        PAYMENT_ATTEMPT_FAILED,
-        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
     ] {
         assert!(
-            DOCUMENTED_ATTEMPT_STATES.contains(&state),
-            "{state} is reachable but undocumented"
+            expect_hold_disposition(
+                &links_in(state, Some(WALLET_RESERVATION_ACTIVE), false),
+                state
+            )
+            .is_err(),
+            "{state} must not be accepted as a resting state"
         );
     }
-    assert!(!DOCUMENTED_ATTEMPT_STATES.contains(&"invented"));
+    assert!(expect_hold_disposition(
+        &links_in("invented", Some(WALLET_RESERVATION_ACTIVE), false),
+        "invented"
+    )
+    .is_err());
 }
 
 #[test]

@@ -5,7 +5,8 @@
 // description: The narrow cross-component paid-egress chain command promised by
 // issue #354's Verification section: operator config -> gateway policy decision
 // -> deterministic paid-origin double -> durable payment-attempt/wallet-hold
-// ledger -> re-drive/reconcile, proving the loop-closure boxes end to end.
+// ledger -> re-drive/reconcile. Each leg states the box it closes and the boxes
+// it deliberately leaves to their real owners; see the module doc.
 
 //! # `x402-paid-egress-chain`
 //!
@@ -19,12 +20,15 @@
 //!
 //! * **exactly one** origin side effect, **one** settlement evidence record and
 //!   **one** wallet capture per authorized payment -- including under a re-drive;
-//! * a policy **denial never invokes the signer or the paid replay**;
 //! * post-submission ambiguity parks `outcome_unknown` with the hold
-//!   **RETAINED**, and a restart lands every attempt in a **documented** state,
-//!   never an invented one;
-//! * **reconciliation is idempotent**: re-running it converges rather than
-//!   double-capturing or falsely releasing.
+//!   **RETAINED**, and the TTL sweep's due-query offers a pre-submission hold
+//!   while refusing a post-submission one;
+//! * **reconciliation is idempotent**: the reconcile due-query offers the
+//!   unresolved attempt, a pending on-chain answer re-parks it with the backoff
+//!   cursor advanced, a confirmed one settles it, and every later pass converges
+//!   rather than double-capturing or falsely releasing;
+//! * every attempt the chain produces ends in the **exact** state its leg
+//!   demands, with the hold disposition that state mandates.
 //!
 //! Those are statements about three components agreeing -- the gateway that
 //! authorizes, the merchant that charges, and the ledger that holds and captures
@@ -69,17 +73,49 @@
 //! command holds and captures are the ones the **gateway** computed and returned,
 //! and the settlement evidence is the one the **merchant** actually sent.
 //!
-//! ## What this command does NOT prove
+//! ## What this command does NOT prove, stated before anything it does
 //!
-//! Durable survival of these rows across a real process restart. That needs a
-//! live database, and it is already covered by `payment_attempt_restart.rs`
-//! inside the `postgres-restart` / `supabase-restart` scenarios. What the restart
-//! stage here proves instead is the property that does not need a database: the
-//! gateway comes back and re-issues a **byte-identical authorization** for the
-//! same challenge, and every attempt the chain produced sits in a member of the
-//! **documented** state set with the hold disposition that state documents -- so
-//! a post-restart re-drive is attributable to the same authorization and cannot
-//! double-charge.
+//! 1. **It proves nothing about restart recovery, and does not claim to.** The
+//!    ledger this command drives is an in-process
+//!    [`RuntimeStorageRepositories::in_memory`] living in the *ferrogate-test*
+//!    process; restarting the gateway process cannot touch it, so an assertion
+//!    read back from it after a gateway restart would be exactly as green with
+//!    every restart-recovery path deleted. The restart box --
+//!    "... and process restart all land in the documented state without silent
+//!    loss" -- is owned by `payment_attempt_restart.rs` under the
+//!    `postgres-restart` / `supabase-restart` scenarios, which restart against a
+//!    real database. Folding that in here would have turned an always-running
+//!    command into one that silently skips when Docker is absent.
+//!    [`run_gateway_reauthorization_leg`] therefore claims only the property
+//!    that genuinely survives a gateway restart with no database in the picture:
+//!    the restarted gateway re-issues a **byte-identical authorization** for the
+//!    same challenge, so a later re-drive is attributable to an authorization
+//!    that can be reproduced.
+//!
+//! 2. **It does not prove that a policy denial never reaches the signer or the
+//!    paid replay.** Nothing in production links the two yet:
+//!    `state_x402_negotiation.rs` has no non-test caller (#381), so no system
+//!    decision stands between "policy denied" and "pay anyway" for this command
+//!    to observe. What [`run_denied_leg`] proves is what it can: the gateway
+//!    really answers `deny` with the over-cap reason for the challenge the
+//!    merchant really sent, and a refusal takes **no wallet money**. The
+//!    merchant's zero paid-request count on that path is a self-check on this
+//!    harness (it never dispatches a denied payment), not a system property --
+//!    it is asserted so a future edit to this file cannot quietly start paying,
+//!    and it is labelled that way at the call site.
+//!
+//! 3. **It does not prove the production loop's edge ORDERING.** `ferrogate-cli`
+//!    is a binary-only crate, so `X402SettlementLoop` cannot be linked here and
+//!    the SETTLE ordering (capture-then-mark) is a **second copy** in [`settle`].
+//!    Inverting that ordering in production leaves this command green. The
+//!    storage primitives it drives are the real ones; the orchestration around
+//!    them is not. `state_x402_settlement_test.rs` owns the ordering.
+//!
+//! 4. **Amount coverage is a mirror, not the shipped function.** For the same
+//!    binary-only reason, [`covers_owed_amount`] mirrors
+//!    `state_x402_settlement.rs::classify_settled_amount` rather than calling it.
+//!    It is kept deliberately trivial so the mirror is auditable by eye, and the
+//!    sibling unit tests pin the same cases the shipped function's tests do.
 
 use std::{
     collections::HashMap,
@@ -101,7 +137,7 @@ use ferrogate_storage::{
     WalletReservationResult, PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED,
     PAYMENT_ATTEMPT_DENIED, PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
     PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED, PAYMENT_ATTEMPT_SUBMITTED,
-    WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_SETTLED,
+    WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_RELEASED, WALLET_RESERVATION_SETTLED,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -146,6 +182,13 @@ const WALLET_BALANCE_CREDITS: i64 = 10_000;
 /// two of them are ever captured (the settled leg and the reconciled leg), so
 /// the whole-chain expectation is one exact integer.
 const EXPECTED_CAPTURES: i64 = 2;
+/// Origin side effects the chain must produce: one for the settled leg's paid
+/// replay and one for the ambiguous leg's. Deliberately a SEPARATE constant from
+/// [`EXPECTED_CAPTURES`] even though both are 2 today -- a side effect is the
+/// merchant fulfilling a request and a capture is the wallet being debited, and
+/// the ambiguous leg is precisely a case where the two do not coincide in time.
+/// Adding one leg must not silently make either count assert the other quantity.
+const EXPECTED_ORIGIN_SIDE_EFFECTS: u64 = 2;
 
 /// Fixed clock. Every timestamp the chain writes derives from this, so an
 /// assertion is an exact equality rather than "something recent".
@@ -162,8 +205,8 @@ const RECONCILE_CHECK_DELAY_SECONDS: i64 = 60;
 const SETTLE_UNIX: i64 = CHAIN_UNIX + 4;
 /// The reconciled leg settles only AFTER a full pending/backoff pass.
 const RECONCILE_SETTLE_UNIX: i64 = CHAIN_UNIX + 3 + RECONCILE_CHECK_DELAY_SECONDS + 1;
-/// Well past every in-run edge: the post-restart replay is the last write.
-const RESTART_REPLAY_UNIX: i64 = CHAIN_UNIX + 3 + RECONCILE_CHECK_DELAY_SECONDS + 100;
+/// Well past every in-run edge: the duplicate-finalize replay is the last write.
+const DUPLICATE_FINALIZE_UNIX: i64 = CHAIN_UNIX + 3 + RECONCILE_CHECK_DELAY_SECONDS + 100;
 
 const REQUEST_METHOD: &str = "GET";
 const X402_VERSION: i64 = 2;
@@ -174,18 +217,9 @@ const DECISION_DENY: &str = "deny";
 const REASON_ALLOWED: &str = "x402_allowed";
 const REASON_OVER_CAP: &str = "x402_over_per_payment_cap";
 
-/// Every state the `#354` loop can leave an attempt in. A restart must land in
-/// one of these; anything else is an invented state and fails the chain.
-const DOCUMENTED_ATTEMPT_STATES: &[&str] = &[
-    PAYMENT_ATTEMPT_CHALLENGED,
-    PAYMENT_ATTEMPT_AUTHORIZED,
-    PAYMENT_ATTEMPT_SUBMITTED,
-    PAYMENT_ATTEMPT_SETTLED,
-    PAYMENT_ATTEMPT_DENIED,
-    PAYMENT_ATTEMPT_RELEASED,
-    PAYMENT_ATTEMPT_FAILED,
-    PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
-];
+/// Failure code the TTL-sweep control leg records when its pre-submission hold
+/// is reclaimed, mirroring the sweeper's own `x402.hold.ttl_expired` edge.
+const REASON_TTL_EXPIRED: &str = "x402_hold_ttl_expired";
 
 /// Transport paths on the merchant double. The *logical* resource every
 /// challenge names is always [`RESOURCE_URL`] -- the declared, policy-allowlisted
@@ -215,11 +249,27 @@ pub(crate) fn run_x402_paid_egress_chain(args: &LocalArgs) -> Result<()> {
     runtime.block_on(provision_wallet(&ledger))?;
 
     let settled = run_settled_leg(&harness.gateway_addr, &origin, &runtime, &ledger)?;
-    run_denied_leg(&harness.gateway_addr, &origin, &runtime, &ledger)?;
+    let denied = run_denied_leg(&harness.gateway_addr, &origin, &runtime, &ledger)?;
     let unknown = run_outcome_unknown_leg(&harness.gateway_addr, &origin, &runtime, &ledger)?;
+    let swept = run_ttl_sweep_leg(&harness.gateway_addr, &runtime, &ledger, &unknown)?;
     run_reconcile_leg(&origin, &runtime, &ledger, &unknown)?;
-    run_restart_leg(args, harness, &runtime, &ledger, &[&settled, &unknown])?;
-    runtime.block_on(assert_chain_accounting(&ledger))?;
+    run_gateway_reauthorization_leg(args, harness)?;
+
+    // The exact state each leg must have come to rest in. Not "a documented
+    // state" -- an all-states membership test cannot distinguish a settled
+    // attempt from one a regression left `authorized`, so it is the named
+    // terminal per leg or nothing.
+    let finals: [(&Leg, &str); 4] = [
+        (&settled, PAYMENT_ATTEMPT_SETTLED),
+        (&denied, PAYMENT_ATTEMPT_DENIED),
+        // The ambiguous leg is `outcome_unknown` from its own leg until the
+        // reconciler converges it; by here the confirmed on-chain answer has
+        // settled it, and anything else means reconciliation did not converge.
+        (&unknown, PAYMENT_ATTEMPT_SETTLED),
+        (&swept, PAYMENT_ATTEMPT_RELEASED),
+    ];
+    runtime.block_on(assert_final_ledger_state(&ledger, &finals))?;
+    runtime.block_on(assert_chain_accounting(&ledger, &finals))?;
     origin.assert_no_unauthorized_payment()?;
 
     println!("x402-paid-egress-chain scenario passed");
@@ -256,6 +306,13 @@ fn run_settled_leg(
     // 4. The single paid replay. One dispatch, one side effect.
     let paid = origin.paid_replay(leg.transport_path, &leg.transaction_signature)?;
     let evidence = paid.expect_settlement_evidence()?;
+    // A gate, not a proof: this double always reports the full authorized
+    // amount, so a short settlement cannot arise here and this call cannot fail
+    // inside a scenario run. It is kept because it is the thing that would catch
+    // a future double (or a real merchant) reporting less -- and the property
+    // itself is pinned non-vacuously by
+    // `settlement_evidence_short_of_the_owed_amount_is_refused` in the sibling
+    // unit tests, which feeds it an amount that IS short.
     evidence.expect_pays_at_least(authorization.atomic_amount)?;
 
     // 5. SETTLE: capture the hold, THEN mark the attempt settled. That order is
@@ -293,19 +350,31 @@ fn run_settled_leg(
 }
 
 // ---------------------------------------------------------------------------
-// Leg 2 -- a denial must never reach the merchant
+// Leg 2 -- the gateway refuses an over-cap challenge, and a refusal costs
+//          nothing
 // ---------------------------------------------------------------------------
 
-/// Acceptance: "Policy denial/insufficient funds never invokes signer or paid
-/// replay." The proof is negative and therefore has to be counted at the
-/// merchant: the double records every request carrying an `X-PAYMENT` header per
-/// path, and the denied path's count must still be zero at the end of the run.
+/// **What this leg proves:** the gateway, running the operator's declared #351
+/// policy, answers `deny` with `x402_over_per_payment_cap` for the over-cap
+/// challenge the merchant actually sent, and the refusal is recorded durably as
+/// a `denied` attempt that owns **no wallet hold and no settlement**.
+///
+/// **What it does NOT prove, and the acceptance box it therefore leaves open:**
+/// "Policy denial/insufficient funds never invokes signer or paid replay". That
+/// is a claim about a production edge that does not exist yet --
+/// `state_x402_negotiation.rs` has no non-test caller (#381), so no shipped code
+/// path consults a decision before paying. The merchant's paid-request counter
+/// for this path is asserted zero below, but it is zero because THIS FUNCTION
+/// never calls [`PaidOriginDouble::paid_replay`] on it: the assertion is a guard
+/// against a future edit to this file quietly paying for a denied challenge, not
+/// evidence of a system decision. The box closes when #381 wires the negotiation
+/// path and this leg can drive the real egress handler instead.
 fn run_denied_leg(
     gateway_addr: &str,
     origin: &PaidOriginDouble,
     runtime: &Runtime,
     ledger: &RuntimeStorageRepositories,
-) -> Result<()> {
+) -> Result<Leg> {
     let leg = Leg::new("chain-denied", PATH_PREMIUM);
     let challenge = origin.unpaid_dispatch(leg.transport_path)?;
     let authorization = authorize(gateway_addr, &challenge)?;
@@ -351,14 +420,14 @@ fn run_denied_leg(
         anyhow::Ok(())
     })?;
 
-    // The merchant must never have been asked to fulfil this one.
+    // Harness self-check, not a system property -- see this function's doc.
     let paid_requests = origin.paid_requests(leg.transport_path)?;
     if paid_requests != 0 {
         bail!(
-            "denied leg: the merchant received {paid_requests} paid requests for a payment policy DENIED"
+            "denied leg: this scenario dispatched {paid_requests} paid requests for a challenge the gateway DENIED"
         );
     }
-    Ok(())
+    Ok(leg)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +440,14 @@ fn run_denied_leg(
 /// nothing about the money. Releasing here could spend stablecoin without ever
 /// charging the wallet, so the hold is RETAINED and the attempt parks
 /// `outcome_unknown` -- non-terminal, operator-visible, reconciler's business.
+///
+/// **Precisely what the retained hold assertion pins.** This leg calls
+/// [`RuntimeStorageRepositories::mark_payment_attempt_outcome_unknown`]
+/// directly, so what it proves is that the shipped **storage primitive** for the
+/// UNKNOWN edge performs no wallet mutation. It does not run
+/// `X402SettlementLoop::finalize` -- that is unreachable from here (#381,
+/// binary-only crate) -- so changing *the loop* to release on ambiguity would
+/// leave this leg green. `state_x402_settlement_test.rs` owns the loop's edge.
 fn run_outcome_unknown_leg(
     gateway_addr: &str,
     origin: &PaidOriginDouble,
@@ -407,18 +484,108 @@ fn run_outcome_unknown_leg(
         expect_hold_retained(ledger, &leg, "after parking outcome_unknown").await
     })?;
 
-    // The TTL sweeper's own due-query must refuse to see this attempt: only
-    // PRE-submission holds may be reclaimed, and this one's proof is already out.
-    // A far-future cutoff makes the query maximally eager, so a hit here would be
-    // a real money-safety regression rather than a timing artefact.
+    Ok(leg)
+}
+
+// ---------------------------------------------------------------------------
+// Leg 3b -- the TTL sweep sees pre-submission holds and ONLY those
+// ---------------------------------------------------------------------------
+
+/// Acceptance: "only pre-submission holds may be released" -- the money-safety
+/// rule the #354 sweeper is built around.
+///
+/// The interesting assertion is a negative one (the post-submission ambiguous
+/// attempt must NOT be offered for release), and a negative assertion against a
+/// bounded query is worthless without a **positive control**: stub
+/// `list_expirable_due_payment_attempts` to `vec![]` and a lone negative check
+/// stays green forever. So this leg opens a second, deliberately
+/// pre-submission attempt (`authorized`, live hold, already past its TTL under
+/// the cutoff used) and asserts **one query answers both questions**: the
+/// pre-submission attempt IS offered, and the post-submission one is NOT. An
+/// always-empty due-query now fails the first half.
+///
+/// It then drives the sweeper's own RELEASE edge over the control attempt --
+/// release the hold, then mark the attempt `released`, the money-safe order --
+/// so the control leaves no live hold behind and the chain's accounting stays
+/// one exact integer. Re-querying afterwards proves a released attempt leaves
+/// the due-query rather than being offered again on every tick.
+fn run_ttl_sweep_leg(
+    gateway_addr: &str,
+    runtime: &Runtime,
+    ledger: &RuntimeStorageRepositories,
+    post_submission: &Leg,
+) -> Result<Leg> {
+    // The transport path is inert for this leg: the control never dispatches to
+    // the merchant at all -- it exists only to put a live PRE-submission hold in
+    // front of the sweeper's due-query.
+    let leg = Leg::new("chain-ttl-control", PATH_SETTLED);
+    // Authorized through the same gateway evaluation as every other leg, so the
+    // control's hold is for credits the gateway computed, not an invented figure.
+    let challenge = challenge_header(ALLOWED_ATOMIC_AMOUNT, MERCHANT, RESOURCE_URL);
+    let authorization = authorize(gateway_addr, &challenge)?;
+    authorization.expect_allowed(ALLOWED_ATOMIC_AMOUNT, ALLOWED_CREDITS)?;
+
+    // A maximally eager cutoff: every hold in the chain is long past its TTL by
+    // here, so anything the query withholds is withheld on STATE, never timing.
+    let cutoff = CHAIN_UNIX + HOLD_TTL_SECONDS * 10;
+
     runtime.block_on(async {
+        open_pre_submission(ledger, &leg, &authorization).await?;
+
         let due = ledger
-            .list_expirable_due_payment_attempts(CHAIN_UNIX + HOLD_TTL_SECONDS * 10, 100)
+            .list_expirable_due_payment_attempts(cutoff, 100)
             .await
             .context("read the TTL sweeper due-query")?;
-        if due.iter().any(|attempt| attempt.id == leg.attempt_id) {
+        let offered = |id: &str| due.iter().any(|attempt| attempt.id == id);
+        // Positive control.
+        if !offered(&leg.attempt_id) {
+            bail!(
+                "the TTL sweeper's due-query did not offer PRE-submission attempt {} (hold expired at {}, cutoff {cutoff}); with this query answering nothing the negative check below would be vacuous",
+                leg.attempt_id,
+                CHAIN_UNIX + HOLD_TTL_SECONDS
+            );
+        }
+        // The money-safety assertion the positive control just gave teeth to.
+        if offered(&post_submission.attempt_id) {
             bail!(
                 "the TTL sweeper's due-query offered post-submission attempt {} for release",
+                post_submission.attempt_id
+            );
+        }
+
+        // RELEASE: give the credits back FIRST, then mark the attempt terminal.
+        let released = ledger
+            .release_wallet_reservation(&leg.hold_id, CHAIN_UNIX + 3)
+            .await
+            .with_context(|| format!("release the hold for {}", leg.attempt_id))?;
+        if released.status != WALLET_RESERVATION_RELEASED {
+            bail!(
+                "releasing hold {} left it {}, expected {WALLET_RESERVATION_RELEASED}",
+                leg.hold_id,
+                released.status
+            );
+        }
+        expect_applied(
+            ledger
+                .release_payment_attempt(
+                    &leg.attempt_id,
+                    PaymentAttemptEvidenceArgs {
+                        failure_code: Some(REASON_TTL_EXPIRED),
+                        ..Default::default()
+                    },
+                    CHAIN_UNIX + 3,
+                )
+                .await,
+            "release the expired pre-submission attempt",
+        )?;
+
+        let after = ledger
+            .list_expirable_due_payment_attempts(cutoff, 100)
+            .await
+            .context("re-read the TTL sweeper due-query after the release")?;
+        if after.iter().any(|attempt| attempt.id == leg.attempt_id) {
+            bail!(
+                "released attempt {} is still offered to the TTL sweeper",
                 leg.attempt_id
             );
         }
@@ -437,15 +604,35 @@ fn run_outcome_unknown_leg(
 ///
 /// Drives the reconciler's decision shape against the merchant's facilitator:
 /// the first on-chain answer is `pending` (still propagating) and every later one
-/// is `confirmed` for the exact owed amount. Trust order is on-chain-authoritative
-/// -- the merchant's earlier silence never mattered, and the confirmed amount is
-/// compared against what is OWED on parsed integers before anything is captured.
+/// is `confirmed`. Trust order is on-chain-authoritative -- the merchant's
+/// earlier silence never mattered -- and the confirmed amount is put through
+/// [`covers_owed_amount`], the mirror of the shipped
+/// `classify_settled_amount`/`decide_confirmed_amount` decision, before anything
+/// is captured.
 fn run_reconcile_leg(
     origin: &PaidOriginDouble,
     runtime: &Runtime,
     ledger: &RuntimeStorageRepositories,
     leg: &Leg,
 ) -> Result<()> {
+    // Positive control for the convergence check at the end of this function.
+    // "A settled attempt is no longer offered" means nothing unless the
+    // unresolved one IS offered first: an always-empty due-query would satisfy
+    // the closing assertion on its own.
+    runtime.block_on(async {
+        let due = ledger
+            .list_reconcilable_payment_attempts(CHAIN_UNIX + HOLD_TTL_SECONDS * 10, 100)
+            .await
+            .context("read the reconciler due-query before convergence")?;
+        if !due.iter().any(|attempt| attempt.id == leg.attempt_id) {
+            bail!(
+                "the reconciler's due-query never offered unresolved attempt {} -- an unresolved payment that no bounded pass ever picks up is money stuck forever",
+                leg.attempt_id
+            );
+        }
+        anyhow::Ok(())
+    })?;
+
     // Pass 1: pending. Re-park (bounded backoff), never a terminal, hold kept.
     let pending = origin.facilitator_lookup(&leg.transaction_signature)?;
     if pending.status != "pending" {
@@ -489,21 +676,28 @@ fn run_reconcile_leg(
         );
     }
 
-    // Pass 2: confirmed for the exact owed amount -> SETTLE (capture, then mark).
+    // Pass 2: a confirmed transfer that COVERS what is owed -> SETTLE (capture,
+    // then mark). "Covers" is the runtime's decision, not equality: see
+    // [`covers_owed_amount`].
     let confirmed = origin.facilitator_lookup(&leg.transaction_signature)?;
     if confirmed.status != "confirmed" {
         bail!("the facilitator did not converge to confirmed: {confirmed:?}");
     }
     let owed = after.atomic_amount.clone();
-    if confirmed.amount.as_deref() != Some(owed.as_str()) {
+    let Some(settled_atomic_amount) = confirmed.amount.clone() else {
+        bail!("a confirmed on-chain transfer reported no amount at all: {confirmed:?}");
+    };
+    if !covers_owed_amount(&owed, &settled_atomic_amount) {
         bail!(
-            "on-chain confirmation reports {:?} atomic units, the attempt owes {owed} -- a mismatch must NOT capture",
-            confirmed.amount
+            "on-chain confirmation reports {settled_atomic_amount} atomic units, the attempt owes {owed} -- a transfer SHORT of what is owed must NOT capture"
         );
     }
+    // The evidence records what the CHAIN reported, not what was owed: an
+    // overpayment must stay visible as an overpayment rather than be flattened
+    // into an exact settlement (#469).
     let evidence = SettlementEvidence {
         transaction_signature: leg.transaction_signature.clone(),
-        atomic_amount: owed.clone(),
+        atomic_amount: settled_atomic_amount,
         raw: confirmed.raw.clone(),
     };
     runtime.block_on(settle(ledger, leg, &evidence, RECONCILE_SETTLE_UNIX))?;
@@ -540,28 +734,29 @@ fn run_reconcile_leg(
 }
 
 // ---------------------------------------------------------------------------
-// Leg 5 -- restart lands in a documented state
+// Leg 5 -- a restarted gateway re-authorizes identically
 // ---------------------------------------------------------------------------
 
-/// Acceptance: "... and process restart all land in the documented state without
-/// silent loss."
+/// **This leg does not claim the restart acceptance box.** "... and process
+/// restart all land in the documented state without silent loss" is about
+/// DURABLE rows surviving a process restart; the ledger this command drives is
+/// an in-process [`RuntimeStorageRepositories::in_memory`] owned by the
+/// *ferrogate-test* process, which restarting the *gateway* process cannot
+/// touch. Reading attempts back from it after the restart would be exactly as
+/// green with every restart-recovery path in the payment ledger deleted, so no
+/// such read happens here. That box belongs to `payment_attempt_restart.rs`
+/// under `postgres-restart` / `supabase-restart`, which restarts against a real
+/// database; duplicating it here would make this command skip without Docker.
 ///
-/// Two halves, because "documented" has two halves:
-///
-/// * the **authorization** an attempt was opened under must survive the restart
-///   unchanged -- same policy revision, same decision seal for the same
-///   challenge -- otherwise a post-restart re-drive would be charging under an
-///   authorization nobody can reproduce;
-/// * every attempt the chain produced must read back in a member of
-///   [`DOCUMENTED_ATTEMPT_STATES`], with the hold disposition that state
-///   documents, and a re-driven settle must still be idempotent.
-fn run_restart_leg(
-    args: &LocalArgs,
-    harness: LocalHarness,
-    runtime: &Runtime,
-    ledger: &RuntimeStorageRepositories,
-    legs: &[&Leg],
-) -> Result<()> {
+/// What IS a real restart property, and needs no database, is the one asserted
+/// below: the gateway is stopped, started again from the same operator config,
+/// and must re-issue a **byte-identical authorization** for the same challenge
+/// -- same policy revision, same challenge hash, same decision seal, same
+/// computed credits. Without that, a payment re-driven after a restart would be
+/// charging under an authorization nobody can reproduce, and the durable
+/// evidence chain that answers "why was this payment made?" would be broken at
+/// its first link.
+fn run_gateway_reauthorization_leg(args: &LocalArgs, harness: LocalHarness) -> Result<()> {
     let challenge = challenge_header(ALLOWED_ATOMIC_AMOUNT, MERCHANT, RESOURCE_URL);
     let before = authorize(&harness.gateway_addr, &challenge)?;
     drop(harness);
@@ -578,41 +773,68 @@ fn run_restart_leg(
             "the restarted gateway re-authorized the same challenge differently: {before:?} then {after:?}"
         );
     }
-
-    runtime.block_on(async {
-        for leg in legs {
-            let links = expect_links(ledger, leg).await?;
-            let state = links.attempt.state.as_str();
-            if !DOCUMENTED_ATTEMPT_STATES.contains(&state) {
-                bail!(
-                    "attempt {} came back in the invented state {state:?}",
-                    leg.attempt_id
-                );
-            }
-            expect_documented_hold_disposition(&links)?;
-        }
-        anyhow::Ok(())
-    })?;
-
-    // A restart is exactly when a duplicate finalize replay happens: the caller
-    // that crashed mid-settle comes back and re-drives its edge.
-    runtime.block_on(async {
-        for leg in legs {
-            let attempt = expect_attempt(ledger, leg).await?;
-            if attempt.state != PAYMENT_ATTEMPT_SETTLED {
-                continue;
-            }
-            let evidence = SettlementEvidence {
-                transaction_signature: leg.transaction_signature.clone(),
-                atomic_amount: attempt.atomic_amount.clone(),
-                raw: attempt.settlement_response.clone().unwrap_or_default(),
-            };
-            expect_settle_is_idempotent(ledger, leg, &evidence, RESTART_REPLAY_UNIX).await?;
-            expect_exactly_one_capture(ledger, leg).await?;
-        }
-        anyhow::Ok(())
-    })?;
     drop(restarted);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Where the chain came to rest
+// ---------------------------------------------------------------------------
+
+/// Every leg must have come to rest in the **exact** state its own transitions
+/// demand, holding exactly the money that state mandates, and a duplicate
+/// finalize replay against a settled leg must still be a no-op.
+///
+/// The per-leg expected state is the point. An earlier revision asserted
+/// membership in an all-eight-states list, which could only fire on a string
+/// that was not any exported constant -- a regression leaving a settled attempt
+/// `authorized`, or an ambiguous one `released`, passed it. Naming the terminal
+/// per leg is what turns this into an assertion.
+///
+/// This runs after [`run_gateway_reauthorization_leg`] only because a crashed
+/// caller re-driving its settle is the realistic occasion for a duplicate
+/// finalize; the replay is proven by the CAS and the hold, not by the restart.
+async fn assert_final_ledger_state(
+    ledger: &RuntimeStorageRepositories,
+    finals: &[(&Leg, &str)],
+) -> Result<()> {
+    for (leg, expected_state) in finals {
+        let links = expect_links(ledger, leg).await?;
+        if links.attempt.state != *expected_state {
+            bail!(
+                "attempt {} came to rest in {:?}, expected {expected_state:?}",
+                leg.attempt_id,
+                links.attempt.state
+            );
+        }
+        expect_hold_disposition(&links, expected_state)?;
+
+        if *expected_state != PAYMENT_ATTEMPT_SETTLED {
+            continue;
+        }
+        // The duplicate finalize: same attempt, same evidence, re-driven. Both
+        // primitives must report a replay rather than a second charge.
+        let attempt = &links.attempt;
+        let raw = attempt.settlement_response.clone().with_context(|| {
+            format!(
+                "settled attempt {} carries no settlement response to replay -- a settle replay must never be driven with invented evidence",
+                leg.attempt_id
+            )
+        })?;
+        let settled_atomic_amount = attempt.settled_atomic_amount.clone().with_context(|| {
+            format!(
+                "settled attempt {} carries no settled amount to replay",
+                leg.attempt_id
+            )
+        })?;
+        let evidence = SettlementEvidence {
+            transaction_signature: leg.transaction_signature.clone(),
+            atomic_amount: settled_atomic_amount,
+            raw,
+        };
+        expect_settle_is_idempotent(ledger, leg, &evidence, DUPLICATE_FINALIZE_UNIX).await?;
+        expect_exactly_one_capture(ledger, leg).await?;
+    }
     Ok(())
 }
 
@@ -623,7 +845,10 @@ fn run_restart_leg(
 /// The single arithmetic statement the whole chain reduces to: the wallet moved
 /// by exactly the captures the chain authorized, and by nothing else. Integer
 /// credits, checked arithmetic -- money is never `f64` here.
-async fn assert_chain_accounting(ledger: &RuntimeStorageRepositories) -> Result<()> {
+async fn assert_chain_accounting(
+    ledger: &RuntimeStorageRepositories,
+    finals: &[(&Leg, &str)],
+) -> Result<()> {
     let expected_debit = ALLOWED_CREDITS
         .checked_mul(EXPECTED_CAPTURES)
         .context("expected chain debit overflowed")?;
@@ -662,34 +887,34 @@ async fn assert_chain_accounting(ledger: &RuntimeStorageRepositories) -> Result<
     }
 
     // Operator visibility: every attempt the chain made is listable under its
-    // tenant, in a documented state. "Why was this payment made and what
-    // happened to it?" is answerable from durable evidence, not log scraping.
-    // The listing is BOUNDED (#352 box 6): a page carries at most `limit` rows
-    // and resumes through a keyset cursor, so this asks for a page comfortably
-    // wider than the three attempts the chain makes and asserts the page ends
-    // there rather than assuming an unbounded read.
+    // tenant, in the exact state its leg demands -- not merely in "a documented
+    // state", which an all-states list can never refute. "Why was this payment
+    // made and what happened to it?" is answerable from durable evidence, not
+    // log scraping. The listing is BOUNDED (#352 box 6): a page carries at most
+    // `limit` rows and resumes through a keyset cursor, so this asks for a page
+    // comfortably wider than the attempts the chain makes and asserts the page
+    // ends there rather than assuming an unbounded read.
     let page = ledger
         .list_payment_attempts(TENANT_ID, &ferrogate_storage::PaymentAttemptQuery::new(16))
         .await
         .context("list the chain's payment attempts")?;
     if page.next_cursor.is_some() {
-        bail!("a 16-row page over 3 attempts must be the end of the listing");
-    }
-    let attempts = page.attempts;
-    if attempts.len() != 3 {
         bail!(
-            "the chain recorded {} attempts, expected 3 (settled, denied, reconciled)",
-            attempts.len()
+            "a 16-row page over {} attempts must be the end of the listing",
+            finals.len()
         );
     }
-    for attempt in &attempts {
-        if !DOCUMENTED_ATTEMPT_STATES.contains(&attempt.state.as_str()) {
-            bail!(
-                "attempt {} is listed in the invented state {:?}",
-                attempt.id,
-                attempt.state
-            );
-        }
+    let listed: HashMap<&str, &str> = page
+        .attempts
+        .iter()
+        .map(|attempt| (attempt.id.as_str(), attempt.state.as_str()))
+        .collect();
+    let expected: HashMap<&str, &str> = finals
+        .iter()
+        .map(|(leg, state)| (leg.attempt_id.as_str(), *state))
+        .collect();
+    if listed != expected {
+        bail!("the tenant's payment-attempt listing is {listed:?}, expected exactly {expected:?}");
     }
     Ok(())
 }
@@ -796,10 +1021,11 @@ async fn provision_wallet(ledger: &RuntimeStorageRepositories) -> Result<()> {
         .context("provision the chain wallet")
 }
 
-/// `reserve hold -> create attempt -> authorize -> submit`. The hold is placed
-/// BEFORE any proof exists, so an insufficient balance is refused without ever
-/// reaching a signer.
-async fn open_and_submit(
+/// `reserve hold -> create attempt -> authorize`. The hold is placed BEFORE any
+/// proof exists, so an insufficient balance is refused without ever reaching a
+/// signer. Stops short of SUBMIT: this is the state in which a hold is still the
+/// TTL sweeper's to reclaim.
+async fn open_pre_submission(
     ledger: &RuntimeStorageRepositories,
     leg: &Leg,
     authorization: &Authorization,
@@ -843,7 +1069,17 @@ async fn open_and_submit(
             )
             .await,
         "authorize the attempt",
-    )?;
+    )
+}
+
+/// [`open_pre_submission`] followed by SUBMIT: the proof is now out, so the hold
+/// stops being reclaimable and becomes the reconciler's business.
+async fn open_and_submit(
+    ledger: &RuntimeStorageRepositories,
+    leg: &Leg,
+    authorization: &Authorization,
+) -> Result<()> {
+    open_pre_submission(ledger, leg, authorization).await?;
     expect_applied(
         ledger
             .submit_payment_attempt(
@@ -861,6 +1097,44 @@ async fn open_and_submit(
             .await,
         "submit the attempt",
     )
+}
+
+/// Does a reported/observed settled amount COVER what is owed, i.e. may the
+/// hold be captured?
+///
+/// This is a **mirror** of the shipped decision, not the shipped decision
+/// itself: `state_x402_settlement.rs::classify_settled_amount` is `pub(crate)`
+/// in the binary-only `ferrogate-cli` crate and cannot be linked here, and
+/// `state_x402_reconciler.rs::decide_confirmed_amount` is its only caller on the
+/// reconcile path. The mirror is kept to a single expression so it is auditable
+/// by eye against the original.
+///
+/// It is `settled >= owed` on PARSED INTEGERS, and both halves of that matter:
+///
+/// * **Not equality.** The x402 SVM `exact` scheme (`scheme_exact_svm.md` 1.4)
+///   defines a matching transfer as one that MAY EXCEED the required amount, and
+///   the runtime deliberately SETTLES a spec-valid overpayment (flagging
+///   `overpaid`, #469). An earlier revision of this scenario required exact
+///   string equality, so a facilitator reporting 2501 against 2500 owed would
+///   have failed the chain on a case production settles -- describing a decision
+///   the runtime does not make. A sibling slice hit the same trap from the other
+///   side on #352: implementing literal equality broke 9 tests that assert an
+///   overpayment settles.
+/// * **Not strings.** Lexically `"10" < "9"`, which reads a spec-valid
+///   overpayment as an underpayment AND a real underpayment as covering. Both
+///   are money bugs, in opposite directions.
+///
+/// Fail-closed: an amount either side of which is not a canonical unsigned
+/// decimal is never treated as covering. `u128` mirrors the shipped width (the
+/// on-chain domain is `u64`, so nothing overflows). No float ever touches this.
+fn covers_owed_amount(owed_atomic_amount: &str, settled_atomic_amount: &str) -> bool {
+    match (
+        owed_atomic_amount.parse::<u128>(),
+        settled_atomic_amount.parse::<u128>(),
+    ) {
+        (Ok(owed), Ok(settled)) => settled >= owed,
+        _ => false,
+    }
 }
 
 /// SETTLE: capture the hold FIRST, then mark the attempt settled. Both
@@ -1006,13 +1280,19 @@ async fn expect_hold_retained(
     Ok(())
 }
 
-/// The hold disposition each documented state mandates. This is the assertion
-/// that makes "documented" mean something: a state whose money disposition
-/// contradicts its documentation is exactly as bad as an invented state.
-fn expect_documented_hold_disposition(links: &PaymentAttemptLinks) -> Result<()> {
+/// The money disposition each resting state mandates. A state whose disposition
+/// contradicts its definition is a money bug even when the state name itself is
+/// perfectly ordinary, so this is checked separately from the state equality in
+/// [`assert_final_ledger_state`].
+///
+/// There is no silent wildcard: `expected_state` has already been asserted equal
+/// to `links.attempt.state`, and the chain must never come to rest mid-flight,
+/// so `challenged`/`authorized`/`submitted` are an explicit failure rather than
+/// an unexamined `_ => {}`.
+fn expect_hold_disposition(links: &PaymentAttemptLinks, expected_state: &str) -> Result<()> {
     let id = &links.attempt.id;
     let hold_status = links.reservation.as_ref().map(|hold| hold.status.as_str());
-    match links.attempt.state.as_str() {
+    match expected_state {
         PAYMENT_ATTEMPT_SETTLED => {
             if hold_status != Some(WALLET_RESERVATION_SETTLED) || links.settlement.is_none() {
                 bail!("settled attempt {id} does not own exactly one captured hold: {links:?}");
@@ -1029,13 +1309,16 @@ fn expect_documented_hold_disposition(links: &PaymentAttemptLinks) -> Result<()>
             }
         }
         PAYMENT_ATTEMPT_RELEASED | PAYMENT_ATTEMPT_FAILED => {
-            if links.settlement.is_some() {
-                bail!("attempt {id} is terminal-without-payment yet captured its hold: {links:?}");
+            if hold_status == Some(WALLET_RESERVATION_ACTIVE) || links.settlement.is_some() {
+                bail!(
+                    "attempt {id} is terminal-without-payment yet its money is not given back: {links:?}"
+                );
             }
         }
-        // Pre-terminal states hold live money by design; the settled/released
-        // question is not yet answered for them.
-        _ => {}
+        PAYMENT_ATTEMPT_CHALLENGED | PAYMENT_ATTEMPT_AUTHORIZED | PAYMENT_ATTEMPT_SUBMITTED => {
+            bail!("the chain came to rest with attempt {id} still mid-flight in {expected_state:?}")
+        }
+        other => bail!("attempt {id} came to rest in the invented state {other:?}"),
     }
     Ok(())
 }
@@ -1429,8 +1712,12 @@ impl PaidOriginDouble {
             .unwrap_or(0))
     }
 
-    /// Final capability-boundary check: the merchant was never paid for anything
-    /// beyond the two payments the gateway authorized.
+    /// Final sweep over the merchant's counters: no path outside the two this
+    /// scenario deliberately pays was ever sent an `X-PAYMENT`, and the total
+    /// number of fulfilments is the expected one. Like the denied leg's zero
+    /// count, the path filter is a guard on this file rather than a system
+    /// property (#381); the side-effect TOTAL, by contrast, is a real merchant
+    /// observation -- it is what a duplicate replay would inflate.
     fn assert_no_unauthorized_payment(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
         let unauthorized: Vec<(&String, &u64)> = snapshot
@@ -1442,9 +1729,9 @@ impl PaidOriginDouble {
             bail!("the merchant was paid on unauthorized paths: {unauthorized:?}");
         }
         let total_side_effects: u64 = snapshot.side_effects.values().copied().sum();
-        if total_side_effects != EXPECTED_CAPTURES as u64 {
+        if total_side_effects != EXPECTED_ORIGIN_SIDE_EFFECTS {
             bail!(
-                "the chain produced {total_side_effects} origin side effects, expected exactly {EXPECTED_CAPTURES}"
+                "the chain produced {total_side_effects} origin side effects, expected exactly {EXPECTED_ORIGIN_SIDE_EFFECTS}"
             );
         }
         Ok(())
