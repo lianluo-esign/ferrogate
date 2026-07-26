@@ -53,6 +53,16 @@ export const policiesConfig: ResourceConfig<PolicyRule> = {
     // presents at request time (see ferrogate-cli policy evaluation), which is
     // not guaranteed to be an admin-console tenant/key row, so they stay
     // free-text rather than being force-mapped to an entity source (#341).
+    //
+    // #340 caveat: the "not guaranteed to be a tenant row" half of that premise
+    // is false for the tenant id specifically -- the gateway compares an
+    // organization id DIRECTLY against a tenant-accounts row id (see
+    // `project.tenant_id != organization_id` in
+    // crates/ferrogate-cli/src/gateway/api_key_tenancy.rs), which is why #340
+    // converted api-keys.organization_id to a tenant-accounts picker. These
+    // policy fields are #341's scope, not #340's, so they are left as-is here
+    // -- but they are OUTSTANDING, not "already done upstream" as #340's
+    // original field inventory recorded them.
     { name: "organization_ids", labelKey: "resource.policies.field.organizationIds", type: "csv" },
     {
       name: "project_ids",

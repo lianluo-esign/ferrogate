@@ -24,6 +24,9 @@ const providers = [
   { name: "openai", kind: "openai", base_url: "https://api.openai.com" },
   { name: "anthropic", kind: "anthropic", base_url: "https://api.anthropic.com" },
 ];
+const tenants = [
+  { id: "tenant-1", name: "Acme", slug: "acme", status: "active" },
+];
 const projects = [
   { id: "project-1", tenant_id: "tenant-1", name: "Production", slug: "prod" },
 ];
@@ -43,6 +46,15 @@ function installCatalogHandlers() {
     http.get(gatewayUrl("/admin/v1/providers"), () =>
       HttpResponse.json({ object: "list", data: providers }),
     ),
+    http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
+      HttpResponse.json({ object: "list", data: tenants, total: tenants.length, offset: 0, limit: 20 }),
+    ),
+    http.get(gatewayUrl("/admin/v1/tenant-accounts/:id"), ({ params }) => {
+      const tenant = tenants.find((item) => item.id === params.id);
+      return tenant
+        ? HttpResponse.json({ object: "tenant", tenant })
+        : HttpResponse.json({ error: { code: "not_found", message: "x" } }, { status: 404 });
+    }),
     http.get(gatewayUrl("/admin/v1/projects"), () =>
       HttpResponse.json({ object: "list", data: projects, total: projects.length, offset: 0, limit: 20 }),
     ),
@@ -166,7 +178,7 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
     );
   });
 
-  it("native api-key form uses project/workspace/model pickers and keeps opaque IDs raw", async () => {
+  it("native api-key form uses tenant/project/workspace/model pickers and keeps opaque IDs raw", async () => {
     installCatalogHandlers();
     const user = userEvent.setup();
     const onSubmit = renderForm(apiKeysConfig.fields, {
@@ -179,12 +191,21 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
     expect(screen.getByRole("combobox", { name: "Allowed models" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Denied providers" })).toBeInTheDocument();
 
-    // Request-time identifiers with no entity source stay as text inputs.
-    expect(screen.getByRole("textbox", { name: "Organization ID" })).toBeInTheDocument();
+    // #340 box 1: organization_id is a tenant-accounts reference (the gateway
+    // compares it against `project.tenant_id`), so it is a picker, NOT the free
+    // text this assertion previously locked in.
+    expect(screen.getByRole("combobox", { name: "Tenant" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Tenant" })).not.toBeInTheDocument();
+
+    // user_id has no catalog to bind to (the Admin API exposes no users
+    // endpoint), so it stays a text input -- an explicit box-7 exclusion.
     expect(screen.getByRole("textbox", { name: "User ID" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("combobox", { name: "Project" }));
     await user.click(await screen.findByRole("option", { name: /Production/ }));
+
+    await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+    await user.click(await screen.findByRole("option", { name: /Acme/ }));
 
     await user.click(screen.getByRole("combobox", { name: "Allowed models" }));
     await user.click(await screen.findByRole("option", { name: /gpt-4o/ }));
@@ -196,11 +217,32 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({
           name: "native-key",
+          // The picker submits the canonical tenant id, unchanged in shape from
+          // the free-text field it replaced.
+          organization_id: "tenant-1",
           project_id: "project-1",
           allowed_models: ["gpt-4o"],
         }),
       ),
     );
+  });
+
+  it("an api-key organization_id that is not a tenant row stays inspectable and repairable", async () => {
+    // #340 acceptance: "Existing invalid or deleted references must remain
+    // inspectable and repairable." A value stored before the picker landed (or
+    // whose tenant was since deleted) must not vanish from the form.
+    installCatalogHandlers();
+    renderForm(apiKeysConfig.fields, {
+      ...defaultFieldValues(apiKeysConfig.fields),
+      name: "legacy-key",
+      organization_id: "org-not-a-tenant-row",
+    });
+
+    const selected = await screen.findByRole("list", { name: "Selected Tenant" });
+    // The raw id is still shown...
+    await waitFor(() => expect(selected).toHaveTextContent("org-not-a-tenant-row"));
+    // ...and is visibly marked as not resolving to a live tenant.
+    expect(selected).toHaveTextContent(/Unresolved reference/i);
   });
 
   it("plan default model allowlist is a model picker submitting canonical names", async () => {

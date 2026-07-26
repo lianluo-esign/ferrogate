@@ -475,7 +475,9 @@ export const zhCN = {
   "resource.apiKeys.field.deniedModels": "拒绝的模型",
   "resource.apiKeys.field.allowedProviders": "允许的提供商",
   "resource.apiKeys.field.deniedProviders": "拒绝的提供商",
-  "resource.apiKeys.field.organizationId": "组织 ID",
+  "resource.apiKeys.field.organization": "租户",
+  "resource.apiKeys.field.organization.desc":
+    "拥有该密钥的租户账户。提交时原样写入密钥的 organization_id 字段；网关会拒绝属于其他租户的项目或工作空间。",
   "resource.apiKeys.field.project": "项目",
   "resource.apiKeys.field.workspace": "工作空间",
   "resource.apiKeys.field.userId": "用户 ID",

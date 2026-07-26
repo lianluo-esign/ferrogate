@@ -135,13 +135,36 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
-    // organization_id and user_id match the raw identifier the caller presents
-    // at request time (see the native api-key auth path in ferrogate-cli); they
-    // are not guaranteed to be admin-console tenant/user rows and the console
-    // exposes no organizations/users list endpoint, so they stay free text
-    // rather than being force-mapped to an entity source (mirrors the
-    // policies.ts organization_ids decision from #341; #340).
-    { name: "organization_id", labelKey: "resource.apiKeys.field.organizationId", type: "text" },
+    {
+      // #340 box 1: `organization_id` IS a tenant reference, so it is a picker
+      // over the same `tenant-accounts` catalog projects.ts uses for its
+      // `tenant_id`. It previously shipped as free text on the premise that it
+      // "is not guaranteed to be an admin-console tenant row and the console
+      // exposes no organizations list endpoint" -- both halves are false:
+      //   * the gateway compares this value DIRECTLY against a tenant-accounts
+      //     row id (`project.tenant_id != organization_id` in
+      //     crates/ferrogate-cli/src/gateway/api_key_tenancy.rs), and the same
+      //     equivalence holds across the tree (local.rs resolves the request
+      //     tenant as `auth.organization_id`, wallets are 1:1 with it);
+      //   * `/admin/v1/tenant-accounts` is exactly the list endpoint the
+      //     premise claimed was missing -- projects.ts:39 already targets it.
+      // The submitted payload is unchanged (the canonical tenant `id`). A
+      // stored value that is not a tenant row still renders, badged as an
+      // unresolved reference with its raw id shown, so pre-existing and deleted
+      // references stay inspectable and repairable.
+      name: "organization_id",
+      labelKey: "resource.apiKeys.field.organization",
+      descriptionKey: "resource.apiKeys.field.organization.desc",
+      type: "entity",
+      reference: {
+        target: "tenant-accounts",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug"],
+        // #340 box 5: a suspended tenant is listed but marked and unselectable.
+        disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE,
+      },
+    },
     {
       // #340: project_id / workspace_id are first-class rows the key is scoped
       // to, so they now use the shared single-entity pickers. Submitted values
@@ -182,7 +205,16 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         dependencies: [{ field: "project_id", queryKey: "project_id" }],
       },
     },
-    { name: "user_id", labelKey: "resource.apiKeys.field.userId", type: "text" },
+    {
+      // #340 box 7 (explicit exclusion, not a silent one): `user_id` stays free
+      // text. Box 1 does not list "user" among the entity kinds it forbids, and
+      // unlike `organization_id` there is genuinely no catalog to bind to --
+      // the Admin API exposes no users list/get endpoint, so there is nothing
+      // for the shared #337 picker to read. Revisit if a users endpoint lands.
+      name: "user_id",
+      labelKey: "resource.apiKeys.field.userId",
+      type: "text",
+    },
     { name: "monthly_token_budget", labelKey: "resource.apiKeys.field.monthlyTokenBudget", type: "number" },
     { name: "request_limit_per_minute", labelKey: "resource.apiKeys.field.requestLimitPerMinute", type: "number" },
     { name: "expires_at_unix", labelKey: "resource.apiKeys.field.expiresAt", type: "number" },

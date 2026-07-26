@@ -411,7 +411,9 @@ export const enRest = {
   "resource.apiKeys.field.deniedModels": "Denied models",
   "resource.apiKeys.field.allowedProviders": "Allowed providers",
   "resource.apiKeys.field.deniedProviders": "Denied providers",
-  "resource.apiKeys.field.organizationId": "Organization ID",
+  "resource.apiKeys.field.organization": "Tenant",
+  "resource.apiKeys.field.organization.desc":
+    "Owning tenant account. Submitted unchanged as the key's organization_id; the gateway rejects a project or workspace belonging to a different tenant.",
   "resource.apiKeys.field.project": "Project",
   "resource.apiKeys.field.workspace": "Workspace",
   "resource.apiKeys.field.userId": "User ID",
