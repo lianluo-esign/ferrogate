@@ -4,6 +4,10 @@ const baseURL = "http://127.0.0.1:4173";
 
 export default defineConfig({
   testDir: "./e2e",
+  // Browser specs only. `e2e/support/*.test.ts` are vitest unit tests over the
+  // pure support modules (the #348 registered-route inventory) and would
+  // otherwise be picked up by Playwright's default `*.test.ts` match.
+  testMatch: "**/*.spec.ts",
   outputDir: "test-results/playwright",
   fullyParallel: true,
   forbidOnly: true,

@@ -39,7 +39,12 @@ export default defineConfig({
     port: 5173,
   },
   test: {
-    include: ["src/**/*.test.{ts,tsx}"],
+    // `e2e/support/*.test.ts` are NOT browser specs: they are unit tests over the
+    // pure support modules the Playwright specs are built from (the #348
+    // registered-route inventory), and they belong next to the module they
+    // check. `playwright.config.ts` pins `testMatch` to `*.spec.ts` so the two
+    // runners do not collide over them.
+    include: ["src/**/*.test.{ts,tsx}", "e2e/support/*.test.ts"],
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     restoreMocks: true,
