@@ -9,8 +9,20 @@
 // stays authoritative — this is fast feedback, not the gate. TLS for a freshly
 // bound hostname rides the existing ACME issuance + graceful-upgrade reload;
 // the bind response reports that ACME posture.
+//
+// A bind RECORDS a binding; it does not make the hostname live. Post-#488 the
+// gateway serves a bound hostname only while its DNS-TXT ownership proof
+// resolves, and it reports that verdict on every listed binding (`serving` +
+// `verification_state`). Those are rendered per row — see
+// components/site-domain-liveness.tsx — because a bound timestamp on its own
+// makes a hostname whose requests are REFUSED look identical to a live one.
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -25,6 +37,10 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  SiteDomainChallenge,
+  SiteDomainLiveness,
+} from "@/components/site-domain-liveness";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
@@ -67,6 +83,34 @@ export default function SiteDomainsPage() {
   });
 
   const domains = useMemo(() => data?.data ?? [], [data]);
+
+  // A binding is RECORDED on bind but only SERVES once its #488 DNS ownership
+  // proof resolves, and the listing already carries that verdict per row
+  // (`serving` + `verification_state`, bulk-joined server-side — no N+1). The
+  // one thing the listing cannot carry is the challenge TXT record itself, so
+  // exactly the pending rows get a detail read to fetch it; nothing else does.
+  const pendingHostnames = useMemo(
+    () =>
+      domains
+        .filter((domain) => domain.verification_state === "pending_verification")
+        .map((domain) => domain.hostname),
+    [domains],
+  );
+  const challengeQueries = useQueries({
+    queries: pendingHostnames.map((hostname) => ({
+      queryKey: ["site-domain-detail", hostname] as const,
+      queryFn: () =>
+        adminGet(apiKey, "/admin/v1/site-domains/{hostname}", {
+          params: { hostname },
+        }),
+    })),
+  });
+  const challenges = challengeQueries.flatMap((query) => {
+    const verification = query.data?.verification;
+    return verification && verification.state === "pending_verification"
+      ? [verification]
+      : [];
+  });
 
   // The session tenant's PUBLISHED static-site slugs, from the same `/v1/assets`
   // enumeration the Static sites page derives its list from. Only read while the
@@ -274,19 +318,20 @@ export default function SiteDomainsPage() {
               <TableHead>{t("page.siteDomains.field.site")}</TableHead>
               <TableHead>{t("page.siteDomains.col.servePath")}</TableHead>
               <TableHead>{t("page.siteDomains.col.bound")}</TableHead>
+              <TableHead>{t("page.siteDomains.col.status")}</TableHead>
               <TableHead className="w-24" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
-                <TableCell colSpan={6} className="h-24 text-center">
+                <TableCell colSpan={7} className="h-24 text-center">
                   {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : domains.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="h-24 text-center">
+                <TableCell colSpan={7} className="h-24 text-center">
                   {t("page.siteDomains.empty")}
                 </TableCell>
               </TableRow>
@@ -300,6 +345,17 @@ export default function SiteDomainsPage() {
                   </TableCell>
                   <TableCell className="font-mono text-xs">{domain.serve_path}</TableCell>
                   <TableCell className="text-xs">{formatUnix(domain.created_at_unix)}</TableCell>
+                  {/* Is this hostname live? A bound timestamp does not answer
+                      that: the gateway refuses requests on a hostname whose
+                      ownership proof is missing, pending or expired. Rendered
+                      from the fields the listing itself reports; `Unknown` when
+                      it reports none, never a guess. */}
+                  <TableCell>
+                    <SiteDomainLiveness
+                      serving={domain.serving}
+                      verificationState={domain.verification_state}
+                    />
+                  </TableCell>
                   <TableCell>
                     <Button
                       variant="destructive"
@@ -315,6 +371,12 @@ export default function SiteDomainsPage() {
           </TableBody>
         </Table>
       </div>
+
+      {/* The remedy for every "Pending DNS verification" row above: the exact
+          TXT record to publish, straight from the gateway. */}
+      {challenges.map((verification) => (
+        <SiteDomainChallenge key={verification.hostname} verification={verification} />
+      ))}
 
       <AlertDialog
         open={pendingUnbind !== null}

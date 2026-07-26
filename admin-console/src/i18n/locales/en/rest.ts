@@ -745,6 +745,21 @@ export const enRest = {
   "page.siteDomains.acme.enabledNoReload": " ACME enabled; no listener reload was required.",
   "page.siteDomains.acme.disabled":
     " ACME issuance is disabled on this gateway; provision TLS out-of-band.",
+  // Bound-hostname LIVENESS (#488), shared by the site-domains page and the
+  // static-site detail drawer. A binding is recorded immediately but only SERVES
+  // once its DNS ownership proof resolves, so `serving` + `verification_state`
+  // are rendered next to every hostname; an absent field prints Unknown.
+  "page.siteDomains.col.status": "Status",
+  "page.siteDomains.serving": "Serving",
+  "page.siteDomains.notServing": "Not serving",
+  "page.siteDomains.verification.none": "No DNS ownership proof",
+  "page.siteDomains.verification.pending": "Pending DNS verification",
+  "page.siteDomains.verification.verified": "Ownership verified",
+  "page.siteDomains.verification.grandfathered": "Grandfathered",
+  "page.siteDomains.verification.expired": "Verification expired",
+  "page.siteDomains.challenge.title":
+    "Publish this DNS record, then verify, to make {hostname} serve:",
+  "page.siteDomains.challenge.expires": "The challenge token expires {expires}.",
 
   // Static-site management + publish flow (src/pages/static-sites.tsx, #345).
   "page.staticSites.title": "Static sites",
@@ -843,6 +858,11 @@ export const enRest = {
     "PERMANENTLY removes EVERY retained bundle of {site} — each bundle's files and manifest, the serving channel, and the site manifest — so the site stops serving immediately, bound domains resolve to nothing, and none of its bytes keep counting against your asset-storage quota. This is not a republish and cannot be undone; each deletion is recorded in the audit log. Type the exact site name below to confirm.",
   "page.staticSites.unpublish.confirmLabel": "Type {site} to confirm",
   "page.staticSites.unpublish.success": "Unpublished {site}",
+  // A purge is many independent DELETEs; one of them failing leaves the site
+  // PARTIALLY removed. Say exactly that instead of a bare failure toast, and
+  // leave the action re-drivable against the refreshed row list.
+  "page.staticSites.unpublish.partial":
+    "Unpublish stopped part-way: {failed} of {total} deletions failed ({message}). {site} is partially removed and still listed — run Unpublish again to retry the rows that remain.",
 
   // Resolved tenant-defaults lookup (src/pages/tenant-resolved-defaults.tsx).
   "page.resolvedDefaults.title": "Resolved tenant defaults",

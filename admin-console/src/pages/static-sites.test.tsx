@@ -226,16 +226,56 @@ function marketingFixture(overrides: Partial<SiteFixture> = {}): SiteFixture {
   };
 }
 
+/**
+ * The shape the gateway ACTUALLY serializes for a bound hostname. #488 added
+ * `verification_state` and `serving` to `admin_site_domain()` with NO
+ * `skip_serializing_if`, so every `AdminSiteDomain` on the wire carries both —
+ * yet the generated client declares them optional, so a fixture that omits them
+ * still typechecks. That divergence is exactly why the ACME tests below would
+ * stay green against a permanently dead hostname. Typing the base fixture as
+ * `Required` makes dropping either field a COMPILE error; a test that wants to
+ * model a gateway that reports neither still overrides them to `undefined`
+ * explicitly, which is a visible choice rather than an omission.
+ */
+type WireSiteDomain = SiteDomain &
+  Required<Pick<SiteDomain, "verification_state" | "serving">>;
+
+const BOUND_DOMAIN: WireSiteDomain = {
+  object: "site_domain",
+  hostname: "app.example.com",
+  tenant_id: "tenant-1",
+  site: "marketing",
+  serve_path: "/sites/tenant-1/marketing/",
+  // A live binding: ownership proven, so the gateway serves it.
+  verification_state: "verified",
+  serving: true,
+  created_at_unix: 1000,
+  updated_at_unix: 1000,
+};
+
 function domain(overrides: Partial<SiteDomain> = {}): SiteDomain {
+  return { ...BOUND_DOMAIN, ...overrides };
+}
+
+/** The #488 ownership-proof block `GET /admin/v1/site-domains/{hostname}`
+ * returns alongside a binding: the exact `_ferrogate-challenge.{hostname}` TXT
+ * record still to be published, plus when its token expires. */
+function pendingVerification(
+  binding: SiteDomain,
+): AdminSchema<"AdminSiteDomainVerification"> {
   return {
-    object: "site_domain",
-    hostname: "app.example.com",
-    tenant_id: "tenant-1",
-    site: "marketing",
-    serve_path: "/sites/tenant-1/marketing/",
-    created_at_unix: 1000,
-    updated_at_unix: 1000,
-    ...overrides,
+    object: "site_domain_verification",
+    state: "pending_verification",
+    serves: false,
+    tenant_id: binding.tenant_id,
+    hostname: binding.hostname,
+    site: binding.site,
+    challenge_record_name: `_ferrogate-challenge.${binding.hostname}`,
+    challenge_record_type: "TXT",
+    challenge_record_value: "ferrogate-site-verify=cafebabe",
+    issued_at_unix: 1000,
+    token_expires_at_unix: 1_700_003_600,
+    attempt_count: 0,
   };
 }
 
@@ -288,18 +328,29 @@ function mockBase(options: {
     http.get(gatewayUrl("/admin/v1/site-domains"), () =>
       HttpResponse.json({ object: "list", data: options.domains ?? [] }),
     ),
-    // Per-hostname detail read: the only endpoint that carries ACME posture, so
-    // the drawer can show it for a binding made long before this session.
-    http.get(gatewayUrl("/admin/v1/site-domains/:hostname"), ({ params }) =>
-      HttpResponse.json({
+    // Per-hostname detail read: the only endpoint that carries ACME posture and
+    // the #488 `verification` block, so the drawer can show both for a binding
+    // made long before this session. It echoes the listed binding, so a fixture
+    // that says a hostname is pending is not contradicted by its own detail.
+    http.get(gatewayUrl("/admin/v1/site-domains/:hostname"), ({ params }) => {
+      const hostname = params.hostname as string;
+      const binding =
+        (options.domains ?? []).find((entry) => entry.hostname === hostname) ??
+        domain({ hostname });
+      return HttpResponse.json({
         object: "site_domain",
-        site_domain: domain({ hostname: params.hostname as string }),
+        site_domain: binding,
         acme: {
           enabled: options.acmeEnabled ?? true,
           reload_triggered: false,
         },
-      }),
-    ),
+        // The gateway omits `verification` only when no proof record exists at
+        // all; a pending binding always carries the record to publish.
+        ...(binding.verification_state === "pending_verification"
+          ? { verification: pendingVerification(binding) }
+          : {}),
+      });
+    }),
     http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
       HttpResponse.json({ object: "tenant", tenant: { id: "tenant-1", name: "Acme", slug: "acme" } }),
     ),
@@ -613,8 +664,19 @@ describe("StaticSitesPage publish target", () => {
     expect(screen.getByText("/sites/tenant-1/{site}/")).toBeInTheDocument();
   });
 
-  it("backs the site field with the tenant's published slugs", async () => {
-    mockBase({ sites: [marketingFixture()] });
+  it("backs the site field with the tenant's published slugs, deduped and sorted", async () => {
+    // THREE published sites, listed out of order, each contributing several
+    // `/v1/assets` rows (bundle manifests, `__site_file__:` objects, the marker)
+    // under the SAME name. A single-site fixture pinned one option and so could
+    // not tell a correct enumeration from one that dropped the sort or emitted a
+    // suggestion per asset row.
+    mockBase({
+      sites: [
+        marketingFixture(),
+        marketingFixture({ site: "docs", serving: "2.1.0" }),
+        marketingFixture({ site: "blog", serving: "2.1.0" }),
+      ],
+    });
     renderWithProviders(<StaticSitesPage />);
     await screen.findByTestId("static-site-marketing");
 
@@ -626,7 +688,10 @@ describe("StaticSitesPage publish target", () => {
     const options = document
       .getElementById("site-slug-options")!
       .querySelectorAll("option");
+    // One option per SITE (not per asset row), alphabetically ordered.
     expect([...options].map((option) => option.getAttribute("value"))).toEqual([
+      "blog",
+      "docs",
       "marketing",
     ]);
   });
@@ -842,27 +907,125 @@ describe("StaticSitesPage per-file download", () => {
   });
 });
 
+/**
+ * A STATEFUL `marketing` server for the unpublish purge, modelling the two
+ * gateway behaviours a fire-and-forget mock cannot show:
+ *
+ *  1. `DELETE` of a version row that a channel still points at is REFUSED —
+ *     `delete_asset_variant_if_unreferenced` returns `BlockedByChannel` for the
+ *     last resolvable variant of a channel-referenced version, and
+ *     `handle_asset_delete` turns that into 409 `asset_version_referenced`
+ *     ("…move or delete the channel first"). A handler that 200s every version
+ *     DELETE leaves the purge ORDER completely unconstrained, which is how a
+ *     purge that deletes versions before channels passed its own test.
+ *  2. Deletions are VISIBLE: `/v1/assets` and the registry manifest are rebuilt
+ *     from live state, so the test can assert the applied outcome (the site is
+ *     gone from a refetched listing) instead of only the requests sent.
+ */
+function installStatefulMarketing(
+  fixture: SiteFixture,
+  options: {
+    /** Version rows whose DELETE fails with a 503, to model a purge that only
+     * partially applies. Keyed by the DECODED registry key, since the reserved
+     * `__site_file__:{v}:{path}` keys are percent-encoded on the wire. */
+    failVersions?: Record<string, string>;
+  } = {},
+) {
+  const registry = registryFor(fixture);
+  const state = {
+    versions: registry.versions.map((entry) => entry.version),
+    channels: registry.channels.map((entry) => ({ ...entry })),
+    /** Every delete, in the order the server received it. */
+    order: [] as string[],
+  };
+  const rowsByVersion = new Map(
+    assetRowsFor(fixture).map((row) => [row.version, row]),
+  );
+  server.use(
+    http.get(gatewayUrl("/v1/assets"), () =>
+      HttpResponse.json({
+        object: "list",
+        data: state.versions.flatMap((version) => {
+          const row = rowsByVersion.get(version);
+          return row ? [row] : [];
+        }),
+      }),
+    ),
+    http.get(gatewayUrl(`/v1/assets/static_site/${fixture.site}/manifest`), () =>
+      HttpResponse.json({
+        ...registry,
+        channels: state.channels,
+        versions: state.versions.map((version) => ({
+          version,
+          yanked: false,
+          variants: [],
+        })),
+      }),
+    ),
+    http.delete(
+      gatewayUrl(`/v1/assets/static_site/${fixture.site}/channels/:channel`),
+      ({ params }) => {
+        const channel = params.channel as string;
+        state.order.push(`channel:${channel}`);
+        state.channels = state.channels.filter(
+          (entry) => entry.channel !== channel,
+        );
+        return HttpResponse.json({
+          object: "asset_channel",
+          id: `static_site/${fixture.site}/channels/${channel}`,
+          deleted: true,
+        });
+      },
+    ),
+    http.delete(
+      gatewayUrl(`/v1/assets/static_site/${fixture.site}/:version`),
+      ({ params }) => {
+        const version = params.version as string;
+        state.order.push(`version:${version}`);
+        const injected = options.failVersions?.[version];
+        if (injected !== undefined) {
+          return HttpResponse.json(
+            {
+              error: {
+                type: "ferrogate_error",
+                code: "storage_unavailable",
+                message: injected,
+                request_id: "req-down",
+              },
+            },
+            { status: 503 },
+          );
+        }
+        // The gateway's refusal, verbatim in shape and code.
+        if (state.channels.some((entry) => entry.version === version)) {
+          return HttpResponse.json(
+            {
+              error: {
+                type: "ferrogate_error",
+                code: "asset_version_referenced",
+                message: `version ${version} is the last resolvable variant of a channel-referenced version; move or delete the channel first`,
+                request_id: "req-ref",
+              },
+            },
+            { status: 409 },
+          );
+        }
+        state.versions = state.versions.filter((entry) => entry !== version);
+        return HttpResponse.json({
+          object: "asset",
+          id: `static_site/${fixture.site}/${version}`,
+          deleted: true,
+        });
+      },
+    ),
+  );
+  return state;
+}
+
 describe("StaticSitesPage unpublish flow", () => {
   it("requires the exact typed site name, then purges EVERY retained row and the serving channel", async () => {
     mockBase({ sites: [marketingFixture()] });
-    const deleted = new Set<string>();
-    const deletedChannels = new Set<string>();
-    server.use(
-      http.delete(
-        gatewayUrl("/v1/assets/static_site/marketing/channels/:channel"),
-        ({ params }) => {
-          deletedChannels.add(params.channel as string);
-          return HttpResponse.json({ object: "asset_channel", deleted: true });
-        },
-      ),
-      http.delete(
-        gatewayUrl("/v1/assets/static_site/marketing/:version"),
-        ({ params }) => {
-          deleted.add(params.version as string);
-          return HttpResponse.json({ object: "asset", deleted: true });
-        },
-      ),
-    );
+    const state = installStatefulMarketing(marketingFixture());
     const successToast = vi.spyOn(toast, "success");
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
@@ -896,33 +1059,104 @@ describe("StaticSitesPage unpublish flow", () => {
 
     await user.click(confirmButton);
 
-    // EVERY row the gateway retains for this site is deleted, not just the
-    // served bundle's files: both bundle-manifest rows (2.1.0 + the retained
-    // 2.0.0), every `__site_file__:{version}:{path}` object of BOTH bundles,
-    // and the reserved marker. Anything left behind would keep the site in
-    // `GET /v1/assets` forever and keep charging its bytes to the tenant's
-    // asset-storage quota, which would make the success toast a lie.
+    // The APPLIED outcome: the site is gone from a refetched `/v1/assets`.
+    // Anything left behind keeps the site listed forever and keeps charging its
+    // bytes to the tenant's asset-storage quota, which would make the success
+    // toast a lie — and that is precisely what happens when the purge deletes
+    // versions before the channel that references them: the served bundle's row
+    // 409s and the channel + marker deletes never run.
     await waitFor(() =>
-      expect(deleted).toEqual(
-        new Set([
-          "2.1.0",
-          "__site_file__:2.1.0:index.html",
-          "__site_file__:2.1.0:app.js",
-          "2.0.0",
-          "__site_file__:2.0.0:index.html",
-          "__site_manifest__",
-        ]),
-      ),
+      expect(screen.queryByTestId("static-site-marketing")).toBeNull(),
     );
-    // …and the `serving` channel pointer, a separately stored row that would
-    // otherwise survive and be re-adopted by a later publish of the same slug.
-    await waitFor(() => expect(deletedChannels).toEqual(new Set(["serving"])));
+    expect(await screen.findByText("No published static sites.")).toBeInTheDocument();
+
+    // Nothing survives server-side: no version rows, no channel pointer (a
+    // leftover `serving` would be re-adopted by a later publish of the slug).
+    expect(state.versions).toEqual([]);
+    expect(state.channels).toEqual([]);
+    // EVERY retained row was deleted, not just the served bundle's files: both
+    // bundle-manifest rows (2.1.0 + the retained 2.0.0), every
+    // `__site_file__:{version}:{path}` object of BOTH bundles, and the marker.
+    expect(new Set(state.order)).toEqual(
+      new Set([
+        "channel:serving",
+        "version:2.1.0",
+        "version:__site_file__:2.1.0:index.html",
+        "version:__site_file__:2.1.0:app.js",
+        "version:2.0.0",
+        "version:__site_file__:2.0.0:index.html",
+        "version:__site_manifest__",
+      ]),
+    );
+    // The order the gateway's own 409 message prescribes: channel first, then
+    // the version rows, then the reserved marker last.
+    expect(state.order[0]).toBe("channel:serving");
+    expect(state.order.at(-1)).toBe("version:__site_manifest__");
     await waitFor(() =>
       expect(successToast).toHaveBeenCalledWith(
         en["page.staticSites.unpublish.success"].replace("{site}", "marketing"),
       ),
     );
     successToast.mockRestore();
+  });
+
+  it("reports a PARTIAL purge honestly and leaves it re-drivable", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    // One file object refuses to delete (a storage blip). The purge must not
+    // claim success, must not push on to the marker — which would orphan the
+    // surviving objects behind a gone manifest — and must say what is left.
+    const state = installStatefulMarketing(marketingFixture(), {
+      failVersions: {
+        "__site_file__:2.0.0:index.html": "object store is unavailable",
+      },
+    });
+    const successToast = vi.spyOn(toast, "success");
+    const errorToast = vi.spyOn(toast, "error");
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.1.0");
+    await user.click(
+      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
+    );
+    const drawer = await screen.findByRole("dialog");
+    await user.click(
+      within(drawer).getByRole("button", {
+        name: en["page.staticSites.unpublish.action"],
+      }),
+    );
+    const confirmDialog = (
+      await screen.findByText(
+        en["page.staticSites.unpublish.title"].replace("{site}", "marketing"),
+      )
+    ).closest("[role='dialog']") as HTMLElement;
+    await user.type(
+      within(confirmDialog).getByLabelText(
+        en["page.staticSites.unpublish.confirmLabel"].replace("{site}", "marketing"),
+      ),
+      "marketing",
+    );
+    await user.click(
+      within(confirmDialog).getByRole("button", {
+        name: en["page.staticSites.unpublish.action"],
+      }),
+    );
+
+    // No success is claimed, and the failure names the row + the gateway verdict.
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    expect(successToast).not.toHaveBeenCalled();
+    const message = errorToast.mock.calls[0][0] as string;
+    expect(message).toContain("__site_file__:2.0.0:index.html");
+    expect(message).toContain("object store is unavailable");
+    expect(message).toContain("marketing");
+    // The marker was NOT deleted — the site stays describable, and the surviving
+    // object is still reachable for a retry.
+    expect(state.versions).toContain("__site_manifest__");
+    expect(state.versions).toContain("__site_file__:2.0.0:index.html");
+    expect(state.order).not.toContain("version:__site_manifest__");
+    successToast.mockRestore();
+    errorToast.mockRestore();
   });
 });
 
@@ -1488,7 +1722,12 @@ describe("StaticSitesPage domain binding (site context)", () => {
         gatewayUrl("/admin/v1/site-domains/:hostname"),
         ({ params }) => {
           unbound = params.hostname as string;
-          return HttpResponse.json({ object: "site_domain", deleted: true });
+          // The contract is DeleteResponse: object + id + deleted.
+          return HttpResponse.json({
+            object: "site_domain",
+            id: unbound,
+            deleted: true,
+          });
         },
       ),
     );
@@ -1545,6 +1784,103 @@ describe("StaticSitesPage domain binding (site context)", () => {
     expect(
       await within(domainRow).findByText(en["page.staticSites.acme.disabled"]),
     ).toBeInTheDocument();
+  });
+
+  it("reports a live binding as serving, with its ownership verified", async () => {
+    mockBase({ sites: [marketingFixture()], domains: [domain()] });
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    const domainRow = within(drawer).getByTestId(
+      "static-site-domain-app.example.com",
+    );
+    expect(
+      await within(domainRow).findByText(en["page.siteDomains.serving"]),
+    ).toBeInTheDocument();
+    expect(
+      within(domainRow).getByText(en["page.siteDomains.verification.verified"]),
+    ).toBeInTheDocument();
+    // A live binding has no outstanding challenge to publish.
+    expect(
+      within(drawer).queryByTestId(
+        "site-domain-challenge-app.example.com",
+      ),
+    ).toBeNull();
+  });
+
+  it("shows a bound hostname the gateway REFUSES as not serving, with the record to publish", async () => {
+    // The exact post-bind reality #488 created: the binding is recorded (it has
+    // a bound timestamp and ACME is on) but `serving` is false until the DNS
+    // proof lands. Showing only "bound" + "ACME enabled" here would render a
+    // hostname whose requests are refused exactly like a live one.
+    mockBase({
+      sites: [marketingFixture()],
+      domains: [
+        domain({ verification_state: "pending_verification", serving: false }),
+      ],
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    const domainRow = within(drawer).getByTestId(
+      "static-site-domain-app.example.com",
+    );
+    expect(
+      await within(domainRow).findByText(en["page.siteDomains.notServing"]),
+    ).toBeInTheDocument();
+    expect(
+      within(domainRow).getByText(en["page.siteDomains.verification.pending"]),
+    ).toBeInTheDocument();
+    expect(
+      within(domainRow).queryByText(en["page.siteDomains.serving"]),
+    ).toBeNull();
+    // …and the remedy: the exact TXT record the gateway is waiting for.
+    const challenge = await within(drawer).findByTestId(
+      "site-domain-challenge-app.example.com",
+    );
+    expect(challenge).toHaveTextContent("_ferrogate-challenge.app.example.com");
+    expect(challenge).toHaveTextContent("TXT");
+    expect(challenge).toHaveTextContent("ferrogate-site-verify=cafebabe");
+  });
+
+  it("says Unknown for liveness rather than guessing when nothing reports it", async () => {
+    // A gateway that reports neither field (both are optional in the generated
+    // client) AND a failed detail read: the console knows nothing about this
+    // hostname's liveness and must say exactly that.
+    mockBase({
+      sites: [marketingFixture()],
+      domains: [domain({ verification_state: undefined, serving: undefined })],
+    });
+    server.use(
+      http.get(gatewayUrl("/admin/v1/site-domains/:hostname"), () =>
+        HttpResponse.json(
+          { error: { code: "backend_unavailable", message: "down" } },
+          { status: 503 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    const domainRow = within(drawer).getByTestId(
+      "static-site-domain-app.example.com",
+    );
+    // Serving badge, verification state and ACME all read Unknown — no posture
+    // is asserted anywhere in the row.
+    await waitFor(() =>
+      expect(
+        within(domainRow).getAllByText(en["common.unknown"]).length,
+      ).toBe(3),
+    );
+    expect(
+      within(domainRow).queryByText(en["page.siteDomains.serving"]),
+    ).toBeNull();
+    expect(
+      within(domainRow).queryByText(en["page.siteDomains.notServing"]),
+    ).toBeNull();
   });
 
   it("says Unknown rather than guessing when the ACME read fails", async () => {

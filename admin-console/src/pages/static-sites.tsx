@@ -20,10 +20,17 @@
 //   - a per-site DETAIL drawer that inspects the served bundle's file tree
 //     (paths, content types, hashes, sizes) straight from that bundle's
 //     manifest; and
-//   - an UNPUBLISH flow that permanently removes a site (every retained bundle
-//     manifest row, every per-file object of every retained bundle, the
-//     `serving` channel, and the reserved marker row) behind a name-typed
-//     destructive confirm, each underlying delete recorded in the audit log.
+//   - an UNPUBLISH flow that permanently removes a site (the `serving` channel
+//     FIRST, then every retained bundle-manifest row and every per-file object,
+//     then the reserved marker — the one order the gateway accepts) behind a
+//     name-typed destructive confirm, each delete recorded in the audit log.
+//
+// The drawer's domain table reports each bound hostname's LIVENESS, not just
+// that it is bound: post-#488 the gateway refuses requests on a hostname whose
+// DNS ownership proof is missing, pending or expired, and it says so on every
+// `AdminSiteDomain` it serializes (`serving`, `verification_state`). Rendering
+// only the bound timestamp + ACME flag showed a refused hostname as if it were
+// live; see components/site-domain-liveness.tsx.
 //
 // EVERY displayed policy/file field describes the bundle the gateway ACTUALLY
 // SERVES, resolved exactly the way `Gateway::resolve_active_site_bundle` does
@@ -80,6 +87,10 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  SiteDomainChallenge,
+  SiteDomainLiveness,
+} from "@/components/site-domain-liveness";
 import {
   Card,
   CardContent,
@@ -341,6 +352,25 @@ async function fetchActiveSiteBundle(
   }
 }
 
+/**
+ * Runs one stage of the unpublish purge concurrently and REPORTS which deletes
+ * failed, instead of `Promise.all`'s abandon-at-first-rejection: with `all`, one
+ * 409 both hides which siblings actually ran and skips every stage after it, so
+ * the caller can neither describe nor finish the purge. Returns one
+ * `"{row}: {verdict}"` line per failure, empty when the stage fully applied.
+ */
+async function settleDeletes(
+  deletes: { label: string; run: () => Promise<unknown> }[],
+): Promise<string[]> {
+  const results = await Promise.allSettled(deletes.map((entry) => entry.run()));
+  return results.flatMap((result, index) => {
+    if (result.status !== "rejected") return [];
+    const reason: unknown = result.reason;
+    const message = reason instanceof Error ? reason.message : String(reason);
+    return [`${deletes[index].label}: ${message}`];
+  });
+}
+
 /** Total stored bytes across a manifest's files. */
 function manifestBytes(manifest: SiteManifest): number {
   return manifest.files.reduce((sum, file) => sum + file.size_bytes, 0);
@@ -585,12 +615,13 @@ function SiteDetailSheet({
   const [bindAcmeNote, setBindAcmeNote] = useState<string | null>(null);
   const [pendingUnbind, setPendingUnbind] = useState<SiteDomain | null>(null);
 
-  // ACME posture for EVERY bound hostname, not just one bound in this session.
-  // The list endpoint (`GET /admin/v1/site-domains`) carries no ACME field, so
-  // each binding's posture comes from its own detail read
-  // (`GET /admin/v1/site-domains/{hostname}` -> `acme`, site_domains.rs). Read
-  // in parallel while the drawer is open; a read that has not landed or that
-  // failed prints "Unknown" rather than asserting a posture we do not know.
+  // Per-binding detail read for EVERY bound hostname, not just one bound in this
+  // session. The list endpoint (`GET /admin/v1/site-domains`) carries no ACME
+  // field and no `verification` block, so both come from each binding's own
+  // detail read (`GET /admin/v1/site-domains/{hostname}` -> `acme` +
+  // `verification`, site_domains.rs). Read in parallel while the drawer is open;
+  // a read that has not landed or that failed prints "Unknown" rather than
+  // asserting a posture we do not know.
   const domainDetailQueries = useQueries({
     queries: (row?.domains ?? []).map((domain) => ({
       queryKey: ["site-domain-detail", domain.hostname] as const,
@@ -600,12 +631,36 @@ function SiteDetailSheet({
         }),
     })),
   });
-  const acmeByHostname = new Map<string, boolean | undefined>(
+  const detailByHostname = new Map(
     (row?.domains ?? []).map((domain, index) => [
       domain.hostname,
-      domainDetailQueries[index]?.data?.acme.enabled,
+      domainDetailQueries[index]?.data,
     ]),
   );
+  /**
+   * The gateway reports a binding's LIVENESS on every `AdminSiteDomain` it
+   * serializes — the listing row we already hold AND the detail read — so both
+   * are consulted, freshest first. `serving` answers "is this hostname live?";
+   * `verification_state` says why. Consuming only `acme.enabled` (what this used
+   * to do) renders a hostname the gateway REFUSES exactly like a live one.
+   */
+  function livenessOf(domain: SiteDomain) {
+    const detail = detailByHostname.get(domain.hostname);
+    return {
+      acme: detail?.acme.enabled,
+      serving: detail?.site_domain.serving ?? domain.serving,
+      verificationState:
+        detail?.site_domain.verification_state ?? domain.verification_state,
+    };
+  }
+  // The TXT records still to be published. Only a pending binding has one to
+  // act on, and only the detail read carries it.
+  const pendingChallenges = (row?.domains ?? []).flatMap((domain) => {
+    const detail = detailByHostname.get(domain.hostname);
+    const verification = detail?.verification;
+    if (!verification || verification.state !== "pending_verification") return [];
+    return [verification];
+  });
 
   const hostnameCheck =
     bindHostname.trim() === "" ? null : validateSiteDomainHostname(bindHostname);
@@ -935,6 +990,7 @@ function SiteDetailSheet({
                         <TableHead>{t("page.siteDomains.col.hostname")}</TableHead>
                         <TableHead>{t("page.siteDomains.col.servePath")}</TableHead>
                         <TableHead>{t("page.siteDomains.col.bound")}</TableHead>
+                        <TableHead>{t("page.siteDomains.col.status")}</TableHead>
                         <TableHead>{t("page.staticSites.domains.acme")}</TableHead>
                         <TableHead className="w-24">
                           {t("resource.table.actionsColumn")}
@@ -942,7 +998,9 @@ function SiteDetailSheet({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {row.domains.map((domain) => (
+                      {row.domains.map((domain) => {
+                        const liveness = livenessOf(domain);
+                        return (
                         <TableRow
                           key={domain.hostname}
                           data-testid={`static-site-domain-${domain.hostname}`}
@@ -959,13 +1017,24 @@ function SiteDetailSheet({
                               timeStyle: "short",
                             })}
                           </TableCell>
+                          {/* Does this hostname actually SERVE, and if not, why?
+                            A bound timestamp alone says nothing: post-#488 a
+                            binding is refused until its DNS ownership proof
+                            resolves, so omitting this rendered an unhealthy
+                            state as implicitly healthy. */}
+                          <TableCell>
+                            <SiteDomainLiveness
+                              serving={liveness.serving}
+                              verificationState={liveness.verificationState}
+                            />
+                          </TableCell>
                           {/* Live ACME posture for THIS binding, however long
                             ago it was bound. Unknown until its detail read
                             lands (or if it failed) — never a guessed posture. */}
                           <TableCell className="text-xs">
-                            {acmeByHostname.get(domain.hostname) === undefined
+                            {liveness.acme === undefined
                               ? t("common.unknown")
-                              : acmeByHostname.get(domain.hostname)
+                              : liveness.acme
                                 ? t("page.staticSites.acme.enabled")
                                 : t("page.staticSites.acme.disabled")}
                           </TableCell>
@@ -980,11 +1049,23 @@ function SiteDetailSheet({
                             </Button>
                           </TableCell>
                         </TableRow>
-                      ))}
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>
               )}
+
+              {/* A pending binding has exactly one thing the operator must do:
+                publish the challenge TXT record the gateway issued. Reporting
+                "not serving" while withholding the remedy would be half an
+                answer. */}
+              {pendingChallenges.map((verification) => (
+                <SiteDomainChallenge
+                  key={verification.hostname}
+                  verification={verification}
+                />
+              ))}
 
               {/* ACME posture from the last successful bind, kept visible in the
                 drawer (an aria-live status, not just a transient toast). */}
@@ -1316,10 +1397,16 @@ export default function StaticSitesPage() {
       siteNames.map((name, index) => {
         const query = bundleQueries[index];
         const domains = domainsBySite.get(name) ?? [];
-        // Canonical serve URL: a bound hostname's serve_path when one exists,
-        // else the tenant-scoped /sites/{tenant}/{site}/ browse path.
-        const serveUrl =
-          domains[0]?.serve_path ?? `/sites/${tenantId}/${name}/`;
+        // Canonical serve URL: ALWAYS the tenant-scoped browse path. This used
+        // to prefer `domains[0]?.serve_path`, which silently picked one of
+        // several bound hostnames — and picked nothing useful anyway, since the
+        // gateway computes `serve_path` as exactly this tenant path
+        // (site_domains.rs `admin_site_domain`). Worse, a custom hostname is
+        // NOT interchangeable with it: post-#488 the hostname only serves once
+        // its DNS ownership proof resolves, so presenting one as "the canonical
+        // URL" would advertise a link that may be refused. Bound hostnames and
+        // their liveness are shown in the detail drawer's domain table instead.
+        const serveUrl = `/sites/${tenantId}/${name}/`;
         return {
           name,
           manifest: query.data?.manifest,
@@ -1468,11 +1555,28 @@ export default function StaticSitesPage() {
   // unavailable") and its retained bytes keep counting against the tenant's
   // asset-storage quota — so the "Site unpublished" toast would be a lie.
   //
+  // ORDER IS LOAD-BEARING: CHANNELS FIRST, then the version rows, then the
+  // reserved marker. The gateway REFUSES the other order —
+  // `delete_asset_variant_if_unreferenced` returns `BlockedByChannel` for the
+  // last resolvable variant of a channel-referenced version, which
+  // `handle_asset_delete` turns into 409 `asset_version_referenced` whose
+  // message is literally "move or delete the channel first". Deleting versions
+  // up front therefore 409s on exactly the served bundle, and (under a bare
+  // `Promise.all`) abandons the channel + marker deletes mid-flight, leaving a
+  // site that still lists, still bills, and now serves a manifest whose file
+  // objects are gone. The marker goes LAST for the same reason it always did: a
+  // partial failure must leave the site describable, not orphan objects behind
+  // a manifest that is already gone.
+  //
   // Every version row is addressed by its EXACT registry key, which the
   // gateway's bare-path remap (`resolve_site_asset_version`) passes through
-  // untouched. The reserved marker goes LAST so a partial failure leaves the
-  // site describable instead of orphaning objects behind a gone manifest.
-  // Every DELETE is audit-logged by the assets registry.
+  // untouched. Every DELETE is audit-logged by the assets registry.
+  //
+  // Each stage is `allSettled`, not `all`: one failed DELETE must not silently
+  // decide which of its siblings ran. A stage that reports failures stops the
+  // purge and surfaces an explicit PARTIAL state naming what failed, and the
+  // registry is refetched so pressing Unpublish again re-drives the purge over
+  // exactly the rows that are still there.
   const unpublishMutation = useMutation({
     mutationFn: async ({
       name,
@@ -1485,30 +1589,54 @@ export default function StaticSitesPage() {
         adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
           params: { asset_type: STATIC_SITE_TYPE, name, version },
         });
-      await Promise.all(
-        registry.versions
-          .filter((entry) => entry.version !== SITE_MANIFEST_VERSION)
-          .map((entry) => deleteVersion(entry.version)),
+      const deleteChannel = (channel: string) =>
+        adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/channels/{channel}", {
+          params: { asset_type: STATIC_SITE_TYPE, name, channel },
+        });
+      const versions = registry.versions
+        .map((entry) => entry.version)
+        .filter((version) => version !== SITE_MANIFEST_VERSION);
+      const total = registry.channels.length + versions.length + 1;
+      const halt = (failures: string[]): never => {
+        throw new Error(
+          t("page.staticSites.unpublish.partial", {
+            site: name,
+            failed: failures.length,
+            total,
+            message: failures.join("; "),
+          }),
+        );
+      };
+
+      // 1. The channels. `serving` is a separate stored pointer: leaving it
+      //    would keep resolving (to a now-missing target) and would be
+      //    re-adopted by a later publish of the same slug — and, until it is
+      //    gone, the gateway will not let its target version be deleted.
+      const channelFailures = await settleDeletes(
+        registry.channels.map((channel) => ({
+          label: channel.channel,
+          run: () => deleteChannel(channel.channel),
+        })),
       );
-      // Drop the `serving` channel too: it is a separate stored pointer, so a
-      // leftover would keep resolving (to a now-missing target) and would be
-      // re-adopted by a later publish of the same slug.
-      await Promise.all(
-        registry.channels.map((channel) =>
-          adminDelete(
-            apiKey,
-            "/v1/assets/{asset_type}/{name}/channels/{channel}",
-            {
-              params: {
-                asset_type: STATIC_SITE_TYPE,
-                name,
-                channel: channel.channel,
-              },
-            },
-          ),
-        ),
+      if (channelFailures.length > 0) halt(channelFailures);
+
+      // 2. Every version row — now unreferenced, so none of them 409.
+      const versionFailures = await settleDeletes(
+        versions.map((version) => ({
+          label: version,
+          run: () => deleteVersion(version),
+        })),
       );
-      await deleteVersion(SITE_MANIFEST_VERSION);
+      if (versionFailures.length > 0) halt(versionFailures);
+
+      // 3. The reserved marker, last.
+      const markerFailures = await settleDeletes([
+        {
+          label: SITE_MANIFEST_VERSION,
+          run: () => deleteVersion(SITE_MANIFEST_VERSION),
+        },
+      ]);
+      if (markerFailures.length > 0) halt(markerFailures);
     },
     onSuccess: (_result, variables) => {
       toast.success(
@@ -1523,7 +1651,17 @@ export default function StaticSitesPage() {
       setUnpublishConfirm("");
       setDetailSite(null);
     },
-    onError: (error: Error) => toast.error(error.message),
+    // A partially-applied purge is the normal failure here, so refresh the row
+    // list the retry walks (the already-deleted rows are gone from it) and keep
+    // the confirm dialog open so the operator can immediately re-drive it.
+    onError: (error: Error) => {
+      toast.error(error.message);
+      queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
+      if (unpublishSite)
+        queryClient.invalidateQueries({
+          queryKey: siteBundleQueryKey(unpublishSite),
+        });
+    },
   });
 
   function submitPublish() {

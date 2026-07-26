@@ -13,17 +13,31 @@ import { createTestQueryClient, seedSession } from "@/test/test-utils";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 
+/**
+ * The shape the gateway ACTUALLY serializes for a bound hostname: #488 added
+ * `verification_state` + `serving` to `admin_site_domain()` with no
+ * `skip_serializing_if`, so the listing carries both on every row — while the
+ * generated client declares them optional, which is what let fixtures omit them
+ * and hide the fact that a bound hostname may not be serving at all. Typing the
+ * base fixture `Required` makes dropping either a compile error.
+ */
+type WireSiteDomain = SiteDomain &
+  Required<Pick<SiteDomain, "verification_state" | "serving">>;
+
+const BOUND_DOMAIN: WireSiteDomain = {
+  object: "site_domain",
+  hostname: "app.example.com",
+  tenant_id: "org-acme",
+  site: "marketing",
+  serve_path: "/sites/org-acme/marketing/",
+  verification_state: "verified",
+  serving: true,
+  created_at_unix: 1000,
+  updated_at_unix: 1000,
+};
+
 function domain(overrides: Partial<SiteDomain> = {}): SiteDomain {
-  return {
-    object: "site_domain",
-    hostname: "app.example.com",
-    tenant_id: "org-acme",
-    site: "marketing",
-    serve_path: "/sites/org-acme/marketing/",
-    created_at_unix: 1000,
-    updated_at_unix: 1000,
-    ...overrides,
-  };
+  return { ...BOUND_DOMAIN, ...overrides };
 }
 
 /** One `/v1/assets` summary row for the published-site enumeration. */
@@ -78,6 +92,80 @@ describe("SiteDomainsPage", () => {
     expect(within(row).getByText("org-acme")).toBeInTheDocument();
     expect(within(row).getByText("marketing")).toBeInTheDocument();
     expect(screen.getByTestId("site-domain-docs.example.com")).toBeInTheDocument();
+  });
+
+  it("reports each hostname's liveness, and the DNS record a pending one still needs", async () => {
+    // Post-#488 a bound hostname does not serve until its DNS ownership proof
+    // resolves, and the listing says so per row. A page that shows only the
+    // bound timestamp presents a hostname the gateway REFUSES exactly like a
+    // live one.
+    mockList([
+      domain(),
+      domain({
+        hostname: "pending.example.com",
+        verification_state: "pending_verification",
+        serving: false,
+      }),
+    ]);
+    server.use(
+      http.get(gatewayUrl("/admin/v1/site-domains/pending.example.com"), () =>
+        HttpResponse.json({
+          object: "site_domain",
+          site_domain: domain({
+            hostname: "pending.example.com",
+            verification_state: "pending_verification",
+            serving: false,
+          }),
+          acme: { enabled: true, reload_triggered: false },
+          verification: {
+            object: "site_domain_verification",
+            state: "pending_verification",
+            serves: false,
+            tenant_id: "org-acme",
+            hostname: "pending.example.com",
+            site: "marketing",
+            challenge_record_name: "_ferrogate-challenge.pending.example.com",
+            challenge_record_type: "TXT",
+            challenge_record_value: "ferrogate-site-verify=deadbeef",
+            issued_at_unix: 1000,
+            token_expires_at_unix: 1_700_003_600,
+            attempt_count: 0,
+          } satisfies AdminSchema<"AdminSiteDomainVerification">,
+        }),
+      ),
+    );
+    renderPage();
+
+    const live = await screen.findByTestId("site-domain-app.example.com");
+    expect(within(live).getByText("Serving")).toBeInTheDocument();
+    expect(within(live).getByText("Ownership verified")).toBeInTheDocument();
+
+    const pending = screen.getByTestId("site-domain-pending.example.com");
+    expect(within(pending).getByText("Not serving")).toBeInTheDocument();
+    expect(within(pending).getByText("Pending DNS verification")).toBeInTheDocument();
+    expect(within(pending).queryByText("Serving")).toBeNull();
+
+    // The remedy is offered for the pending hostname only.
+    const challenge = await screen.findByTestId(
+      "site-domain-challenge-pending.example.com",
+    );
+    expect(challenge).toHaveTextContent("_ferrogate-challenge.pending.example.com");
+    expect(challenge).toHaveTextContent("ferrogate-site-verify=deadbeef");
+    expect(
+      screen.queryByTestId("site-domain-challenge-app.example.com"),
+    ).toBeNull();
+  });
+
+  it("says Unknown for a hostname whose liveness the gateway does not report", async () => {
+    mockList([domain({ verification_state: undefined, serving: undefined })]);
+    renderPage();
+
+    const row = await screen.findByTestId("site-domain-app.example.com");
+    // Two Unknowns — the serving badge and the verification state — and no
+    // guessed posture in either.
+    expect(within(row).getAllByText("Unknown")).toHaveLength(2);
+    expect(within(row).queryByText("Serving")).toBeNull();
+    expect(within(row).queryByText("Not serving")).toBeNull();
   });
 
   it("binds a valid hostname and reports ACME posture", async () => {

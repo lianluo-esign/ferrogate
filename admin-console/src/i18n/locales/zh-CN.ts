@@ -771,6 +771,20 @@ export const zhCN = {
   "page.siteDomains.acme.reloadTriggered": " 已触发 ACME 重载——证书将随新域名重新签发。",
   "page.siteDomains.acme.enabledNoReload": " 已启用 ACME；无需重载监听器。",
   "page.siteDomains.acme.disabled": " 此网关已禁用 ACME 签发；请在带外配置 TLS。",
+  // 已绑定主机名的存活状态（#488）：绑定会立即记录，但只有 DNS 归属证明生效后
+  // 才会真正对外提供服务，因此在每个主机名旁展示 serving 与 verification_state；
+  // 字段缺失时显示“未知”，绝不臆测。
+  "page.siteDomains.col.status": "状态",
+  "page.siteDomains.serving": "正在服务",
+  "page.siteDomains.notServing": "未提供服务",
+  "page.siteDomains.verification.none": "无 DNS 归属证明",
+  "page.siteDomains.verification.pending": "等待 DNS 验证",
+  "page.siteDomains.verification.verified": "归属已验证",
+  "page.siteDomains.verification.grandfathered": "历史豁免",
+  "page.siteDomains.verification.expired": "验证已过期",
+  "page.siteDomains.challenge.title":
+    "请发布以下 DNS 记录并完成验证，{hostname} 才能对外提供服务：",
+  "page.siteDomains.challenge.expires": "质询令牌将于 {expires} 过期。",
 
   // 静态站点管理与发布流程（src/pages/static-sites.tsx，#345）。
   "page.staticSites.title": "静态站点",
@@ -863,6 +877,10 @@ export const zhCN = {
     "将永久删除 {site} 的所有保留版本包——每个版本包的文件与清单、serving 通道以及站点清单，站点会立即停止提供服务，已绑定域名将无法解析到任何内容，其占用的字节也不再计入资产存储配额。这不是重新发布，且无法撤销；每次删除都会记录到审计日志。请在下方输入准确的站点名称以确认。",
   "page.staticSites.unpublish.confirmLabel": "输入 {site} 以确认",
   "page.staticSites.unpublish.success": "已取消发布 {site}",
+  // 清理由多次独立的 DELETE 组成，其中任意一次失败都会让站点处于“部分删除”状态。
+  // 与其只弹一句失败提示，不如如实说明，并允许基于刷新后的行列表重新执行。
+  "page.staticSites.unpublish.partial":
+    "取消发布中途停止：{total} 次删除中有 {failed} 次失败（{message}）。{site} 已被部分删除且仍在列表中——请再次执行“取消发布”以重试剩余的行。",
 
   // 解析后的租户默认值查询（src/pages/tenant-resolved-defaults.tsx）。
   "page.resolvedDefaults.title": "解析后的租户默认值",

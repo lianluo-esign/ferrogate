@@ -167,8 +167,10 @@ test("open/preview exposes the canonical serve URL in the list and the detail dr
   await expect(listLink).toHaveAttribute("href", `${GATEWAY_ORIGIN}/sites/tenant-e2e/marketing/`);
   await expect(listLink).toHaveAttribute("target", "_blank");
 
-  // A site with a bound custom domain surfaces the domain's serve_path as its
-  // canonical serve URL (docs is bound to docs.acme.example).
+  // A site with a bound custom domain still advertises the TENANT-SCOPED serve
+  // path as its canonical URL (docs is bound to docs.acme.example): a custom
+  // hostname only serves once its #488 DNS ownership proof resolves, so it is
+  // never substituted for the canonical link. Its liveness lives in the drawer.
   await expect(siteRow(page, "docs").getByRole("link", { name: /\/sites\/tenant-e2e\/docs\// })).toBeVisible();
 
   // The drawer's outbound "Open serve URL" affordance targets the same canonical

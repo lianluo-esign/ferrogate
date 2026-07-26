@@ -43,6 +43,21 @@ type AssetSummary = components["schemas"]["AssetSummary"];
 type AssetManifest = components["schemas"]["AssetManifest"];
 type AssetManifestVariant = components["schemas"]["AssetManifestVariant"];
 type AdminSiteDomain = components["schemas"]["AdminSiteDomain"];
+type AdminSiteDomainVerification =
+  components["schemas"]["AdminSiteDomainVerification"];
+
+/**
+ * The AdminSiteDomain shape the gateway ACTUALLY serializes. `admin_site_domain`
+ * (site_domains.rs) writes `verification_state` and `serving` unconditionally —
+ * no `skip_serializing_if` — but #488 declared both OPTIONAL in the contract, so
+ * a fixture that omits them still typechecks while modelling a wire message the
+ * gateway never sends. Requiring them here makes an omission a compile error:
+ * post-#488 a bound hostname does not serve until its DNS ownership proof
+ * resolves, and a mock that never says so cannot exercise the console's
+ * liveness reporting at all.
+ */
+type WireSiteDomain = AdminSiteDomain &
+  Required<Pick<AdminSiteDomain, "verification_state" | "serving">>;
 
 // Reserved `version` keys the gateway writes for a static site (mirrors the
 // constants in static-sites.tsx / the gateway's sites.rs).
@@ -102,7 +117,7 @@ interface StaticSitesState {
    * reads — so a rollback changes what the console displays. */
   bundleManifests: Map<string, SiteManifestBody>;
   /** Bound custom hostnames backing GET /admin/v1/site-domains. */
-  domains: AdminSiteDomain[];
+  domains: WireSiteDomain[];
   clock: number;
 }
 
@@ -239,13 +254,17 @@ function buildState(): StaticSitesState {
     updated_at_unix: 1_751_800_000,
   };
 
-  const domains: AdminSiteDomain[] = [
+  // A LIVE seeded binding: its DNS ownership proof is verified, so the gateway
+  // actually serves it. A freshly bound hostname is not (see the bind handler).
+  const domains: WireSiteDomain[] = [
     {
       object: "site_domain",
       hostname: "docs.acme.example",
       tenant_id: SESSION_TENANT_ID,
       site: "docs",
       serve_path: "/sites/tenant-e2e/docs/",
+      verification_state: "verified",
+      serving: true,
       created_at_unix: 1_751_950_000,
       updated_at_unix: 1_751_950_000,
     },
@@ -272,6 +291,27 @@ function buildState(): StaticSitesState {
     ]),
     domains,
     clock: 1_752_100_000,
+  };
+}
+
+/** The #488 ownership-proof block the detail/bind responses carry for a binding:
+ * the `_ferrogate-challenge.{hostname}` TXT record and its token expiry. */
+function verificationFor(binding: WireSiteDomain): AdminSiteDomainVerification {
+  return {
+    object: "site_domain_verification",
+    state: binding.verification_state === "pending_verification"
+      ? "pending_verification"
+      : "verified",
+    serves: binding.serving,
+    tenant_id: binding.tenant_id,
+    hostname: binding.hostname,
+    site: binding.site,
+    challenge_record_name: `_ferrogate-challenge.${binding.hostname}`,
+    challenge_record_type: "TXT",
+    challenge_record_value: `ferrogate-site-verify=${binding.hostname.replace(/\./g, "-")}`,
+    issued_at_unix: binding.created_at_unix,
+    token_expires_at_unix: binding.created_at_unix + 86_400,
+    attempt_count: 0,
   };
 }
 
@@ -495,9 +535,25 @@ async function handleGatewayRequest(
       return;
     }
 
-    // DELETE — the unpublish path purges each file object then the manifest.
-    // Removing the manifest tears the whole site down so a refetch drops it.
+    // DELETE — the unpublish purge. ORDER MATTERS and the mock enforces it: the
+    // gateway refuses to delete the last resolvable variant of a version a
+    // channel still points at (`delete_asset_variant_if_unreferenced` ->
+    // `BlockedByChannel` -> 409 `asset_version_referenced`, whose message says
+    // "move or delete the channel first"). A mock that 200s every version DELETE
+    // cannot tell a correct purge from one that strands the site.
     if (method === "DELETE") {
+      const registryManifestForDelete = state.registry.get(regKey(assetType, name));
+      if (
+        registryManifestForDelete?.channels.some((entry) => entry.version === tail)
+      ) {
+        await fulfillJson(route, 409, {
+          error: {
+            code: "asset_version_referenced",
+            message: `version ${tail} is the last resolvable variant of a channel-referenced version; move or delete the channel first`,
+          },
+        });
+        return;
+      }
       state.summaries = state.summaries.filter(
         (row) => !(row.asset_type === assetType && row.name === name && row.version === tail),
       );
@@ -562,6 +618,10 @@ async function handleSiteDomainsRequest(
       object: "site_domain",
       site_domain: binding,
       acme: { enabled: true, reload_triggered: false },
+      // The #488 proof block. The gateway returns it whenever a record exists;
+      // while the state is pending it carries the exact TXT record to publish,
+      // which is the only thing an operator can act on.
+      verification: verificationFor(binding),
     });
     return;
   }
@@ -577,12 +637,18 @@ async function handleSiteDomainsRequest(
     const tenantId = body.tenant_id ?? "";
     const site = body.site ?? "";
     const created = now();
-    const siteDomain: AdminSiteDomain = {
+    // A fresh bind RECORDS the binding but does not make it live: #488 issues a
+    // DNS challenge and the gateway answers 202 with `serving: false` until the
+    // TXT record is published and verified. Modelling this as an instantly-live
+    // binding is exactly the fiction the console must not repeat.
+    const siteDomain: WireSiteDomain = {
       object: "site_domain",
       hostname,
       tenant_id: tenantId,
       site,
       serve_path: `/sites/${tenantId}/${site}/`,
+      verification_state: "pending_verification",
+      serving: false,
       created_at_unix: created,
       updated_at_unix: created,
     };
@@ -591,10 +657,11 @@ async function handleSiteDomainsRequest(
       ...state.domains.filter((domain) => domain.hostname !== hostname),
       siteDomain,
     ];
-    await fulfillJson(route, 200, {
+    await fulfillJson(route, 202, {
       object: "site_domain",
       site_domain: siteDomain,
       acme: { enabled: true, reload_triggered: true },
+      verification: verificationFor(siteDomain),
     });
     return;
   }
