@@ -219,8 +219,195 @@ pub(crate) fn run_static_site_api(args: &LocalArgs) -> Result<()> {
     }
 
     verify_console_agreement(&gateway_addr)?;
+    verify_withheld_publish_agreement(args)?;
 
     println!("static-site-api scenario passed");
+    Ok(())
+}
+
+/// #345 gate coverage, the SECOND uncommitted-publish path: a bundle that is a
+/// perfectly good ZIP but whose supply-chain screening did not clear.
+///
+/// `verify_console_agreement`'s box 3 drives the non-ZIP fallthrough. This is
+/// the other one, and it is the half that keeps getting half-fixed, because it
+/// is neither an error nor a bad upload: `assets.rs` takes the bundle-publish
+/// path only when `screening.is_visible()` also holds, and #366 DELIBERATELY
+/// stores a pending/quarantined bundle withheld rather than rejecting it. So a
+/// clean-looking publish answers **200** with the SAME opaque-blob envelope, the
+/// site is never served, and the console must not call it a publish.
+///
+/// Both facts the console's failure path depends on are OBSERVED here rather
+/// than read off the source, which is exactly what `e28c452` / `f504810`
+/// recorded as untested: that a withheld verdict produces the blob envelope at
+/// all, and that `GET /v1/assets/withheld` -- the read
+/// `explainUncommittedPublish` issues, with the same `asset_type`/`search`/
+/// `limit` query and the same `total` comparison -- durably names the state by
+/// the time the publish response is in the operator's hands.
+///
+/// A separate gateway process is needed because the screening posture comes from
+/// the environment: `FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES=1` defers
+/// every non-trivial object to an async scan, which is exactly the `PendingScan`
+/// (withheld, invisible) state. Canary: with that variable removed, the same PUT
+/// answers `{"object":"static_site",…}` and this function fails on the envelope
+/// assertion -- so it is testing the branch it claims to.
+fn verify_withheld_publish_agreement(args: &LocalArgs) -> Result<()> {
+    const SITE: &str = "withheld-site";
+    const VERSION: &str = "1.0.0";
+
+    let gateway_addr = free_addr()?;
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("static-site-withheld.yaml");
+    fs::write(&config_path, scenario_config(&gateway_addr))?;
+    let _gateway = GatewayGuard::start_with_env(
+        &args.ferrogate_bin,
+        &config_path,
+        &gateway_addr,
+        &[("FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES", "1")],
+    )?;
+
+    let plan = http_request_addr(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"site-e2e-plan","name":"Site E2E plan","slug":"site-e2e-plan","asset_hosting_enabled":true}"#,
+    )?;
+    if plan.status != 200 && plan.status != 201 {
+        bail!("failed to create hosting plan (withheld): {}", plan.raw);
+    }
+    let tenant = http_request_addr(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &format!(
+            r#"{{"id":"{TENANT}","name":"Site E2E","slug":"site-e2e","plan_id":"site-e2e-plan"}}"#
+        ),
+    )?;
+    if tenant.status != 200 && tenant.status != 201 {
+        bail!("failed to create hosting tenant (withheld): {}", tenant.raw);
+    }
+
+    // A REAL zip bundle -- the console's client-side `PK\x03\x04` sniff would
+    // pass it, and so does the gateway's `is_zip_archive`. Only the screening
+    // verdict differs, which is the whole point: this fallthrough is NOT
+    // predictable from the bytes the console can see.
+    let bundle = build_stored_zip(&[("index.html", b"<h1>withheld</h1>" as &[u8])]);
+    let published = crate::http::http_request_addr_bytes(
+        &gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{SITE}/{VERSION}"),
+        &[
+            CLIENT_AUTH,
+            "Content-Type: application/zip",
+            "x-site-public: true",
+        ],
+        &bundle,
+    )?;
+    if published.status != 200 && published.status != 201 {
+        bail!(
+            "a withheld bundle is stored, not rejected -- expected a 2xx: {}",
+            published.raw
+        );
+    }
+    let publish_body: Value = serde_json::from_str(&published.body)
+        .with_context(|| format!("withheld publish response is not JSON: {}", published.raw))?;
+    // THE POINT: a 2xx that is NOT a publish, in the very same shape the non-ZIP
+    // fallthrough answers with. `isBundleCommit` (static-sites.tsx) is what
+    // stands between this and a "Published …" toast for a site that does not
+    // exist.
+    if publish_body["object"] != "asset" {
+        bail!(
+            "a screening-withheld bundle must fall through to the opaque-blob \
+             `asset` envelope, not the `static_site` publish envelope: {}",
+            published.raw
+        );
+    }
+    if publish_body["site"] != Value::Null
+        || publish_body["file_count"] != Value::Null
+        || publish_body["files"] != Value::Null
+    {
+        bail!(
+            "the withheld fallthrough envelope must carry no publish fields: {}",
+            published.raw
+        );
+    }
+
+    // Nothing is served: the bundle was never unpacked into per-file objects or
+    // a serving channel, so the site does not exist at its canonical URL.
+    let serve = http_request_addr(
+        &gateway_addr,
+        "GET",
+        &format!("/sites/{TENANT}/{SITE}/"),
+        &[],
+        "",
+    )?;
+    if serve.status == 200 {
+        bail!(
+            "a withheld bundle must never be served before it is proven clean: {}",
+            serve.raw
+        );
+    }
+
+    // And the reason is READABLE, at the exact URL + query the console issues
+    // (`explainUncommittedPublish`): asset_type + search + a max page, so the
+    // deduction is made from the whole answer rather than a first page.
+    let withheld = http_request_addr(
+        &gateway_addr,
+        "GET",
+        &format!("/v1/assets/withheld?asset_type=static_site&search={VERSION}&limit=1000"),
+        &[CLIENT_AUTH],
+        "",
+    )?;
+    if withheld.status != 200 {
+        bail!("the withheld listing must be readable: {}", withheld.raw);
+    }
+    let withheld_body: Value = serde_json::from_str(&withheld.body)
+        .with_context(|| format!("withheld listing is not JSON: {}", withheld.raw))?;
+    let rows = withheld_body["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let row = rows
+        .iter()
+        .find(|row| row["name"] == SITE && row["version"] == VERSION)
+        .with_context(|| {
+            format!(
+                "the withheld listing must name the bundle the publish did not commit, so the \
+                 console can report WHY instead of guessing: {}",
+                withheld.raw
+            )
+        })?;
+    // `visibility` is what the console maps to "Pending scan" / "Quarantined".
+    let visibility = row["visibility"].as_str().unwrap_or_default();
+    if visibility != "pending_scan" && visibility != "quarantined" {
+        bail!(
+            "a withheld row must carry a withheld visibility, got {visibility:?}: {}",
+            withheld.raw
+        );
+    }
+    // Non-vacuity for the "absent from this listing therefore it was not a ZIP"
+    // deduction: a bundle nobody withheld must NOT appear here.
+    if rows.iter().any(|row| {
+        row["name"] == "console-site" || row["name"] == SITE && row["version"] != VERSION
+    }) {
+        bail!(
+            "a clean bundle must never appear in the withheld listing: {}",
+            withheld.raw
+        );
+    }
+    // And `total` is the pre-pagination count the console compares against the
+    // rows it got, which is what makes that deduction honest rather than a guess.
+    let total = withheld_body["total"].as_u64();
+    if total != Some(rows.len() as u64) {
+        bail!(
+            "the withheld listing must report a `total` the console can compare against \
+             the rows it received: {}",
+            withheld.raw
+        );
+    }
+
+    println!("static-site withheld-publish coverage passed");
     Ok(())
 }
 
@@ -785,10 +972,27 @@ struct GatewayGuard {
 
 impl GatewayGuard {
     fn start(binary: &Path, config_path: &Path, gateway_addr: &str) -> Result<Self> {
-        let child = Command::new(binary)
+        Self::start_with_env(binary, config_path, gateway_addr, &[])
+    }
+
+    /// Same, plus extra process environment. The supply-chain screening posture
+    /// (#366) is read from the gateway's ENVIRONMENT rather than its YAML, so
+    /// the withheld-publish coverage needs its own gateway with a different one.
+    fn start_with_env(
+        binary: &Path,
+        config_path: &Path,
+        gateway_addr: &str,
+        extra_env: &[(&str, &str)],
+    ) -> Result<Self> {
+        let mut command = Command::new(binary);
+        command
             .args(["run", "--config"])
             .arg(config_path)
-            .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+            .env("FERROGATE_PROVIDER_SECRET", "provider-secret");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(
