@@ -835,6 +835,26 @@ impl Config {
         if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
             bail!("field observability.otlp_endpoint: must start with http:// or https://");
         }
+        if matches!(
+            self.observability.provider,
+            super::ObservabilityProvider::Cloudflare
+        ) {
+            // Fail at startup rather than logging a warning and silently
+            // running with observability disabled (issue #520).
+            if self
+                .observability
+                .cloudflare_collector_token_ref
+                .as_deref()
+                .is_none_or(|reference| reference.trim().is_empty())
+            {
+                bail!("field observability.cloudflare_collector_token_ref: required when observability.provider is cloudflare");
+            }
+            // Same rule the backend enforces before every export, so a
+            // credential-leaking endpoint cannot reach the export thread.
+            if !ferrogate_observability::endpoint_protects_credentials(endpoint) {
+                bail!("field observability.otlp_endpoint: refusing to send the collector credential over plaintext to `{endpoint}`; use https (loopback http is allowed for local development)");
+            }
+        }
         Ok(())
     }
 

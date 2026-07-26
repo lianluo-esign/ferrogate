@@ -2592,6 +2592,68 @@ fn rejects_enabled_observability_without_otlp_endpoint() {
 }
 
 #[test]
+fn rejects_cloudflare_observability_without_a_collector_token_ref() {
+    let config = Config {
+        observability: ObservabilityConfig {
+            enabled: true,
+            provider: ObservabilityProvider::Cloudflare,
+            otlp_endpoint: Some("https://collector.example.workers.dev".into()),
+            cloudflare_collector_token_ref: None,
+            ..ObservabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("field observability.cloudflare_collector_token_ref"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_cloudflare_observability_sending_its_credential_over_plaintext() {
+    let config = Config {
+        observability: ObservabilityConfig {
+            enabled: true,
+            provider: ObservabilityProvider::Cloudflare,
+            otlp_endpoint: Some("http://collector.example.com".into()),
+            cloudflare_collector_token_ref: Some("env://FERROGATE_CF_COLLECTOR_TOKEN".into()),
+            ..ObservabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("plaintext"), "got: {error}");
+}
+
+#[test]
+fn accepts_cloudflare_observability_over_https_and_loopback() {
+    for endpoint in [
+        "https://collector.example.workers.dev",
+        "http://127.0.0.1:8787",
+    ] {
+        let config = Config {
+            observability: ObservabilityConfig {
+                enabled: true,
+                provider: ObservabilityProvider::Cloudflare,
+                otlp_endpoint: Some(endpoint.into()),
+                cloudflare_collector_token_ref: Some("env://FERROGATE_CF_COLLECTOR_TOKEN".into()),
+                ..ObservabilityConfig::default()
+            },
+            ..Config::default()
+        };
+
+        assert!(
+            config.validate().is_ok(),
+            "expected {endpoint} to validate: {:?}",
+            config.validate().unwrap_err()
+        );
+    }
+}
+
+#[test]
 fn rejects_invalid_observability_metrics_path() {
     let config = Config {
         observability: ObservabilityConfig {

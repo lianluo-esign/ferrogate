@@ -1850,8 +1850,23 @@ pub(crate) struct ObservabilityConfig {
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) provider: ObservabilityProvider,
+    /// OTLP/HTTP+JSON collector endpoint. Under
+    /// [`ObservabilityProvider::Cloudflare`] this is the URL of the FerroGate
+    /// `telemetry-collector` Worker (issue #520) rather than a self-hosted
+    /// collector; the wire protocol is identical either way.
     #[serde(default)]
     pub(crate) otlp_endpoint: Option<String>,
+    /// Secret reference (`env://NAME`, `cf://...`, ...) for the bearer token
+    /// the Cloudflare collector Worker requires. Resolved through the shared
+    /// `SecretResolverRegistry` seam so the credential is never plaintext in
+    /// this file (issue #520).
+    #[serde(default)]
+    pub(crate) cloudflare_collector_token_ref: Option<String>,
+    /// Fallback tenant for telemetry records that carry no tenant attribute.
+    /// Analytics Engine allows exactly one `index` per data point and the
+    /// collector uses the tenant as that index, so it needs some value.
+    #[serde(default)]
+    pub(crate) cloudflare_default_tenant: Option<String>,
     #[serde(default = "default_observability_prometheus_metrics_path")]
     pub(crate) prometheus_metrics_path: String,
     #[serde(default = "default_observability_export_timeout_secs")]
@@ -1872,6 +1887,11 @@ pub(crate) enum ObservabilityProvider {
     #[default]
     Vector,
     Otlp,
+    /// Cloudflare-native observability via the FerroGate `telemetry-collector`
+    /// Worker, which fans out to Analytics Engine + Workers Logs (issue #520).
+    /// Cloudflare exposes no telemetry ingest endpoint of its own, so the
+    /// Worker we deploy *is* the ingest endpoint.
+    Cloudflare,
     None,
 }
 
@@ -2627,6 +2647,8 @@ impl Default for ObservabilityConfig {
             enabled: false,
             provider: ObservabilityProvider::Vector,
             otlp_endpoint: None,
+            cloudflare_collector_token_ref: None,
+            cloudflare_default_tenant: None,
             prometheus_metrics_path: default_observability_prometheus_metrics_path(),
             export_timeout_secs: default_observability_export_timeout_secs(),
             observed_activity_running_ttl_secs:

@@ -7,8 +7,7 @@
 use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_billing::BillingEvent;
 use ferrogate_observability::{
-    build_otlp_logs_request, build_otlp_metrics_request, build_otlp_traces_request, OtlpAttribute,
-    OtlpHttpRequest, OtlpLogRecord, OtlpSpanRecord,
+    OtlpAttribute, OtlpHttpRequest, OtlpLogRecord, OtlpSpanRecord, TelemetryBackend,
 };
 use ferrogate_storage::{
     StoredAgentRunEvent, StoredAuditEvent, StoredRequestLog, StoredUsageAggregate,
@@ -30,18 +29,20 @@ use crate::state::AppState;
 const OTLP_EXPORT_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) fn start_otlp_background_sender(state: AppState) -> Option<JoinHandle<()>> {
-    let endpoint = state.otlp_endpoint()?;
+    let backend = state.telemetry_backend()?;
     let timeout = Duration::from_secs(state.otlp_timeout_secs());
 
     Some(thread::spawn(move || {
-        debug!(endpoint = %endpoint, "OTLP background sender started");
+        // Log the backend name, not the endpoint: a credentialed destination
+        // has no business in the process log (issue #520).
+        debug!(backend = backend.name(), "OTLP background sender started");
         let mut exported_request_logs = 0;
         let mut exported_audit_events = 0;
         let mut exported_billing_events = 0;
         loop {
             match export_otlp_once_since(
                 &state,
-                &endpoint,
+                backend.as_ref(),
                 timeout,
                 &mut exported_request_logs,
                 &mut exported_audit_events,
@@ -92,43 +93,51 @@ pub(crate) fn start_analytics_background_sender(state: AppState) -> Option<JoinH
     }))
 }
 
+/// Dispatch a request the backend chose to build; `None` means the backend
+/// had nothing to send for that signal.
+fn dispatch_backend_request(
+    request: Option<OtlpHttpRequest>,
+    timeout: Duration,
+) -> AnyResult<bool> {
+    match request {
+        Some(request) => dispatch_otlp_request(&request, timeout).map(|()| true),
+        None => Ok(false),
+    }
+}
+
 #[cfg(test)]
-pub(crate) fn export_otlp_once(state: &AppState, endpoint: &str) -> AnyResult<()> {
+pub(crate) fn export_otlp_once(state: &AppState, backend: &dyn TelemetryBackend) -> AnyResult<()> {
     let timeout = Duration::from_secs(state.otlp_timeout_secs());
     let snapshot = state.prometheus_metrics_snapshot();
-    dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?, timeout)?;
+    dispatch_backend_request(backend.metrics_request(&snapshot)?, timeout)?;
 
     let request_logs = state.request_logs();
     let audit_events = state.audit_events();
     let billing_events = state.metering_events();
     let log_records = runtime_events_as_otlp_logs(&request_logs, &audit_events, &billing_events);
-    if !log_records.is_empty() {
-        dispatch_otlp_request(
-            &build_otlp_logs_request(endpoint, &snapshot.service_name, &log_records)?,
-            timeout,
-        )?;
-    }
+    dispatch_backend_request(
+        backend.logs_request(&snapshot.service_name, &log_records)?,
+        timeout,
+    )?;
     let spans = otlp_trace_spans(state, &request_logs, &audit_events, &billing_events);
-    if !spans.is_empty() {
-        dispatch_otlp_request(
-            &build_otlp_traces_request(endpoint, &snapshot.service_name, &spans)?,
-            timeout,
-        )?;
-    }
+    dispatch_backend_request(
+        backend.traces_request(&snapshot.service_name, &spans)?,
+        timeout,
+    )?;
 
     Ok(())
 }
 
 fn export_otlp_once_since(
     state: &AppState,
-    endpoint: &str,
+    backend: &dyn TelemetryBackend,
     timeout: Duration,
     exported_request_logs: &mut usize,
     exported_audit_events: &mut usize,
     exported_billing_events: &mut usize,
 ) -> AnyResult<()> {
     let snapshot = state.prometheus_metrics_snapshot();
-    dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?, timeout)?;
+    dispatch_backend_request(backend.metrics_request(&snapshot)?, timeout)?;
 
     let request_logs = state.request_logs();
     let new_logs = request_logs
@@ -147,22 +156,26 @@ fn export_otlp_once_since(
         .to_vec();
     let log_records =
         runtime_events_as_otlp_logs(&new_logs, &new_audit_events, &new_billing_events);
-    if !log_records.is_empty() {
-        dispatch_otlp_request(
-            &build_otlp_logs_request(endpoint, &snapshot.service_name, &log_records)?,
-            timeout,
-        )?;
-        *exported_audit_events = audit_events.len();
-        *exported_billing_events = billing_events.len();
-    }
+    // The cursors advance whenever the batch was *disposed of*, which covers
+    // three cases: it was sent, it was empty (the advance is then a no-op), or
+    // the backend does not carry that signal at all. That last case is why the
+    // advance is not gated on "something was actually sent" -- a
+    // metrics-only backend would otherwise re-derive the same growing log tail
+    // on every five-second tick, forever. A dispatch *failure* still returns
+    // early via `?`, so nothing is skipped on error.
+    dispatch_backend_request(
+        backend.logs_request(&snapshot.service_name, &log_records)?,
+        timeout,
+    )?;
+    *exported_audit_events = audit_events.len();
+    *exported_billing_events = billing_events.len();
+
     let spans = otlp_trace_spans(state, &new_logs, &new_audit_events, &new_billing_events);
-    if !spans.is_empty() {
-        dispatch_otlp_request(
-            &build_otlp_traces_request(endpoint, &snapshot.service_name, &spans)?,
-            timeout,
-        )?;
-        *exported_request_logs = request_logs.len();
-    }
+    dispatch_backend_request(
+        backend.traces_request(&snapshot.service_name, &spans)?,
+        timeout,
+    )?;
+    *exported_request_logs = request_logs.len();
 
     Ok(())
 }
@@ -1654,7 +1667,11 @@ mod tests {
         ))
         .unwrap();
 
-        export_otlp_once(&state, &endpoint).unwrap();
+        export_otlp_once(
+            &state,
+            &ferrogate_observability::OtlpBackend::new(&endpoint),
+        )
+        .unwrap();
         server.join().unwrap();
 
         let bodies = bodies.lock().unwrap().join("\n");
@@ -1676,6 +1693,60 @@ mod tests {
         assert!(bodies.contains("fast-chat"));
         assert!(!bodies.contains("client-secret prompt"));
         assert!(!bodies.contains("provider-secret response"));
+    }
+
+    /// The Cloudflare collector Worker rejects unauthenticated posts, so the
+    /// bearer credential has to survive the whole path -- backend, request
+    /// builder, and the hand-rolled HTTP writer -- and land on the wire
+    /// (issue #520).
+    #[test]
+    fn cloudflare_backend_export_puts_the_bearer_credential_on_the_wire() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server_requests = Arc::clone(&requests);
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buffer[..read]);
+                if http_body_if_complete(&raw).is_some() {
+                    break;
+                }
+            }
+            server_requests
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&raw).to_string());
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        // A fresh state has no logs or spans, so the metrics post is the only
+        // request the backend builds.
+        let state = AppState::new(Config::default());
+        let backend = ferrogate_observability::CloudflareBackend::new(&endpoint, "collector-token")
+            .with_default_tenant(Some("acme".to_string()));
+        export_otlp_once(&state, &backend).unwrap();
+        server.join().unwrap();
+
+        let requests = requests.lock().unwrap().join("\n");
+        assert!(
+            requests.contains("Authorization: Bearer collector-token"),
+            "credential missing from the wire: {requests}"
+        );
+        assert!(
+            requests.contains("x-ferrogate-tenant: acme"),
+            "default tenant missing from the wire: {requests}"
+        );
+        assert!(requests.starts_with("POST /v1/metrics "), "got: {requests}");
     }
 
     #[test]

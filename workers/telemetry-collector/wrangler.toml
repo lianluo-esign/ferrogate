@@ -1,0 +1,54 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-26
+# description: Wrangler config for the FerroGate telemetry-collector Worker (issue #520):
+#   the Analytics Engine dataset binding plus the observability switches that make this
+#   Worker's OWN telemetry land in the same place as the telemetry it ingests.
+
+name = "ferrogate-telemetry-collector"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+# --- Analytics Engine -------------------------------------------------------
+# The ONLY write path Cloudflare exposes for Analytics Engine is this binding's
+# `writeDataPoint()`. The dataset's HTTP API is SQL READ-only, which is precisely
+# why FerroGate cannot write telemetry to Cloudflare without this Worker.
+#
+# The dataset need not be pre-created: it is created on first write.
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "ferrogate_telemetry"
+
+[vars]
+# Per-request OTLP body ceiling; over it the collector answers 413 rather than
+# buffering an unbounded batch. 4 MiB.
+MAX_BODY_BYTES = "4194304"
+
+# --- Observability ----------------------------------------------------------
+# THREE INDEPENDENT SWITCHES. `enabled` alone does NOT turn on tracing — the
+# traces sub-table is its own opt-in, and omitting it leaves this Worker's own
+# spans unrecorded.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+# Invocation logs are the automatic one-per-request "request" events, which are
+# billed the same as the structured lines this Worker emits deliberately. Off,
+# because they roughly DOUBLE the billable log events of an ingest Worker while
+# duplicating information the ingest summary line already carries.
+invocation_logs = false
+
+[observability.traces]
+enabled = true
+
+# --- Secrets (NOT stored here) ----------------------------------------------
+# COLLECTOR_TOKEN is the shared bearer secret every /v1/* request must present.
+# It is NEVER committed. Seed it out-of-band, once per environment:
+#
+#   wrangler secret put COLLECTOR_TOKEN
+#
+# FerroGate's Rust side sends it as `Authorization: Bearer <token>`; with the
+# secret unset the Worker fails CLOSED (500) rather than accepting anonymous
+# telemetry.

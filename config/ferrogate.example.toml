@@ -15,6 +15,29 @@ access_log = "error"
 access_log_sample_rate = 100
 access_log_error_rate_limit_per_sec = 100
 
+# Telemetry export destination. `provider` selects the backend; the wire
+# protocol is OTLP/HTTP+JSON in every case.
+#
+#   vector     -- self-hosted collector (default)
+#   otlp       -- any OTLP/HTTP collector, no credential
+#   cloudflare -- the FerroGate telemetry-collector Worker, which fans out to
+#                 Analytics Engine + Workers Logs (issue #520). Cloudflare has
+#                 no telemetry ingest endpoint of its own, so that Worker --
+#                 deployed from workers/telemetry-collector/ -- IS the endpoint.
+#   none       -- disabled
+#
+# [observability]
+# enabled = true
+# provider = "cloudflare"
+# otlp_endpoint = "https://ferrogate-telemetry-collector.<subdomain>.workers.dev"
+# # Secret reference, never the token itself. Resolved through the shared
+# # SecretResolverRegistry, so `cf://` (Cloudflare Secrets Store) works too.
+# cloudflare_collector_token_ref = "env://FERROGATE_CF_COLLECTOR_TOKEN"
+# # Fallback tenant for records with no tenant attribute: Analytics Engine
+# # allows exactly one index per data point and the collector uses the tenant
+# # as that index, so it needs some value.
+# cloudflare_default_tenant = "default"
+
 [metering]
 export_enabled = false
 export_endpoint = "https://api.token4ai.cloud/v1/metering/events"

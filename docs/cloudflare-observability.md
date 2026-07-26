@@ -127,6 +127,22 @@ CF 相关已有资产：`crates/ferrogate-cloudflare/`（D1/R2/Secrets Store，*
 
 边界：Postgres 的 `request_logs` / `audit_events` / `billing_metering_events` **不在切换范围内** —— 它们是计费与审计权威源，不是遥测；AE 读写双向采样、只留 3 个月，且 CF 官方明说其数据集不可用于计费口径。控制面存储迁 CF 是另一条已立项的线（#419 → #420 / #410）。
 
+### 已落地（第一刀）
+
+| 组件 | 位置 |
+|---|---|
+| `TelemetryBackend` trait —— 后端扩展点 | `crates/ferrogate-observability/src/backend.rs` |
+| `OtlpBackend`（原有行为，改为一等后端，导出循环里不再有特例） | 同上 |
+| `CloudflareBackend`（bearer 鉴权 + 租户回退头 + 凭据脱敏 Debug） | `crates/ferrogate-observability/src/cloudflare.rs` |
+| `ObservabilityProvider::Cloudflare` + `cloudflare_collector_token_ref` / `cloudflare_default_tenant` | `crates/ferrogate-cli/src/config/types.rs` |
+| 后端构造（token 经 `SecretResolverRegistry`，解析失败**失败关闭**而非降级为无凭据发送） | `crates/ferrogate-cli/src/state_observability.rs` `telemetry_backend()` |
+| 启动期配置校验（缺 token ref / 明文外发凭据 → 启动即报错） | `crates/ferrogate-cli/src/config/validate.rs` |
+| collector Worker（OTLP 三路 ingest → AE + Workers Logs，含全部硬限制的强制执行） | `workers/telemetry-collector/` |
+
+设计要点：`ferrogate-observability` 保持**零 I/O**（依赖只有 `serde_json` + `tracing`），所以 `TelemetryBackend` 的方法**构造** `OtlpHttpRequest` 而不发送它；传输仍然只在 `ferrogate-cli` 的 `dispatch_otlp_request` 一处。因此每个后端都能在没有网络、没有 runtime、没有 mock server 的情况下被单测覆盖。
+
+安全边界（均有测试）：bearer 凭据**只允许**走 https，或 http 到 loopback（保住 `wrangler dev`）；`localhost.evil.com` / `127.0.0.1.evil.com` / `user@evil.com` 这类伪装 loopback 一律拒绝；凭据不进 Debug 输出、不进启动日志（日志打 backend 名而非 endpoint）；含 CR/LF 的凭据在启动期就被拒（否则是每 5 秒静默失败一次）。
+
 以下原「分层」分析保留作为技术依据。
 
 ## 4b. 原建议（已被上述决策取代）：分层，而不是替换

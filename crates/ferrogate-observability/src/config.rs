@@ -41,6 +41,11 @@ pub enum ObservabilityExporterKind {
     Otlp,
     Prometheus,
     File,
+    /// OTLP/HTTP+JSON to the FerroGate `telemetry-collector` Worker, which
+    /// fans out to Analytics Engine + Workers Logs (issue #520). Distinct from
+    /// [`Self::Otlp`] because it carries a bearer credential and therefore
+    /// refuses non-loopback plaintext endpoints.
+    Cloudflare,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +93,21 @@ impl ObservabilityExporterConfig {
             ],
         );
         exporter.endpoint = Some(endpoint.into());
+        exporter
+    }
+
+    /// The FerroGate `telemetry-collector` Worker on Cloudflare (issue #520).
+    pub fn cloudflare(collector_endpoint: impl Into<String>) -> Self {
+        let mut exporter = Self::new(
+            "cloudflare",
+            ObservabilityExporterKind::Cloudflare,
+            vec![
+                ObservabilitySignal::Trace,
+                ObservabilitySignal::Metric,
+                ObservabilitySignal::Log,
+            ],
+        );
+        exporter.endpoint = Some(collector_endpoint.into());
         exporter
     }
 
@@ -231,6 +251,16 @@ pub enum ObservabilityConfigError {
         kind: ObservabilityExporterKind,
         signal: ObservabilitySignal,
     },
+    MissingCredential {
+        exporter: String,
+    },
+    InvalidCredential {
+        exporter: String,
+    },
+    InsecureEndpoint {
+        exporter: String,
+        endpoint: String,
+    },
 }
 
 impl fmt::Display for ObservabilityConfigError {
@@ -268,6 +298,18 @@ impl fmt::Display for ObservabilityConfigError {
                 f,
                 "observability exporter `{exporter}` of kind {kind:?} does not support {signal:?}"
             ),
+            Self::MissingCredential { exporter } => write!(
+                f,
+                "observability exporter `{exporter}` requires a non-empty credential"
+            ),
+            Self::InvalidCredential { exporter } => write!(
+                f,
+                "observability exporter `{exporter}` credential must not contain CR/LF"
+            ),
+            Self::InsecureEndpoint { exporter, endpoint } => write!(
+                f,
+                "observability exporter `{exporter}` refuses to send its credential over plaintext to `{endpoint}`; use https (loopback http is allowed for local development)"
+            ),
         }
     }
 }
@@ -293,7 +335,7 @@ fn validate_exporter_parts(
     }
 
     match kind {
-        ObservabilityExporterKind::Otlp => {
+        ObservabilityExporterKind::Otlp | ObservabilityExporterKind::Cloudflare => {
             if endpoint.is_none_or(|endpoint| endpoint.trim().is_empty()) {
                 return Err(ObservabilityConfigError::MissingEndpoint {
                     exporter: exporter.to_string(),

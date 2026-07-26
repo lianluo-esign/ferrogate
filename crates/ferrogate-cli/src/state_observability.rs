@@ -6,9 +6,69 @@
 
 use super::*;
 
+use crate::config::ObservabilityProvider;
+use ferrogate_observability::{CloudflareBackend, OtlpBackend, TelemetryBackend};
+
 impl AppState {
     pub(crate) fn state_service_name(&self) -> String {
         self.config.telemetry.service_name.clone()
+    }
+
+    /// Build the configured telemetry destination (issue #520).
+    ///
+    /// `None` means "no destination configured", which disables the export
+    /// thread entirely. Notably, a `cloudflare` provider whose collector
+    /// credential cannot be resolved returns `None` **rather than falling back
+    /// to an unauthenticated OTLP post**: silently downgrading would either
+    /// spin on 401s or ship telemetry to an endpoint that never agreed to
+    /// authenticate it.
+    pub(crate) fn telemetry_backend(&self) -> Option<Box<dyn TelemetryBackend>> {
+        let endpoint = self.otlp_endpoint()?;
+
+        if self.config.observability.enabled
+            && self.config.observability.provider == ObservabilityProvider::Cloudflare
+        {
+            let token = self.cloudflare_collector_token()?;
+            let backend = CloudflareBackend::new(endpoint, token)
+                .with_default_tenant(self.config.observability.cloudflare_default_tenant.clone());
+            if let Err(error) = backend.validate() {
+                warn!(error = %error, "cloudflare telemetry backend rejected its configuration; observability export disabled");
+                return None;
+            }
+            return Some(Box::new(backend));
+        }
+
+        Some(Box::new(OtlpBackend::new(endpoint)))
+    }
+
+    /// Resolve the collector Worker bearer token through the same
+    /// `SecretResolverRegistry` seam used for provider API keys, so it can come
+    /// from `env://`, Cloudflare Secrets Store (`cf://`), or any other
+    /// registered scheme instead of plaintext config.
+    fn cloudflare_collector_token(&self) -> Option<String> {
+        let reference = self
+            .config
+            .observability
+            .cloudflare_collector_token_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|reference| !reference.is_empty());
+        let Some(reference) = reference else {
+            warn!("observability provider is `cloudflare` but no cloudflare_collector_token_ref is configured; observability export disabled");
+            return None;
+        };
+
+        match ferrogate_secrets::SecretResolverRegistry::from_env().resolve(reference) {
+            Ok(Some(token)) if !token.trim().is_empty() => Some(token),
+            Ok(_) => {
+                warn!("cloudflare_collector_token_ref resolved to no value; observability export disabled");
+                None
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to resolve cloudflare_collector_token_ref; observability export disabled");
+                None
+            }
+        }
     }
 
     pub(crate) fn otlp_endpoint(&self) -> Option<String> {

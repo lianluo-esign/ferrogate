@@ -6,7 +6,7 @@
 # description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 #
 # Cloudflare Workers gate (#465): TypeScript typecheck for every Worker under
-# workers/ (agent-gateway, mcp-server, d1-proxy).
+# workers/ (agent-gateway, mcp-server, d1-proxy, telemetry-collector).
 # Runs standalone for dev use and from scripts/release-local.sh (no GitHub
 # Actions per the release directive), mirroring scripts/check-admin-console.sh.
 #
@@ -32,7 +32,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 command -v npm >/dev/null || { echo "ERROR: npm not found (need Node 22+; see workers/*/README.md)" >&2; exit 1; }
 
-WORKERS=(agent-gateway mcp-server d1-proxy)
+WORKERS=(agent-gateway mcp-server d1-proxy telemetry-collector)
 
 echo "== workers gate =="
 for worker in "${WORKERS[@]}"; do
