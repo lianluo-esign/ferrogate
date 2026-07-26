@@ -103,6 +103,28 @@ pub struct ReviewedExclusion {
 /// whose operation is now covered, or no longer in the contract) so this table
 /// cannot rot into a rubber stamp.
 pub const REVIEWED_EXCLUSIONS: &[ReviewedExclusion] = &[
+    // x402 spend-policy diagnostics (#351). Read-only: two GETs (declared and
+    // effective policy + revision) plus a POST that is a dry-run evaluator and
+    // mutates nothing. The policy itself is authored in `ferrogate.toml` via
+    // `[[x402_spend_policies]]`, not through this API. These are policy-family
+    // resources, so their verbs belong with the rest of the policy surface in
+    // #361 rather than as a one-off group; binding them here would fork the
+    // policy family across two slices.
+    ReviewedExclusion {
+        operation_id: "listX402SpendPolicies",
+        owner: "policy resource family (#361)",
+        reason: "read-only x402 spend-policy declarations; verbs land with the #361 policy family rather than forking it",
+    },
+    ReviewedExclusion {
+        operation_id: "getEffectiveX402SpendPolicy",
+        owner: "policy resource family (#361)",
+        reason: "read-only effective-policy diagnostics (policy in force + revision); verbs land with the #361 policy family",
+    },
+    ReviewedExclusion {
+        operation_id: "evaluateX402SpendPolicy",
+        owner: "policy resource family (#361)",
+        reason: "dry-run policy evaluator that mutates nothing; verbs land with the #361 policy family",
+    },
     // Agent skill/discovery reads — verbs not yet built. Owner: agent family track (#362 follow-up).
     ReviewedExclusion {
         operation_id: "getAgentDiscovery",
