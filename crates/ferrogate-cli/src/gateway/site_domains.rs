@@ -555,11 +555,11 @@ impl FerroGateway {
     /// servable.
     ///
     /// Three distinct terminals, and only one of them verifies:
-    ///   * match           -> 200, `verified`, the binding becomes servable and
-    ///                        (only now) enters the ACME domain set;
-    ///   * no match        -> 409, still `pending_verification`;
+    ///   * match -> 200, `verified`, the binding becomes servable and (only
+    ///     now) enters the ACME domain set;
+    ///   * no match -> 409, still `pending_verification`;
     ///   * resolver failed -> 503, state UNCHANGED. An unreachable resolver is
-    ///                        never a pass, and never a demotion either.
+    ///     never a pass, and never a demotion either.
     async fn handle_admin_site_domain_verify(
         &self,
         session: &mut Session,

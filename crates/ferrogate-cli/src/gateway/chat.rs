@@ -2597,6 +2597,19 @@ async fn decide_ai_ingress(
 /// Steps 19-30: body cap, JSON and typed parse, metadata bounds, per-key model
 /// allow/deny, model registry, external RBAC, tenant visibility, usage
 /// estimate, candidate routes, canary promotion, region fail-closed.
+///
+/// `result_large_err` is allowed rather than fixed (#509). `GovernedDecision`
+/// is 464 bytes and is the error type of the WHOLE governed-decision path, not
+/// just this step: both callers -- `decide_ai_request` and the request
+/// handler's own `match` -- already hold it unboxed, and
+/// `deliver_governed_decision` consumes it by value. Boxing only this one
+/// signature would add a heap allocation and a deref on every denial while
+/// shrinking no frame that matters; the lint is silent on the sibling steps
+/// only because they are `async fn` (the lint does not look through the
+/// returned future), not because they are any cheaper. Shrinking
+/// `GovernedDecision` itself is the real fix and belongs to whoever owns that
+/// type, not to a lint-cleanup commit.
+#[allow(clippy::result_large_err)]
 fn decide_ai_plan(
     state: &AppState,
     ingress: AiIngressPlan,
@@ -2665,9 +2678,9 @@ async fn decide_ai_workflow_admission(
         },
     )
     .await
-    .map_err(|rejection| deny(rejection))?;
+    .map_err(deny)?;
     apply_workflow_provider_constraint(constraint.as_ref(), &plan.request.model, &mut plan.routes)
-        .map_err(|rejection| deny(rejection))
+        .map_err(deny)
 }
 
 async fn build_ai_ingress_plan(

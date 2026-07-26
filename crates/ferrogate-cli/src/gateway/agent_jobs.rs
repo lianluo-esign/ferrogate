@@ -1177,7 +1177,7 @@ fn page_agent_job_events(
     mut events: Vec<StoredAgentRunEvent>,
     cursor: &AgentJobEventCursor,
 ) -> AgentJobEventSlice {
-    events.sort_by(|left, right| agent_job_event_key(left).cmp(&agent_job_event_key(right)));
+    events.sort_by_key(agent_job_event_key);
     let resolved = cursor
         .after_event_id
         .as_deref()
