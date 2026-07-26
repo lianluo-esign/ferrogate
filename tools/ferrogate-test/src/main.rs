@@ -20,6 +20,9 @@ mod http;
 mod local;
 mod mcp_identity;
 mod mocks;
+/// #352: durable x402 payment attempts + their wallet-hold links inside the
+/// `*-restart` scenarios' verified set.
+mod payment_attempt_restart;
 mod provider_compliance;
 mod scenarios;
 mod static_site;

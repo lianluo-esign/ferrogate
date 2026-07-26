@@ -25,18 +25,18 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// Devnet USDC mint. A canonical base58 mint address, never the `USDC` symbol.
-const USDC_DEVNET_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+pub(crate) const USDC_DEVNET_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 /// CAIP-2 id for Solana devnet. A mainnet pin would have to be explicit.
-const CAIP2_DEVNET: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+pub(crate) const CAIP2_DEVNET: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 /// The one allowlisted devnet merchant.
-const MERCHANT: &str = "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4";
+pub(crate) const MERCHANT: &str = "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4";
 /// An unrelated wallet used to prove a payee outside the allowlist denies.
 const OTHER_MERCHANT: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
 const FEE_PAYER: &str = "EwWqGE4ZFKLofuestmU4LDdK7XM1N4ALgdZccwYugwGd";
 
 const RESOURCE_ORIGIN: &str = "https://pay.example.com";
 const RESOURCE_PATH_PREFIX: &str = "/weather";
-const RESOURCE_URL: &str = "https://pay.example.com/weather";
+pub(crate) const RESOURCE_URL: &str = "https://pay.example.com/weather";
 
 const TENANT_ID: &str = "compliance-tenant";
 const PROJECT_ID: &str = "compliance-project";

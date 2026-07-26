@@ -15,6 +15,7 @@ use crate::{
     fixtures::toml_basic_string,
     http::{free_addr, free_port, http_request_addr},
     mocks::spawn_local_provider_upstream,
+    payment_attempt_restart::DurablePaymentAttemptFixture,
     supabase_schema::{LiveSupabaseScenario, LiveSupabaseSchema},
 };
 use anyhow::{bail, Context, Result};
@@ -30,6 +31,11 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// Postgres schema the non-Supabase restart scenarios pin their control plane
+/// to. Shared so an out-of-band repository handle (the #352 payment-attempt
+/// fixture) resolves the same tables the gateway writes.
+pub(crate) const POSTGRES_RESTART_SCHEMA: &str = "ferrogate_control";
 
 pub(crate) fn run_supabase_restart(args: &LocalArgs) -> Result<()> {
     let host_port = free_port()?;
@@ -521,6 +527,7 @@ pub(crate) fn run_postgres_restart(args: &LocalArgs) -> Result<()> {
         "ferrogate-postgres-test",
         true,
     )?;
+    expect_payment_attempt_schema(POSTGRES_RESTART_SCHEMA)?;
     println!("postgres-restart scenario passed");
     Ok(())
 }
@@ -618,6 +625,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
         "ferrogate-postgres-tls-test",
         true,
     )?;
+    expect_payment_attempt_schema(POSTGRES_RESTART_SCHEMA)?;
     println!("postgres-tls-restart scenario passed");
     Ok(())
 }
@@ -772,6 +780,10 @@ fn run_control_plane_restart(
     })
     .to_string();
 
+    // #352: two durable x402 payment attempts (one settled, one parked
+    // `outcome_unknown` with its hold RETAINED) plus their wallet-reservation
+    // links join the restart scenario's verified set.
+    let payments = DurablePaymentAttemptFixture::new(&resource_id);
     let approval_id;
     let mcp_server_name = format!(
         "dbhttp{}",
@@ -861,6 +873,13 @@ fn run_control_plane_restart(
             },
         )?;
         case.expect_agent_upstream(&agent_upstream_id, true)?;
+        // Operator input for the money path: the tenant + funded wallet the
+        // x402 holds are taken against, through the Admin API.
+        payments.provision_wallet(&case)?;
+        // Then the attempts themselves, through the runtime's own repository
+        // contract (there is no create-side Admin API for attempts yet -- the
+        // x402 negotiation transport binding is still open on #381).
+        payments.seed(storage)?;
     }
 
     {
@@ -886,6 +905,7 @@ fn run_control_plane_restart(
         case.expect_policy(&policy_name)?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
         case.expect_agent_upstream(&agent_upstream_id, true)?;
+        payments.expect_durable_after_restart(storage, "first restart")?;
         case.expect_restored_prompt_template_render(&resource_id, &prompt_template_id)?;
         case.expect_restored_api_key_models_access(&resource_id)?;
         case.expect_metered_chat_completion(&resource_id, &gateway_config_id)?;
@@ -996,6 +1016,76 @@ fn run_control_plane_restart(
         }
         case.expect_prompt_template(&prompt_template_id, "archived")?;
         case.expect_missing_agent_upstream(&agent_upstream_id)?;
+        // Still durable after a SECOND restart, and still not reported as
+        // failed/released: money state does not decay with restart count.
+        payments.expect_durable_after_restart(storage, "second restart")?;
+    }
+
+    Ok(())
+}
+
+/// Verifies migration 52/54 (#352/#354) landed on the live database: the
+/// `payment_attempts` table, the columns the audit tuple needs in the domains
+/// the storage layer reads them back in, and the three indexes that keep the
+/// admin listing, the hold lookup, and the reconciler's due-query off a full
+/// scan. Called by the Postgres restart scenarios, which otherwise never
+/// inspect the schema, and folded into the Supabase schema contract below.
+fn expect_payment_attempt_schema(schema: &str) -> Result<()> {
+    let count = postgres_scalar(&format!(
+        "SELECT count(*) FROM information_schema.tables \
+         WHERE table_schema = '{}' AND table_name = 'payment_attempts'",
+        sql_literal(schema)
+    ))?;
+    if count.trim() != "1" {
+        bail!("expected schema table {schema}.payment_attempts, got count {count}");
+    }
+
+    // `atomic_amount` is TEXT on purpose: the on-chain u64 range does not fit a
+    // BIGINT. `generation` is the NOT NULL operation token the CAS bumps.
+    let columns = [
+        ("atomic_amount", "text:NO"),
+        ("settled_atomic_amount", "text:YES"),
+        ("credits_amount", "bigint:YES"),
+        ("challenge_hash", "text:NO"),
+        ("hold_id", "text:YES"),
+        ("state", "text:NO"),
+        ("generation", "bigint:NO"),
+        ("transaction_signature", "text:YES"),
+        ("policy_revision", "bigint:NO"),
+    ];
+    for (column, expected) in columns {
+        let actual = postgres_scalar(&format!(
+            "SELECT data_type || ':' || is_nullable FROM information_schema.columns \
+             WHERE table_schema = '{}' AND table_name = 'payment_attempts' \
+               AND column_name = '{}'",
+            sql_literal(schema),
+            sql_literal(column)
+        ))?;
+        if actual.trim() != expected {
+            bail!(
+                "expected {schema}.payment_attempts.{column} to be {expected}, got {}",
+                actual.trim()
+            );
+        }
+    }
+
+    for index in [
+        // Tenant-scoped newest-first admin listing.
+        "idx_payment_attempts_tenant_time",
+        // Attempt <-> wallet hold linkage.
+        "idx_payment_attempts_hold",
+        // Partial index over the in-flight states the reconciler drains.
+        "idx_payment_attempts_reconcile",
+    ] {
+        let count = postgres_scalar(&format!(
+            "SELECT count(*) FROM pg_indexes \
+             WHERE schemaname = '{}' AND indexname = '{}'",
+            sql_literal(schema),
+            sql_literal(index)
+        ))?;
+        if count.trim() != "1" {
+            bail!("expected schema index {schema}.{index}, got count {count}");
+        }
     }
 
     Ok(())
@@ -1118,6 +1208,9 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "agent_schedule_fires",
         // #281 (migration 40): durable wallet reserve/hold primitive.
         "wallet_reservations",
+        // #352 (migration 52): durable x402 payment attempts, coupled to the
+        // wallet holds above by `hold_id`.
+        "payment_attempts",
         // #283 (migration 42): durable per-tenant SSO config + restart-safe
         // pending-flow state.
         "sso_provider_configs",
@@ -1297,6 +1390,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
             bail!("expected Supabase schema index {schema}.{index}, got count {count}");
         }
     }
+
+    // #352/#354 (migrations 52 + 54): the x402 payment-attempt table, its audit
+    // column domains, and the three indexes its reads depend on.
+    expect_payment_attempt_schema(schema)?;
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
@@ -1511,12 +1608,13 @@ impl ControlPlaneRestartStorage<'_> {
   postgres_tls_mode: {tls_mode}{ca_cert_path}
   postgres_connect_timeout_secs: 5
   postgres_statement_timeout_millis: 30000
-  postgres_schema: ferrogate_control
+  postgres_schema: {schema}
   postgres_search_path:
     - public
   migration_mode: {migration_mode}"#,
                     tls_mode = tls.mode,
                     ca_cert_path = ca_cert_path,
+                    schema = POSTGRES_RESTART_SCHEMA,
                     migration_mode = migration_mode.as_str()
                 )
             }
