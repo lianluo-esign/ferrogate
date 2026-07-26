@@ -3081,6 +3081,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/x402-spend-policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the operator-declared typed x402 spend policies.
+         * @description Returns every x402 spend-policy declaration in the running config (#351), scoped to what the caller may see: a tenant-scoped admin sees only declarations for tenants/projects/workspaces/keys it owns, while run-scoped declarations are visible to the platform operator only (an agent-run id cannot yet be resolved to its tenant). Read-only diagnostics: the response carries allowlists, caps, conversion ratio, approval threshold and revision -- never a signer key, wallet secret, or any credential.
+         */
+        get: operations["listX402SpendPolicies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/x402-spend-policies/effective": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve the effective x402 spend policy and revision for a scope chain.
+         * @description Resolves the tenant/project/workspace/key/agent-run chain against the operator-declared policies (#351) and returns the single declaration in force, its revision, and the inheritance evidence explaining why it won. The narrowest declared scope wins; a chain with no declaration anywhere returns declared=false with the disabled deny-all default at revision 0 rather than 404, so an unconfigured scope can never be read as unlimited. Exposes decisions and revisions only -- no signer or secret fields.
+         */
+        get: operations["getEffectiveX402SpendPolicy"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/x402-spend-policies/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dry-run the effective x402 spend policy against a concrete challenge.
+         * @description Parses an untrusted x402 PAYMENT-REQUIRED challenge with the frozen x402/SVM wire contract, resolves the effective policy for the scope chain, and returns the pure Allow / ApprovalRequired / Deny decision produced by the SAME policy function the payment path evaluates (#351). Read-only: nothing is paid, signed, or persisted. The response carries the full evidence chain -- stable reason code, policy revision, matched resource rule, ORIGINAL atomic units, computed internal credits, conversion snapshot and challenge hash -- and no signer or secret field. Money math is checked integer arithmetic: overflow or a missing/impossible conversion ratio denies.
+         */
+        post: operations["evaluateX402SpendPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4145,6 +4205,8 @@ export interface components {
             output: string | null;
             /** @description Artifact evidence the runtime reported for this run. */
             artifacts: components["schemas"]["AgentJobArtifact"][];
+            /** @description Coding-agent work products (#472) decoded from this run's artifact events and re-verified against the run_id in the path. Empty for non-coding jobs. */
+            work_products: components["schemas"]["CodingAgentWorkProduct"][];
             request_count: number;
             billing_event_count: number;
             completed_at_unix: number | null;
@@ -6626,6 +6688,172 @@ export interface components {
             last_failure_reason?: string | null;
             /** Format: int64 */
             attempt_count: number;
+        };
+        /** @description One reviewable diff produced by a coding run (#472), projected from the run timeline. attribution_verified/repo_verified are re-derived from the content-addressed product id rather than copied from the worker-reported record. */
+        CodingAgentWorkProduct: {
+            /** @constant */
+            object: "coding_agent_work_product";
+            /** @description sha256(tenant|run|repo|base_commit|diff_digest). */
+            product_id: string;
+            run_id: string;
+            tenant_id: string;
+            /** @description provider:host/namespace/name. */
+            repo_id: string;
+            base_commit: string;
+            branch?: string;
+            head_commit?: string;
+            diff_digest: string;
+            diff_byte_len: number;
+            /**
+             * @description Where the patch bytes are. They are never inlined into this projection.
+             * @enum {string}
+             */
+            diff_carrier: "inline" | "artifact";
+            diff_artifact_ref?: string;
+            stats: components["schemas"]["CodingAgentDiffStats"];
+            /** @description Advisory agent prose. Never a substitute for reading the diff. */
+            summary?: string;
+            extracted_at_unix: number;
+            /** @description True only when the derived product id matches this run. False means the record was relabelled after extraction. */
+            attribution_verified: boolean;
+            repo_verified: boolean;
+            published?: components["schemas"]["CodingAgentPublishedChange"];
+        };
+        CodingAgentDiffStats: {
+            files_changed: number;
+            insertions: number;
+            deletions: number;
+        };
+        /** @description What left the platform for this work product, and whether the receipt actually describes publishing it. */
+        CodingAgentPublishedChange: {
+            /** @enum {string} */
+            operation: "push_branch" | "open_pull_request" | "update_pull_request" | "push_tag";
+            branch: string;
+            head_commit: string;
+            /** @enum {string} */
+            outcome: "completed" | "refused" | "failed";
+            review_reference?: string;
+            grant_id: string;
+            /** @description Target-level fingerprint of the vcs.write_back ActionIdentity, for the audit join. */
+            action_fingerprint: string;
+            completed_at_unix: number;
+            /** @description True only when the receipt's tenant, run, repo, branch and head commit all match the work product it names. */
+            matches_work_product: boolean;
+        };
+        /**
+         * @description One level of the tenancy chain an x402 spend policy may be declared at, from broadest to narrowest. Precedence is by specificity: the narrowest declared scope in a request's chain is the one in force.
+         * @enum {string}
+         */
+        X402PolicyScopeKind: "tenant" | "project" | "workspace" | "key" | "run";
+        /** @description A reference to the scope whose declaration is in force. */
+        X402PolicyScopeRef: {
+            scope_type: components["schemas"]["X402PolicyScopeKind"];
+            scope_id: string;
+        };
+        /** @description The tenant/project/workspace/key/agent-run chain a policy lookup or dry-run evaluation is made at. tenant_id is required; narrower levels are optional. */
+        X402ScopeChain: {
+            tenant_id: string;
+            project_id?: string | null;
+            workspace_id?: string | null;
+            key_id?: string | null;
+            run_id?: string | null;
+        };
+        /** @description One operator-declared x402 spend policy, pinned to a scope. Carries no secret or signer material: the policy model is an allowlist/caps/conversion document only. */
+        X402DeclaredSpendPolicy: {
+            /** @constant */
+            object: "x402_spend_policy";
+            scope_type: components["schemas"]["X402PolicyScopeKind"];
+            scope_id: string;
+            enabled: boolean;
+            /** Format: int64 */
+            revision: number;
+            policy: components["schemas"]["X402SpendPolicy"];
+        };
+        X402DeclaredSpendPolicyList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["X402DeclaredSpendPolicy"][];
+        };
+        /** @description One level of the resolved inheritance chain, broadest first: whether a declaration exists there and whether it is the one in force. This is the 'why did this policy win' evidence. */
+        X402PolicyInheritanceLevel: {
+            scope_type: components["schemas"]["X402PolicyScopeKind"];
+            scope_id: string;
+            declared: boolean;
+            effective: boolean;
+        };
+        /** @description The effective x402 spend policy for a scope chain. Always defined: a chain with no declaration anywhere reports declared=false with the disabled deny-all default at revision 0, so 'no policy' can never read as 'no limit'. Exposes decisions/revisions only -- no signer key, secret, or wallet material. */
+        X402EffectiveSpendPolicy: {
+            /** @constant */
+            object: "x402_effective_spend_policy";
+            scope: components["schemas"]["X402ScopeChain"];
+            declared: boolean;
+            resolved_scope: components["schemas"]["X402PolicyScopeRef"] | null;
+            /** Format: int64 */
+            policy_revision: number;
+            policy: components["schemas"]["X402SpendPolicy"];
+            inheritance: components["schemas"]["X402PolicyInheritanceLevel"][];
+        };
+        /** @description The atomic->credits conversion in effect for one decision. Integer-only; computed_credits is null (never 0) when the conversion overflowed or the ratio was impossible, which denies. */
+        X402ConversionSnapshot: {
+            /** Format: int64 */
+            numerator: number;
+            /** Format: int64 */
+            denominator: number;
+            rounding: components["schemas"]["X402Rounding"];
+            version: string;
+            /** Format: int64 */
+            computed_credits: number | null;
+        };
+        /** @description The immutable decision evidence for one payment authorization: three-valued decision, stable reason code, policy revision, matched rule, ORIGINAL atomic units, computed internal credits, conversion snapshot, and the deterministic challenge hash. No signer, secret, or transaction material. */
+        X402PaymentDecision: {
+            /** @enum {string} */
+            decision: "allow" | "approval_required" | "deny";
+            /** @description Stable x402_* reason code (e.g. x402_allowed, x402_disabled, x402_network_not_allowed, x402_mint_not_allowed, x402_recipient_not_allowed, x402_resource_mismatch, x402_resource_not_allowed, x402_amount_below_min, x402_atomic_cap_exceeded, x402_conversion_unavailable, x402_over_per_payment_cap, x402_over_run_cap, x402_over_window_cap, x402_approval_required). */
+            reason_code: string;
+            message: string;
+            /** Format: int64 */
+            approval_threshold_credits: number | null;
+            /** Format: int64 */
+            policy_revision: number;
+            network_caip2: components["schemas"]["X402PolicyNetwork"];
+            mint: string;
+            recipient: string;
+            resource_url: string;
+            authorized_resource_url: string;
+            challenge_hash_hex: string;
+            /**
+             * Format: int64
+             * @description Original on-chain atomic token amount, preserved losslessly as an integer.
+             */
+            atomic_amount: number;
+            /** Format: int64 */
+            computed_credits: number | null;
+            conversion: components["schemas"]["X402ConversionSnapshot"];
+            matched_resource: components["schemas"]["X402ResourceRule"] | null;
+        };
+        /** @description A dry-run payment-authorization request. payment_required is the untrusted merchant PAYMENT-REQUIRED header exactly as received (base64), parsed by the frozen x402/SVM wire contract -- display text and token symbols are never trusted. authorized_resource_url is the egress URL FerroGate already authorized; a challenge whose own resource differs is a payment-redirect attempt and denies. */
+        X402SpendPolicyEvaluationRequest: {
+            scope: components["schemas"]["X402ScopeChain"];
+            payment_required: string;
+            authorized_resource_url: string;
+            /** @description Already-committed spend read from the durable ledger, so per-run/per-window caps can be dry-run realistically. Defaults to a fresh run/window. */
+            spent?: {
+                /** Format: int64 */
+                run_spent_credits?: number;
+                /** Format: int64 */
+                window_spent_credits?: number;
+            };
+        };
+        /** @description The result of a dry-run evaluation: which declaration was in force, at which revision, and the decision it produced. */
+        X402SpendPolicyEvaluation: {
+            /** @constant */
+            object: "x402_spend_policy_evaluation";
+            scope: components["schemas"]["X402ScopeChain"];
+            declared: boolean;
+            resolved_scope: components["schemas"]["X402PolicyScopeRef"] | null;
+            /** Format: int64 */
+            policy_revision: number;
+            decision: components["schemas"]["X402PaymentDecision"];
         };
     };
     responses: {
@@ -13560,6 +13788,99 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listX402SpendPolicies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The declarations visible to the caller. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["X402DeclaredSpendPolicyList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+        };
+    };
+    getEffectiveX402SpendPolicy: {
+        parameters: {
+            query: {
+                /** @description Tenant (organization) id. Required. */
+                tenant_id: string;
+                project_id?: string;
+                workspace_id?: string;
+                key_id?: string;
+                /** @description Agent-run id. Platform-operator keys only. */
+                run_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The effective policy, its revision, and the inheritance chain. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["X402EffectiveSpendPolicy"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+        };
+    };
+    evaluateX402SpendPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["X402SpendPolicyEvaluationRequest"];
+            };
+        };
+        responses: {
+            /** @description The dry-run decision and the policy that produced it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["X402SpendPolicyEvaluation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The declared policy in force failed structural validation, so no decision was produced. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
 }
