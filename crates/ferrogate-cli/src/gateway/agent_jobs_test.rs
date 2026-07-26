@@ -420,6 +420,7 @@ fn submitted_input_evidence_is_bounded() {
 fn worker_report(
     run_id: &str,
     organization_id: &str,
+    worker_id: &str,
     id: &str,
     kind: &str,
     event_json: &str,
@@ -427,7 +428,7 @@ fn worker_report(
 ) -> ferrogate_storage::StoredSelfHostedWorkerTelemetryEvent {
     ferrogate_storage::StoredSelfHostedWorkerTelemetryEvent {
         id: id.to_string(),
-        worker_id: "worker-1".to_string(),
+        worker_id: worker_id.to_string(),
         tenant: tenant(organization_id),
         workspace_id: "ws-1".to_string(),
         session_id: Some(format!("agent-job-session-{run_id}")),
@@ -444,6 +445,50 @@ fn worker_report(
     }
 }
 
+/// #503: lease `run_id`'s start dispatch to `worker_id` directly through the
+/// durable `self_hosted_run_dispatches` row -- the same direct-construction
+/// pattern `a_cancel_on_a_replica_that_never_served_the_submit_still_reaches_the_runtime`
+/// already uses -- rather than driving a full register/poll handshake that is
+/// irrelevant to what these tests are proving (lease-ownership enforcement in
+/// `apply_worker_reported_run_state`, not the poll protocol itself).
+fn lease_start_dispatch_to_worker(
+    state: &AppState,
+    run_id: &str,
+    organization_id: &str,
+    worker_id: &str,
+) {
+    let dispatch = start_dispatch(run_id, organization_id);
+    let lease_id = format!("{}:attempt-1", dispatch.dispatch_id);
+    let stored = ferrogate_storage::StoredSelfHostedRunDispatch {
+        dispatch_id: dispatch.dispatch_id,
+        action: "start_run".to_string(),
+        tenant_id: dispatch.tenant_id,
+        workspace_id: dispatch.workspace_id,
+        session_id: dispatch.session_id,
+        run_id: dispatch.run_id,
+        framework_adapter: dispatch.framework_adapter,
+        required_capabilities: dispatch.required_capabilities,
+        workload_ref: dispatch.workload_ref,
+        queued_at_unix: Some(dispatch.queued_at_unix),
+        assigned_worker_id: Some(worker_id.to_string()),
+        lease_id: Some(lease_id),
+        lease_expires_at_unix: Some(u64::MAX),
+        attempt: 1,
+        acknowledged_status: None,
+        acknowledged_at_unix: None,
+        request_id: dispatch.request_id,
+        trace_id: dispatch.trace_id,
+        agent_run_id: dispatch.agent_run_id,
+        parent_action_fingerprint: dispatch.parent_action_fingerprint,
+    };
+    crate::gateway::block_on_sync_bridge(
+        state
+            .repositories_arc()
+            .upsert_self_hosted_run_dispatch(stored),
+    )
+    .expect("leased dispatch row persists");
+}
+
 #[test]
 fn a_worker_run_report_terminalizes_the_job_and_carries_its_output() {
     // The #474 rework's central blocker: before the bridge, NOTHING on the
@@ -452,11 +497,15 @@ fn a_worker_run_report_terminalizes_the_job_and_carries_its_output() {
     let state = AppState::new(Config::default());
     let run_id = agent_job_run_id("tenant-a", "fix-issue-474");
     state.record_agent_run(queued_run(&run_id, "tenant-a"));
+    // #503: the run-state bridge only applies a report from the worker that
+    // actually holds the run's dispatch lease.
+    lease_start_dispatch_to_worker(&state, &run_id, "tenant-a", "worker-1");
 
     // Progress first: the run leaves `queued` but is NOT collectable yet.
     let running = state.apply_worker_reported_run_state(&worker_report(
         &run_id,
         "tenant-a",
+        "worker-1",
         "evt-1",
         "lifecycle",
         r#"{"state":"started"}"#,
@@ -472,6 +521,7 @@ fn a_worker_run_report_terminalizes_the_job_and_carries_its_output() {
     let completed = state.apply_worker_reported_run_state(&worker_report(
         &run_id,
         "tenant-a",
+        "worker-1",
         "evt-2",
         "run.completed",
         r#"{"state":"completed","turns_executed":7,"output":"opened PR #1234"}"#,
@@ -507,6 +557,7 @@ fn a_worker_run_report_terminalizes_the_job_and_carries_its_output() {
         state.apply_worker_reported_run_state(&worker_report(
             &run_id,
             "tenant-a",
+            "worker-1",
             "evt-3",
             "run.failed",
             r#"{"state":"failed","output":"rewritten"}"#,
@@ -528,11 +579,13 @@ fn a_worker_cannot_report_state_onto_another_tenants_run() {
     let state = AppState::new(Config::default());
     let run_id = agent_job_run_id("tenant-a", "fix-issue-474");
     state.record_agent_run(queued_run(&run_id, "tenant-a"));
+    lease_start_dispatch_to_worker(&state, &run_id, "tenant-a", "worker-1");
 
     assert_eq!(
         state.apply_worker_reported_run_state(&worker_report(
             &run_id,
             "tenant-b",
+            "worker-1",
             "evt-x",
             "run.completed",
             r#"{"state":"completed","output":"exfiltrated"}"#,
@@ -550,6 +603,7 @@ fn a_worker_cannot_report_state_onto_another_tenants_run() {
         state.apply_worker_reported_run_state(&worker_report(
             "job-unknown",
             "tenant-b",
+            "worker-1",
             "evt-y",
             "run.completed",
             r#"{"state":"completed"}"#,
@@ -558,6 +612,108 @@ fn a_worker_cannot_report_state_onto_another_tenants_run() {
         None
     );
     assert!(state.agent_run_record("job-unknown").is_none());
+}
+
+/// #503: the core regression for the run-state bridge's lease-scope fix.
+/// `worker-1` and `worker-2` both belong to `tenant-a` (a real cross-tenant
+/// report is already covered by `a_worker_cannot_report_state_onto_another_tenants_run`);
+/// only `worker-1` was ever dispatched/leased run A, so `worker-2` reporting
+/// `run.completed` for it must be ignored exactly like a cross-tenant report
+/// is -- a worker must not be able to complete a sibling worker's run just
+/// because they share a tenant.
+#[test]
+fn a_worker_cannot_report_state_for_a_run_it_does_not_hold_the_lease_for() {
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "fix-issue-503");
+    state.record_agent_run(queued_run(&run_id, "tenant-a"));
+    lease_start_dispatch_to_worker(&state, &run_id, "tenant-a", "worker-1");
+
+    let result = state.apply_worker_reported_run_state(&worker_report(
+        &run_id,
+        "tenant-a",
+        "worker-2",
+        "evt-intruder",
+        "run.completed",
+        r#"{"state":"completed","output":"stolen"}"#,
+        200,
+    ));
+    assert_eq!(
+        result, None,
+        "a worker that does not hold the run's lease must not move its status"
+    );
+    let stored = state.agent_run_record(&run_id).expect("run record");
+    assert_eq!(stored.status, "queued", "the run must remain unchanged");
+    assert!(!stored.output_recorded);
+
+    // The legitimate lease holder can still complete its own run.
+    let completed = state.apply_worker_reported_run_state(&worker_report(
+        &run_id,
+        "tenant-a",
+        "worker-1",
+        "evt-owner",
+        "run.completed",
+        r#"{"state":"completed","output":"opened PR #9"}"#,
+        201,
+    ));
+    assert_eq!(completed.as_deref(), Some("completed"));
+}
+
+/// #503: a run with no `StartRun` dispatch at all (submitted through a
+/// non-worker path, or a run_id the worker path never enqueued) must reject
+/// every worker report -- there is no lease to prove, so none is assumed.
+#[test]
+fn a_worker_cannot_report_state_for_a_run_with_no_dispatch_at_all() {
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "no-dispatch-503");
+    state.record_agent_run(queued_run(&run_id, "tenant-a"));
+    // Deliberately: no `lease_start_dispatch_to_worker` call, no
+    // `enqueue_scheduled_self_hosted_dispatch` call either.
+
+    let result = state.apply_worker_reported_run_state(&worker_report(
+        &run_id,
+        "tenant-a",
+        "worker-1",
+        "evt-1",
+        "run.completed",
+        r#"{"state":"completed"}"#,
+        200,
+    ));
+    assert_eq!(result, None);
+    assert_eq!(
+        state.agent_run_record(&run_id).expect("run record").status,
+        "queued"
+    );
+}
+
+/// #503: a dispatch can exist (the job was submitted through the worker path)
+/// without ever having been leased to anyone yet -- `assigned_worker_id` is
+/// still `None`. That must be treated the same as "no dispatch at all", not as
+/// "any worker may claim it".
+#[test]
+fn a_worker_cannot_report_state_for_a_dispatch_nobody_has_leased_yet() {
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "unleased-503");
+    state.record_agent_run(queued_run(&run_id, "tenant-a"));
+    state
+        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&run_id, "tenant-a"))
+        .expect("submit enqueues the start dispatch");
+    // Deliberately: the dispatch is queued but never leased (no poll/no
+    // direct `assigned_worker_id` write).
+
+    let result = state.apply_worker_reported_run_state(&worker_report(
+        &run_id,
+        "tenant-a",
+        "worker-1",
+        "evt-1",
+        "run.completed",
+        r#"{"state":"completed"}"#,
+        200,
+    ));
+    assert_eq!(result, None);
+    assert_eq!(
+        state.agent_run_record(&run_id).expect("run record").status,
+        "queued"
+    );
 }
 
 #[test]
