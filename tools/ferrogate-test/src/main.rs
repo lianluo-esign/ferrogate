@@ -11,6 +11,7 @@ mod api_contract;
 mod assertions;
 /// #368: the size+checksum-bound presigned staging upload path.
 mod asset_presign;
+mod asset_registry;
 mod cli;
 mod compliance;
 mod constants;
@@ -43,6 +44,7 @@ mod x402_spend_policy;
 use agent_jobs::run_agent_jobs_api;
 use api_contract::run_api_contract;
 use asset_presign::run_asset_presign_api;
+use asset_registry::run_asset_registry_api;
 use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use function_egress_cloudflare::run_function_egress_cloudflare_api;
@@ -76,6 +78,7 @@ fn main() -> Result<()> {
         function_egress_cloudflare: run_function_egress_cloudflare_api,
         static_site: run_static_site_api,
         asset_presign: run_asset_presign_api,
+        asset_registry: run_asset_registry_api,
         agent_jobs: run_agent_jobs_api,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,
@@ -114,6 +117,7 @@ fn main() -> Result<()> {
             run_function_egress_cloudflare_api(local)?;
             run_static_site_api(local)?;
             run_asset_presign_api(local)?;
+            run_asset_registry_api(local)?;
             run_agent_jobs_api(local)?;
             run_workers_ai_llama_guard(local)?;
             run_supabase_migration(local)?;
