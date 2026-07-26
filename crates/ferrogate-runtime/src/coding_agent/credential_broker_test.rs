@@ -347,6 +347,89 @@ fn known_hosts_pins_all_three_published_github_keys() {
     }
 }
 
+/// TEST GATE (#475 box 4). `known_hosts_pins_all_three_published_github_keys`
+/// above is tautological: it renders the body FROM `GITHUB_SSH_HOST_KEYS` and
+/// then asserts the body contains `GITHUB_SSH_HOST_KEYS`. A key edited to an
+/// attacker's would pass it, and the pinned `SHA256:` fingerprint — the only
+/// field cross-checkable against GitHub's published `ssh_key_fingerprints` — was
+/// never read by any test at all.
+///
+/// This derives the fingerprint from the key bytes the way OpenSSH does
+/// (base64 of the SHA-256 of the wire-format blob, unpadded) and compares it to
+/// the pinned one. Change any byte of any key and it goes red.
+///
+/// The three pinned fingerprints were checked against
+/// <https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints>
+/// on 2026-07-26 and matched.
+#[test]
+fn every_pinned_host_key_hashes_to_its_pinned_fingerprint() {
+    use base64::{
+        engine::general_purpose::{STANDARD as B64, STANDARD_NO_PAD as B64_NO_PAD},
+        Engine as _,
+    };
+
+    assert_eq!(GITHUB_SSH_HOST_KEYS.len(), 3, "all three published keys");
+    for (algorithm, key, fingerprint) in GITHUB_SSH_HOST_KEYS {
+        let blob = B64.decode(key).expect("pinned key must be valid base64");
+        // The blob is SSH wire format: a length-prefixed algorithm name first.
+        let name_len = u32::from_be_bytes(blob[..4].try_into().expect("length prefix")) as usize;
+        assert_eq!(
+            &blob[4..4 + name_len],
+            algorithm.as_bytes(),
+            "{algorithm}: the key blob names a different algorithm"
+        );
+        let derived = format!("SHA256:{}", B64_NO_PAD.encode(Sha256::digest(&blob)));
+        assert_eq!(
+            derived, fingerprint,
+            "{algorithm}: the pinned key does not hash to the pinned fingerprint"
+        );
+    }
+}
+
+/// TEST GATE (#475 box 4). "What happens if the pin file is missing or empty —
+/// does it fail closed or fall through?" Executed rather than reasoned about:
+/// there is no pin *file*. The pin is a compile-time constant, so the
+/// missing-file state is unrepresentable, and `github_known_hosts` cannot render
+/// an empty body for any host.
+#[test]
+fn the_host_key_pin_has_no_missing_or_empty_state() {
+    for (algorithm, key, fingerprint) in GITHUB_SSH_HOST_KEYS {
+        assert!(!algorithm.is_empty() && !key.is_empty());
+        assert!(fingerprint.starts_with("SHA256:"), "{fingerprint}");
+    }
+    let body = github_known_hosts("github.com");
+    assert_eq!(body.lines().count(), 3);
+    assert!(body.lines().all(|line| line.split(' ').count() == 3));
+    // `prepare` renders it unconditionally: there is no argument that turns the
+    // pin off, and no code path that hands back an environment without one.
+    let prepared = ContainerGitEnvironment::prepare(
+        callback_binding(),
+        "/usr/local/bin/ferrogate-git-credential",
+        "github.com",
+        "",
+        ["PATH"],
+    )
+    .expect("environment");
+    assert_eq!(prepared.known_hosts, body);
+}
+
+/// TEST GATE (#475 box 4). An `ssh_config` that never mentions
+/// `StrictHostKeyChecking` is ACCEPTED. That is the documented behaviour and it
+/// is only safe for the two reasons pinned above and below: OpenSSH's default is
+/// `ask` (which refuses an unknown key non-interactively), and `known_hosts` is
+/// rendered unconditionally. Pinned so that "silence is accepted" is a decision
+/// on the record rather than an accident, and so that a future default of
+/// `accept-new` in the image would have to change this test.
+#[test]
+fn silence_about_host_key_checking_is_accepted_but_the_pin_is_still_rendered() {
+    assert!(validate_ssh_hardening("").is_ok());
+    assert!(validate_ssh_hardening("Host github.com\n  User git\n").is_ok());
+    let prepared =
+        ContainerGitEnvironment::prepare(callback_binding(), "/bin/helper", "github.com", "", [])
+            .expect("environment");
+    assert!(prepared.known_hosts.contains("ssh-ed25519"));
+}
+
 #[test]
 fn ssh_hardening_refuses_every_spelling_of_disabled_host_key_checking() {
     for config in [
