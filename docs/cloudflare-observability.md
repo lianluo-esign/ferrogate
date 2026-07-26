@@ -143,6 +143,14 @@ CF 相关已有资产：`crates/ferrogate-cloudflare/`（D1/R2/Secrets Store，*
 
 安全边界（均有测试）：bearer 凭据**只允许**走 https，或 http 到 loopback（保住 `wrangler dev`）；`localhost.evil.com` / `127.0.0.1.evil.com` / `user@evil.com` 这类伪装 loopback 一律拒绝；凭据不进 Debug 输出、不进启动日志（日志打 backend 名而非 endpoint）；含 CR/LF 的凭据在启动期就被拒（否则是每 5 秒静默失败一次）。
 
+### 补充决策（founder, 2026-07-26）：可观测闭合在网关层，不在 agent 内
+
+本文档 §1 与 §4b 中把「MCP / sandbox / agent-worker 出站没有 traceparent」列为全链路缺口的说法**已被推翻**，详见 **#522**。
+
+理由：agent 的全部流量（LLM 调用、tool 调用、MCP 调用）本来就都经过 FerroGate，网关一侧即可重建完整链路；而客户的 agent 怎么跑不在我们控制范围内，不可插桩。因此 agent 的唯一义务是**声明一个 action id**，关联靠「流量收口」而不是「上下文传播」。**向不可插桩的第三方 agent 传播 W3C trace context 是明确的非目标。**
+
+连带影响：#520 的 scope 第 7 项作废，且本方案不再依赖 Cloudflare 那个尚未发布的对外 traceparent 传播能力。
+
 以下原「分层」分析保留作为技术依据。
 
 ## 4b. 原建议（已被上述决策取代）：分层，而不是替换
