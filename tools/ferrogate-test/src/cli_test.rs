@@ -38,6 +38,19 @@ fn live_supabase_schema_retention_requires_explicit_flag() {
 }
 
 #[test]
+fn the_x402_paid_egress_chain_is_a_deterministic_local_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "x402-paid-egress-chain"]).unwrap();
+
+    // #354's Verification section promises this command by name. It takes only a
+    // ferrogate binary: no DSN, no image, nothing opt-in -- so a gate run cannot
+    // "pass" it by silently skipping an unconfigured dependency.
+    let Commands::X402PaidEgressChain(args) = cli.command else {
+        panic!("expected x402-paid-egress-chain command");
+    };
+    assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
+}
+
+#[test]
 fn target_capability_supabase_uses_live_schema_controls() {
     let cli = Cli::try_parse_from([
         "ferrogate-test",

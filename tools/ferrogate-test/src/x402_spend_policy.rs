@@ -38,7 +38,7 @@ const RESOURCE_ORIGIN: &str = "https://pay.example.com";
 const RESOURCE_PATH_PREFIX: &str = "/weather";
 pub(crate) const RESOURCE_URL: &str = "https://pay.example.com/weather";
 
-const TENANT_ID: &str = "compliance-tenant";
+pub(crate) const TENANT_ID: &str = "compliance-tenant";
 const PROJECT_ID: &str = "compliance-project";
 const WORKSPACE_ID: &str = "compliance-workspace";
 const KEY_ID: &str = "compliance-key";
@@ -46,7 +46,7 @@ const RUN_ID: &str = "compliance-run";
 
 /// Tenant-scope declaration: 1 credit per 1000 atomic units (round up), 1000
 /// credits per payment, approval above 500 credits.
-const TENANT_REVISION: u64 = 7;
+pub(crate) const TENANT_REVISION: u64 = 7;
 const TENANT_MAX_CREDITS_PER_PAYMENT: u64 = 1_000;
 const APPROVAL_THRESHOLD_CREDITS: u64 = 500;
 /// Project-scope override at a deliberately tiny cap, so the SAME payment that
@@ -1051,7 +1051,7 @@ fn scope_body(case: &X402Case) -> Value {
 }
 
 /// A base64 `PAYMENT-REQUIRED` header exactly as an x402 merchant would send it.
-fn challenge_header(atomic_amount: u64, recipient: &str, resource: &str) -> String {
+pub(crate) fn challenge_header(atomic_amount: u64, recipient: &str, resource: &str) -> String {
     let challenge = json!({
         "x402Version": 2,
         "resource": {"url": resource, "mimeType": "application/json"},

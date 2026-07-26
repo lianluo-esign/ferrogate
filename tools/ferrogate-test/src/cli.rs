@@ -40,6 +40,8 @@ pub(crate) enum Commands {
     ComponentComplianceSupabase(SupabaseLiveRestartArgs),
     /// Run the gateway -> billing service usage-to-ledger chain (gpt-5.5).
     GatewayBillingChain(LocalArgs),
+    /// Run the managed x402 paid-egress loop-closure chain: policy -> merchant -> ledger (#354).
+    X402PaidEgressChain(LocalArgs),
     /// Run function egress broker coverage against a real local FerroGate process.
     FunctionEgressApi(LocalArgs),
     /// Run the Cloudflare Worker branch of the function egress broker E2E (#435).
@@ -219,6 +221,7 @@ pub(crate) struct Dispatch {
     pub(crate) component_compliance: fn(&LocalArgs) -> Result<()>,
     pub(crate) component_compliance_supabase: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) gateway_billing_chain: fn(&LocalArgs) -> Result<()>,
+    pub(crate) x402_paid_egress_chain: fn(&LocalArgs) -> Result<()>,
     pub(crate) function_egress: fn(&LocalArgs) -> Result<()>,
     pub(crate) function_egress_cloudflare: fn(&LocalArgs) -> Result<()>,
     pub(crate) static_site: fn(&LocalArgs) -> Result<()>,
@@ -246,7 +249,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), ci, function-egress-cloudflare-api, static-site-api, asset-presign-api, agent-jobs-api, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
+                "local: admin-api, auth-api, gateway-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, agent-jobs-api, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -267,6 +270,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
             (dispatch.component_compliance_supabase)(&args)
         }
         Commands::GatewayBillingChain(args) => (dispatch.gateway_billing_chain)(&args),
+        Commands::X402PaidEgressChain(args) => (dispatch.x402_paid_egress_chain)(&args),
         Commands::FunctionEgressApi(args) => (dispatch.function_egress)(&args),
         Commands::FunctionEgressCloudflareApi(args) => (dispatch.function_egress_cloudflare)(&args),
         Commands::StaticSiteApi(args) => (dispatch.static_site)(&args),

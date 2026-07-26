@@ -32,6 +32,10 @@ mod storage;
 mod supabase_schema;
 mod target_capability;
 mod workers_ai_guardrail;
+/// #354: the narrow cross-component managed paid-egress chain command --
+/// gateway policy decision, deterministic merchant double, durable attempt/hold
+/// ledger, re-drive and reconcile.
+mod x402_paid_egress_chain;
 /// #351: the component-compliance closure for the typed Solana x402 spend
 /// policy (operator config -> effective policy -> runtime decision).
 mod x402_spend_policy;
@@ -56,6 +60,7 @@ use storage::{
 };
 use target_capability::run_target_capability_supabase;
 use workers_ai_guardrail::run_workers_ai_llama_guard;
+use x402_paid_egress_chain::run_x402_paid_egress_chain;
 
 fn main() -> Result<()> {
     cli::run(cli::Dispatch {
@@ -66,6 +71,7 @@ fn main() -> Result<()> {
         component_compliance: run_component_compliance,
         component_compliance_supabase: run_component_compliance_supabase,
         gateway_billing_chain: run_gateway_billing_chain,
+        x402_paid_egress_chain: run_x402_paid_egress_chain,
         function_egress: run_function_egress_api,
         function_egress_cloudflare: run_function_egress_cloudflare_api,
         static_site: run_static_site_api,
