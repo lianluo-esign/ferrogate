@@ -711,3 +711,214 @@ fn assert_distinct(tenants: &[&str]) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test-gate coverage for #490 (added by the gate, independent of the fix
+// author's tests). Each of the three findings gets one test that is written to
+// go RED if the corresponding fix is reverted; the mutation runs are recorded
+// in the gate report.
+// ---------------------------------------------------------------------------
+
+/// GATE #490 finding 1. Every colliding tenant id named in the issue — the
+/// four folding variants AND a truncation family sharing 53+ leading
+/// characters — must be PAIRWISE distinct in one pool (not just distinct
+/// within its own family), and every derived name must still be a legal R2
+/// bucket name. Revert the digest and this fails on the first pair.
+#[test]
+fn gate_490_all_issue_colliding_tenant_ids_are_pairwise_distinct_and_r2_valid() {
+    let long_head = "t".repeat(53);
+    let longer_head = "q".repeat(70);
+    let tenants: Vec<String> = vec![
+        // The exact four from the issue body: all -> "ferrogate-acme-corp".
+        "Acme_Corp".to_string(),
+        "acme-corp".to_string(),
+        "acme corp".to_string(),
+        "ACME.CORP".to_string(),
+        // Two ids sharing their first 53 characters (the truncation family).
+        format!("{long_head}alpha"),
+        format!("{long_head}beta"),
+        // And two sharing far more than 53 (70) leading characters.
+        format!("{longer_head}-one"),
+        format!("{longer_head}-two"),
+    ];
+
+    // Sanity: the pre-#490 derivation really did collide on these, so this test
+    // is not vacuous about what it is guarding.
+    assert_eq!(
+        r2_legacy_bucket_name_for_tenant(&tenants[0]),
+        r2_legacy_bucket_name_for_tenant(&tenants[3]),
+        "the legacy derivation must collide on the issue's folding family"
+    );
+    assert_eq!(
+        r2_legacy_bucket_name_for_tenant(&tenants[4]),
+        r2_legacy_bucket_name_for_tenant(&tenants[5]),
+        "the legacy derivation must collide after 63-char truncation"
+    );
+    assert_eq!(
+        r2_legacy_bucket_name_for_tenant(&tenants[6]),
+        r2_legacy_bucket_name_for_tenant(&tenants[7]),
+    );
+
+    // The property under test: pairwise distinct across the WHOLE pool.
+    for (i, left) in tenants.iter().enumerate() {
+        let left_name = r2_bucket_name_for_tenant(left);
+        assert_r2_valid(&left_name);
+        for right in tenants.iter().skip(i + 1) {
+            let right_name = r2_bucket_name_for_tenant(right);
+            assert_ne!(
+                left_name, right_name,
+                "tenants {left:?} and {right:?} share bucket {left_name:?}"
+            );
+        }
+    }
+    // 8 distinct tenants -> 8 distinct buckets.
+    let unique: std::collections::HashSet<String> = tenants
+        .iter()
+        .map(|t| r2_bucket_name_for_tenant(t))
+        .collect();
+    assert_eq!(unique.len(), tenants.len());
+
+    // Broader corpus: every separator/case/length permutation an operator or a
+    // buggy caller could realistically produce, all sharing one slug family, so
+    // the digest is the only thing keeping them apart.
+    let mut corpus: Vec<String> = Vec::new();
+    for sep in ["_", "-", " ", ".", "/", "", "::", "\u{a0}"] {
+        for case in ["acme", "ACME", "Acme", "aCmE"] {
+            for tail in ["corp", "CORP", "corp1"] {
+                corpus.push(format!("{case}{sep}{tail}"));
+            }
+        }
+    }
+    for len in 50..60 {
+        corpus.push("z".repeat(len));
+        corpus.push(format!("{}-a", "z".repeat(len)));
+    }
+    let unique_corpus: std::collections::HashSet<String> = corpus
+        .iter()
+        .map(|t| {
+            let name = r2_bucket_name_for_tenant(t);
+            assert_r2_valid(&name);
+            assert!(!name.contains("--"), "{name:?} has a doubled hyphen");
+            name
+        })
+        .collect();
+    let distinct_tenants: std::collections::HashSet<&String> = corpus.iter().collect();
+    assert_eq!(
+        unique_corpus.len(),
+        distinct_tenants.len(),
+        "{} distinct tenant ids collapsed to {} bucket names",
+        distinct_tenants.len(),
+        unique_corpus.len()
+    );
+}
+
+/// GATE #490 finding 2. Two pages of buckets, with the second page ending the
+/// walk. The caller must receive BOTH pages' rows, and the second request must
+/// echo the cursor the first page handed back. Delete the pagination loop and
+/// this fails: `names` is short and only one request is recorded.
+#[test]
+fn gate_490_list_buckets_returns_every_page_not_just_the_first() {
+    let transport = Arc::new(RecordingTransport::new(vec![
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [
+                { "name": "page1-a" }, { "name": "page1-b" } ] },
+                 "result_info": { "cursor": "next-page-token", "per_page": 2 } }"#,
+        ),
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [
+                { "name": "page2-a" }, { "name": "page2-b" } ] },
+                 "result_info": { "per_page": 2 } }"#,
+        ),
+    ]));
+    let client = cf_client(transport.clone());
+
+    let buckets = runtime()
+        .block_on(client.list_r2_buckets())
+        .expect("list should walk both pages");
+    let names: Vec<&str> = buckets.iter().filter_map(|b| b.name.as_deref()).collect();
+    assert_eq!(
+        names,
+        ["page1-a", "page1-b", "page2-a", "page2-b"],
+        "the caller must receive every page, not just page 1"
+    );
+
+    let requests = transport.recorded();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the cursor from page 1 must trigger a second request"
+    );
+    assert!(
+        requests[1].url.contains("cursor=next-page-token"),
+        "page 2 must echo the server's cursor: {}",
+        requests[1].url
+    );
+    // A bucket that only exists on page 2 must be findable — this is the
+    // "absent after delete passes vacuously" hazard the issue names.
+    assert!(names.contains(&"page2-b"));
+}
+
+/// GATE #490 finding 3. The create path absorbs ONLY a documented
+/// already-exists code. Restore the blanket `status == 409` branch and the
+/// three surfacing cases below fail.
+#[test]
+fn gate_490_only_documented_already_exists_codes_are_swallowed() {
+    // Absorbed: the two documented codes.
+    for body in [
+        r#"{ "success": false, "errors": [ { "code": 10004, "message": "already exists, you own it" } ] }"#,
+        r#"{ "success": false, "errors": [ { "code": 10073, "message": "BucketConflict" } ] }"#,
+    ] {
+        let transport = Arc::new(RecordingTransport::new(vec![ok(409, body)]));
+        let client = cf_client(transport);
+        let outcome = runtime()
+            .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-x")))
+            .unwrap_or_else(|e| panic!("documented already-exists code must be absorbed: {e:?}"));
+        assert_eq!(outcome, R2BucketCreation::AlreadyExists);
+    }
+
+    // NOT absorbed: any other 409 must reach the caller as a typed error.
+    for (label, body) in [
+        ("codeless", r#"{ "success": false, "errors": [] }"#),
+        (
+            "mid-deletion",
+            r#"{ "success": false, "errors": [ { "code": 10035, "message": "being deleted" } ] }"#,
+        ),
+        (
+            "name held by another account",
+            r#"{ "success": false, "errors": [ { "code": 10014, "message": "bucket name unavailable" } ] }"#,
+        ),
+    ] {
+        let transport = Arc::new(RecordingTransport::new(vec![ok(409, body)]));
+        let client = cf_client(transport);
+        let error = runtime()
+            .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-x")))
+            .expect_err(&format!("a {label} 409 must not read as provisioned"));
+        assert!(
+            matches!(error, CloudflareError::Api { status: 409, .. }),
+            "{label}: {error:?}"
+        );
+    }
+}
+
+/// GATE #490 finding 3, at the caller the issue actually cares about: a
+/// non-already-exists 409 must NOT reach `ensure_tenant_r2_bucket` as a
+/// `created: false` provision, because #462 then mints a read+write credential
+/// for a bucket that may not exist.
+#[test]
+fn gate_490_ensure_tenant_bucket_does_not_report_a_phantom_bucket_on_an_unrelated_409() {
+    let transport = Arc::new(RecordingTransport::new(vec![ok(
+        409,
+        r#"{ "success": false, "errors": [ { "code": 10035, "message": "The bucket you tried to create is being deleted." } ] }"#,
+    )]));
+    let client = cf_client(transport);
+
+    let error = runtime()
+        .block_on(client.ensure_tenant_r2_bucket("tenant-acme"))
+        .expect_err("an unrelated 409 must not be reported as a provisioned bucket");
+    assert!(
+        matches!(error, CloudflareError::Api { status: 409, .. }),
+        "{error:?}"
+    );
+}
