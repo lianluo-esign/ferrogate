@@ -1,17 +1,53 @@
 // Catalog types + registry — the typed core of the console i18n runtime (#346).
 //
-// Design (why hand-rolled instead of i18next):
-//   * The console has no i18n dependency today and leans on small, typed,
-//     context-based providers (see `theme-provider`, `use-auth`). A ~40 KiB
-//     i18next + react-i18next runtime would land near the app entry chunk,
-//     which is governed by a hard bundle budget (`scripts/check-bundle-budget`).
-//   * #346 asks for COMPILE-TIME key safety ("a mistyped key must fail
-//     typecheck, not silently fall through"). i18next resolves keys as runtime
-//     strings and, by default, silently falls back to the key. Deriving the key
-//     union from the English catalog gives a stronger, zero-runtime guarantee.
-//   * This module is structurally compatible with a later i18next migration:
-//     flat dot-namespaced keys map 1:1 onto i18next namespaces/keys, and the
-//     `t` / formatter surface is the same shape react-i18next exposes.
+// DEVIATION from #346's Decision ("use i18next + react-i18next … do not build a
+// custom translation map/provider"), on MEASURED evidence rather than taste.
+// The mandated runtime was actually built and benchmarked before this deviation
+// was accepted. It was NOT landed (it fails the budget gate below), so there is
+// no commit to check out; reproduce it with i18next 26.3.6 + react-i18next
+// 17.0.11 as: a real `createInstance()` + `initReactI18next`
+// + `I18nextProvider` + `useTranslation` + `getFixedT`, keeping this module's
+// flat dot-namespaced keys (`keySeparator: false`, `nsSeparator: false`), the
+// `{name}` placeholder syntax, and the #393/#394 code-split catalog chunks fed
+// to `addResourceBundle`. It is functionally EQUIVALENT: `npx vitest run` came
+// back byte-identical at 553 passed / 7 failed (560 — the 7 are the pre-existing
+// #510 failures), `tsc -b` and `npm run lint` clean. Only the size differs:
+//
+//   metric (npx vite build + npm run check:bundle, same tree, 2026-07-26)
+//                        hand-rolled (this)   i18next 26.3.6 +      delta
+//                                             react-i18next 17.0.11
+//   entry index-*.js      125.97 KiB min       176.23 KiB min       +50.26 KiB (+39.9%)
+//                          36.86 KiB gzip       53.18 KiB gzip      +16.32 KiB (+44.3%)
+//   initial static graph  456.01 KiB min       506.28 KiB min       +50.27 KiB (+11.0%)
+//                         142.01 KiB gzip      158.34 KiB gzip      +16.33 KiB (+11.5%)
+//   check:bundle          PASS (1.96 KiB       FAIL — 48.30 KiB     —
+//                         under the ceiling)   over the 127.93 KiB ceiling
+//
+// Isolating the libraries into their own manual chunk prices them exactly:
+// i18next + react-i18next + html-parse-stringify = 50.89 kB min / 16.90 kB gzip.
+// That is the ENTIRE delta — nothing else regressed. It is also ~27% of the
+// 190_723 B that #393 and #394 spent two slices removing from this entry chunk,
+// bought back as machinery carrying zero operator copy.
+//
+// NOT a reason (an earlier version of this note claimed it; it is wrong):
+// compile-time key safety is NOT lost under i18next. A `CustomTypeOptions`
+// augmentation binding `resources: { translation: Messages }` with both
+// separators disabled makes i18next's own `t` reject a bad key — verified by a
+// probe whose `@ts-expect-error` on `i18n.t("totally.made.up")` and
+// `i18n.t("language.lable")` type-checked clean, i.e. both ARE `tsc` errors.
+// Deriving `TranslationKey` from the English catalog (below) is equivalent on
+// that axis, not superior. The bundle number is the whole argument.
+//
+// Also rejected: hiding i18next in a sibling manual chunk. It measures at entry
+// 126.70 KiB, so `check:bundle` goes green — but the chunk is STATICALLY
+// imported by the entry, so all 50.89 kB still download before first paint
+// (initial static graph 506.44 KiB). The budget's stated purpose is to guard
+// against an unintended heavy dependency; routing around it defeats exactly that.
+//
+// This module stays structurally compatible with a later i18next migration:
+// flat dot-namespaced keys map 1:1 onto i18next keys, and the `t` / formatter
+// surface is the same shape react-i18next exposes — which is what made the
+// measured port above a ~150-line change.
 //
 // Code-split — locales (#393) AND the default catalog (#394):
 //   * Non-default locales (zh-CN) were already lazy: fetched with a dynamic

@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 
 // Entry-chunk ceiling. The console's i18n runtime is hand-rolled precisely to
 // keep the localized catalogs OUT of a heavyweight i18next dependency (see
-// src/i18n/catalog.ts). Historically BOTH the EN and zh-CN catalogs were eagerly
+// src/i18n/catalog.ts). That trade-off is MEASURED, not asserted: porting to
+// i18next 26.3.6 + react-i18next 17.0.11 takes this entry
+// from 128_993 B to 180_463 B — +51_470 B (+39.9%), 48.30 KiB over the ceiling
+// below. Historically BOTH the EN and zh-CN catalogs were eagerly
 // imported into the entry chunk, so every catalog growth ratcheted this ceiling
 // up: 300_000 -> 312_000 (#348 copy-complete) -> 316_000 (#344 Assets registry)
 // -> 321_000 (#345 Static Sites). Each bump was the real cost of new copy across
