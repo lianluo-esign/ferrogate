@@ -402,6 +402,285 @@ fn page_item_keys_match_the_openapi_contract() {
     );
 }
 
+/// Every object schema in the contract that the CLI would recognize as a list
+/// page: one carrying an array-typed property under a [`PAGE_ITEM_KEYS`]
+/// spelling. Walked recursively so an envelope declared **inline** on a
+/// response (several are) counts exactly like a named component schema —
+/// scanning only `components/schemas`, as the item-key test does, would let an
+/// inline cursor envelope slip through.
+fn list_envelope_properties(
+    spec: &serde_json::Value,
+) -> Vec<&serde_json::Map<String, serde_json::Value>> {
+    fn walk<'a>(
+        node: &'a serde_json::Value,
+        found: &mut Vec<&'a serde_json::Map<String, serde_json::Value>>,
+    ) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if let Some(properties) = map.get("properties").and_then(|p| p.as_object()) {
+                    let is_page = PAGE_ITEM_KEYS.iter().any(|key| {
+                        properties
+                            .get(*key)
+                            .and_then(|property| property.get("type"))
+                            .and_then(|kind| kind.as_str())
+                            == Some("array")
+                    });
+                    if is_page {
+                        found.push(properties);
+                    }
+                }
+                for value in map.values() {
+                    walk(value, found);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(spec, &mut found);
+    found
+}
+
+/// Whether a schema property may be absent/`null`. The contract spells that two
+/// ways — `"type": ["string", "null"]` and `"nullable": true` — and a
+/// derivation that understood only one would miss half the cursor envelopes.
+fn property_is_nullable(property: &serde_json::Value) -> bool {
+    if property.get("nullable").and_then(|n| n.as_bool()) == Some(true) {
+        return true;
+    }
+    property
+        .get("type")
+        .and_then(|kind| kind.as_array())
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("null")))
+}
+
+fn property_has_type(property: &serde_json::Value, wanted: &str) -> bool {
+    match property.get("type") {
+        Some(serde_json::Value::String(kind)) => kind == wanted,
+        Some(serde_json::Value::Array(kinds)) => {
+            kinds.iter().any(|kind| kind.as_str() == Some(wanted))
+        }
+        _ => false,
+    }
+}
+
+/// The cursor markers the walk refuses on are re-derived from the enforced
+/// OpenAPI contract, exactly as [`page_item_keys_match_the_openapi_contract`]
+/// re-derives the item keys — and for a sharper reason.
+///
+/// `PAGE_CURSOR_KEYS` was hand-maintained and documented as spec-derived. It
+/// was accurate when written and became wrong without a single test going red:
+/// `AdminPaymentAttemptList` added the admin contract's first `next_cursor`
+/// envelope (#352), the constant did not grow the key, so `page_envelope`
+/// reported `cursor = false` and `--all-pages` walked a cursor endpoint with
+/// `offset`/`limit` the server ignores — up to `MAX_PAGES` requests that each
+/// returned, and merged, page one. The item-key test could not catch it: it
+/// only re-derives `PAGE_ITEM_KEYS`, and every cursor envelope spells its array
+/// `data` like everyone else.
+///
+/// **The derivation.** Inside a list envelope, a cursor marker is a property
+/// that is either
+/// 1. **boolean-typed** — a "more pages exist" / "your cursor was reset" flag,
+///    or
+/// 2. **nullable-string-typed** — a resume token, which must be able to say
+///    "there is no next page" and therefore must admit `null`.
+///
+/// Everything else in these envelopes is one of the offset-window integers
+/// (`offset`/`limit`/`total`, nullable or not) or non-nullable endpoint context
+/// (`object`, `run_id`, `worker_id`, `request_id`, `trust_level`) — none of
+/// which can be a cursor. A name-shaped second rule backstops a hypothetical
+/// cursor spelled as a **non**-nullable string, minus the offset vocabulary the
+/// client already classifies elsewhere, so the union can only ever demand MORE
+/// keys than rule 1 — and an extra key here merely *refuses* a walk, which is
+/// the safe direction.
+///
+/// The consequence for the next envelope: add `{"data": [...],
+/// "next_page_token": nullable string}` to the contract and this test fails
+/// naming the key, instead of `--all-pages` quietly storming the admin plane.
+#[test]
+fn page_cursor_keys_match_the_openapi_contract() {
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+            .expect("the OpenAPI contract parses");
+    let envelopes = list_envelope_properties(&spec);
+    assert!(
+        envelopes.len() > 10,
+        "the derivation found only {} list envelopes, so it is not seeing the contract; \
+         a vacuous scan would make this whole test pass by finding nothing",
+        envelopes.len()
+    );
+
+    // Keys the client already classifies as OFFSET pagination. Excluded from
+    // the name-shaped rule so a future `next_offset` — the one offset-shaped
+    // name that would collide with it — is not mistaken for a cursor.
+    let offset_vocabulary: std::collections::BTreeSet<&str> = PAGE_WINDOW_KEYS
+        .iter()
+        .chain(PAGE_TOTAL_KEYS.iter())
+        .copied()
+        .chain(["next_offset"])
+        .collect();
+
+    let mut markers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for properties in &envelopes {
+        for (name, property) in properties.iter() {
+            if offset_vocabulary.contains(name.as_str()) {
+                continue;
+            }
+            let by_shape = property_has_type(property, "boolean")
+                || (property_is_nullable(property) && property_has_type(property, "string"));
+            let by_name = name.contains("cursor")
+                || name.contains("after")
+                || name.starts_with("next_")
+                || name == "has_more";
+            if by_shape || by_name {
+                markers.insert(name.clone());
+            }
+        }
+    }
+
+    let declared: std::collections::BTreeSet<String> =
+        PAGE_CURSOR_KEYS.iter().map(|key| key.to_string()).collect();
+    // Equality, in both directions, for the same reason the item-key test uses
+    // one: the left side catches a contract that grew a cursor marker the walk
+    // would not recognize (the #352 regression), the right side catches a
+    // speculative alias re-added here that no endpoint emits (the #360 one).
+    assert_eq!(
+        markers, declared,
+        "the cursor markers in the contract and PAGE_CURSOR_KEYS must match exactly: \
+         contract has {markers:?}, the CLI declares {declared:?}"
+    );
+}
+
+/// The regression the constant above exists for, expressed as behavior rather
+/// than as a string list: the payment-attempt envelope **verbatim from the
+/// contract** must be recognized as cursor-paginated, and `--all-pages` must
+/// refuse it on the FIRST page instead of walking it by offset.
+///
+/// Without this, `ferrogate ctl payment-attempts list --all-pages` against a
+/// tenant with more than one page of attempts issued `MAX_PAGES` requests that
+/// each returned page one — a self-inflicted request storm on the admin plane,
+/// reachable from a documented flag, on a money-audit surface.
+#[test]
+fn all_pages_refuses_the_payment_attempt_cursor_envelope() {
+    // `AdminPaymentAttemptList` as the handler emits it: a full page, a
+    // server-applied `limit`, no `total`, and a cursor to resume from. Every
+    // one of those is what made the offset walk look legitimate.
+    let page = serde_json::json!({
+        "object": "list",
+        "data": [{"id": "att-2"}, {"id": "att-1"}],
+        "limit": 2,
+        "next_cursor": "1753500000:att-1",
+    });
+    let envelope = page_envelope(&page).unwrap();
+    assert!(
+        envelope.cursor,
+        "an envelope carrying next_cursor is cursor-paginated: {page}"
+    );
+    assert!(
+        envelope.echoes_page_window(),
+        "it echoes a limit, which is exactly why the windowless guard cannot catch it"
+    );
+    assert_eq!(
+        next_page(&PageRequest::first(2), 2, None),
+        Some(PageRequest {
+            offset: 2,
+            limit: Some(2)
+        }),
+        "the offset arithmetic itself is willing to advance — the refusal must come first"
+    );
+
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = FakeTransport {
+        response: RawResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::to_vec(&page).unwrap(),
+        },
+        seen: Mutex::new(None),
+    };
+    let client = ControlPlaneClient::new(context, None, transport);
+    let error = block_on(client.send_all_pages(&RequestSpec::get("/admin/v1/payment-attempts"), 2))
+        .unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(
+        error.to_string().contains("cursor-paginated"),
+        "the refusal must name the reason: {error}"
+    );
+}
+
+/// A cursor page reports its own continuation, and the reader must not confuse
+/// the cursor the caller *used* with the one to use *next*.
+#[test]
+fn page_cursor_state_reads_the_continuation_not_the_echo() {
+    // Not a cursor page at all.
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({"object": "list", "data": [], "total": 0})),
+        None
+    );
+    assert_eq!(page_cursor_state(&serde_json::json!([{"id": "a"}])), None);
+
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({
+            "data": [{"id": "att-1"}],
+            "limit": 1,
+            "next_cursor": "1753500000:att-1",
+        })),
+        Some(PageCursorState::Resume {
+            key: "next_cursor",
+            value: "1753500000:att-1".to_string(),
+        })
+    );
+    // Null cursor: the definitive end, which is what keeps a full last page
+    // from being announced as truncated.
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({"data": [], "next_cursor": serde_json::Value::Null})),
+        Some(PageCursorState::Exhausted)
+    );
+    // `after_event_id` is the cursor the caller ALREADY used. Resuming from it
+    // would re-fetch the page in hand forever, so it is never a continuation.
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({
+            "data": [{"id": "e1"}],
+            "after_event_id": "e0",
+            "next_after_event_id": serde_json::Value::Null,
+            "has_more": false,
+        })),
+        Some(PageCursorState::Exhausted)
+    );
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({
+            "data": [{"id": "e1"}],
+            "after_event_id": "e0",
+            "next_after_event_id": "e1",
+            "has_more": true,
+        })),
+        Some(PageCursorState::Resume {
+            key: "next_after_event_id",
+            value: "e1".to_string(),
+        })
+    );
+    // An explicit `has_more: false` outranks a token the server echoed back on
+    // its last page: the strongest statement available wins.
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({
+            "data": [],
+            "next_after_event_id": "e1",
+            "has_more": false,
+        })),
+        Some(PageCursorState::Exhausted)
+    );
+    // Cursor-paginated but silent about continuation.
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({"data": [{"id": "e1"}], "has_more": true})),
+        Some(PageCursorState::Unknown)
+    );
+}
+
 /// `--sort` is documented as unhonored, and this pins that claim to the
 /// contract instead of to a comment. When the server does implement sorting,
 /// this test fails and forces the flag help, `docs/cli-reference.md`, and the

@@ -108,7 +108,11 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
   // panel next to the wallet holds it joins to, in the same wallets/metering
   // spend cockpit the x402 spend-policy diagnostics are waiting on. Operators
   // are NOT blocked meanwhile: the `ctl payment-attempts list|get` verbs cover
-  // the surface today. Deferred, needs UI — tracked on the #313 chain.
+  // the surface today — the whole listing, not just its first page, by passing
+  // the page's `next_cursor` back as `--filter cursor=…`. The endpoint is
+  // CURSOR-paginated, so `--offset`/`--all-pages` do not apply to it and the
+  // CLI now refuses both rather than silently re-serving page one. Deferred,
+  // needs UI — tracked on the #313 chain.
   "payment-attempts": {
     owner: "billing/ops cockpit (#352 inspection, #428 follow-up, #313 chain)",
     reason:

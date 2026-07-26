@@ -66,9 +66,9 @@ use std::future::Future;
 use std::sync::Arc;
 
 use ferrogate_storage::{
-    PaymentAttemptCreation, PaymentAttemptEvidenceArgs, PaymentAttemptTransition,
-    RuntimeStorageRepositories, StorageError, StoredPaymentAttempt, WalletReservationResult,
-    PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED,
+    is_canonical_atomic_amount, PaymentAttemptCreation, PaymentAttemptEvidenceArgs,
+    PaymentAttemptTransition, RuntimeStorageRepositories, StorageError, StoredPaymentAttempt,
+    WalletReservationResult, PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED,
 };
 
 use super::AppState;
@@ -155,6 +155,19 @@ pub(crate) fn classify_settled_amount(
     owed_atomic_amount: &str,
     settled_atomic_amount: &str,
 ) -> AmountCoverage {
+    // Screen the DOMAIN before the comparison, with the same predicate migration
+    // 59's `CHECK` and both storage backends use (#352 review §2). `u128::from_str`
+    // alone is looser than the column: it accepts a leading `+` and any number of
+    // digits, so `"+250000"` and a 21-digit value used to pass this guard, reach
+    // the CAS, and be refused by Postgres while the memory twin stored them.
+    // Deciding it here keeps the money verdict at the money seam -- the caller
+    // gets a fail-closed `Short` (hold RETAINED, attempt left non-terminal for
+    // the reconciler) instead of a storage error about a constraint.
+    if !is_canonical_atomic_amount(owed_atomic_amount)
+        || !is_canonical_atomic_amount(settled_atomic_amount)
+    {
+        return AmountCoverage::Short;
+    }
     match (
         owed_atomic_amount.parse::<u128>(),
         settled_atomic_amount.parse::<u128>(),

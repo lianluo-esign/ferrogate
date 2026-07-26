@@ -46,8 +46,8 @@ use ferrogate_cli_core::output::{render_json, OutputFormat, Table};
 use ferrogate_cli_core::registry_helpers::ResourceInput;
 use ferrogate_cli_core::resource::ListParams;
 use ferrogate_cli_core::transport::{
-    page_envelope, ApiResponse, ControlPlaneClient, PageRequest, ReqwestTransport,
-    DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
+    page_cursor_state, page_envelope, ApiResponse, ControlPlaneClient, PageCursorState,
+    PageRequest, ReqwestTransport, DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
 };
 use serde_json::{Map, Value};
 
@@ -339,6 +339,13 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     let mut body = response.body;
     redact_response(group_name, &redaction_spec, &mut body);
 
+    // A cursor endpoint ignores `--offset`, so page N is page ONE with exit 0 —
+    // checked BEFORE anything is printed, so the wrong page never reaches stdout
+    // to be piped somewhere.
+    if let Some(refusal) = cursor_offset_refusal(&body, resource.offset, &redaction_spec.path) {
+        return Err(CliError::usage(refusal));
+    }
+
     match output_format {
         OutputFormat::Json => println!("{}", render_json(&body)?),
         OutputFormat::Table => println!("{}", render_table(&body)?),
@@ -355,13 +362,46 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     Ok(())
 }
 
+/// Refuse a `--offset` the endpoint provably did not honor.
+///
+/// A cursor-paginated endpoint parses `cursor`, not `offset`: `--offset 50`
+/// against one returns page **one** and exits 0. That is the quiet half of the
+/// same defect as the `--all-pages` storm (#352 review) and the worse half —
+/// the storm at least errors eventually, while this hands an operator page one
+/// labelled as page N on a money-audit surface. `--all-pages` is refused inside
+/// the walk itself; this is the single-page path, which never reaches it.
+///
+/// `None` when no offset was asked for, or when the response is not a cursor
+/// page — an offset-paginated endpoint honors offsets, and a non-list document
+/// has no pages at all. Pure.
+fn cursor_offset_refusal(body: &Value, offset: Option<u64>, path: &str) -> Option<String> {
+    let offset = offset.filter(|offset| *offset > 0)?;
+    let state = page_cursor_state(body)?;
+    let resume = match &state {
+        PageCursorState::Resume { key, value } => format!(
+            "This page's continuation is {key}={value}; pass it back with --filter using the \
+             cursor parameter {path} documents"
+        ),
+        _ => format!(
+            "Page it with --filter and the cursor parameter {path} documents, or re-run without \
+             --offset for the first page"
+        ),
+    };
+    Some(format!(
+        "--offset {offset} was ignored by {path}: it is cursor-paginated, so the rows above are \
+         page ONE, not the page you asked for. Refusing rather than returning the wrong page with \
+         exit 0. {resume}"
+    ))
+}
+
 /// Build the operator-facing notice that a single-page list is — or may be —
 /// incomplete, or `None` when the page is provably the whole collection.
 ///
 /// This is what keeps the default one-page list from being the silent
 /// truncation the issue forbids: whenever rows were left behind, or whenever
 /// the server gave us no way to know, the operator is told so and pointed at
-/// `--all-pages`. Pure, so every branch is unit-testable.
+/// `--all-pages` — or, on a cursor endpoint, at the cursor, since `--all-pages`
+/// cannot walk one.
 ///
 /// `requested_limit` is the operator's `--limit`, which is frequently absent.
 /// The page size that actually applied then comes from the envelope's own
@@ -370,10 +410,30 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
 /// <group> list` against an endpoint with a server-side default page size and
 /// no `total` produced no notice at all: the exact default invocation an
 /// operator is most likely to run, and the one where a truncated page is least
-/// likely to be suspected.
+/// likely to be suspected. Pure, so every branch is unit-testable.
 fn truncation_notice(body: &Value, offset: u64, requested_limit: Option<u64>) -> Option<String> {
     let envelope = page_envelope(body)?;
     let returned = envelope.items.len() as u64;
+    // A cursor page's completeness is decided by its own cursor, not by
+    // arithmetic on a window it never used: a full page with a null
+    // `next_cursor` IS the whole remainder, and a page whose cursor is set has
+    // more rows even when it came back short. Pointing such an operator at
+    // `--all-pages` — which now refuses cursor endpoints, correctly — would be
+    // advice that cannot work.
+    if envelope.cursor {
+        return match page_cursor_state(body)? {
+            PageCursorState::Resume { key, value } => Some(format!(
+                "note: showing {returned} rows; this endpoint pages by cursor and reported \
+                 {key}={value}, so more rows exist — re-run with --filter and the cursor \
+                 parameter this endpoint documents (--all-pages cannot walk a cursor endpoint)"
+            )),
+            PageCursorState::Exhausted => None,
+            PageCursorState::Unknown => Some(format!(
+                "note: showing {returned} rows from a cursor-paginated endpoint that reported no \
+                 continuation either way; more rows may exist"
+            )),
+        };
+    }
     match envelope.total {
         Some(total) if offset.saturating_add(returned) < total => Some(format!(
             "note: showing {returned} of {total} rows (offset {offset}); \

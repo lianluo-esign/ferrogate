@@ -2641,6 +2641,25 @@ $$;
 -- application already refuses these values as of this change), so an existing
 -- row violating them fails the migration loudly rather than being silently
 -- grandfathered into the audit record.
+--
+-- The same upgrade story applies to the UNIQUE INDEX, and it is worth stating
+-- rather than leaving implied (#352 review §3): pre-existing rows sharing a
+-- transaction_signature make `CREATE UNIQUE INDEX` fail, which fails this DO
+-- block, which -- with POSTGRES_SCHEMA_VERSION now at 59 -- means the gateway
+-- refuses to start. That is the intended outcome, not an oversight. Two attempts
+-- holding one signature IS the double-capture this migration exists to prevent,
+-- and it is unresolvable by machine: only an operator can say which attempt the
+-- transfer actually paid for, and silently indexing around it (a NOT VALID-style
+-- grandfather, or a non-unique index) would leave a live double-capture in the
+-- audit record while reporting a clean upgrade. Recovery is deliberate and
+-- manual -- reconcile the duplicates on-chain, correct the losing attempt, then
+-- restart. The duplicate set is one query:
+--   SELECT transaction_signature, array_agg(id) FROM payment_attempts
+--    WHERE transaction_signature IS NOT NULL
+--    GROUP BY transaction_signature HAVING count(*) > 1;
+-- In practice the table is young and every writer has always set
+-- hold_id = attempt_id, so duplicates are not expected; "not expected" is not
+-- "handled", which is why the failure mode is written down here.
 DO $$
 BEGIN
     INSERT INTO storage_schema_migrations (version, name)

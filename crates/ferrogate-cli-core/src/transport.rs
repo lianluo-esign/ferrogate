@@ -394,17 +394,26 @@ const PAGE_WINDOW_KEYS: [&str; 2] = ["offset", "limit"];
 /// return page one forever, so their presence is a hard stop rather than an
 /// accidental fallback (see [`ControlPlaneClient::send_all_pages`]).
 ///
-/// Spec-derived, like [`PAGE_ITEM_KEYS`]: these are exactly the cursor markers
-/// carried by the contract's two cursor envelopes (`AgentJobEventPage`,
-/// `AdminSelfHostedWorkerEventStream`). A speculative `next_cursor` alias was
-/// removed — a false positive here only *refuses*, so it is harmless in
-/// operation, but a list documented as derived from the contract must actually
-/// be derived from it or the next reader trusts the wrong thing.
-const PAGE_CURSOR_KEYS: [&str; 4] = [
+/// Spec-derived, like [`PAGE_ITEM_KEYS`] — and, since #352, derived by
+/// something that **runs**: `page_cursor_keys_match_the_openapi_contract` in
+/// `transport_test.rs` re-collects the contract's cursor markers structurally
+/// and fails when this list is missing one.
+///
+/// That test exists because the previous, hand-maintained version of this list
+/// went stale silently. It recorded that a speculative `next_cursor` alias had
+/// been removed "because the string appears nowhere in the contract" — true
+/// when written, and false the moment `AdminPaymentAttemptList` landed the
+/// admin contract's first `next_cursor` envelope. In that window
+/// `--all-pages` walked a cursor endpoint by offset: the server ignores
+/// `offset`, so every one of up to [`MAX_PAGES`] iterations re-fetched page one
+/// and merged it again. A list documented as derived from the contract must be
+/// derived by a test, not re-audited by a reader.
+const PAGE_CURSOR_KEYS: [&str; 5] = [
     "after_event_id",
-    "next_after_event_id",
-    "has_more",
     "cursor_reset",
+    "has_more",
+    "next_after_event_id",
+    "next_cursor",
 ];
 
 /// A decoded list page: the item array, the envelope key it lived under
@@ -446,6 +455,63 @@ impl PageEnvelope<'_> {
     pub fn echoes_page_window(&self) -> bool {
         self.total.is_some() || self.limit.is_some() || self.offset.is_some()
     }
+}
+
+/// What a cursor-paginated page says about its own continuation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageCursorState {
+    /// The server handed back a non-null resume token: more rows exist and this
+    /// is what to ask for them with. The key is the envelope property carrying
+    /// it — the *response* spelling, which is not necessarily the query
+    /// parameter's, so a caller must quote it rather than invent a flag.
+    Resume { key: &'static str, value: String },
+    /// The page is the definitive end of the listing (`next_cursor: null`, or
+    /// `has_more: false`).
+    Exhausted,
+    /// Cursor-paginated, but the envelope carries no continuation evidence
+    /// either way (`has_more: true` with no token, say).
+    Unknown,
+}
+
+/// Read a cursor envelope's continuation, so a caller can tell the operator
+/// whether a single page was the whole answer without teaching it any
+/// resource's cursor spelling.
+///
+/// Returns `None` for a page that is not cursor-paginated. Pure.
+pub fn page_cursor_state(body: &serde_json::Value) -> Option<PageCursorState> {
+    let map = body.as_object()?;
+    if !PAGE_CURSOR_KEYS.iter().any(|key| map.contains_key(*key)) {
+        return None;
+    }
+    // An explicit `has_more: false` is the strongest statement available and
+    // outranks a token, so a server that echoes the request cursor back on the
+    // last page is not misread as having more rows.
+    if map.get("has_more").and_then(serde_json::Value::as_bool) == Some(false) {
+        return Some(PageCursorState::Exhausted);
+    }
+    // Only the `next_*` markers are continuations: the bare `after_event_id` is
+    // the echo of the cursor the caller already used, and resuming from it would
+    // re-fetch the page in hand forever.
+    let next_keys = || {
+        PAGE_CURSOR_KEYS
+            .iter()
+            .filter(|key| key.starts_with("next_"))
+    };
+    if let Some((key, value)) = next_keys().find_map(|key| {
+        map.get(*key)
+            .filter(|value| !value.is_null())
+            .map(|value| (*key, value))
+    }) {
+        let value = match value {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        return Some(PageCursorState::Resume { key, value });
+    }
+    if next_keys().any(|key| map.contains_key(*key)) {
+        return Some(PageCursorState::Exhausted);
+    }
+    Some(PageCursorState::Unknown)
 }
 
 /// Recognize a list response shape. Returns `None` when the document is not a

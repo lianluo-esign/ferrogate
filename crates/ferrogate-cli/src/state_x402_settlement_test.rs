@@ -892,3 +892,69 @@ fn a_disabled_reconciler_leaves_the_request_ttl_untouched() {
         "a disabled reconciler must not impose an unvalidated floor"
     );
 }
+
+/// The classifier screens the amount DOMAIN, not just the arithmetic.
+///
+/// `u128::from_str` is looser than the column it feeds: it accepts a leading `+`
+/// and any number of digits, so `"+250000"` and a 21-digit value passed this
+/// guard, reached the CAS, and were then refused by migration 59's CHECK on
+/// Postgres while the memory twin stored them (#352 review §2). Screening with
+/// the SAME `is_canonical_atomic_amount` the storage layer and the CHECK use
+/// keeps the money verdict at the money seam and the backends in agreement.
+///
+/// Fail-closed direction, always: a non-canonical amount is `Short`, which
+/// refuses the capture, RETAINS the hold and leaves the attempt non-terminal for
+/// the reconciler. It is never read as covering the owed amount.
+///
+/// Delete the `is_canonical_atomic_amount` screen in `classify_settled_amount`
+/// and the `"+250000"` case goes red.
+#[test]
+fn a_non_canonical_amount_is_never_read_as_covering_the_owed_amount() {
+    for bad in [
+        "+250000",               // sign u128::from_str accepts, the column does not
+        "184467440737095516150", // 21 digits: wider than u64::MAX
+        "",
+        "-250000",
+        "2.5e5",
+        " 250000",
+    ] {
+        assert_eq!(
+            classify_settled_amount("250000", bad),
+            AmountCoverage::Short,
+            "settled {bad:?} must fail closed"
+        );
+        // And in the mirror direction: a non-canonical OWED amount cannot be
+        // satisfied either, however large the settled side is.
+        assert_eq!(
+            classify_settled_amount(bad, "999999999"),
+            AmountCoverage::Short,
+            "owed {bad:?} must fail closed"
+        );
+    }
+
+    // The screen is narrow: canonical amounts classify exactly as before, so an
+    // exact transfer and the spec-valid overpayment both still settle.
+    assert_eq!(
+        classify_settled_amount("250000", "250000"),
+        AmountCoverage::Covers {
+            overpayment_atomic_amount: None
+        }
+    );
+    assert_eq!(
+        classify_settled_amount("250000", "250001"),
+        AmountCoverage::Covers {
+            overpayment_atomic_amount: Some("1".to_string())
+        }
+    );
+    // Leading zeros are still canonical and still compare numerically.
+    assert_eq!(
+        classify_settled_amount("250000", "0250000"),
+        AmountCoverage::Covers {
+            overpayment_atomic_amount: None
+        }
+    );
+    assert_eq!(
+        classify_settled_amount("250000", "249999"),
+        AmountCoverage::Short
+    );
+}

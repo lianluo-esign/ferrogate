@@ -297,7 +297,7 @@ impl CommandGroup for PaymentAttemptsGroup {
             vec![
                 VerbDescriptor::api(
                     "list",
-                    "List a tenant's payment attempts (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])",
+                    "List a tenant's payment attempts — CURSOR-paged, so --offset and --all-pages do not apply (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])",
                     "listPaymentAttempts",
                 ),
                 VerbDescriptor::api(

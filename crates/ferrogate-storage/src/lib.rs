@@ -277,14 +277,14 @@ pub use wallet::{
 
 mod payment_attempt;
 pub use payment_attempt::{
-    payment_attempt_state_is_terminal, PaymentAttemptCreation, PaymentAttemptCursor,
-    PaymentAttemptEvidenceArgs, PaymentAttemptLinks, PaymentAttemptPage, PaymentAttemptQuery,
-    PaymentAttemptTransition, StoredPaymentAttempt, PAYMENT_ATTEMPT_AUTHORIZED,
-    PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED, PAYMENT_ATTEMPT_EXPIRABLE_STATES,
-    PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_INITIAL_STATES, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
-    PAYMENT_ATTEMPT_PAGE_DEFAULT_LIMIT, PAYMENT_ATTEMPT_PAGE_MAX_LIMIT,
-    PAYMENT_ATTEMPT_RECONCILABLE_STATES, PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED,
-    PAYMENT_ATTEMPT_SUBMITTED,
+    is_canonical_atomic_amount, payment_attempt_state_is_terminal, PaymentAttemptCreation,
+    PaymentAttemptCursor, PaymentAttemptEvidenceArgs, PaymentAttemptLinks, PaymentAttemptPage,
+    PaymentAttemptQuery, PaymentAttemptTransition, StoredPaymentAttempt,
+    PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED,
+    PAYMENT_ATTEMPT_EXPIRABLE_STATES, PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_INITIAL_STATES,
+    PAYMENT_ATTEMPT_OUTCOME_UNKNOWN, PAYMENT_ATTEMPT_PAGE_DEFAULT_LIMIT,
+    PAYMENT_ATTEMPT_PAGE_MAX_LIMIT, PAYMENT_ATTEMPT_RECONCILABLE_STATES, PAYMENT_ATTEMPT_RELEASED,
+    PAYMENT_ATTEMPT_SETTLED, PAYMENT_ATTEMPT_SUBMITTED,
 };
 
 mod workflow_budget;
@@ -14878,6 +14878,19 @@ fn postgres_error(error: tokio_postgres::Error) -> StorageError {
 /// every other Postgres error still propagates unchanged.
 fn is_unique_violation(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
+}
+
+/// SQLSTATE 23514: a `CHECK` constraint refused the row.
+///
+/// A check violation is a **domain** verdict on the caller's own values -- the
+/// database refusing a value it is contractually never allowed to hold -- so it
+/// can never succeed on retry. Left as a generic storage error it is
+/// indistinguishable from a transient outage, and a re-driving caller (the x402
+/// reconciler, for one) retries it forever while the money it names stays held.
+/// Callers that own a `CHECK`ed domain map it to the typed `Conflict` so the
+/// refusal is final and operator-visible.
+fn is_check_violation(error: &tokio_postgres::Error) -> bool {
+    error.code() == Some(&tokio_postgres::error::SqlState::CHECK_VIOLATION)
 }
 
 fn asset_transaction_commit_outcome_unknown(operation: &StorageOperation) -> StorageError {

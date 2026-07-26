@@ -389,6 +389,107 @@ fn truncation_notice_uses_the_envelope_page_size_when_no_limit_was_passed() {
     );
 }
 
+/// The payment-attempt page verbatim from the admin contract (#352): a full
+/// page, a server-applied `limit`, no `total`, and a cursor to resume from.
+fn cursor_page() -> Value {
+    json!({
+        "object": "list",
+        "data": [{"id": "att-2"}, {"id": "att-1"}],
+        "limit": 2,
+        "next_cursor": "1753500000:att-1",
+    })
+}
+
+/// `--offset` against a cursor endpoint is refused, not answered with page one.
+///
+/// `ctl payment-attempts list --offset 50` used to print the FIRST page and exit
+/// 0: the handler parses `tenant_id`, `limit` and `cursor` and never looks at
+/// `offset`. On a money-audit surface that is an operator reading rows 1-50
+/// believing they are rows 51-100. Delete the `cursor_offset_refusal` call in
+/// `execute` and nothing else in the suite notices.
+#[test]
+fn an_offset_a_cursor_endpoint_ignores_is_refused_rather_than_answered() {
+    let refusal = cursor_offset_refusal(&cursor_page(), Some(50), "/admin/v1/payment-attempts")
+        .expect("an ignored offset must be refused");
+    assert!(refusal.contains("cursor-paginated"), "{refusal}");
+    assert!(refusal.contains("page ONE"), "{refusal}");
+    // The refusal is actionable: it quotes the continuation the server gave.
+    assert!(
+        refusal.contains("next_cursor=1753500000:att-1"),
+        "{refusal}"
+    );
+
+    // Not a refusal when there is nothing to be wrong about.
+    assert_eq!(
+        cursor_offset_refusal(&cursor_page(), None, "/admin/v1/payment-attempts"),
+        None,
+        "no --offset, no misreading"
+    );
+    assert_eq!(
+        cursor_offset_refusal(&cursor_page(), Some(0), "/admin/v1/payment-attempts"),
+        None,
+        "offset 0 is page one, which is what a cursor endpoint returns anyway"
+    );
+    // An OFFSET-paginated endpoint honors the offset: refusing it would break
+    // every list verb in the contract that actually paginates by window.
+    let offset_page =
+        json!({"object": "list", "data": [{"id": "a"}], "total": 9, "offset": 50, "limit": 1});
+    assert_eq!(
+        cursor_offset_refusal(&offset_page, Some(50), "/admin/v1/virtual-keys"),
+        None
+    );
+    // A non-list document has no pages to be wrong about.
+    assert_eq!(
+        cursor_offset_refusal(
+            &json!({"id": "att-1"}),
+            Some(50),
+            "/admin/v1/payment-attempts"
+        ),
+        None
+    );
+}
+
+/// A cursor page's completeness comes from its own cursor, not from window
+/// arithmetic — and the notice must not point at `--all-pages`, which now
+/// refuses cursor endpoints.
+///
+/// Both directions are load-bearing: a FULL page with a null `next_cursor` is
+/// the whole answer and must stay silent (the window rule would have warned),
+/// and a SHORT page with a live cursor has more rows and must warn (the window
+/// rule would have been silent — it reads a short page as the last page).
+#[test]
+fn truncation_notice_reads_the_cursor_on_a_cursor_page() {
+    let notice = truncation_notice(&cursor_page(), 0, Some(2)).expect("more rows exist");
+    assert!(notice.contains("pages by cursor"), "{notice}");
+    assert!(notice.contains("next_cursor=1753500000:att-1"), "{notice}");
+    assert!(
+        !notice.contains("re-run with --all-pages to"),
+        "advice that cannot work: --all-pages refuses cursor endpoints: {notice}"
+    );
+
+    let exhausted = json!({
+        "object": "list",
+        "data": [{"id": "att-2"}, {"id": "att-1"}],
+        "limit": 2,
+        "next_cursor": Value::Null,
+    });
+    assert_eq!(
+        truncation_notice(&exhausted, 0, Some(2)),
+        None,
+        "a full page with a null cursor is the definitive end of the listing"
+    );
+
+    let short_but_continuing = json!({
+        "object": "list",
+        "data": [{"id": "att-2"}],
+        "limit": 50,
+        "next_cursor": "1753500000:att-2",
+    });
+    let notice = truncation_notice(&short_but_continuing, 0, None)
+        .expect("a live cursor means more rows even on a short page");
+    assert!(notice.contains("more rows exist"), "{notice}");
+}
+
 /// A non-list response never produces a pagination notice.
 #[test]
 fn truncation_notice_ignores_non_list_documents() {

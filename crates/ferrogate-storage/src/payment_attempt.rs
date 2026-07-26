@@ -14,9 +14,9 @@
 // see `wallet.rs`/`workflow_budget.rs` for the pattern this mirrors.
 
 use super::{
-    is_unique_violation, postgres_error, PostgresControlPlaneStore, PostgresRow, Repository,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
-    StoredWalletReservation, StoredWalletSettlement,
+    is_check_violation, is_unique_violation, postgres_error, PostgresControlPlaneStore,
+    PostgresRow, Repository, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
+    StorageOperation, StoredWalletReservation, StoredWalletSettlement,
 };
 
 // ---------------------------------------------------------------------------
@@ -369,7 +369,14 @@ pub enum PaymentAttemptCreation {
 /// function is the application mirror so the memory and Postgres backends refuse
 /// the identical set of values (the #188 conformance obligation) instead of the
 /// memory twin silently accepting what the database rejects.
-fn is_canonical_atomic_amount(value: &str) -> bool {
+///
+/// Exported (#352 review §2) because it is the ONE definition of the domain: the
+/// x402 settlement seam screens evidence with it before a capture, both create
+/// bodies and both transition bodies enforce it before a write, and migration 59
+/// states the same rule in SQL. A second, slightly-different notion of
+/// "canonical" elsewhere is exactly how a value passes one layer and is rejected
+/// by the next.
+pub fn is_canonical_atomic_amount(value: &str) -> bool {
     !value.is_empty() && value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
@@ -396,6 +403,41 @@ fn validate_payment_attempt_amounts(attempt: &StoredPaymentAttempt) -> Result<()
             return Err(StorageError::Conflict(format!(
                 "payment attempt {} has negative credits_amount {credits}",
                 attempt.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a **transition** whose evidence would write a non-canonical money
+/// value, before the CAS runs — the mirror of
+/// [`validate_payment_attempt_amounts`] on the path that actually writes
+/// `settled_atomic_amount` in production.
+///
+/// Create-time validation alone left the two backends disagreeing about the
+/// domain of a money column (#352 review §2). `settled_atomic_amount` is written
+/// by the transition (`COALESCE($4, …)`), and migration 59's
+/// `payment_attempts_settled_amount_canonical` CHECK applies to `UPDATE` too, so
+/// a value like `"+250000"` or a 21-digit amount — both of which `u128::from_str`
+/// accepts, so `classify_settled_amount` passes them through — reached the CAS
+/// and then diverged: Postgres raised SQLSTATE 23514 while the memory twin
+/// stored it. Worse, the raised 23514 surfaced as a generic storage error, which
+/// a reconciler cannot distinguish from a transient outage, so it re-drove the
+/// transition forever with the hold retained.
+///
+/// These values are attacker-influenced: they arrive verbatim from the
+/// facilitator/RPC observation. Refusing them here is the fail-closed answer and
+/// the #188 conformance obligation — memory and Postgres refuse the identical
+/// set, on the write path as well as the create path.
+fn validate_transition_evidence_amounts(
+    id: &str,
+    evidence: &TransitionEvidence<'_>,
+) -> Result<(), StorageError> {
+    if let Some(settled) = evidence.settled_atomic_amount {
+        if !is_canonical_atomic_amount(settled) {
+            return Err(StorageError::Conflict(format!(
+                "payment attempt {id} cannot record non-canonical settled_atomic_amount \
+                 {settled:?} (expected 1-20 decimal digits)"
             )));
         }
     }
@@ -660,7 +702,23 @@ impl PostgresControlPlaneStore {
                 ],
             )
             .await
-            .map_err(postgres_error)?;
+            // Same reasoning as the transition body: migration 59's money
+            // `CHECK`s are a domain verdict, final and never retryable. The
+            // create path validates in application code first, so reaching this
+            // arm means the two rule sets drifted -- which must surface as a
+            // typed conflict naming the column, not as an outage-shaped error a
+            // caller re-drives.
+            .map_err(|error| {
+                if is_check_violation(&error) {
+                    StorageError::Conflict(format!(
+                        "payment attempt {} violates a payment_attempts domain constraint \
+                         (amounts must be canonical): {error}",
+                        attempt.id
+                    ))
+                } else {
+                    postgres_error(error)
+                }
+            })?;
 
         if inserted == 1 {
             transaction.commit().await.map_err(postgres_error)?;
@@ -697,6 +755,10 @@ impl PostgresControlPlaneStore {
         evidence: &TransitionEvidence<'_>,
         now_unix: i64,
     ) -> Result<PaymentAttemptTransition, StorageError> {
+        // Domain check FIRST, before a connection is even acquired: a value the
+        // migration-59 CHECK would reject must fail closed identically here and
+        // in the memory twin, not as a 23514 the caller reads as an outage.
+        validate_transition_evidence_amounts(id, evidence)?;
         let operation = self.payment_attempt_operation(op_name);
         let mut client = self
             .async_pool
@@ -750,12 +812,27 @@ impl PostgresControlPlaneStore {
             // read as a transient outage and retry. The database is the only
             // place two concurrent settles can be serialized, which is why the
             // guard lives there rather than in a read-then-write check.
+            //
+            // Migration 59 also `CHECK`s the money columns, and the same
+            // statement writes `settled_atomic_amount`. The application mirror
+            // above (`validate_transition_evidence_amounts`) is what makes the
+            // two backends agree; this arm is the belt to that braces, because
+            // the alternative is worse than a wrong error message: a 23514 read
+            // as a transient storage fault is re-driven by the reconciler
+            // forever, on an attempt whose wallet hold stays retained. A domain
+            // refusal can never succeed on retry, so it must be typed as final.
             .map_err(|error| {
                 if is_unique_violation(&error) {
                     StorageError::Conflict(format!(
                         "payment attempt {id} cannot record transaction signature {}: another \
                          attempt already recorded it",
                         evidence.transaction_signature.unwrap_or("<none>")
+                    ))
+                } else if is_check_violation(&error) {
+                    StorageError::Conflict(format!(
+                        "payment attempt {id} transition to {to_state} violates a payment_attempts \
+                         domain constraint (settled_atomic_amount must be 1-20 decimal digits): \
+                         {error}"
                     ))
                 } else {
                     postgres_error(error)
@@ -1094,6 +1171,9 @@ impl RuntimeControlPlaneState {
         evidence: &TransitionEvidence<'_>,
         now_unix: i64,
     ) -> Result<PaymentAttemptTransition, StorageError> {
+        // Same refusal, in the same order, as the Postgres body: the memory twin
+        // must not store a settled amount the database's CHECK would reject.
+        validate_transition_evidence_amounts(id, evidence)?;
         let Some(record) = self.payment_attempts.get(id) else {
             return Err(StorageError::NotFound(format!(
                 "payment attempt {id} does not exist"

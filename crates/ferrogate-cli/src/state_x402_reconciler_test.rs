@@ -1275,20 +1275,34 @@ fn confirmed_amount_that_does_not_parse_stays_fail_closed() {
     );
     assert_eq!(decide_confirmed("", "1000000"), mismatch("1000000"));
 
-    // Documented quirk of the parse path, INHERITED unchanged from the pre-#469
-    // `atomic_amounts_match` (both use `str::parse`): Rust's integer parser
-    // accepts an explicit leading `+`, so "+1000000" is the integer 1000000 and
-    // settles as an exact transfer -- exactly as it did before this change. Pinned
-    // here so the behaviour is a recorded decision rather than a surprise; the
-    // value is still parsed as an INTEGER, never taken on trust as a string.
+    // The leading-`+` quirk this used to pin is CLOSED (#352 review §2). Rust's
+    // integer parser accepts an explicit `+`, so "+1000000" used to settle as an
+    // exact transfer -- but the column it would then be written to does not
+    // accept it: migration 59's `payment_attempts_settled_amount_canonical`
+    // CHECK is `^[0-9]{1,20}$`, so Postgres refused the CAS (as an untyped 23514
+    // the reconciler could not tell from an outage, and therefore re-drove
+    // forever) while the memory twin stored it. `classify_settled_amount` now
+    // screens the domain with the same `is_canonical_atomic_amount` the storage
+    // backends and the CHECK use, so a non-canonical amount is fail-closed here
+    // -- mismatch, hold RETAINED, operator review -- rather than settling into a
+    // write one backend rejects.
     assert_eq!(
         decide_confirmed("1000000", "+1000000"),
-        settle("+1000000", None)
+        mismatch("+1000000"),
+        "a sign the durable column forbids must not settle"
     );
     assert_eq!(
         decide_confirmed("1000000", "+999999"),
         mismatch("+999999"),
         "the leading `+` never bypasses the underpayment check"
+    );
+    // A 21-digit amount is the other value `u128::from_str` accepts and the
+    // column does not: wider than u64::MAX, so it can never be a real on-chain
+    // atomic amount.
+    assert_eq!(
+        decide_confirmed("1000000", "184467440737095516150"),
+        mismatch("184467440737095516150"),
+        "an amount wider than u64::MAX must not settle"
     );
 }
 

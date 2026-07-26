@@ -154,3 +154,112 @@ fn a_negative_credits_amount_is_refused_at_create() {
     candidate.credits_amount = Some(0);
     assert!(block_on(repositories.create_payment_attempt(candidate)).is_ok());
 }
+
+/// The domain is enforced on the path that actually writes it in production.
+///
+/// `settled_atomic_amount` is written by the **transition**, not by a create --
+/// so validating only the create bodies left the two backends disagreeing about
+/// a money column on the one path production uses (#352 review §2). Migration
+/// 59's `payment_attempts_settled_amount_canonical` CHECK applies to `UPDATE`
+/// too: Postgres would raise 23514 (which the caller could not tell from a
+/// transient outage, so the reconciler re-drove it forever with the hold
+/// retained) while the memory twin stored the value.
+///
+/// The values here are the ones `u128::from_str` accepts and the column does
+/// not, which is exactly how they got past `classify_settled_amount` -- a
+/// leading `+`, and a 21-digit amount wider than `u64::MAX`. They are
+/// attacker-influenced: they arrive verbatim from the facilitator/RPC
+/// observation.
+///
+/// Delete `validate_transition_evidence_amounts(id, evidence)?` from either
+/// transition body and this test goes red.
+#[test]
+fn a_non_canonical_settled_amount_is_refused_at_transition() {
+    for bad in [
+        "+250000",
+        "184467440737095516150",
+        "",
+        "-1",
+        "2.5e5",
+        "0x10",
+    ] {
+        let repositories = amount_domain_repositories();
+        block_on(repositories.reserve_wallet_credits("hold-t", "tenant-a", 250, 10_000, 100))
+            .unwrap();
+        let mut candidate = attempt("att-t");
+        candidate.hold_id = Some("hold-t".into());
+        block_on(repositories.create_payment_attempt(candidate)).unwrap();
+        block_on(repositories.submit_payment_attempt(
+            "att-t",
+            crate::PaymentAttemptEvidenceArgs {
+                submitted_at_unix: Some(200),
+                ..Default::default()
+            },
+            200,
+        ))
+        .unwrap();
+
+        let error = block_on(repositories.settle_payment_attempt(
+            "att-t",
+            crate::PaymentAttemptEvidenceArgs {
+                transaction_signature: Some(&"5".repeat(88)),
+                settled_atomic_amount: Some(bad),
+                ..Default::default()
+            },
+            300,
+        ))
+        .expect_err(&format!("settled_atomic_amount {bad:?} must be refused"));
+        assert!(
+            matches!(error, StorageError::Conflict(ref message) if message.contains("settled_atomic_amount")),
+            "{bad:?} produced the wrong error: {error:?}"
+        );
+
+        // Fail-closed means the row is untouched: still submitted, no evidence
+        // recorded, so the hold is RETAINED and the attempt stays inspectable
+        // for the reconciler rather than being half-settled.
+        let stored = block_on(repositories.get_payment_attempt("att-t"))
+            .unwrap()
+            .expect("the attempt still exists");
+        assert_eq!(stored.state, crate::PAYMENT_ATTEMPT_SUBMITTED);
+        assert_eq!(stored.settled_atomic_amount, None);
+        assert_eq!(stored.transaction_signature, None);
+    }
+}
+
+/// The mirror direction: canonical settled amounts still settle, including the
+/// full `u64` range and a spec-valid overpayment. A domain check that refused
+/// these would break settlement entirely, so the refusal above has to be proven
+/// narrow.
+#[test]
+fn a_canonical_settled_amount_still_settles() {
+    for good in ["250000", "250001", "0", "18446744073709551615"] {
+        let repositories = amount_domain_repositories();
+        block_on(repositories.reserve_wallet_credits("hold-t", "tenant-a", 250, 10_000, 100))
+            .unwrap();
+        let mut candidate = attempt("att-t");
+        candidate.hold_id = Some("hold-t".into());
+        block_on(repositories.create_payment_attempt(candidate)).unwrap();
+        block_on(repositories.submit_payment_attempt(
+            "att-t",
+            crate::PaymentAttemptEvidenceArgs {
+                submitted_at_unix: Some(200),
+                ..Default::default()
+            },
+            200,
+        ))
+        .unwrap();
+        let settled = block_on(repositories.settle_payment_attempt(
+            "att-t",
+            crate::PaymentAttemptEvidenceArgs {
+                transaction_signature: Some(&"5".repeat(88)),
+                settled_atomic_amount: Some(good),
+                ..Default::default()
+            },
+            300,
+        ));
+        assert!(
+            settled.is_ok(),
+            "settled_atomic_amount {good:?} must be accepted: {settled:?}"
+        );
+    }
+}
