@@ -87,6 +87,19 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
   // to create, edit or delete. The console already renders the durable tenant
   // registry (`/admin/v1/tenant-accounts`) at `/app/tenants`, so a page here
   // would duplicate that route with a strictly weaker, non-editable dataset.
+  // Read-only x402 spend-policy DIAGNOSTICS (#351): the two GETs expose the
+  // declared and the effective policy plus its revision, and the single POST is
+  // a dry-run evaluator that mutates nothing. The policy itself is authored in
+  // `ferrogate.toml` (`[[x402_spend_policies]]`), NOT through this API, so a
+  // console CRUD page would present editable-looking controls over a surface
+  // that cannot write. The operator UI that belongs here is a spend panel next
+  // to the wallets/metering cockpit, shared with the #428 cost-governance
+  // follow-up. Deferred, needs UI — tracked on the #313 chain.
+  "x402-spend-policies": {
+    owner: "billing/ops cockpit (#351 diagnostics, #428 follow-up, #313 chain)",
+    reason:
+      "read-only effective-policy diagnostics plus a dry-run evaluator; the policy is authored in ferrogate.toml, not through this API, so a CRUD page would imply writes the surface does not support — deferred, needs UI alongside the wallets/metering spend panel",
+  },
   tenants: {
     owner: "tenancy (superseded by tenant-accounts)",
     reason:
