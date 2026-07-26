@@ -672,6 +672,66 @@ fn public_x402_headers_are_not_treated_as_bearer_material() {
     assert_eq!(redacted, raw);
 }
 
+/// An `obs-fold` continuation line (RFC 7230 §3.2.4) carries the tail of the
+/// PREVIOUS field's value and has no colon of its own, so a per-line parse would
+/// wave it straight through. The credential is split across the fold here so
+/// that letting the continuation past leaks a usable piece of it.
+#[test]
+fn a_folded_bearer_header_value_is_redacted_across_the_fold() {
+    let raw = "HTTP/1.1 200 OK\r\n\
+               Authorization: Bearer first-half\r\n\
+               \tsecond-half-of-the-secret\r\n\
+               content-type: text/plain\r\n\
+               \tcharset=utf-8\r\n\
+               \r\n\
+               body";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert!(!redacted.contains("first-half"), "{redacted}");
+    assert!(
+        !redacted.contains("second-half-of-the-secret"),
+        "the folded tail of a credential leaked: {redacted}"
+    );
+    // A fold on a NON-bearer header is untouched — this must not become a
+    // blanket "drop every continuation line".
+    assert!(redacted.contains("charset=utf-8"), "{redacted}");
+    assert!(redacted.ends_with("body"), "{redacted}");
+}
+
+/// A fold in the BODY is body text, not a continuation: the header/body
+/// separator still ends the header section.
+#[test]
+fn a_fold_after_the_header_separator_is_body_text() {
+    let raw = "HTTP/1.1 200 OK\r\n\
+               Authorization: Bearer secret\r\n\
+               \r\n\
+               \tindented body line";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert!(redacted.ends_with("\tindented body line"), "{redacted}");
+    assert!(!redacted.contains("secret"), "{redacted}");
+}
+
+/// Credential headers outside the IANA registry authenticate their holder just
+/// as completely as `authorization` does.
+#[test]
+fn non_registered_credential_headers_are_bearer_material() {
+    let raw = "HTTP/1.1 200 OK\r\n\
+               x-api-key: key-material\r\n\
+               X-Auth-Token: token-material\r\n\
+               Authentication: auth-material\r\n\
+               \r\n";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert!(!redacted.contains("key-material"), "{redacted}");
+    assert!(!redacted.contains("token-material"), "{redacted}");
+    assert!(!redacted.contains("auth-material"), "{redacted}");
+    assert_eq!(redacted.matches(REDACTED_HEADER_VALUE).count(), 3);
+}
+
 // ---------------------------------------------------------------------------
 // Wire stage → hold disposition (#353). Socket-level coverage lives in
 // `external_actions_x402_test.rs`; this pins the mapping itself.

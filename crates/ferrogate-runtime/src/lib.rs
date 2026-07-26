@@ -20,6 +20,7 @@ mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
 mod cloudflare_worker_target;
 pub mod coding_agent;
+mod egress_dispatch_stage;
 mod framework_adapter;
 mod function_egress;
 mod function_token;
@@ -119,6 +120,9 @@ pub use cloudflare_worker_target::{
     prepare_governed_worker_invocation, CloudflareWorkerInvocation, CloudflareWorkerTarget,
     CloudflareWorkerTargetError, PreparedWorkerInvocation, WorkerBrokerError,
     WorkerInvocationRequest, DEFAULT_WORKER_INVOCATION_TIMEOUT_MILLIS, WORKER_FUNCTION_CAPABILITY,
+};
+pub use egress_dispatch_stage::{
+    HoldDisposition, RequestWireStage, EGRESS_HOLD_DISPOSITION_KEY, EGRESS_REQUEST_WIRE_STAGE_KEY,
 };
 pub use ferrogate_cloudflare::{HttpMethod, HttpRequest, HttpResponse, HttpTransport};
 pub use framework_adapter::{

@@ -1018,7 +1018,16 @@ pub(crate) fn governed_rest_execution_smoke_command(mode: FrameworkAdapterMode) 
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_rest_action(&gate, smoke_session(mode), action, false)?;
+    let events = match execute_governed_rest_action(&gate, smoke_session(mode), action, false) {
+        Ok(events) => events,
+        Err(rejection) => {
+            // The typed dispatch verdict IS the evidence on this path, so it is
+            // emitted before the command fails. An operator (and any harness)
+            // reads the discriminant off `metadata`, never off the message.
+            eprintln!("{}", rejection.event.canonical_json());
+            return Err(rejection.error.into());
+        }
+    };
     let served_request = server.join()?;
     let output = serde_json::json!({
         "events": events
@@ -2061,12 +2070,19 @@ fn run_authorized_cli_action_until_cancelled(
     ))
 }
 
+/// Run one governed REST action end to end.
+///
+/// The error type is [`GovernedRestRejection`] rather than a bare
+/// [`FrameworkAdapterError`] because a failure here is evidence, not just a
+/// message: it carries the typed wire stage and the worker event that ships it
+/// across the process boundary. The prose is preserved verbatim through
+/// `Display`, so existing operator-facing behaviour is unchanged.
 fn execute_governed_rest_action<A>(
     authorizer: &A,
     session: FrameworkAdapterSession,
     action: ManagedRestAction,
     high_risk: bool,
-) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+) -> Result<Vec<NormalizedFrameworkEvent>, GovernedRestRejection>
 where
     A: GatewayExternalActionAuthorizer + ?Sized,
 {
@@ -2077,8 +2093,10 @@ where
             action: ManagedExternalAction::Rest(action.clone()),
             high_risk,
         },
-    )?;
-    let execution = run_authorized_rest_action(&action).map_err(RestDispatchFailure::into_error)?;
+    )
+    .map_err(|error| GovernedRestRejection::gate_refused(&session, &action, error))?;
+    let execution = run_authorized_rest_action(&action)
+        .map_err(|failure| GovernedRestRejection::dispatch_failed(&session, &action, failure))?;
     Ok(vec![
         decision.event,
         NormalizedFrameworkEvent {
@@ -3691,30 +3709,47 @@ struct GovernedRestExecution {
     response_excerpt: String,
 }
 
+/// The action-describing half of a governed REST event's metadata, shared by the
+/// success and the dispatch-failure events so a consumer sees the same shape
+/// either way.
+fn rest_action_metadata(action: &ManagedRestAction) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("external_action".to_string(), "rest".to_string()),
+        (
+            "external_target".to_string(),
+            format!("{} {}", action.method, action.url),
+        ),
+        ("method".to_string(), action.method.clone()),
+        ("url".to_string(), action.url.clone()),
+        ("headers_policy".to_string(), action.headers_policy.clone()),
+        ("body_policy".to_string(), action.body_policy.clone()),
+        (
+            "timeout_millis".to_string(),
+            action.timeout_millis.to_string(),
+        ),
+        ("retry_limit".to_string(), action.retry_limit.to_string()),
+    ])
+}
+
 impl GovernedRestExecution {
     fn metadata(self, action: &ManagedRestAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
-            ("external_action".to_string(), "rest".to_string()),
-            (
-                "external_target".to_string(),
-                format!("{} {}", action.method, action.url),
-            ),
-            ("method".to_string(), action.method.clone()),
-            ("url".to_string(), action.url.clone()),
-            ("headers_policy".to_string(), action.headers_policy.clone()),
-            ("body_policy".to_string(), action.body_policy.clone()),
-            (
-                "timeout_millis".to_string(),
-                action.timeout_millis.to_string(),
-            ),
-            ("retry_limit".to_string(), action.retry_limit.to_string()),
+        let mut metadata = rest_action_metadata(action);
+        metadata.extend([
             (
                 "executed_after_authorization".to_string(),
                 "true".to_string(),
             ),
+            ("dispatch_outcome".to_string(), "completed".to_string()),
             ("status_code".to_string(), self.status_code.to_string()),
             ("response_excerpt".to_string(), self.response_excerpt),
-        ])
+        ]);
+        // A completed dispatch reached the upstream by definition, so the key is
+        // present on the success path too. A consumer therefore never has to
+        // distinguish "absent because it succeeded" from "absent because the
+        // producer predates the key" — and if it ever did, the absent case reads
+        // as retain anyway.
+        RequestWireStage::SentOrUnknown.write_event_metadata(&mut metadata);
+        metadata
     }
 }
 
@@ -3752,12 +3787,16 @@ impl RestDispatchFailure {
     /// Collapse back to the shared adapter error, carrying the wire stage into
     /// the operator-facing message.
     ///
-    /// This is the stage's consumer TODAY. It matters for any REST failure, not
-    /// just a paid one — "did my request actually reach the upstream?" is the
-    /// first question after a failed side effect. It becomes money-critical
-    /// once the #381 transport binding attaches a payment proof, because the
-    /// gateway's durable attempt API may only take its RELEASE edge
-    /// (`X402SettlementLoop::cancel`) on the first of these two answers.
+    /// This is DIAGNOSTICS, and only diagnostics. It matters for any REST
+    /// failure, not just a paid one — "did my request actually reach the
+    /// upstream?" is the first question after a failed side effect — but nothing
+    /// may branch on the sentence. The machine-readable carrier is
+    /// [`GovernedRestRejection`], which puts the same classification on the
+    /// event's metadata as a frozen token
+    /// ([`ferrogate_runtime::EGRESS_REQUEST_WIRE_STAGE_KEY`]). That separation is
+    /// the point: the gateway's durable attempt API may only take its RELEASE
+    /// edge (`X402SettlementLoop::cancel`) on a proven-unsent dispatch, and that
+    /// decision must survive a reword of this string.
     fn into_error(self) -> FrameworkAdapterError {
         let reached = match self.stage.hold_disposition() {
             HoldDisposition::ReleasableBeforeSubmission => "no request byte reached the upstream",
@@ -3778,6 +3817,131 @@ impl RestDispatchFailure {
     }
 }
 
+/// A governed REST action that did not produce a response, delivered as TYPED
+/// evidence rather than as prose (#353).
+///
+/// [`RestDispatchFailure::into_error`] annotates the operator-facing message
+/// with how far the request got, which is the right thing for a human reading a
+/// log. It is the wrong thing for the gateway: taking the durable attempt API's
+/// RELEASE edge off a substring match would mean a reword of that sentence
+/// silently flips every hold to the wrong edge, on a money decision.
+///
+/// So the rejection carries the classification three ways, and only one of them
+/// is meant to be consumed:
+///
+/// * [`Self::wire_stage`] — the typed discriminant, in the shared
+///   `ferrogate-runtime` vocabulary both processes can name.
+/// * [`Self::event`] — the same discriminant written into worker event metadata
+///   under [`ferrogate_runtime::EGRESS_REQUEST_WIRE_STAGE_KEY`], which is the
+///   map that actually crosses the process boundary. **This is what a #381
+///   consumer reads**, via [`RequestWireStage::from_event_metadata`].
+/// * [`Self::error`] — human diagnostics, explicitly NOT load-bearing.
+pub(crate) struct GovernedRestRejection {
+    /// How far the request got. `SentOrUnknown` unless proven otherwise.
+    pub(crate) wire_stage: RequestWireStage,
+    /// The worker event carrying the typed classification as metadata. Boxed so
+    /// the `Err` variant of every governed REST result stays small.
+    pub(crate) event: Box<NormalizedFrameworkEvent>,
+    /// The operator-facing failure, prose annotation included.
+    pub(crate) error: FrameworkAdapterError,
+}
+
+impl GovernedRestRejection {
+    /// The gateway-vocabulary verdict for the wallet hold. Derived from the
+    /// typed stage; never from the message.
+    pub(crate) fn hold_disposition(&self) -> HoldDisposition {
+        self.wire_stage.hold_disposition()
+    }
+
+    /// Refusal by the gateway capability gate: no socket was ever opened, so the
+    /// request is provably unsent. No prose annotation is added — the gate's own
+    /// denial message already says exactly what happened, and annotating it with
+    /// wire-stage language would be noise.
+    fn gate_refused(
+        session: &FrameworkAdapterSession,
+        action: &ManagedRestAction,
+        error: FrameworkAdapterError,
+    ) -> Self {
+        Self::build(
+            session,
+            action,
+            RequestWireStage::ProvenNotSent,
+            false,
+            error,
+        )
+    }
+
+    /// A dispatch that was authorized and then failed. The stage is whatever the
+    /// dispatch proved, defaulting to retain.
+    fn dispatch_failed(
+        session: &FrameworkAdapterSession,
+        action: &ManagedRestAction,
+        failure: RestDispatchFailure,
+    ) -> Self {
+        let wire_stage = failure.stage;
+        Self::build(session, action, wire_stage, true, failure.into_error())
+    }
+
+    fn build(
+        session: &FrameworkAdapterSession,
+        action: &ManagedRestAction,
+        wire_stage: RequestWireStage,
+        executed_after_authorization: bool,
+        error: FrameworkAdapterError,
+    ) -> Self {
+        let mut metadata = rest_action_metadata(action);
+        metadata.extend([
+            (
+                "executed_after_authorization".to_string(),
+                executed_after_authorization.to_string(),
+            ),
+            ("dispatch_outcome".to_string(), "failed".to_string()),
+            // Prose, recorded for humans. Deliberately alongside the typed keys
+            // rather than instead of them.
+            ("failure_reason".to_string(), error.to_string()),
+        ]);
+        // The typed discriminant + its derived hold disposition. Written last so
+        // it cannot be shadowed by an action-derived key.
+        wire_stage.write_event_metadata(&mut metadata);
+        Self {
+            wire_stage,
+            event: Box::new(NormalizedFrameworkEvent {
+                session_id: session.session_id.clone(),
+                run_id: session.run_id.clone(),
+                adapter_name: session.adapter_name.clone(),
+                adapter_version: session.adapter_version.clone(),
+                framework: session.framework,
+                mode: session.mode,
+                kind: FrameworkAdapterEventKind::RestRequested,
+                message: Some(
+                    "managed REST action did not complete after gateway authorization".to_string(),
+                ),
+                metadata,
+            }),
+            error,
+        }
+    }
+}
+
+impl std::fmt::Debug for GovernedRestRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GovernedRestRejection")
+            .field("wire_stage", &self.wire_stage)
+            .field("hold_disposition", &self.hold_disposition())
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for GovernedRestRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for GovernedRestRejection {}
+
 /// Fail-safe classification: anything converted implicitly — every `?` on a
 /// bare [`FrameworkAdapterError`] in the dispatch below — lands on
 /// [`RequestWireStage`]'s default, which is `SentOrUnknown` ⇒ retain the hold.
@@ -3793,6 +3957,20 @@ impl From<FrameworkAdapterError> for RestDispatchFailure {
     }
 }
 
+/// Dispatch one already-authorized managed REST action.
+///
+/// Scope, stated plainly so it is not overclaimed again (#353): this is a
+/// LOOPBACK SMOKE executor. The three guards below — `GET` only,
+/// `parse_local_http_url`'s `http://`-only rule, and its loopback-only rule —
+/// mean it can never talk to a public HTTPS host, and its only non-test caller
+/// (`governed_rest_execution_smoke_command`) points a hardcoded action at a
+/// listener it spawns itself. The `402` branch is therefore correct behaviour
+/// that is unreachable in the shipped binary; live x402 detection needs an
+/// egress executor that does not yet exist in this crate.
+///
+/// The redaction and the wire-stage classification are NOT scoped that way: they
+/// are properties of "a dispatch failed" and "a response was recorded", and
+/// transfer to whatever real executor eventually lands.
 fn run_authorized_rest_action(
     action: &ManagedRestAction,
 ) -> Result<GovernedRestExecution, RestDispatchFailure> {

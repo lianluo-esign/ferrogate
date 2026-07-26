@@ -43,10 +43,41 @@
 //!
 //! This is the challenge-parse + non-custodial authorization-request build +
 //! spend-authorization handoff contract, with the deny/approval/custody
-//! fail-closed paths, plus the three pieces of it the worker's REAL egress
-//! response path consumes today — [`detect_payment_required`],
-//! [`redact_bearer_headers`] and [`RequestWireStage`], all called from
-//! `external_actions.rs::run_authorized_rest_action`.
+//! fail-closed paths, plus the three pieces of it that
+//! `external_actions.rs::run_authorized_rest_action` calls —
+//! [`detect_payment_required`], [`redact_bearer_headers`] and
+//! [`RequestWireStage`].
+//!
+//! ## What "wired" does and does not mean here — stated plainly
+//!
+//! An earlier revision of this doc called `run_authorized_rest_action` "the
+//! worker's REAL egress path". That was wrong and is corrected here rather than
+//! quietly dropped, because the boundary matters more than the claim did.
+//!
+//! `run_authorized_rest_action` is a **loopback smoke executor**, and it is one
+//! by construction, not by configuration:
+//!
+//! * its only non-test caller is `governed_rest_execution_smoke_command`, a
+//!   zero-argument CLI subcommand that spawns its own listener and points a
+//!   hardcoded action at it (`external_actions.rs`);
+//! * `parse_local_http_url` refuses anything that is not `http://`, and then
+//!   refuses any endpoint that is not loopback;
+//! * the dispatcher refuses any method other than `GET`.
+//!
+//! An x402 merchant is a public DNS name over HTTPS, so this executor can never
+//! have one on the other side — regardless of what #381 lands. The 402 branch is
+//! therefore genuinely unreachable in the shipped binary today. It is kept
+//! because it is the correct behaviour for the executor to have *if* a 402 ever
+//! arrives, and because the redaction and wire-stage work around it are
+//! independently valuable; it is NOT evidence of live 402 detection.
+//!
+//! The only production code in this repository that can reach an arbitrary
+//! public HTTPS host on an agent's behalf is the gateway's MCP tool client
+//! (`ferrogate-mcp/src/http_client.rs`), which is in a different process and a
+//! different crate, and has no payment handling. "Non-custodial 402 detection on
+//! the live egress path" therefore cannot be satisfied inside `agent-worker`: it
+//! is blocked on whichever issue gives the worker a real, non-hardcoded egress
+//! executor.
 //!
 //! ## What is NOT here, and why it cannot be
 //!
@@ -68,7 +99,12 @@
 //! can observe: how far the outgoing request got on the wire before a dispatch
 //! failed. That is [`RequestWireStage`], and it is what decides whether the
 //! gateway may take the loop's RELEASE edge or must retain the hold as
-//! `outcome_unknown`.
+//! `outcome_unknown`. It now lives in `ferrogate-runtime` and is emitted as a
+//! typed discriminant in worker event metadata
+//! ([`ferrogate_runtime::EGRESS_REQUEST_WIRE_STAGE_KEY`]), so a consumer reads a
+//! frozen token instead of substring-matching an error sentence. That part is
+//! executor-independent: it applies to whatever egress executor #381 ends up
+//! binding.
 //!
 //! The rest of the module still has no production caller, so `dead_code` is
 //! allowed off the test path — mirroring `state_x402_settlement.rs` (#354).
@@ -713,11 +749,16 @@ pub(crate) const REDACTED_HEADER_VALUE: &str = "<redacted>";
 /// happened to it?". Redacting them would destroy evidence without protecting
 /// anything.
 fn is_bearer_header(name: &str) -> bool {
-    const BEARER_HEADERS: [&str; 4] = [
+    const BEARER_HEADERS: [&str; 7] = [
         "authorization",
         "proxy-authorization",
         "cookie",
         "set-cookie",
+        // Not IANA-registered, but every one of these is a value whose mere
+        // possession authenticates the holder — which is the whole criterion.
+        "authentication",
+        "x-api-key",
+        "x-auth-token",
     ];
     name.eq_ignore_ascii_case(HEADER_PAYMENT_SIGNATURE)
         || BEARER_HEADERS
@@ -739,6 +780,10 @@ fn is_bearer_header(name: &str) -> bool {
 /// * A message with no header/body separator (a truncated or malformed
 ///   response) is treated as ALL headers, which over-redacts rather than
 ///   under-redacts.
+/// * An `obs-fold` continuation line (RFC 7230 §3.2.4 — deprecated, but still
+///   emitted by real servers) has no colon of its own, so matching per line
+///   would let the tail of a folded credential through untouched. A
+///   continuation of a bearer header is redacted with it.
 ///
 /// Scope limit, stated honestly: this redacts the header section only. A body
 /// that echoes a credential back is not covered — guessing at secrets inside
@@ -746,6 +791,8 @@ fn is_bearer_header(name: &str) -> bool {
 pub(crate) fn redact_bearer_headers(raw_http_message: &str) -> String {
     let mut redacted = String::with_capacity(raw_http_message.len());
     let mut in_header_section = true;
+    // Whether the field this line may be continuing is bearer material.
+    let mut folding_bearer_header = false;
     for (index, line) in raw_http_message.split_inclusive('\n').enumerate() {
         // Index 0 is the status/request line, which is never a header even if
         // it happens to contain a colon.
@@ -756,17 +803,35 @@ pub(crate) fn redact_bearer_headers(raw_http_message: &str) -> String {
         let content = line.trim_end_matches(['\r', '\n']);
         if content.is_empty() {
             in_header_section = false;
+            folding_bearer_header = false;
             redacted.push_str(line);
+            continue;
+        }
+        // A leading space/tab means this line continues the PREVIOUS field's
+        // value, so it inherits that field's classification instead of being
+        // parsed as a header in its own right.
+        if content.starts_with([' ', '\t']) {
+            if folding_bearer_header {
+                redacted.push(' ');
+                redacted.push_str(REDACTED_HEADER_VALUE);
+                redacted.push_str(&line[content.len()..]);
+            } else {
+                redacted.push_str(line);
+            }
             continue;
         }
         match content.split_once(':') {
             Some((name, _)) if is_bearer_header(name.trim()) => {
+                folding_bearer_header = true;
                 redacted.push_str(name);
                 redacted.push_str(": ");
                 redacted.push_str(REDACTED_HEADER_VALUE);
                 redacted.push_str(&line[content.len()..]);
             }
-            _ => redacted.push_str(line),
+            _ => {
+                folding_bearer_header = false;
+                redacted.push_str(line);
+            }
         }
     }
     redacted
@@ -776,66 +841,24 @@ pub(crate) fn redact_bearer_headers(raw_http_message: &str) -> String {
 // Wire stage → hold disposition (#353's half of the cancellation contract)
 // ---------------------------------------------------------------------------
 
-/// How far an outgoing egress request got before the dispatch failed.
+/// The wire-stage vocabulary, re-exported from `ferrogate-runtime`.
 ///
-/// Only the worker can observe this, and it is the single fact the gateway's
-/// durable attempt API needs in order to choose between releasing a hold and
-/// retaining it. The variants are named for what can be **proven**, not for what
-/// is likely.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequestWireStage {
-    /// PROVEN that no request byte can have reached the peer: the failure
-    /// happened during validation, address resolution, connection setup, or
-    /// socket option setup — strictly before the first write was attempted.
-    ProvenNotSent,
-    /// Everything else, including every genuinely ambiguous case: a partial
-    /// write, a connection reset mid-request, a read timeout after the request
-    /// was fully written, or any failure this code has not explicitly proven to
-    /// be pre-send.
-    SentOrUnknown,
-}
-
-/// The fail-safe default is [`RequestWireStage::SentOrUnknown`].
+/// It used to be defined here, privately, which meant the observation could
+/// never leave this process as anything but English: `RestDispatchFailure`
+/// discarded the stage and appended a sentence, so a gateway wanting the RELEASE
+/// edge would have had to substring-match prose to make a money decision.
 ///
-/// The two misclassifications are not symmetric. Calling a sent request
-/// "not sent" releases a wallet hold for a payment that may already have
-/// settled on-chain — FerroGate would have handed over stablecoin and charged
-/// nobody. Calling an unsent request "sent" merely parks a hold that the TTL
-/// sweeper (`state_x402_sweeper.rs`) reclaims on its next tick. So anything not
-/// proven pre-send must land here.
-impl Default for RequestWireStage {
-    fn default() -> Self {
-        Self::SentOrUnknown
-    }
-}
-
-/// What the gateway's durable attempt API may do with the wallet hold, in that
-/// API's own vocabulary (`state_x402_settlement.rs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HoldDisposition {
-    /// Safe to take the loop's RELEASE edge (`X402SettlementLoop::cancel`),
-    /// which is valid only on a pre-submission attempt.
-    ReleasableBeforeSubmission,
-    /// The proof may be on the wire. The attempt must be parked
-    /// `outcome_unknown` with the hold RETAINED, for the reconciler to resolve.
-    RetainOutcomeUnknown,
-}
-
-impl RequestWireStage {
-    /// Map the observed wire stage onto the hold disposition.
-    ///
-    /// This function is the whole of what `agent-worker` can contribute to the
-    /// cancellation contract. It deliberately does NOT call the durable attempt
-    /// API: that API lives behind the gateway's capability boundary and this
-    /// crate has no dependency on it (see the module docs). The call itself is
-    /// the transport binding's job, tracked on #381.
-    pub(crate) fn hold_disposition(self) -> HoldDisposition {
-        match self {
-            Self::ProvenNotSent => HoldDisposition::ReleasableBeforeSubmission,
-            Self::SentOrUnknown => HoldDisposition::RetainOutcomeUnknown,
-        }
-    }
-}
+/// The types now live in [`ferrogate_runtime::egress_dispatch_stage`], the crate
+/// BOTH `agent-worker` and `ferrogate-cli` already depend on, with frozen wire
+/// tokens, fail-safe parsing/deserialization, and event-metadata helpers. That
+/// is what makes the classification consumable across the boundary; the prose
+/// stays as human diagnostics and stops being load-bearing.
+///
+/// Nothing about the asymmetry changed in the move: `RequestWireStage::default()`
+/// is still `SentOrUnknown`, so every implicit conversion in
+/// `external_actions.rs` still retains, and only an explicit `proven_not_sent`
+/// can release.
+pub(crate) use ferrogate_runtime::{HoldDisposition, RequestWireStage};
 
 #[cfg(test)]
 #[path = "x402_client_test.rs"]

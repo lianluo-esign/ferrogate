@@ -4,10 +4,23 @@
 // Created: 2026-07-26
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-//! The x402 seam of the worker's REAL governed REST response path (#353).
+//! The x402 seam of the worker's governed REST response path (#353).
 //!
-//! Two properties are proven here against live loopback sockets, because both
-//! are properties of the production path rather than of a pure function:
+//! Read the honesty note first. The executor these tests drive
+//! (`run_authorized_rest_action`) is a LOOPBACK SMOKE executor: `http://` only,
+//! loopback only, `GET` only, and its sole non-test caller points a hardcoded
+//! action at a listener it spawns itself. So these tests prove the functions are
+//! correct on a real socket; they do NOT prove the 402 branch runs in the shipped
+//! binary, because it cannot — no x402 merchant is reachable from here. See the
+//! boundary note in `x402_client.rs`.
+//!
+//! What survives that caveat intact is everything below that is
+//! executor-independent: the redaction ordering, the wire-stage classification,
+//! and the typed carrier that ships it across the process boundary. Those apply
+//! to whatever real egress executor eventually exists.
+//!
+//! Three properties are proven here against live loopback sockets, because all
+//! three are properties of a wired code path rather than of a pure function:
 //!
 //! 1. **Redaction.** Bearer material never reaches recorded evidence.
 //!    `run_authorized_rest_action` records an excerpt of the raw HTTP response —
@@ -23,6 +36,15 @@
 //!    PROVEN to be pre-send may release a wallet hold. Every other outcome —
 //!    including the genuinely ambiguous ones — must retain it.
 //!
+//! 3. **The classification crosses the process boundary as a discriminant.**
+//!    The gateway owns the durable attempt API and runs in another process. If
+//!    the only carrier were the English suffix on the error message, the gateway
+//!    would have to substring-match a sentence to choose between releasing and
+//!    retaining a wallet hold, and any reword would silently flip every hold to
+//!    the wrong edge. So the stage is written into worker event metadata as a
+//!    frozen token and read back through a typed, fail-safe accessor — asserted
+//!    here across the real management-protocol serialization, not in memory.
+//!
 //! Plus the worker's non-custodial `402` detection: it surfaces the challenge
 //! and refuses. It never pays, and it never replays.
 
@@ -30,6 +52,9 @@ use std::sync::mpsc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use ferrogate_runtime::{
+    AgentWorkerFrameworkEventResult, EGRESS_HOLD_DISPOSITION_KEY, EGRESS_REQUEST_WIRE_STAGE_KEY,
+};
 use serde_json::json;
 
 use super::*;
@@ -170,9 +195,24 @@ fn http_response(status_line: &str, headers: &[(&str, String)], body: &str) -> S
 /// event metadata the worker recorded.
 fn rest_event_metadata(
     action: ManagedRestAction,
-) -> Result<BTreeMap<String, String>, FrameworkAdapterError> {
+) -> Result<BTreeMap<String, String>, GovernedRestRejection> {
     let events = execute_governed_rest_action(&allowing_gate(), x402_session(), action, false)?;
     Ok(events[1].metadata.clone())
+}
+
+/// Drive the REAL governed path against a target that cannot answer and return
+/// the typed rejection.
+fn rest_rejection(action: ManagedRestAction) -> GovernedRestRejection {
+    execute_governed_rest_action(&allowing_gate(), x402_session(), action, false).unwrap_err()
+}
+
+/// An address with nothing listening on it. Binding then dropping guarantees the
+/// port was free, so the connect is refused rather than answered.
+fn unbound_endpoint() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    drop(listener);
+    endpoint
 }
 
 // ---------------------------------------------------------------------------
@@ -426,19 +466,26 @@ fn a_rejected_action_is_proven_unsent() {
 /// The request was fully written and the peer went silent. The proof — if #381
 /// had attached one — is on the wire and may have settled, so the hold must be
 /// RETAINED, never released.
+///
+/// The peer is released by a CHANNEL, not a sleep (acceptance box 6): it holds
+/// the connection open silently until the client's read timeout has already
+/// fired and `run_authorized_rest_action` has returned. There is no timing
+/// assumption left to be wrong on a loaded box.
 #[test]
 fn a_silent_peer_after_a_complete_request_retains_the_hold() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = listener.local_addr().unwrap();
+    let (release, released) = mpsc::channel::<()>();
     let accepted = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        // Hold the connection open, silently, until the client's read timeout
-        // fires.
-        thread::sleep(Duration::from_millis(400));
+        // Silent for as long as the client is still reading; the sender side is
+        // only signalled once the client's read timeout has expired.
+        let _ = released.recv();
         drop(stream);
     });
 
     let failure = run_authorized_rest_action(&rest_action(endpoint, 60)).unwrap_err();
+    release.send(()).unwrap();
 
     assert_eq!(failure.stage, RequestWireStage::SentOrUnknown);
     assert_eq!(
@@ -446,7 +493,7 @@ fn a_silent_peer_after_a_complete_request_retains_the_hold() {
         HoldDisposition::RetainOutcomeUnknown
     );
 
-    let _ = accepted.join();
+    accepted.join().unwrap();
 }
 
 /// The explicitly AMBIGUOUS case, which is the one that matters.
@@ -557,4 +604,243 @@ fn an_unclassified_dispatch_failure_defaults_to_retaining_the_hold() {
         HoldDisposition::RetainOutcomeUnknown
     );
     assert_eq!(RequestWireStage::default(), RequestWireStage::SentOrUnknown);
+}
+
+// ---------------------------------------------------------------------------
+// 4. The classification crosses the process boundary as a DISCRIMINANT
+// ---------------------------------------------------------------------------
+//
+// Everything in section 3 proves the worker classifies correctly in-process.
+// None of it proved the classification is consumable: `into_error` discards the
+// stage and appends a sentence, so a gateway wanting the RELEASE edge would have
+// had to substring-match prose on a money decision. These tests assert the typed
+// carrier instead.
+
+/// The only case that may release a hold, delivered as a typed discriminant on
+/// the worker's own event surface — not as a sentence.
+#[test]
+fn a_proven_unsent_dispatch_ships_a_typed_release_discriminant() {
+    let rejection = rest_rejection(rest_action(unbound_endpoint(), 200));
+
+    assert_eq!(rejection.wire_stage, RequestWireStage::ProvenNotSent);
+    assert_eq!(
+        rejection.hold_disposition(),
+        HoldDisposition::ReleasableBeforeSubmission
+    );
+    // What a #381 consumer actually reads: two frozen tokens on the event map.
+    assert_eq!(
+        rejection
+            .event
+            .metadata
+            .get(EGRESS_REQUEST_WIRE_STAGE_KEY)
+            .map(String::as_str),
+        Some("proven_not_sent"),
+        "metadata: {:?}",
+        rejection.event.metadata
+    );
+    assert_eq!(
+        rejection
+            .event
+            .metadata
+            .get(EGRESS_HOLD_DISPOSITION_KEY)
+            .map(String::as_str),
+        Some("releasable_before_submission")
+    );
+    assert_eq!(
+        RequestWireStage::from_event_metadata(&rejection.event.metadata),
+        RequestWireStage::ProvenNotSent
+    );
+}
+
+/// The ambiguous dispatch ships the RETAIN discriminant. Same surface, opposite
+/// edge, so the two are distinguishable by a consumer that never reads prose.
+#[test]
+fn an_ambiguous_dispatch_ships_a_typed_retain_discriminant() {
+    let origin = CannedOrigin::spawn(http_response(
+        "HTTP/1.1 500 Internal Server Error",
+        &[],
+        "boom\n",
+    ));
+
+    let rejection = rest_rejection(rest_action(origin.endpoint, 1_000));
+
+    assert_eq!(rejection.wire_stage, RequestWireStage::SentOrUnknown);
+    assert_eq!(
+        rejection
+            .event
+            .metadata
+            .get(EGRESS_REQUEST_WIRE_STAGE_KEY)
+            .map(String::as_str),
+        Some("sent_or_unknown")
+    );
+    assert_eq!(
+        RequestWireStage::from_event_metadata(&rejection.event.metadata).hold_disposition(),
+        HoldDisposition::RetainOutcomeUnknown
+    );
+}
+
+/// The load-bearing boundary test: lower the event onto the management wire
+/// exactly as the worker ships it to the control plane, serialize, deserialize
+/// on the receiving side, and read the edge off the reconstructed map.
+///
+/// This is the step nothing previously covered. Both edges are checked, so a
+/// carrier that always answers "retain" does not pass either.
+#[test]
+fn the_hold_edge_survives_the_management_wire_in_both_directions() {
+    let origin = CannedOrigin::spawn(http_response(
+        "HTTP/1.1 500 Internal Server Error",
+        &[],
+        "boom\n",
+    ));
+    let cases = [
+        (
+            rest_rejection(rest_action(unbound_endpoint(), 200)),
+            RequestWireStage::ProvenNotSent,
+            HoldDisposition::ReleasableBeforeSubmission,
+        ),
+        (
+            rest_rejection(rest_action(origin.endpoint, 1_000)),
+            RequestWireStage::SentOrUnknown,
+            HoldDisposition::RetainOutcomeUnknown,
+        ),
+    ];
+
+    for (rejection, expected_stage, expected_disposition) in cases {
+        let shipped = crate::events::NormalizedWorkerEvent::from(&*rejection.event)
+            .into_management_event_result();
+        let on_the_wire = serde_json::to_string(&shipped).unwrap();
+        let received: AgentWorkerFrameworkEventResult =
+            serde_json::from_str(&on_the_wire).expect("the control plane parses the event");
+
+        let stage = RequestWireStage::from_wire_token(
+            received
+                .metadata
+                .get(EGRESS_REQUEST_WIRE_STAGE_KEY)
+                .map(String::as_str),
+        );
+        assert_eq!(stage, expected_stage, "wire form: {on_the_wire}");
+        assert_eq!(stage.hold_disposition(), expected_disposition);
+        assert_eq!(
+            received
+                .metadata
+                .get(EGRESS_HOLD_DISPOSITION_KEY)
+                .map(String::as_str),
+            Some(expected_disposition.as_wire_token())
+        );
+    }
+}
+
+/// The point of the whole exercise: rewording the diagnostics cannot move the
+/// money edge.
+///
+/// The event's `message` and its `failure_reason` are replaced with text that
+/// says the OPPOSITE of the truth — the retain case is relabelled with the
+/// release sentence and vice versa — and the edge each one yields is unchanged,
+/// because it is read off the typed key. A consumer implemented by substring
+/// matching would report both of these backwards.
+#[test]
+fn rewording_the_diagnostics_cannot_flip_the_hold_edge() {
+    const RELEASE_PROSE: &str = "no request byte reached the upstream";
+    const RETAIN_PROSE: &str = "the request may have reached the upstream";
+
+    let origin = CannedOrigin::spawn(http_response(
+        "HTTP/1.1 500 Internal Server Error",
+        &[],
+        "boom\n",
+    ));
+    // Each rejection is paired with the prose of the OTHER edge.
+    let cases = [
+        (
+            rest_rejection(rest_action(unbound_endpoint(), 200)),
+            RETAIN_PROSE,
+            RequestWireStage::ProvenNotSent,
+            HoldDisposition::ReleasableBeforeSubmission,
+        ),
+        (
+            rest_rejection(rest_action(origin.endpoint, 1_000)),
+            RELEASE_PROSE,
+            RequestWireStage::SentOrUnknown,
+            HoldDisposition::RetainOutcomeUnknown,
+        ),
+    ];
+
+    for (mut rejection, misleading_prose, expected_stage, expected_disposition) in cases {
+        // Sanity: the honest prose really is there before it is corrupted, so
+        // this test cannot pass by the prose having quietly disappeared.
+        let honest = rejection.error.to_string();
+        assert!(
+            honest.contains(RELEASE_PROSE) || honest.contains(RETAIN_PROSE),
+            "the human diagnostic should still say how far the request got: {honest}"
+        );
+
+        rejection.event.message = Some(misleading_prose.to_string());
+        rejection.event.metadata.insert(
+            "failure_reason".to_string(),
+            format!("managed REST action failed ({misleading_prose})"),
+        );
+
+        let stage = RequestWireStage::from_event_metadata(&rejection.event.metadata);
+        assert_eq!(
+            stage, expected_stage,
+            "the edge must come from the typed key, not the prose"
+        );
+        assert_eq!(stage.hold_disposition(), expected_disposition);
+    }
+}
+
+/// A completed dispatch carries the discriminant too, so a consumer never has to
+/// treat "key absent" as a meaningful state. (It is safe if it does: absent
+/// reads as retain.)
+#[test]
+fn a_completed_dispatch_also_records_the_wire_stage() {
+    let origin = CannedOrigin::spawn(http_response(
+        "HTTP/1.1 200 OK",
+        &[("content-type", "text/plain".to_string())],
+        "served\n",
+    ));
+
+    let metadata = rest_event_metadata(rest_action(origin.endpoint, 1_000)).unwrap();
+
+    assert_eq!(
+        RequestWireStage::from_event_metadata(&metadata),
+        RequestWireStage::SentOrUnknown,
+        "a completed dispatch reached the upstream by definition"
+    );
+    assert_eq!(
+        metadata
+            .get(EGRESS_HOLD_DISPOSITION_KEY)
+            .map(String::as_str),
+        Some("retain_outcome_unknown")
+    );
+}
+
+/// A gate refusal never opened a socket, so it is provably unsent — and it says
+/// so on the typed key, without borrowing the dispatch path's prose.
+#[test]
+fn a_gate_refusal_is_typed_as_proven_unsent() {
+    let denying_gate =
+        RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+    let rejection = execute_governed_rest_action(
+        &denying_gate,
+        x402_session(),
+        rest_action(unbound_endpoint(), 200),
+        false,
+    )
+    .unwrap_err();
+
+    assert_eq!(rejection.wire_stage, RequestWireStage::ProvenNotSent);
+    assert_eq!(
+        RequestWireStage::from_event_metadata(&rejection.event.metadata),
+        RequestWireStage::ProvenNotSent
+    );
+    assert_eq!(
+        rejection
+            .event
+            .metadata
+            .get("executed_after_authorization")
+            .map(String::as_str),
+        Some("false"),
+        "a refused action was never executed"
+    );
 }
