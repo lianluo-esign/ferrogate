@@ -33,5 +33,6 @@ sha2.workspace = true
 rustix = { version = "1.1.4", features = ["fs", "net", "process"] }
 
 [dev-dependencies]
+base64.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

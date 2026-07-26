@@ -43,19 +43,42 @@
 //!
 //! This is the challenge-parse + non-custodial authorization-request build +
 //! spend-authorization handoff contract, with the deny/approval/custody
-//! fail-closed paths. The durable attempt/hold binding (#352/#354), the
-//! short-lived cryptographically bound `SpendAuthorization` token minted by the
-//! gateway, redirect re-authorization, and the exact-once paid replay +
-//! settlement wiring are deferred to follow-up slices. Until a production
-//! dispatch path consumes this client, the non-test build has no caller, so
-//! `dead_code` is allowed off the test path — mirroring `state_x402_settlement.rs`
-//! (#354).
+//! fail-closed paths, plus the three pieces of it the worker's REAL egress
+//! response path consumes today — [`detect_payment_required`],
+//! [`redact_bearer_headers`] and [`RequestWireStage`], all called from
+//! `external_actions.rs::run_authorized_rest_action`.
+//!
+//! ## What is NOT here, and why it cannot be
+//!
+//! The gateway-minted short-lived `SpendAuthorization` token, the exact-once
+//! paid replay, and the durable attempt/hold integration are NOT deferred out of
+//! convenience — they are **unreachable from this process**. The durable attempt
+//! API is `X402SettlementLoop` (`ferrogate-cli/src/state_x402_settlement.rs`:
+//! `open` / `submit` / `finalize` / `cancel` / `expire_if_due`) over
+//! `ferrogate_storage::RuntimeStorageRepositories`, and `agent-worker` depends on
+//! neither `ferrogate-cli` nor `ferrogate-storage` (see this crate's
+//! `Cargo.toml`). That is deliberate: the worker sits on the far side of the
+//! gateway-mediated capability boundary, and handing it a durable ledger handle
+//! would breach the very boundary the non-custody rule above exists to protect.
+//! Driving the attempt state machine is therefore the gateway's job — the
+//! negotiation core already exists (`state_x402_negotiation.rs`, issue #381) and
+//! is waiting only on its transport binding.
+//!
+//! What the worker legitimately owns of that contract is the one fact only it
+//! can observe: how far the outgoing request got on the wire before a dispatch
+//! failed. That is [`RequestWireStage`], and it is what decides whether the
+//! gateway may take the loop's RELEASE edge or must retain the hold as
+//! `outcome_unknown`.
+//!
+//! The rest of the module still has no production caller, so `dead_code` is
+//! allowed off the test path — mirroring `state_x402_settlement.rs` (#354).
 #![cfg_attr(not(test), allow(dead_code))]
 
 use ferrogate_payments::{
     parse_payment_required, select_requirement, validate_solana_address, PaymentError,
     PaymentIntent, PaymentIntentDraft, PaymentIntentIdentity, RequestBodyHash, RequirementFilter,
-    SelectedPayment, SvmTransferIntent, SvmTransferSigner, SCHEME_EXACT, X402_VERSION,
+    SelectedPayment, SvmTransferIntent, SvmTransferSigner, HEADER_PAYMENT_SIGNATURE, SCHEME_EXACT,
+    X402_VERSION,
 };
 use ferrogate_policy::{PaymentAuthorization, PaymentAuthorizationRequest, PaymentDecision};
 use serde::Serialize;
@@ -604,6 +627,213 @@ impl AuthorizedHandoff {
         }
         ferrogate_payments::build_payment_signature(&self.selected, signer)
             .map_err(X402ClientError::ProofHandoffFailed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worker-side `402` detection (#353)
+// ---------------------------------------------------------------------------
+
+/// The public evidence a worker surfaces when an already-authorized egress
+/// action comes back `402 Payment Required`.
+///
+/// Every field here is public protocol data taken verbatim from the merchant's
+/// own challenge. There is deliberately no proof, no signer, and no decision:
+/// detecting a demand for payment is not authorizing one. The worker reports
+/// this upward and stops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetectedPaymentChallenge {
+    /// Deterministic wire-contract challenge hash — the stable idempotency and
+    /// audit key that joins this detection to the gateway's later decision,
+    /// attempt, and hold.
+    pub challenge_hash_hex: String,
+    /// CAIP-2 network the merchant wants to be paid on.
+    pub network_caip2: String,
+    /// Atomic amount demanded (integer; never a float — this is money).
+    pub atomic_amount: u64,
+    /// Merchant payout address.
+    pub recipient: String,
+    /// The protected resource, which has already been proven equal to the
+    /// egress URL FerroGate authorized.
+    pub resource_url: String,
+}
+
+/// Detect and validate a merchant `402` challenge on an already-authorized
+/// egress action, WITHOUT paying it and WITHOUT deciding whether it is
+/// acceptable.
+///
+/// This is the worker's whole role at a `402`: prove the challenge is
+/// well-formed against the frozen wire contract, prove it is not a payment
+/// redirect (its resource must equal the egress URL the gateway authorized),
+/// and hand the public evidence upward. Whether this spend is *allowed* — the
+/// network, mint, amount and recipient allowlists, the caps, the approval
+/// threshold — is policy, and policy is the gateway's
+/// ([`ferrogate_policy::authorize_x402_payment`], #351). Accordingly the
+/// requirement filter here is [`RequirementFilter::default`]: "any requirement
+/// the wire contract itself considers valid". Narrowing it in the worker would
+/// be the worker quietly making a policy decision.
+pub(crate) fn detect_payment_required(
+    payment_required_header: &str,
+    request: AuthorizedRequest,
+) -> Result<DetectedPaymentChallenge, X402ClientError> {
+    let challenge = ParsedChallenge::parse(
+        payment_required_header,
+        request,
+        &RequirementFilter::default(),
+    )?;
+    let selected = challenge.selected();
+    Ok(DetectedPaymentChallenge {
+        challenge_hash_hex: challenge.challenge_hash_hex(),
+        network_caip2: selected.network.caip2().to_string(),
+        atomic_amount: selected.atomic_amount,
+        recipient: selected.recipient.clone(),
+        resource_url: selected.resource_url.clone(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Bearer-material redaction for recorded evidence (#353)
+// ---------------------------------------------------------------------------
+
+/// Replacement written in place of a bearer header value.
+pub(crate) const REDACTED_HEADER_VALUE: &str = "<redacted>";
+
+/// Header names whose VALUE is bearer material: possession of the value alone
+/// is enough to spend money or impersonate the caller, so it must never reach
+/// an event, a log line, or a worker's stdout.
+///
+/// `PAYMENT-SIGNATURE` leads the list because it is the worst case: it carries
+/// the base64 **signed SVM transaction**. Anyone who captures it can submit that
+/// transaction. It is not merely sensitive, it is spendable.
+///
+/// `PAYMENT-REQUIRED` and `PAYMENT-RESPONSE` are deliberately NOT here. The
+/// first is the merchant's public challenge and the second is public settlement
+/// evidence (an on-chain transaction signature); both are exactly the audit
+/// trail #354 needs in order to answer "why was this payment made and what
+/// happened to it?". Redacting them would destroy evidence without protecting
+/// anything.
+fn is_bearer_header(name: &str) -> bool {
+    const BEARER_HEADERS: [&str; 4] = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+    ];
+    name.eq_ignore_ascii_case(HEADER_PAYMENT_SIGNATURE)
+        || BEARER_HEADERS
+            .iter()
+            .any(|bearer| name.eq_ignore_ascii_case(bearer))
+}
+
+/// Strip bearer header VALUES out of a raw HTTP message before any of it is
+/// recorded as worker evidence.
+///
+/// Header NAMES are preserved, so the record still shows that a credential or a
+/// payment proof was present — an operator can see the shape of the exchange
+/// without the record itself becoming a way to spend the money.
+///
+/// Fail-safe by construction:
+///
+/// * Redaction happens BEFORE truncation at the call site, so a truncated
+///   excerpt can never carry a surviving prefix of a proof.
+/// * A message with no header/body separator (a truncated or malformed
+///   response) is treated as ALL headers, which over-redacts rather than
+///   under-redacts.
+///
+/// Scope limit, stated honestly: this redacts the header section only. A body
+/// that echoes a credential back is not covered — guessing at secrets inside
+/// arbitrary payloads is a different problem with a different failure mode.
+pub(crate) fn redact_bearer_headers(raw_http_message: &str) -> String {
+    let mut redacted = String::with_capacity(raw_http_message.len());
+    let mut in_header_section = true;
+    for (index, line) in raw_http_message.split_inclusive('\n').enumerate() {
+        // Index 0 is the status/request line, which is never a header even if
+        // it happens to contain a colon.
+        if !in_header_section || index == 0 {
+            redacted.push_str(line);
+            continue;
+        }
+        let content = line.trim_end_matches(['\r', '\n']);
+        if content.is_empty() {
+            in_header_section = false;
+            redacted.push_str(line);
+            continue;
+        }
+        match content.split_once(':') {
+            Some((name, _)) if is_bearer_header(name.trim()) => {
+                redacted.push_str(name);
+                redacted.push_str(": ");
+                redacted.push_str(REDACTED_HEADER_VALUE);
+                redacted.push_str(&line[content.len()..]);
+            }
+            _ => redacted.push_str(line),
+        }
+    }
+    redacted
+}
+
+// ---------------------------------------------------------------------------
+// Wire stage → hold disposition (#353's half of the cancellation contract)
+// ---------------------------------------------------------------------------
+
+/// How far an outgoing egress request got before the dispatch failed.
+///
+/// Only the worker can observe this, and it is the single fact the gateway's
+/// durable attempt API needs in order to choose between releasing a hold and
+/// retaining it. The variants are named for what can be **proven**, not for what
+/// is likely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestWireStage {
+    /// PROVEN that no request byte can have reached the peer: the failure
+    /// happened during validation, address resolution, connection setup, or
+    /// socket option setup — strictly before the first write was attempted.
+    ProvenNotSent,
+    /// Everything else, including every genuinely ambiguous case: a partial
+    /// write, a connection reset mid-request, a read timeout after the request
+    /// was fully written, or any failure this code has not explicitly proven to
+    /// be pre-send.
+    SentOrUnknown,
+}
+
+/// The fail-safe default is [`RequestWireStage::SentOrUnknown`].
+///
+/// The two misclassifications are not symmetric. Calling a sent request
+/// "not sent" releases a wallet hold for a payment that may already have
+/// settled on-chain — FerroGate would have handed over stablecoin and charged
+/// nobody. Calling an unsent request "sent" merely parks a hold that the TTL
+/// sweeper (`state_x402_sweeper.rs`) reclaims on its next tick. So anything not
+/// proven pre-send must land here.
+impl Default for RequestWireStage {
+    fn default() -> Self {
+        Self::SentOrUnknown
+    }
+}
+
+/// What the gateway's durable attempt API may do with the wallet hold, in that
+/// API's own vocabulary (`state_x402_settlement.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HoldDisposition {
+    /// Safe to take the loop's RELEASE edge (`X402SettlementLoop::cancel`),
+    /// which is valid only on a pre-submission attempt.
+    ReleasableBeforeSubmission,
+    /// The proof may be on the wire. The attempt must be parked
+    /// `outcome_unknown` with the hold RETAINED, for the reconciler to resolve.
+    RetainOutcomeUnknown,
+}
+
+impl RequestWireStage {
+    /// Map the observed wire stage onto the hold disposition.
+    ///
+    /// This function is the whole of what `agent-worker` can contribute to the
+    /// cancellation contract. It deliberately does NOT call the durable attempt
+    /// API: that API lives behind the gateway's capability boundary and this
+    /// crate has no dependency on it (see the module docs). The call itself is
+    /// the transport binding's job, tracked on #381.
+    pub(crate) fn hold_disposition(self) -> HoldDisposition {
+        match self {
+            Self::ProvenNotSent => HoldDisposition::ReleasableBeforeSubmission,
+            Self::SentOrUnknown => HoldDisposition::RetainOutcomeUnknown,
+        }
     }
 }
 

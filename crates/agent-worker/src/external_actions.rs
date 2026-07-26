@@ -45,8 +45,14 @@ use ferrogate_runtime::{
     NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
+use ferrogate_payments::HEADER_PAYMENT_REQUIRED;
+
 use crate::self_hosted_execution::{
     run_governed_workload, GovernedWorkloadExecution, GovernedWorkloadOutcome,
+};
+use crate::x402_client::{
+    detect_payment_required, redact_bearer_headers, AuthorizedRequest, HoldDisposition,
+    RequestWireStage,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -2072,7 +2078,7 @@ where
             high_risk,
         },
     )?;
-    let execution = run_authorized_rest_action(&action)?;
+    let execution = run_authorized_rest_action(&action).map_err(RestDispatchFailure::into_error)?;
     Ok(vec![
         decision.event,
         NormalizedFrameworkEvent {
@@ -3679,6 +3685,7 @@ fn bounded_utf8_excerpt(bytes: &[u8], limit: u64) -> String {
     String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]).to_string()
 }
 
+#[derive(Debug)]
 struct GovernedRestExecution {
     status_code: u16,
     response_excerpt: String,
@@ -3711,41 +3718,127 @@ impl GovernedRestExecution {
     }
 }
 
+/// HTTP status an x402 merchant returns to demand payment.
+const STATUS_PAYMENT_REQUIRED: u16 = 402;
+
+/// A failed REST dispatch, carrying the one fact only the worker can observe:
+/// how far the outgoing request got on the wire (#353).
+///
+/// Before this type existed, every failure below collapsed into one opaque
+/// `FrameworkAdapterError`. That is harmless while the worker sends no payment
+/// proof, and becomes a money-safety defect the moment the #381 transport
+/// binding attaches a `PAYMENT-SIGNATURE` to this very function: "the connection
+/// was refused" (nothing was sent — the hold is safe to release) and "the read
+/// timed out after the request was fully written" (the proof may have settled —
+/// the hold must be retained) would be indistinguishable, and the gateway would
+/// take the RELEASE edge on a payment that may already have moved on-chain.
+#[derive(Debug)]
+struct RestDispatchFailure {
+    stage: RequestWireStage,
+    error: FrameworkAdapterError,
+}
+
+impl RestDispatchFailure {
+    /// Classify a failure that is PROVEN to have happened before any request
+    /// byte could reach the peer. Only connection/validation/socket-setup
+    /// failures qualify; a write that may have partially landed does not.
+    fn proven_not_sent(error: FrameworkAdapterError) -> Self {
+        Self {
+            stage: RequestWireStage::ProvenNotSent,
+            error,
+        }
+    }
+
+    /// Collapse back to the shared adapter error, carrying the wire stage into
+    /// the operator-facing message.
+    ///
+    /// This is the stage's consumer TODAY. It matters for any REST failure, not
+    /// just a paid one — "did my request actually reach the upstream?" is the
+    /// first question after a failed side effect. It becomes money-critical
+    /// once the #381 transport binding attaches a payment proof, because the
+    /// gateway's durable attempt API may only take its RELEASE edge
+    /// (`X402SettlementLoop::cancel`) on the first of these two answers.
+    fn into_error(self) -> FrameworkAdapterError {
+        let reached = match self.stage.hold_disposition() {
+            HoldDisposition::ReleasableBeforeSubmission => "no request byte reached the upstream",
+            HoldDisposition::RetainOutcomeUnknown => "the request may have reached the upstream",
+        };
+        let annotate = |message: String| format!("{message} ({reached})");
+        match self.error {
+            FrameworkAdapterError::InvalidDescriptor(message) => {
+                FrameworkAdapterError::InvalidDescriptor(annotate(message))
+            }
+            FrameworkAdapterError::InvalidRequest(message) => {
+                FrameworkAdapterError::InvalidRequest(annotate(message))
+            }
+            FrameworkAdapterError::CapabilityDenied(message) => {
+                FrameworkAdapterError::CapabilityDenied(annotate(message))
+            }
+        }
+    }
+}
+
+/// Fail-safe classification: anything converted implicitly — every `?` on a
+/// bare [`FrameworkAdapterError`] in the dispatch below — lands on
+/// [`RequestWireStage`]'s default, which is `SentOrUnknown` ⇒ retain the hold.
+/// Forgetting to classify a new failure path is therefore safe by construction;
+/// only an explicit [`RestDispatchFailure::proven_not_sent`] can ever authorize
+/// a release.
+impl From<FrameworkAdapterError> for RestDispatchFailure {
+    fn from(error: FrameworkAdapterError) -> Self {
+        Self {
+            stage: RequestWireStage::default(),
+            error,
+        }
+    }
+}
+
 fn run_authorized_rest_action(
     action: &ManagedRestAction,
-) -> Result<GovernedRestExecution, FrameworkAdapterError> {
+) -> Result<GovernedRestExecution, RestDispatchFailure> {
     if action.method != "GET" {
-        return Err(FrameworkAdapterError::InvalidRequest(
-            "managed REST smoke currently supports GET only".to_string(),
+        return Err(RestDispatchFailure::proven_not_sent(
+            FrameworkAdapterError::InvalidRequest(
+                "managed REST smoke currently supports GET only".to_string(),
+            ),
         ));
     }
-    let target = parse_local_http_url(&action.url)?;
-    let pinned_ip = required_pinned_ip(&action.resolved_ips)?;
+    let target = parse_local_http_url(&action.url).map_err(RestDispatchFailure::proven_not_sent)?;
+    let pinned_ip =
+        required_pinned_ip(&action.resolved_ips).map_err(RestDispatchFailure::proven_not_sent)?;
     if pinned_ip != target.endpoint.ip() {
-        return Err(FrameworkAdapterError::CapabilityDenied(
-            "managed REST execution endpoint differs from the authorized pinned IP".to_string(),
+        return Err(RestDispatchFailure::proven_not_sent(
+            FrameworkAdapterError::CapabilityDenied(
+                "managed REST execution endpoint differs from the authorized pinned IP".to_string(),
+            ),
         ));
     }
     let timeout = Duration::from_millis(action.timeout_millis.max(1));
+    // Connection and socket setup: proven pre-send, so a failure here is the
+    // one case where the gateway may safely release a hold.
     let mut stream = TcpStream::connect_timeout(&target.endpoint, timeout).map_err(|error| {
-        FrameworkAdapterError::CapabilityDenied(format!(
+        RestDispatchFailure::proven_not_sent(FrameworkAdapterError::CapabilityDenied(format!(
             "managed REST action transport failed after gateway authorization: {error}"
-        ))
+        )))
     })?;
     stream.set_read_timeout(Some(timeout)).map_err(|error| {
-        FrameworkAdapterError::CapabilityDenied(format!(
+        RestDispatchFailure::proven_not_sent(FrameworkAdapterError::CapabilityDenied(format!(
             "managed REST action read timeout setup failed: {error}"
-        ))
+        )))
     })?;
     stream.set_write_timeout(Some(timeout)).map_err(|error| {
-        FrameworkAdapterError::CapabilityDenied(format!(
+        RestDispatchFailure::proven_not_sent(FrameworkAdapterError::CapabilityDenied(format!(
             "managed REST action write timeout setup failed: {error}"
-        ))
+        )))
     })?;
     let request = format!(
         "GET {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\n\r\n",
         target.path, target.endpoint
     );
+    // From here on nothing is provably unsent. `write_all` can fail having
+    // already delivered part of the request, and everything after it happens
+    // with the full request on the wire, so all of these take the fail-safe
+    // `SentOrUnknown` classification via `From`.
     stream.write_all(request.as_bytes()).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
             "managed REST action request write failed: {error}"
@@ -3764,15 +3857,73 @@ fn run_authorized_rest_action(
     })?;
     let response = String::from_utf8_lossy(&response);
     let status_code = parse_smoke_http_status(response.lines().next().unwrap_or_default())?;
+    if status_code == STATUS_PAYMENT_REQUIRED {
+        return Err(payment_required_failure(action, &response).into());
+    }
     if !(200..300).contains(&status_code) {
         return Err(FrameworkAdapterError::CapabilityDenied(format!(
             "managed REST action returned status {status_code}"
-        )));
+        ))
+        .into());
     }
     Ok(GovernedRestExecution {
         status_code,
-        response_excerpt: response.chars().take(512).collect(),
+        // Redact BEFORE truncating: a 512-char prefix of an unredacted response
+        // would otherwise carry a usable prefix of a bearer credential.
+        response_excerpt: redact_bearer_headers(&response).chars().take(512).collect(),
     })
+}
+
+/// Turn a merchant `402` into a typed, fail-closed refusal that names the
+/// challenge — the worker's non-custodial `402` detection (#353).
+///
+/// The worker does not pay, does not select what it is willing to pay, and does
+/// not ask anyone to sign. It validates the challenge against the frozen wire
+/// contract, proves the challenge is not redirecting payment away from the
+/// egress URL FerroGate authorized, and reports the public evidence (challenge
+/// hash, network, atomic amount, recipient) so the gateway can decide. Every
+/// failure mode — a missing header, an unparseable challenge, a redirected
+/// resource — is a refusal, never a payment.
+fn payment_required_failure(action: &ManagedRestAction, response: &str) -> FrameworkAdapterError {
+    let Some(header) = response_header_value(response, HEADER_PAYMENT_REQUIRED) else {
+        return FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action returned status {STATUS_PAYMENT_REQUIRED} without a \
+             {HEADER_PAYMENT_REQUIRED} challenge header; nothing was paid"
+        ));
+    };
+    let request = AuthorizedRequest::new(action.method.clone(), action.url.clone());
+    match detect_payment_required(header, request) {
+        Ok(challenge) => FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action requires an x402 payment the worker will not self-authorize \
+             (challenge {} on {} for {} atomic units to {}); the spend decision belongs to the \
+             gateway",
+            challenge.challenge_hash_hex,
+            challenge.network_caip2,
+            challenge.atomic_amount,
+            challenge.recipient
+        )),
+        Err(error) => FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action returned an x402 challenge that failed closed: {error}"
+        )),
+    }
+}
+
+/// Read a single header value out of a raw HTTP response, case-insensitively.
+/// Stops at the header/body separator so a body line can never be mistaken for
+/// a header.
+fn response_header_value<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+    for line in response.lines().skip(1) {
+        if line.trim_end_matches('\r').is_empty() {
+            return None;
+        }
+        let Some((header, value)) = line.split_once(':') else {
+            continue;
+        };
+        if header.trim().eq_ignore_ascii_case(name) {
+            return Some(value.trim());
+        }
+    }
+    None
 }
 
 fn required_pinned_ip(values: &[String]) -> Result<std::net::IpAddr, FrameworkAdapterError> {
@@ -4025,7 +4176,8 @@ fn run_authorized_family_workload(
             )
         }
         ManagedExternalAction::Rest(action) => {
-            let execution = run_authorized_rest_action(action)?;
+            let execution =
+                run_authorized_rest_action(action).map_err(RestDispatchFailure::into_error)?;
             (
                 format!(
                     "status_code={} response_excerpt={}",
@@ -6188,3 +6340,7 @@ mod external_actions_worker_type_test;
 #[cfg(test)]
 #[path = "external_actions_target_test.rs"]
 mod external_actions_target_test;
+
+#[cfg(test)]
+#[path = "external_actions_x402_test.rs"]
+mod external_actions_x402_test;

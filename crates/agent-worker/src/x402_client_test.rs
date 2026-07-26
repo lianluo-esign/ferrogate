@@ -484,3 +484,161 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bearer-material redaction (#353) — pure-function edge cases. The wiring into
+// the real REST response path is proven in `external_actions_x402_test.rs`.
+// ---------------------------------------------------------------------------
+
+/// The status line is never a header, even though it contains no colon — and a
+/// header whose NAME merely resembles a bearer header is not redacted.
+#[test]
+fn redaction_rewrites_only_bearer_header_values() {
+    let raw = "HTTP/1.1 200 OK\r\n\
+               content-type: text/plain\r\n\
+               x-authorization-scheme: bearer-ish\r\n\
+               Authorization: Bearer secret-token\r\n\
+               \r\n\
+               body";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert!(redacted.starts_with("HTTP/1.1 200 OK\r\n"), "{redacted}");
+    assert!(redacted.contains("content-type: text/plain"), "{redacted}");
+    assert!(
+        redacted.contains("x-authorization-scheme: bearer-ish"),
+        "a non-bearer header must survive verbatim: {redacted}"
+    );
+    assert!(
+        redacted.contains(&format!("Authorization: {REDACTED_HEADER_VALUE}")),
+        "{redacted}"
+    );
+    assert!(!redacted.contains("secret-token"), "{redacted}");
+    assert!(redacted.ends_with("body"), "{redacted}");
+}
+
+/// Header matching is case-insensitive on both the x402 proof header and the
+/// standard credential headers.
+#[test]
+fn redaction_matches_header_names_case_insensitively() {
+    let raw = "HTTP/1.1 200 OK\r\npayment-signature: proof\r\nSET-COOKIE: s=1\r\n\r\n";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert!(!redacted.contains("proof"), "{redacted}");
+    assert!(!redacted.contains("s=1"), "{redacted}");
+    assert_eq!(redacted.matches(REDACTED_HEADER_VALUE).count(), 2);
+}
+
+/// A response body is not the header section: once the separator is passed,
+/// content is left alone. A line in the body that looks like a credential
+/// header is body text, not a header.
+#[test]
+fn redaction_stops_at_the_header_separator() {
+    let raw = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\r\nauthorization: in-the-body";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert!(
+        redacted.ends_with("authorization: in-the-body"),
+        "{redacted}"
+    );
+    assert!(!redacted.contains(REDACTED_HEADER_VALUE), "{redacted}");
+}
+
+/// A truncated or malformed response with no separator is treated as ALL
+/// headers, which over-redacts rather than under-redacts.
+#[test]
+fn a_response_without_a_separator_is_treated_as_all_headers() {
+    let raw = "HTTP/1.1 200 OK\r\nAuthorization: Bearer secret-token";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert!(!redacted.contains("secret-token"), "{redacted}");
+}
+
+/// The public x402 protocol headers are deliberately NOT bearer material:
+/// redacting them would destroy the audit trail #354 needs.
+#[test]
+fn public_x402_headers_are_not_treated_as_bearer_material() {
+    let raw = "HTTP/1.1 402 Payment Required\r\n\
+               PAYMENT-REQUIRED: challenge-blob\r\n\
+               PAYMENT-RESPONSE: settlement-blob\r\n\
+               \r\n";
+
+    let redacted = redact_bearer_headers(raw);
+
+    assert_eq!(redacted, raw);
+}
+
+// ---------------------------------------------------------------------------
+// Wire stage → hold disposition (#353). Socket-level coverage lives in
+// `external_actions_x402_test.rs`; this pins the mapping itself.
+// ---------------------------------------------------------------------------
+
+/// The asymmetry, stated directly: only a PROVEN-unsent request may release a
+/// hold. Swapping either arm of `hold_disposition` fails this.
+#[test]
+fn only_a_proven_unsent_request_may_release_a_hold() {
+    assert_eq!(
+        RequestWireStage::ProvenNotSent.hold_disposition(),
+        HoldDisposition::ReleasableBeforeSubmission
+    );
+    assert_eq!(
+        RequestWireStage::SentOrUnknown.hold_disposition(),
+        HoldDisposition::RetainOutcomeUnknown
+    );
+    // The default must be the money-safe one: retaining a hold costs a sweeper
+    // tick, releasing one for a settled payment costs the stablecoin.
+    assert_eq!(
+        RequestWireStage::default().hold_disposition(),
+        HoldDisposition::RetainOutcomeUnknown
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Non-custodial 402 detection (#353).
+// ---------------------------------------------------------------------------
+
+/// Detection surfaces the public evidence needed to ask the gateway for a
+/// decision — and nothing else. It performs no policy act and produces no
+/// proof.
+#[test]
+fn detection_surfaces_public_challenge_evidence_only() {
+    let detected = detect_payment_required(DEVNET_HEADER, authorized_request())
+        .expect("the golden devnet challenge is detected");
+
+    assert_eq!(detected.network_caip2, DEVNET_CAIP2);
+    assert_eq!(detected.atomic_amount, ATOMIC_AMOUNT);
+    assert_eq!(detected.recipient, RECIPIENT);
+    assert_eq!(detected.resource_url, RESOURCE_URL);
+    // The challenge hash is the deterministic join key the gateway's decision,
+    // attempt and hold all key on.
+    assert_eq!(
+        detected.challenge_hash_hex,
+        parse_devnet_challenge().challenge_hash_hex()
+    );
+}
+
+/// Detection inherits the redirect guard: a challenge that points somewhere
+/// other than the authorized egress URL is refused before anything else.
+#[test]
+fn detection_refuses_a_payment_redirect() {
+    let error = detect_payment_required(
+        DEVNET_HEADER,
+        AuthorizedRequest::new("GET", "https://pay.example.com/other"),
+    )
+    .expect_err("a challenge for a different resource is a payment redirect");
+
+    assert!(matches!(error, X402ClientError::ResourceRedirect { .. }));
+}
+
+/// A malformed challenge is a refusal delegated to the frozen wire contract,
+/// never a best-effort payment.
+#[test]
+fn detection_fails_closed_on_a_malformed_challenge() {
+    let error = detect_payment_required("not-base64-at-all!!", authorized_request())
+        .expect_err("a malformed challenge is never paid");
+
+    assert!(matches!(error, X402ClientError::ChallengeParse(_)));
+}
