@@ -318,33 +318,34 @@ pub(crate) struct X402DecisionView {
 
 impl X402DecisionView {
     fn from_authorization(authorization: &PaymentAuthorization) -> Self {
-        let (decision, approval_threshold_credits) = match authorization.decision {
+        let (decision, approval_threshold_credits) = match authorization.decision() {
             PaymentDecision::Allow => ("allow", None),
             PaymentDecision::ApprovalRequired { threshold_credits } => {
-                ("approval_required", Some(threshold_credits))
+                ("approval_required", Some(*threshold_credits))
             }
             PaymentDecision::Deny => ("deny", None),
         };
+        let conversion = authorization.conversion();
         Self {
             decision,
-            reason_code: authorization.reason_code,
-            message: authorization.message.clone(),
+            reason_code: authorization.reason_code(),
+            message: authorization.message().to_string(),
             approval_threshold_credits,
-            policy_revision: authorization.policy_revision,
-            network_caip2: authorization.network_caip2.clone(),
-            mint: authorization.mint.clone(),
-            recipient: authorization.recipient.clone(),
-            resource_url: authorization.resource_url.clone(),
-            authorized_resource_url: authorization.authorized_resource_url.clone(),
-            http_method: authorization.http_method.clone(),
-            request_body_sha256_hex: authorization.request_body_hash_hex.clone(),
-            intent_hash_hex: authorization.intent_hash_hex.clone(),
+            policy_revision: authorization.policy_revision(),
+            network_caip2: authorization.network_caip2().to_string(),
+            mint: authorization.mint().to_string(),
+            recipient: authorization.recipient().to_string(),
+            resource_url: authorization.resource_url().to_string(),
+            authorized_resource_url: authorization.authorized_resource_url().to_string(),
+            http_method: authorization.http_method().to_string(),
+            request_body_sha256_hex: authorization.request_body_hash_hex().to_string(),
+            intent_hash_hex: authorization.intent_hash_hex().to_string(),
             decision_hash_hex: authorization.decision_hash_hex(),
-            challenge_hash_hex: authorization.challenge_hash_hex.clone(),
-            atomic_amount: authorization.conversion.atomic_amount.0,
-            computed_credits: authorization.conversion.computed_credits.map(|c| c.0),
-            conversion: X402ConversionView::from_snapshot(&authorization.conversion),
-            matched_resource: authorization.matched_resource.clone(),
+            challenge_hash_hex: authorization.challenge_hash_hex().to_string(),
+            atomic_amount: conversion.atomic_amount.0,
+            computed_credits: conversion.computed_credits.map(|c| c.0),
+            conversion: X402ConversionView::from_snapshot(conversion),
+            matched_resource: authorization.matched_resource().cloned(),
         }
     }
 }

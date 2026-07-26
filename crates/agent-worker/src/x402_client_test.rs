@@ -26,6 +26,12 @@ use proptest::prelude::*;
 // 2500, mint / recipient / feePayer below, resource https://pay.example.com/weather.
 const DEVNET_HEADER: &str = "ewogICJ4NDAyVmVyc2lvbiI6IDIsCiAgInJlc291cmNlIjogewogICAgInVybCI6ICJodHRwczovL3BheS5leGFtcGxlLmNvbS93ZWF0aGVyIiwKICAgICJtaW1lVHlwZSI6ICJhcHBsaWNhdGlvbi9qc29uIgogIH0sCiAgImFjY2VwdHMiOiBbCiAgICB7CiAgICAgICJzY2hlbWUiOiAiZXhhY3QiLAogICAgICAibmV0d29yayI6ICJzb2xhbmE6RXRXVFJBQlphWXE2aU1mZVlLb3VSdTE2NlZVMnhxYTEiLAogICAgICAiYW1vdW50IjogIjI1MDAiLAogICAgICAiYXNzZXQiOiAiNHpNTUM5c3J0NVJpNVgxNEdBZ1hoYUhpaTNHblBBRUVSWVBKZ1pKRG5jRFUiLAogICAgICAicGF5VG8iOiAiMndLdXBMUjlxNndYWXBwdzhHcjJOdld4S0JVcW00UFBKS2tRZm94SERCZzQiLAogICAgICAibWF4VGltZW91dFNlY29uZHMiOiAxMjAsCiAgICAgICJleHRyYSI6IHsKICAgICAgICAiZmVlUGF5ZXIiOiAiRXdXcUdFNFpGS0xvZnVlc3RtVTRMRGRLN1hNMU40QUxnZFpjY3dZdWd3R2QiCiAgICAgIH0KICAgIH0KICBdCn0K";
 
+// The same challenge with `amount` 3000 instead of 2500. Identical network,
+// mint, recipient, fee payer, timeout and resource, so a decision computed for
+// it differs from the golden one in exactly ONE observable way: the wire
+// contract's challenge hash.
+const ALT_AMOUNT_HEADER: &str = "ewogICJ4NDAyVmVyc2lvbiI6IDIsCiAgInJlc291cmNlIjogewogICAgInVybCI6ICJodHRwczovL3BheS5leGFtcGxlLmNvbS93ZWF0aGVyIiwKICAgICJtaW1lVHlwZSI6ICJhcHBsaWNhdGlvbi9qc29uIgogIH0sCiAgImFjY2VwdHMiOiBbCiAgICB7CiAgICAgICJzY2hlbWUiOiAiZXhhY3QiLAogICAgICAibmV0d29yayI6ICJzb2xhbmE6RXRXVFJBQlphWXE2aU1mZVlLb3VSdTE2NlZVMnhxYTEiLAogICAgICAiYW1vdW50IjogIjMwMDAiLAogICAgICAiYXNzZXQiOiAiNHpNTUM5c3J0NVJpNVgxNEdBZ1hoYUhpaTNHblBBRUVSWVBKZ1pKRG5jRFUiLAogICAgICAicGF5VG8iOiAiMndLdXBMUjlxNndYWXBwdzhHcjJOdld4S0JVcW00UFBKS2tRZm94SERCZzQiLAogICAgICAibWF4VGltZW91dFNlY29uZHMiOiAxMjAsCiAgICAgICJleHRyYSI6IHsKICAgICAgICAiZmVlUGF5ZXIiOiAiRXdXcUdFNFpGS0xvZnVlc3RtVTRMRGRLN1hNMU40QUxnZFpjY3dZdWd3R2QiCiAgICAgIH0KICAgIH0KICBdCn0K";
+
 const DEVNET_CAIP2: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const RECIPIENT: &str = "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4";
@@ -57,12 +63,21 @@ fn authorized_request() -> AuthorizedRequest {
 }
 
 fn parse_devnet_challenge() -> ParsedChallenge {
-    ParsedChallenge::parse(
-        DEVNET_HEADER,
-        authorized_request(),
-        &RequirementFilter::default(),
-    )
-    .expect("golden devnet challenge parses and binds to the authorized url")
+    challenge_for(authorized_request())
+}
+
+/// Parse the SAME golden challenge on a different already-authorized request.
+/// This is how the method/body binding is exercised without poking at a
+/// decision's fields: the merchant challenge is byte-identical, so every
+/// wire-derived field (challenge hash, network, mint, recipient, resource)
+/// matches, and only the request the payment is for differs.
+fn challenge_for(request: AuthorizedRequest) -> ParsedChallenge {
+    challenge_for_header(DEVNET_HEADER, request)
+}
+
+fn challenge_for_header(header: &str, request: AuthorizedRequest) -> ParsedChallenge {
+    ParsedChallenge::parse(header, request, &RequirementFilter::default())
+        .expect("golden devnet challenge parses and binds to the authorized url")
 }
 
 fn base_policy(enabled: bool, approval_threshold: Option<u64>) -> X402SpendPolicy {
@@ -103,10 +118,14 @@ fn allow_policy() -> ValidatedX402SpendPolicy {
         .expect("allow policy validates")
 }
 
-fn decision_for(
+/// Run the real policy over a challenge and return BOTH artifacts the worker
+/// consumes: the immutable intent the decision was computed for, and the
+/// decision itself. `PaymentAuthorization`'s fields are sealed, so a test can
+/// only obtain a decision the way production does — which is the point.
+fn authorize(
     challenge: &ParsedChallenge,
     policy: &ValidatedX402SpendPolicy,
-) -> PaymentAuthorization {
+) -> (PaymentIntent, PaymentAuthorization) {
     let scope = SpendScope {
         tenant_id: "tenant-a",
         ..SpendScope::default()
@@ -118,11 +137,12 @@ fn decision_for(
     let intent = challenge
         .payment_intent(&principal)
         .expect("the authorized request forms a valid payment intent");
-    authorize_x402_payment(
+    let decision = authorize_x402_payment(
         policy,
         &challenge.policy_request(&intent, scope),
         &SpendSnapshot::default(),
-    )
+    );
+    (intent, decision)
 }
 
 fn external_signer() -> SignerBinding {
@@ -200,11 +220,11 @@ fn parse_rejects_malformed_challenge() {
 #[test]
 fn authorize_spend_honors_allow_and_hands_off_to_external_signer() {
     let challenge = parse_devnet_challenge();
-    let decision = decision_for(&challenge, &allow_policy());
+    let (intent, decision) = authorize(&challenge, &allow_policy());
     assert!(decision.is_allowed(), "policy allows the golden payment");
 
     let handoff = challenge
-        .authorize_spend(&decision, external_signer())
+        .authorize_spend(&intent, &decision, external_signer())
         .expect("an allowed, bound, externally-signed spend yields a handoff");
 
     assert_eq!(handoff.public_signer_address(), FEE_PAYER);
@@ -230,12 +250,12 @@ fn authorize_spend_never_proceeds_on_deny() {
     let disabled = X402SpendPolicy::disabled()
         .validate()
         .expect("disabled policy validates");
-    let decision = decision_for(&challenge, &disabled);
-    assert_eq!(decision.decision, PaymentDecision::Deny);
+    let (intent, decision) = authorize(&challenge, &disabled);
+    assert_eq!(decision.decision(), &PaymentDecision::Deny);
 
     // A deny is honored, never overridden — even with a valid external signer.
     let err = challenge
-        .authorize_spend(&decision, external_signer())
+        .authorize_spend(&intent, &decision, external_signer())
         .expect_err("a policy deny must stop the worker");
     match err {
         X402ClientError::PolicyDenied { reason_code, .. } => {
@@ -248,12 +268,12 @@ fn authorize_spend_never_proceeds_on_deny() {
 #[test]
 fn authorize_spend_refuses_local_key_custody() {
     let challenge = parse_devnet_challenge();
-    let decision = decision_for(&challenge, &allow_policy());
+    let (intent, decision) = authorize(&challenge, &allow_policy());
     assert!(decision.is_allowed());
 
     // Even on an allow, the worker refuses to hold a key and sign locally.
     let err = challenge
-        .authorize_spend(&decision, SignerBinding::LocalKeyCustody)
+        .authorize_spend(&intent, &decision, SignerBinding::LocalKeyCustody)
         .expect_err("local key custody must fail closed");
     assert!(matches!(err, X402ClientError::KeyCustodyRefused { .. }));
 }
@@ -265,14 +285,14 @@ fn authorize_spend_refuses_headless_approval_required() {
     let policy = base_policy(true, Some(1))
         .validate()
         .expect("approval policy validates");
-    let decision = decision_for(&challenge, &policy);
+    let (intent, decision) = authorize(&challenge, &policy);
     assert!(matches!(
-        decision.decision,
+        decision.decision(),
         PaymentDecision::ApprovalRequired { .. }
     ));
 
     let err = challenge
-        .authorize_spend(&decision, external_signer())
+        .authorize_spend(&intent, &decision, external_signer())
         .expect_err("approval-required must not headless auto-pay");
     assert!(matches!(err, X402ClientError::ApprovalRequired { .. }));
 }
@@ -280,14 +300,15 @@ fn authorize_spend_refuses_headless_approval_required() {
 #[test]
 fn authorize_spend_rejects_decision_not_bound_to_challenge() {
     let challenge = parse_devnet_challenge();
-    let mut decision = decision_for(&challenge, &allow_policy());
-    assert!(decision.is_allowed());
+    // A real `Allow`, computed by real policy — for the 3000-unit challenge.
+    // Everything else about the two challenges is identical, so the ONLY thing
+    // that can catch this is the challenge-hash binding.
+    let other = challenge_for_header(ALT_AMOUNT_HEADER, authorized_request());
+    let (other_intent, other_decision) = authorize(&other, &allow_policy());
+    assert!(other_decision.is_allowed());
 
-    // Tamper: an allow computed for a DIFFERENT challenge hash must not be
-    // accepted for this one.
-    decision.challenge_hash_hex = "00".repeat(32);
     let err = challenge
-        .authorize_spend(&decision, external_signer())
+        .authorize_spend(&other_intent, &other_decision, external_signer())
         .expect_err("an unbound decision must fail closed");
     match err {
         X402ClientError::BindingMismatch { field, .. } => assert_eq!(field, "challenge_hash"),
@@ -295,12 +316,91 @@ fn authorize_spend_rejects_decision_not_bound_to_challenge() {
     }
 }
 
+/// The redirect half the challenge hash cannot cover. An `Allow` computed for
+/// `GET https://pay.example.com/weather` with no body is handed to
+/// `authorize_spend` for a `POST` of an attacker-chosen body to the SAME URL
+/// carrying the SAME challenge: challenge hash, network, mint, recipient and
+/// resource all match, and only the method binding stands between that decision
+/// and a signed transfer.
+#[test]
+fn authorize_spend_rejects_a_decision_bound_to_another_method() {
+    let get = challenge_for(AuthorizedRequest::new("GET", RESOURCE_URL));
+    let (intent, decision) = authorize(&get, &allow_policy());
+    assert!(decision.is_allowed(), "policy allows the GET");
+
+    let post = challenge_for(AuthorizedRequest::new("POST", RESOURCE_URL));
+    let err = post
+        .authorize_spend(&intent, &decision, external_signer())
+        .expect_err("an allow computed for a GET must not authorize a POST");
+    match err {
+        X402ClientError::BindingMismatch {
+            field,
+            expected,
+            actual,
+        } => {
+            assert_eq!(field, "http_method");
+            assert_eq!(expected, "POST");
+            assert_eq!(actual, "GET");
+        }
+        other => panic!("expected an http_method BindingMismatch, got {other:?}"),
+    }
+}
+
+/// Same challenge, same URL, same method — a different request BODY. The
+/// decision names the body it authorized; paying it for another one is the
+/// "cannot redirect payment to another body" half of the invariant.
+#[test]
+fn authorize_spend_rejects_a_decision_bound_to_another_request_body() {
+    let authorized = challenge_for(
+        AuthorizedRequest::new("POST", RESOURCE_URL).with_body(b"{\"q\":\"weather\"}"),
+    );
+    let (intent, decision) = authorize(&authorized, &allow_policy());
+    assert!(decision.is_allowed(), "policy allows the authorized POST");
+
+    let swapped =
+        challenge_for(AuthorizedRequest::new("POST", RESOURCE_URL).with_body(b"{\"q\":\"drain\"}"));
+    let err = swapped
+        .authorize_spend(&intent, &decision, external_signer())
+        .expect_err("an allow computed for one body must not authorize another");
+    match err {
+        X402ClientError::BindingMismatch { field, .. } => {
+            assert_eq!(field, "request_body_hash")
+        }
+        other => panic!("expected a request_body_hash BindingMismatch, got {other:?}"),
+    }
+}
+
+/// The identity half: an `Allow` computed for one run's intent must not be
+/// spendable under another run's intent, even though the challenge, method and
+/// body are identical. Only the intent hash sees this.
+#[test]
+fn authorize_spend_rejects_a_decision_bound_to_another_intent() {
+    let challenge = parse_devnet_challenge();
+    let (_, decision) = authorize(&challenge, &allow_policy());
+    assert!(decision.is_allowed());
+
+    let other_intent = challenge
+        .payment_intent(&SpendPrincipal {
+            tenant_id: "tenant-a".to_string(),
+            run_id: Some("some-other-run".to_string()),
+            ..SpendPrincipal::default()
+        })
+        .expect("a second intent for the same request");
+    let err = challenge
+        .authorize_spend(&other_intent, &decision, external_signer())
+        .expect_err("a decision naming another intent must fail closed");
+    match err {
+        X402ClientError::BindingMismatch { field, .. } => assert_eq!(field, "intent_hash"),
+        other => panic!("expected an intent_hash BindingMismatch, got {other:?}"),
+    }
+}
+
 #[test]
 fn sign_via_rejects_wrong_signer_address() {
     let challenge = parse_devnet_challenge();
-    let decision = decision_for(&challenge, &allow_policy());
+    let (intent, decision) = authorize(&challenge, &allow_policy());
     let handoff = challenge
-        .authorize_spend(&decision, external_signer())
+        .authorize_spend(&intent, &decision, external_signer())
         .expect("handoff");
 
     // The injected signer's public address differs from the authorized payer.
@@ -320,40 +420,53 @@ fn sign_via_rejects_wrong_signer_address() {
 #[test]
 fn external_authority_requires_a_valid_signer_address() {
     let challenge = parse_devnet_challenge();
-    let decision = decision_for(&challenge, &allow_policy());
+    let (intent, decision) = authorize(&challenge, &allow_policy());
     let bad = SignerBinding::ExternalAuthority {
         authority_ref: "kms://x".to_string(),
         public_signer_address: "not-a-solana-address".to_string(),
     };
     let err = challenge
-        .authorize_spend(&decision, bad)
+        .authorize_spend(&intent, &decision, bad)
         .expect_err("invalid external signer address fails closed");
     assert!(matches!(err, X402ClientError::InvalidSigner { .. }));
 }
 
 proptest! {
     /// Core non-custodial invariant: [`ParsedChallenge::authorize_spend`] yields
-    /// a handoff ONLY when the decision is `Allow`, bound to this exact challenge,
-    /// AND backed by an external signer. Any deny, approval-required, unbound
-    /// decision, or local-custody request never produces a handoff.
+    /// a handoff ONLY when the decision is `Allow`, bound to this exact challenge
+    /// AND to the exact request being paid for, AND backed by an external
+    /// signer. Any deny, approval-required, differently-bound decision, or
+    /// local-custody request never produces a handoff.
+    ///
+    /// Every decision here is produced by real policy over real inputs — the
+    /// artifact is sealed, so there is no shortcut — which means the `Deny` and
+    /// `ApprovalRequired` arms are the policy's own and the binding arms are a
+    /// genuinely different request rather than an edited field.
     #[test]
     fn authorize_spend_proceeds_only_when_allowed_bound_and_external(
         decision_kind in 0u8..3,
-        hash_matches in any::<bool>(),
+        request_matches in any::<bool>(),
         signer_external in any::<bool>(),
     ) {
         let challenge = parse_devnet_challenge();
-        let mut decision = decision_for(&challenge, &allow_policy());
-
-        // Impose the generated decision variant.
-        decision.decision = match decision_kind {
-            0 => PaymentDecision::Allow,
-            1 => PaymentDecision::Deny,
-            _ => PaymentDecision::ApprovalRequired { threshold_credits: 5 },
+        let policy = match decision_kind {
+            // Allow.
+            0 => allow_policy(),
+            // Deny: x402 spending disabled for the scope.
+            1 => X402SpendPolicy::disabled().validate().expect("disabled policy validates"),
+            // ApprovalRequired: a 1-credit threshold against a 2500-credit payment.
+            _ => base_policy(true, Some(1)).validate().expect("approval policy validates"),
         };
-        if !hash_matches {
-            decision.challenge_hash_hex = "ab".repeat(32);
-        }
+
+        // The decision is computed either for THIS request, or for a POST of a
+        // different body to the same URL under the same challenge.
+        let evaluated = if request_matches {
+            challenge_for(authorized_request())
+        } else {
+            challenge_for(AuthorizedRequest::new("POST", RESOURCE_URL).with_body(b"drain"))
+        };
+        let (intent, decision) = authorize(&evaluated, &policy);
+        prop_assert_eq!(decision.is_allowed(), decision_kind == 0);
 
         let signer = if signer_external {
             external_signer()
@@ -361,8 +474,8 @@ proptest! {
             SignerBinding::LocalKeyCustody
         };
 
-        let result = challenge.authorize_spend(&decision, signer);
-        let should_proceed = decision_kind == 0 && hash_matches && signer_external;
+        let result = challenge.authorize_spend(&intent, &decision, signer);
+        let should_proceed = decision_kind == 0 && request_matches && signer_external;
         prop_assert_eq!(result.is_ok(), should_proceed);
 
         // A deny is NEVER a proceed, regardless of signer or binding.

@@ -945,6 +945,39 @@ pub(crate) fn assert_x402_spend_policy_surface(gateway_addr: &str) -> Result<()>
         }
     }
 
+    // The SAME refusals on the decision side. `POST …/evaluate` returns the
+    // policy revision, the resolved scope, the matched rule and the full
+    // decision evidence for whatever scope it is handed, so a tenancy check on
+    // the read side alone would leave another tenant's caps readable by
+    // sweeping `atomic_amount` against this endpoint.
+    for (scope, expected_code) in [
+        (json!({"tenant_id": TENANT_ID}), "tenant_scope_denied"),
+        (
+            json!({"tenant_id": "org_demo", "run_id": "some-run"}),
+            "run_scope_requires_platform_operator",
+        ),
+    ] {
+        let refused = expect_json(
+            gateway_addr,
+            "POST",
+            "/admin/v1/x402-spend-policies/evaluate",
+            &[CLIENT_AUTH, JSON_CONTENT],
+            &json!({
+                "scope": scope,
+                "payment_required": challenge_header(2_500, MERCHANT, RESOURCE_URL),
+                "authorized_resource_url": RESOURCE_URL
+            })
+            .to_string(),
+            403,
+        )?;
+        if refused["error"]["code"] != expected_code {
+            bail!("POST evaluate at {scope} must be refused as {expected_code}: {refused}");
+        }
+        if refused.get("decision").is_some() {
+            bail!("a refused evaluation must not carry decision evidence: {refused}");
+        }
+    }
+
     // An unconfigured tenant is not a 404 and not an absence of limits: it is
     // the disabled deny-all default at revision 0.
     let unconfigured = expect_json(

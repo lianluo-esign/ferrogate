@@ -1363,3 +1363,143 @@ fn project_and_workspace_update_delete_are_tenant_scoped_and_reject_if_reference
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+/// Issue #351: the x402 spend-policy diagnostics surface is money policy —
+/// spend caps, payee allowlists, the policy revision in force, and a dry-run
+/// decision carrying the matched rule and the computed credits. All three
+/// operations must be tenant-scoped.
+///
+/// This exists because the surface's tenancy check was, until now, provable
+/// only by calling `authorize_scope_chain` directly: no test drove either
+/// HANDLER, so deleting the call from the `POST …/evaluate` handler left the
+/// entire suite green while a tenant-scoped `admin.read` key could read back
+/// another tenant's `policy_revision`, resolved scope and full decision
+/// evidence — and, by sweeping `atomic_amount`, binary-search that tenant's
+/// per-payment cap.
+#[test]
+fn x402_spend_policy_diagnostics_are_tenant_scoped() {
+    // The checked-in golden devnet `PAYMENT-REQUIRED` challenge (base64 of
+    // ferrogate-payments/fixtures/payment_required_devnet.json): devnet USDC,
+    // 2500 atomic units, resource https://pay.example.com/weather.
+    const CHALLENGE: &str = "ewogICJ4NDAyVmVyc2lvbiI6IDIsCiAgInJlc291cmNlIjogewogICAgInVybCI6ICJodHRwczovL3BheS5leGFtcGxlLmNvbS93ZWF0aGVyIiwKICAgICJtaW1lVHlwZSI6ICJhcHBsaWNhdGlvbi9qc29uIgogIH0sCiAgImFjY2VwdHMiOiBbCiAgICB7CiAgICAgICJzY2hlbWUiOiAiZXhhY3QiLAogICAgICAibmV0d29yayI6ICJzb2xhbmE6RXRXVFJBQlphWXE2aU1mZVlLb3VSdTE2NlZVMnhxYTEiLAogICAgICAiYW1vdW50IjogIjI1MDAiLAogICAgICAiYXNzZXQiOiAiNHpNTUM5c3J0NVJpNVgxNEdBZ1hoYUhpaTNHblBBRUVSWVBKZ1pKRG5jRFUiLAogICAgICAicGF5VG8iOiAiMndLdXBMUjlxNndYWXBwdzhHcjJOdld4S0JVcW00UFBKS2tRZm94SERCZzQiLAogICAgICAibWF4VGltZW91dFNlY29uZHMiOiAxMjAsCiAgICAgICJleHRyYSI6IHsKICAgICAgICAiZmVlUGF5ZXIiOiAiRXdXcUdFNFpGS0xvZnVlc3RtVTRMRGRLN1hNMU40QUxnZFpjY3dZdWd3R2QiCiAgICAgIH0KICAgIH0KICBdCn0K";
+
+    let evaluation_body = |tenant: &str, extra: &str| {
+        format!(
+            r#"{{"scope":{{"tenant_id":"{tenant}"{extra}}},"payment_required":"{CHALLENGE}","authorized_resource_url":"https://pay.example.com/weather"}}"#
+        )
+    };
+
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    register_tenant(&gateway_addr, "tenant-iso-a");
+    register_tenant(&gateway_addr, "tenant-iso-b");
+
+    // Control: tenant A evaluating its OWN tenant reaches the policy layer and
+    // gets a decision back. Without this, a blanket 403 would satisfy the
+    // refusals below without proving anything about tenancy.
+    let own_evaluation = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/x402-spend-policies/evaluate",
+        &TENANT_A,
+        &evaluation_body("tenant-iso-a", ""),
+    );
+    assert!(
+        status_line(&own_evaluation).contains("200"),
+        "a caller must be able to dry-run its own tenant's policy: {own_evaluation}"
+    );
+    let own_body = response_json(own_evaluation);
+    assert_eq!(own_body["object"], "x402_spend_policy_evaluation");
+    assert_eq!(
+        own_body["decision"]["decision"], "deny",
+        "no policy is declared, so the disabled deny-all default applies: {own_body}"
+    );
+
+    // The refusal: naming ANOTHER tenant on the evaluate surface must be a 403,
+    // not a decision computed against that tenant's policy.
+    let cross_tenant = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/x402-spend-policies/evaluate",
+        &TENANT_A,
+        &evaluation_body("tenant-iso-b", ""),
+    );
+    assert!(
+        status_line(&cross_tenant).contains("403"),
+        "evaluating another tenant's x402 policy must be refused: {cross_tenant}"
+    );
+    let cross_tenant_body = response_json(cross_tenant);
+    assert_eq!(cross_tenant_body["error"]["code"], "tenant_scope_denied");
+    assert!(
+        cross_tenant_body.get("decision").is_none(),
+        "a refused evaluation must not leak any decision evidence: {cross_tenant_body}"
+    );
+
+    // A run-scoped evaluation has no run->tenant mapping at this surface, so it
+    // is refused for a tenant-scoped caller rather than guessed at.
+    let run_scoped = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/x402-spend-policies/evaluate",
+        &TENANT_A,
+        &evaluation_body("tenant-iso-a", r#","run_id":"run-9""#),
+    );
+    assert!(
+        status_line(&run_scoped).contains("403"),
+        "a tenant-scoped caller must not name a run scope: {run_scoped}"
+    );
+    assert_eq!(
+        response_json(run_scoped)["error"]["code"],
+        "run_scope_requires_platform_operator"
+    );
+
+    // The read side answers identically: the same chain, refused the same way.
+    let cross_tenant_effective = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/x402-spend-policies/effective?tenant_id=tenant-iso-b",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&cross_tenant_effective).contains("403"),
+        "reading another tenant's effective x402 policy must be refused: {cross_tenant_effective}"
+    );
+    assert_eq!(
+        response_json(cross_tenant_effective)["error"]["code"],
+        "tenant_scope_denied"
+    );
+
+    // The platform operator retains unrestricted cross-tenant access on both.
+    let operator_effective = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/x402-spend-policies/effective?tenant_id=tenant-iso-b",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        status_line(&operator_effective).contains("200"),
+        "the platform operator must read any tenant's effective policy: {operator_effective}"
+    );
+    let operator_evaluation = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/x402-spend-policies/evaluate",
+        &ADMIN,
+        &evaluation_body("tenant-iso-b", r#","run_id":"run-9""#),
+    );
+    assert!(
+        status_line(&operator_evaluation).contains("200"),
+        "the platform operator must evaluate any scope, including a run: {operator_evaluation}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

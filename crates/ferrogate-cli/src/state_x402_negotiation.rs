@@ -328,7 +328,8 @@ impl fmt::Display for X402NegotiationError {
             Self::PolicyRejected { authorization } => write!(
                 f,
                 "x402 payment rejected by policy ({}): {}",
-                authorization.reason_code, authorization.message
+                authorization.reason_code(),
+                authorization.message()
             ),
             Self::Unfundable { rejection, .. } => match rejection {
                 FundingRejection::Insufficient {
@@ -378,7 +379,10 @@ impl From<StorageError> for X402NegotiationError {
 /// finalize edge and is returned as inspectable evidence.
 ///
 /// `now_unix` is supplied by the caller (matching the loop's convention) so the
-/// negotiation stays deterministic and testable.
+/// negotiation stays deterministic and testable. It is the ONE clock this
+/// payment is judged by: the settlement loop stamps the hold and the attempt
+/// with it, and it is also what the policy's conversion-freshness window is
+/// tested against, so `spent.now_unix` is overridden rather than trusted.
 pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
     loop_: &X402SettlementLoop,
     policy: &ValidatedX402SpendPolicy,
@@ -435,8 +439,18 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
         intent: &intent,
         scope,
     };
-    let authorization = authorize_x402_payment(policy, &request, spent);
-    if !matches!(authorization.decision, PaymentDecision::Allow) {
+    // The conversion-freshness clock is THIS call's `now_unix` — the same clock
+    // the settlement loop stamps the hold and the attempt with — not whatever
+    // the caller happened to leave on the ledger snapshot. Two clocks on one
+    // payment is how an expired rate authorizes a spend the ledger then records
+    // at a different instant; a ledger snapshot read minutes ago must not be
+    // able to vouch for the freshness of a rate now.
+    let spent = SpendSnapshot {
+        now_unix: Some(now_unix),
+        ..*spent
+    };
+    let authorization = authorize_x402_payment(policy, &request, &spent);
+    if !matches!(authorization.decision(), PaymentDecision::Allow) {
         // Deny AND ApprovalRequired short-circuit without paying.
         return Err(X402NegotiationError::PolicyRejected {
             authorization: Box::new(authorization),
@@ -639,10 +653,10 @@ fn build_open(
         atomic_amount: selected.atomic_amount.to_string(),
         recipient: selected.recipient.clone(),
         credits_amount,
-        conversion_version: Some(authorization.conversion.version.clone()),
-        policy_revision: authorization.policy_revision as i64,
+        conversion_version: Some(authorization.conversion().version.clone()),
+        policy_revision: authorization.policy_revision() as i64,
         decision: "allow".to_string(),
-        reason_code: authorization.reason_code.to_string(),
+        reason_code: authorization.reason_code().to_string(),
         hold_ttl_secs: ctx.hold_ttl_secs,
     }
 }

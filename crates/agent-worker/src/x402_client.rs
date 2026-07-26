@@ -330,6 +330,23 @@ impl ParsedChallenge {
         self.selected.challenge_hash_hex()
     }
 
+    /// The authorized request's method in the SAME canonical form
+    /// [`PaymentIntent`] stores it (trimmed, uppercase), so the intent, the
+    /// decision, and this binding check can never disagree over `get` vs `GET`.
+    fn method(&self) -> String {
+        self.request.method.trim().to_ascii_uppercase()
+    }
+
+    /// The authorized request's body hash, with a bodyless request represented
+    /// by the canonical empty-body hash rather than an absence — "no body" is a
+    /// concrete value the decision can be compared against.
+    fn body_hash_hex(&self) -> String {
+        self.request
+            .body_sha256_hex
+            .clone()
+            .unwrap_or_else(|| RequestBodyHash::empty().as_hex())
+    }
+
     /// Build the non-custodial handoff evidence presented to the gateway/policy.
     /// Carries no key material.
     pub(crate) fn spend_authorization_request(
@@ -387,7 +404,7 @@ impl ParsedChallenge {
             atomic_amount: self.selected.atomic_amount,
             recipient: self.selected.recipient.clone(),
             authorized_resource_url: self.request.canonical_url.clone(),
-            http_method: self.request.method.clone(),
+            http_method: self.method(),
             request_body_hash: body_hash,
             challenge_hash_hex: self.selected.challenge_hash_hex(),
             max_timeout_seconds: self.selected.max_timeout_seconds,
@@ -422,15 +439,25 @@ impl ParsedChallenge {
     }
 
     /// Consume the gateway/policy decision and, only on an `Allow` that is
-    /// cryptographically bound to THIS challenge and backed by an EXTERNAL
-    /// signer, produce an [`AuthorizedHandoff`].
+    /// cryptographically bound to THIS challenge AND to the exact request the
+    /// gateway authorized, and backed by an EXTERNAL signer, produce an
+    /// [`AuthorizedHandoff`].
     ///
-    /// Fails closed on: a decision bound to a different challenge (any binding
-    /// field mismatch), a `Deny` (never overridden), an `ApprovalRequired` (no
-    /// headless auto-pay), and a local key-custody request. The worker never
-    /// proceeds unless every one of these gates passes.
+    /// `intent` is the immutable [`PaymentIntent`] the decision was computed
+    /// for ([`Self::payment_intent`]); its hash is compared against the one the
+    /// decision names, so a decision computed for another intent — another
+    /// identity, amount, or merchant timeout — can never be spent here.
+    ///
+    /// Fails closed on: a decision bound to a different challenge, a decision
+    /// bound to a different METHOD or request BODY (the half of the invariant
+    /// the challenge hash cannot cover, since neither is merchant input), a
+    /// decision naming a different intent, a `Deny` (never overridden), an
+    /// `ApprovalRequired` (no headless auto-pay), and a local key-custody
+    /// request. The worker never proceeds unless every one of these gates
+    /// passes.
     pub(crate) fn authorize_spend(
         &self,
+        intent: &PaymentIntent,
         decision: &PaymentAuthorization,
         signer: SignerBinding,
     ) -> Result<AuthorizedHandoff, X402ClientError> {
@@ -438,29 +465,56 @@ impl ParsedChallenge {
         //    computed for a different payment is never trusted, whatever it says.
         self.check_binding(
             "challenge_hash",
-            &decision.challenge_hash_hex,
+            decision.challenge_hash_hex(),
             &self.selected.challenge_hash_hex(),
         )?;
         self.check_binding(
             "network",
-            &decision.network_caip2,
+            decision.network_caip2(),
             self.selected.network.caip2(),
         )?;
-        self.check_binding("mint", &decision.mint, &self.selected.mint)?;
-        self.check_binding("recipient", &decision.recipient, &self.selected.recipient)?;
+        self.check_binding("mint", decision.mint(), &self.selected.mint)?;
+        self.check_binding("recipient", decision.recipient(), &self.selected.recipient)?;
         self.check_binding(
             "resource_url",
-            &decision.resource_url,
+            decision.resource_url(),
             &self.selected.resource_url,
         )?;
 
-        // 2. Honor the decision. The worker never overrides a deny and never
+        // 2. The decision must also be bound to the exact egress request this
+        //    worker is paying for. The merchant's challenge hash covers the
+        //    payment terms, NOT the method or the body — neither is merchant
+        //    input — so without these three comparisons an `Allow` computed for
+        //    `GET https://pay.example.com/weather` would authorize a `POST` of
+        //    an arbitrary body to the same URL carrying the same challenge.
+        //    That is precisely the redirect the security invariant forbids.
+        self.check_binding(
+            "authorized_resource_url",
+            decision.authorized_resource_url(),
+            &self.request.canonical_url,
+        )?;
+        self.check_binding("http_method", decision.http_method(), &self.method())?;
+        self.check_binding(
+            "request_body_hash",
+            decision.request_body_hash_hex(),
+            &self.body_hash_hex(),
+        )?;
+
+        // 3. And to the exact intent it names: identity, amount and merchant
+        //    timeout live in the intent hash, not in any field above.
+        self.check_binding(
+            "intent_hash",
+            decision.intent_hash_hex(),
+            &intent.intent_hash_hex(),
+        )?;
+
+        // 4. Honor the decision. The worker never overrides a deny and never
         //    auto-pays what needs approval.
-        match &decision.decision {
+        match decision.decision() {
             PaymentDecision::Deny => {
                 return Err(X402ClientError::PolicyDenied {
-                    reason_code: decision.reason_code,
-                    message: decision.message.clone(),
+                    reason_code: decision.reason_code(),
+                    message: decision.message().to_string(),
                 });
             }
             PaymentDecision::ApprovalRequired { threshold_credits } => {
@@ -471,7 +525,7 @@ impl ParsedChallenge {
             PaymentDecision::Allow => {}
         }
 
-        // 3. Non-custodial signer boundary. A local-custody request fails closed;
+        // 5. Non-custodial signer boundary. A local-custody request fails closed;
         //    only an external authority is accepted.
         let (authority_ref, public_signer_address) = signer.resolve_external()?;
 

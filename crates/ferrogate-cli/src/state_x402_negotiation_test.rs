@@ -428,7 +428,7 @@ fn allow_settle_single_replay_records_attempt_and_settlement() {
     };
     assert_eq!(response.status, 200);
     assert!(authorization.is_allowed());
-    assert_eq!(authorization.reason_code, "x402_allowed");
+    assert_eq!(authorization.reason_code(), "x402_allowed");
     assert!(
         matches!(settlement, EdgeOutcome::Settled { .. }),
         "{settlement:?}"
@@ -489,7 +489,7 @@ fn policy_deny_makes_no_payment_and_never_signs() {
 
     match error {
         X402NegotiationError::PolicyRejected { authorization } => {
-            assert!(matches!(authorization.decision, PaymentDecision::Deny));
+            assert!(matches!(authorization.decision(), PaymentDecision::Deny));
         }
         other => panic!("expected PolicyRejected, got {other:?}"),
     }
@@ -527,7 +527,7 @@ fn approval_required_short_circuits_without_signing() {
     match error {
         X402NegotiationError::PolicyRejected { authorization } => {
             assert!(matches!(
-                authorization.decision,
+                authorization.decision(),
                 PaymentDecision::ApprovalRequired { .. }
             ));
         }
@@ -535,6 +535,97 @@ fn approval_required_short_circuits_without_signing() {
     }
     assert_eq!(transport.calls(), vec![false]);
     assert_eq!(signer.call_count(), 0);
+}
+
+// --------------------------------------------------------------------------
+// 2c. The conversion-freshness clock is the negotiation's own `now_unix`.
+// --------------------------------------------------------------------------
+
+/// An expiring rate, with a policy that would otherwise allow.
+fn expiring_policy(expires_at_unix: i64) -> ValidatedX402SpendPolicy {
+    let mut policy = allowing_policy().policy().clone();
+    policy.conversion.expires_at_unix = Some(expires_at_unix);
+    policy.validate().expect("valid policy")
+}
+
+/// The caller's ledger snapshot claims the rate is fresh (`now_unix` well
+/// before the deadline) while the negotiation is running AFTER it. The clock
+/// that stamps the hold and the attempt is the clock the rate is judged by, so
+/// this must deny rather than pay at a rate nobody can vouch for.
+#[test]
+fn a_stale_ledger_clock_cannot_vouch_for_an_expired_conversion_rate() {
+    let state = seed_state(10_000);
+    let policy = expiring_policy(200);
+    let transport = FakeTransport::new(vec![payment_required_response()]);
+    let signer = FakeSigner::allowing();
+    let loop_ = state.x402_settlement_loop();
+
+    let error = block_on(negotiate_paid_egress(
+        &loop_,
+        &policy,
+        // The snapshot says "it is 100", which is inside the window.
+        &SpendSnapshot {
+            now_unix: Some(100),
+            ..SpendSnapshot::default()
+        },
+        &context(),
+        &transport,
+        &signer,
+        // The negotiation is happening at 300, which is past it.
+        300,
+    ))
+    .expect_err("an expired conversion rate must deny");
+
+    match error {
+        X402NegotiationError::PolicyRejected { authorization } => {
+            assert!(matches!(authorization.decision(), PaymentDecision::Deny));
+            assert_eq!(authorization.reason_code(), "x402_conversion_expired");
+        }
+        other => panic!("expected PolicyRejected/conversion_expired, got {other:?}"),
+    }
+    // Nothing was paid and nothing was signed.
+    assert_eq!(transport.calls(), vec![false]);
+    assert_eq!(signer.call_count(), 0);
+}
+
+/// The mirror image: the caller supplied NO clock, which on its own denies
+/// ("unprovable freshness must not authorize a spend"). The negotiation has an
+/// authoritative one, so a rate that is genuinely still valid pays. Without the
+/// plumbing, an expiry window would make the paid path permanently inert.
+#[test]
+fn the_negotiations_clock_proves_freshness_when_the_caller_supplied_none() {
+    let state = seed_state(10_000);
+    let policy = expiring_policy(1_000);
+    let transport = FakeTransport::new(vec![
+        payment_required_response(),
+        success_response(Some(settled_payment_response())),
+    ]);
+    let signer = FakeSigner::allowing();
+    let loop_ = state.x402_settlement_loop();
+
+    let outcome = block_on(negotiate_paid_egress(
+        &loop_,
+        &policy,
+        &SpendSnapshot::default(),
+        &context(),
+        &transport,
+        &signer,
+        300,
+    ))
+    .expect("a rate inside its validity window pays");
+
+    match outcome {
+        X402Negotiation::Paid { authorization, .. } => {
+            assert!(authorization.is_allowed());
+            assert_eq!(
+                authorization.conversion().expires_at_unix,
+                Some(1_000),
+                "the decision records the freshness bound it was made under"
+            );
+        }
+        other => panic!("expected Paid, got {other:?}"),
+    }
+    assert_eq!(signer.call_count(), 1);
 }
 
 // --------------------------------------------------------------------------

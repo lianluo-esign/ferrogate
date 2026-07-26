@@ -772,59 +772,158 @@ pub const REASON_CONVERSION_EXPIRED: &str = "x402_conversion_expired";
 /// `REASON_*` set, which keeps the code path typed for callers at the cost of
 /// not being reconstructable from arbitrary text.
 ///
-/// It is `#[non_exhaustive]`, so [`authorize_x402_payment`] is the only way to
-/// obtain one: no other crate can assemble a struct literal that *looks* like a
-/// policy decision. [`PaymentAuthorization::decision_hash_hex`] seals the
-/// content — an audit sink can recompute it and detect a decision that was
-/// edited between the policy call and the record.
+/// # Immutability
+///
+/// Every field is PRIVATE and reachable only through a `&self` accessor, and
+/// [`authorize_x402_payment`] is the only constructor. That is what the word
+/// "immutable" is doing here, and it is deliberately not left to
+/// `#[non_exhaustive]`: `#[non_exhaustive]` blocks cross-crate *construction*
+/// and exhaustive matching, but it does nothing about assignment to a `pub`
+/// field, so a consumer could take a real `Allow` and edit the method, body
+/// hash or recipient it names before handing it on. Sealing the fields is what
+/// makes "the decision policy made" and "the decision the sink recorded" the
+/// same object.
+///
+/// [`PaymentAuthorization::decision_hash_hex`] is a content seal on top of
+/// that: because it is recomputed from the current field values, it can only
+/// prove integrity for a sink that recorded the ORIGINAL hash and compares it
+/// later (e.g. across a serialization or process boundary). It is not, on its
+/// own, a defence against in-process edits — the private fields are.
+///
+/// A consumer cannot edit a decision on its way to the audit sink:
+///
+/// ```compile_fail
+/// # use ferrogate_policy::PaymentAuthorization;
+/// fn redirect(decision: &mut PaymentAuthorization) {
+///     decision.recipient = "an attacker's wallet".to_string();
+/// }
+/// ```
+///
+/// …and cannot forge one either:
+///
+/// ```compile_fail
+/// # use ferrogate_policy::{PaymentAuthorization, PaymentDecision};
+/// let forged = PaymentAuthorization {
+///     decision: PaymentDecision::Allow,
+///     ..todo!()
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct PaymentAuthorization {
     /// The three-valued decision.
-    pub decision: PaymentDecision,
+    decision: PaymentDecision,
     /// Stable reason code (one of the `REASON_*` constants).
-    pub reason_code: &'static str,
+    reason_code: &'static str,
     /// Human-readable explanation. Never load-bearing; the `reason_code` is.
-    pub message: String,
+    message: String,
     /// The policy revision that produced this decision.
-    pub policy_revision: u64,
+    policy_revision: u64,
     /// CAIP-2 network of the evaluated payment.
-    pub network_caip2: String,
+    network_caip2: String,
     /// SPL mint of the evaluated payment.
-    pub mint: String,
+    mint: String,
     /// Recipient (`payTo`) of the evaluated payment.
-    pub recipient: String,
+    recipient: String,
     /// The resource URL the payment claims to unlock.
-    pub resource_url: String,
+    resource_url: String,
     /// The egress URL FerroGate had already authorized — the binding target the
     /// challenge's own resource had to match.
-    pub authorized_resource_url: String,
+    authorized_resource_url: String,
     /// HTTP method of the authorized request this decision is bound to.
     /// Together with [`Self::request_body_hash_hex`] this is what stops an
     /// authorization for a `GET` being reused for a `POST` of another body.
-    pub http_method: String,
+    http_method: String,
     /// SHA-256 (hex) of the authorized request body.
-    pub request_body_hash_hex: String,
+    request_body_hash_hex: String,
     /// Deterministic hash (hex) of the whole [`PaymentIntent`] this decision
     /// authorized.
-    pub intent_hash_hex: String,
+    intent_hash_hex: String,
     /// The scope the decision was evaluated at, so a persisted decision can be
     /// attributed to the run that caused it.
-    pub scope: AuthorizedScope,
+    scope: AuthorizedScope,
     /// Deterministic challenge hash (hex) from the wire contract — a stable
     /// idempotency / audit key.
-    pub challenge_hash_hex: String,
+    challenge_hash_hex: String,
     /// The atomic→credits conversion snapshot in effect for this decision.
-    pub conversion: ConversionSnapshot,
+    conversion: ConversionSnapshot,
     /// The resource rule that authorized this payment, when a decision reached
     /// the resource-match stage successfully.
-    pub matched_resource: Option<ResourceRule>,
+    matched_resource: Option<ResourceRule>,
 }
 
 /// Domain-separation tag for [`PaymentAuthorization::decision_hash_hex`].
 pub const PAYMENT_DECISION_HASH_DOMAIN: &str = "ferrogate.x402.payment-decision.v1";
 
 impl PaymentAuthorization {
+    /// The three-valued decision.
+    pub fn decision(&self) -> &PaymentDecision {
+        &self.decision
+    }
+    /// Stable reason code (one of the `REASON_*` constants).
+    pub fn reason_code(&self) -> &'static str {
+        self.reason_code
+    }
+    /// Human-readable explanation. Never load-bearing; the reason code is.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    /// The policy revision that produced this decision.
+    pub fn policy_revision(&self) -> u64 {
+        self.policy_revision
+    }
+    /// CAIP-2 network of the evaluated payment.
+    pub fn network_caip2(&self) -> &str {
+        &self.network_caip2
+    }
+    /// SPL mint of the evaluated payment.
+    pub fn mint(&self) -> &str {
+        &self.mint
+    }
+    /// Recipient (`payTo`) of the evaluated payment.
+    pub fn recipient(&self) -> &str {
+        &self.recipient
+    }
+    /// The resource URL the payment claims to unlock.
+    pub fn resource_url(&self) -> &str {
+        &self.resource_url
+    }
+    /// The egress URL FerroGate had already authorized.
+    pub fn authorized_resource_url(&self) -> &str {
+        &self.authorized_resource_url
+    }
+    /// Uppercase HTTP method of the authorized request this decision is bound
+    /// to.
+    pub fn http_method(&self) -> &str {
+        &self.http_method
+    }
+    /// SHA-256 (hex) of the authorized request body this decision is bound to.
+    pub fn request_body_hash_hex(&self) -> &str {
+        &self.request_body_hash_hex
+    }
+    /// Deterministic hash (hex) of the [`PaymentIntent`] this decision
+    /// authorized.
+    pub fn intent_hash_hex(&self) -> &str {
+        &self.intent_hash_hex
+    }
+    /// The scope the decision was evaluated at.
+    pub fn scope(&self) -> &AuthorizedScope {
+        &self.scope
+    }
+    /// Deterministic challenge hash (hex) from the wire contract.
+    pub fn challenge_hash_hex(&self) -> &str {
+        &self.challenge_hash_hex
+    }
+    /// The atomic→credits conversion snapshot in effect for this decision.
+    pub fn conversion(&self) -> &ConversionSnapshot {
+        &self.conversion
+    }
+    /// The resource rule that authorized this payment, when the decision
+    /// reached the resource-match stage successfully.
+    pub fn matched_resource(&self) -> Option<&ResourceRule> {
+        self.matched_resource.as_ref()
+    }
+
     /// True iff the decision is [`PaymentDecision::Allow`].
     pub fn is_allowed(&self) -> bool {
         matches!(self.decision, PaymentDecision::Allow)
@@ -842,8 +941,14 @@ impl PaymentAuthorization {
     ///
     /// The human-readable `message` is deliberately excluded — it is explicitly
     /// not load-bearing, and including it would make the seal churn whenever
-    /// wording changed. Recompute this at the audit sink to prove the decision
-    /// stored is the decision policy made.
+    /// wording changed.
+    ///
+    /// What this proves, precisely: a sink that recorded THIS hash next to the
+    /// decision can recompute it later — after a serialization round trip, in
+    /// another process, out of a database row — and detect that the stored
+    /// content no longer matches. It proves nothing on its own about a decision
+    /// nobody sealed a copy of; in-process integrity comes from the private
+    /// fields, not from this function.
     pub fn decision_hash_hex(&self) -> String {
         let mut hasher = Sha256::new();
         let decision = match self.decision {
