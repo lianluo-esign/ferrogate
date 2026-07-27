@@ -67,6 +67,9 @@ function siteAsset(
     content_hash: "a".repeat(64),
     size_bytes: 100,
     storage_backed: false,
+    // #528: a row the consumer listing returns is always `visible`; the
+    // withheld ones are on the operator-only listing (#379).
+    visibility: "visible",
     created_at_unix: createdAtUnix,
     updated_at_unix: createdAtUnix,
   };

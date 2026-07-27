@@ -27,6 +27,9 @@ function asset(overrides: Partial<AssetSummary> = {}): AssetSummary {
     content_hash: "a".repeat(64),
     size_bytes: 100,
     storage_backed: false,
+    // #528: every asset summary now names its screening state. A listed row is
+    // always `visible` -- the consumer listing withholds the rest (#366).
+    visibility: "visible",
     created_at_unix: 1000,
     updated_at_unix: 1000,
     ...overrides,

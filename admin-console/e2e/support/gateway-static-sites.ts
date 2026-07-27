@@ -149,6 +149,8 @@ function staticSiteSummary(
     content_hash: HASH,
     size_bytes: 2048,
     storage_backed: false,
+    // #528: the consumer listing only ever returns `visible` rows.
+    visibility: "visible",
     created_at_unix: createdAtUnix,
     updated_at_unix: createdAtUnix,
   };

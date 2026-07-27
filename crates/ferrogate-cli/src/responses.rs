@@ -10,6 +10,7 @@ use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as 
 use serde::{Deserialize, Serialize};
 
 use ferrogate_runtime::SelfHostedWorkerIdentity;
+use ferrogate_storage::{AssetVisibility, StoredAsset};
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
@@ -1513,26 +1514,71 @@ pub(crate) struct AssetSummary {
     /// bucket storage is in play without leaking the raw bucket/key
     /// reference (`storage_uri`) itself.
     pub(crate) storage_backed: bool,
+    /// The durable trust-screening state of the row (issue #366), as the stable
+    /// `visible` / `pending_scan` / `quarantined` token (issue #528).
+    ///
+    /// Before #528 this summary carried no visibility at all, so a caller could
+    /// not tell a committed asset from a WITHHELD one: a push whose screening
+    /// landed `pending_scan`/`quarantined` returned the same `200` +
+    /// `AssetMutationResponse` a clean push returns, while the row was filtered
+    /// out of every consumer read surface. The console dutifully reported
+    /// "Asset pushed" for an object the operator then could not find.
+    ///
+    /// This is metadata ABOUT the row, never a relaxation of the withholding:
+    /// only `visible` is downloadable, the consumer listing still omits
+    /// non-`visible` rows entirely (#366), and the operator-only withheld
+    /// listing (#379) is where they surface.
+    pub(crate) visibility: &'static str,
     pub(crate) created_at_unix: i64,
     pub(crate) updated_at_unix: i64,
 }
 
+impl AssetSummary {
+    /// The ONE projection from a durable row to the wire summary, shared by the
+    /// registry, presign, promotion and withheld-listing surfaces.
+    ///
+    /// It exists as a single function because `visibility` (#528) is only
+    /// trustworthy if every surface derives it from the same place: the two
+    /// per-module `asset_summary` helpers it replaces were byte-identical
+    /// twins, and a field added to one of them would have shipped a summary
+    /// that reported the state on the registry push and omitted it on the
+    /// presigned commit.
+    pub(crate) fn from_stored(asset: &StoredAsset) -> Self {
+        Self {
+            id: asset.id.clone(),
+            asset_type: asset.asset_type.clone(),
+            name: asset.name.clone(),
+            version: asset.version.clone(),
+            content_type: asset.content_type.clone(),
+            content_hash: asset.content_hash.clone(),
+            size_bytes: asset.size_bytes,
+            storage_backed: asset.storage_uri.is_some(),
+            visibility: asset.visibility.as_str(),
+            created_at_unix: asset.created_at_unix,
+            updated_at_unix: asset.updated_at_unix,
+        }
+    }
+}
+
 /// One WITHHELD asset row for the operator-only inspection surface (issue #379,
-/// follow-up to #366). Carries the ordinary [`AssetSummary`] metadata plus the
-/// two things an operator needs to triage an asset consumers can never see: the
-/// durable `visibility` state (`pending_scan` = deferred async scan not yet run;
+/// follow-up to #366). Carries the ordinary [`AssetSummary`] metadata -- whose
+/// flattened `visibility` (`pending_scan` = deferred async scan not yet run;
 /// `quarantined` = the scanner flagged it or a fail-closed-unavailable policy
-/// withheld it), and the `screening_evidence` recorded at push/commit time --
-/// the scan/signature/approval verdict + verification manifest from #366's push
+/// withheld it) is the state an operator triages on -- plus the
+/// `screening_evidence` recorded at push/commit time: the
+/// scan/signature/approval verdict + verification manifest from #366's push
 /// screening. `screening_evidence` is `None` when the originating push audit
 /// event is no longer retained (best-effort correlation, never fabricated).
+///
+/// #528 moved `visibility` onto [`AssetSummary`] itself; this type no longer
+/// declares its own copy, because a sibling field beside a `#[serde(flatten)]`
+/// of the same name emits the key TWICE in one object. The wire shape is
+/// unchanged (`visibility` is still present on every row here, and still only
+/// ever `pending_scan`/`quarantined` -- a `visible` asset is never listed).
 #[derive(Debug, Serialize)]
 pub(crate) struct WithheldAssetSummary {
     #[serde(flatten)]
     pub(crate) asset: AssetSummary,
-    /// The durable trust-screening state on the asset row: `pending_scan` or
-    /// `quarantined`. A `visible` asset is never listed here.
-    pub(crate) visibility: &'static str,
     /// The screening evidence detail (scan outcome, signature status,
     /// cross-tenant approval state, verification manifest) captured on the
     /// asset's push/commit audit event. `None` when that audit row is absent.
@@ -1564,6 +1610,50 @@ pub(crate) struct AssetPresignedUploadConstraints {
 pub(crate) struct AssetMutationResponse {
     pub(crate) object: &'static str,
     pub(crate) asset: AssetSummary,
+}
+
+impl AssetMutationResponse {
+    /// The one constructor for a push/commit terminal (issue #528): it returns
+    /// the status AND the body together, both derived from the same durable
+    /// row, so the two cannot disagree.
+    ///
+    /// A caller cannot build the body and then pick a status: that is precisely
+    /// the defect -- every asset mutation answered a flat `200 OK` with a body
+    /// that said nothing about screening, so "stored and serving" and "stored
+    /// but WITHHELD pending a scan verdict" were the same response on the wire.
+    /// A client had nothing to branch on and reported success for an object no
+    /// read surface would return.
+    pub(crate) fn for_asset(asset: &StoredAsset) -> (StatusCode, Self) {
+        (
+            asset_mutation_status(asset.visibility),
+            Self {
+                object: "asset",
+                asset: AssetSummary::from_stored(asset),
+            },
+        )
+    }
+}
+
+/// The 2xx terminal for an asset push / presigned commit that durably stored a
+/// row (issue #528).
+///
+/// * `200 OK` -- screened clean and `visible`: stored AND serving.
+/// * `202 Accepted` -- stored but WITHHELD (`pending_scan` awaiting an
+///   out-of-band scan, or `quarantined`). The bytes are durable and the version
+///   is claimed, but the asset is absent from every read surface until it is
+///   promoted (#378), and `quarantined` never becomes visible at all.
+///
+/// 202 rather than a 4xx/5xx because the write SUCCEEDED -- rejecting it would
+/// be a lie in the other direction, and would invite a retry loop against an
+/// immutable version that now exists. It is the honest "accepted, not yet
+/// effective" of a two-phase publish, and it is a status a client that only
+/// checks `status == 200` still notices.
+pub(crate) fn asset_mutation_status(visibility: AssetVisibility) -> StatusCode {
+    if visibility.is_downloadable() {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    }
 }
 
 /// Operator-supplied completed out-of-band scan result that drives a

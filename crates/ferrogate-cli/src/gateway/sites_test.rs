@@ -345,11 +345,15 @@ fn publish(gw: &FerroGateway, version: &str, files: &[(&str, &[u8])]) -> SiteBun
 /// The bytes the serve path WOULD return for `req_path`, resolved through the
 /// exact same channel/manifest/file-keying the live `serve_site_file` uses, plus
 /// the bundle version the active manifest reports. `None` mirrors a serve 404.
+///
+/// #528: the file lookup goes through `resolve_servable_site_file`, the same
+/// function the handler calls, so the withholding gate inside it is on this
+/// path too. It used to inline its own `get_asset`, which would have kept every
+/// assertion below green with the gate deleted.
 fn served(gw: &FerroGateway, req_path: &str) -> Option<(String, Vec<u8>)> {
     let resolved = block_on(gw.resolve_active_site_bundle(T, SITE)).expect("resolve error")?;
     let entry = resolve_site_file(&resolved.manifest, req_path)?.clone();
-    let id = resolved.file_asset_id(T, SITE, &entry.path);
-    let asset = block_on(gw.state.current().get_asset(&id)).expect("get_asset error")?;
+    let asset = block_on(gw.resolve_servable_site_file(&resolved, T, SITE, &entry.path)).ok()?;
     let bytes = match block_on(gw.load_asset_content(&asset, "test-request")) {
         Ok(bytes) => bytes.into_parts().0,
         Err(error) => panic!("load content: {}", error.message),
@@ -725,5 +729,64 @@ fn concurrent_serving_channel_moves_never_strand_and_serve_reads_the_winner() {
     assert_eq!(
         bytes, expected,
         "served bytes must match the active version"
+    );
+}
+
+/// #528 (serve half): the static-site surface must refuse a file row that is
+/// not `visible`, the same way the registry pull, `fetch_asset` and MCP
+/// `resources/read` do.
+///
+/// This surface is anonymous (a public site serves without a key), browser
+/// facing, and answers with the file's own content type, so an unproven object
+/// reaching it is malware serving. Until #528 it had no check of its own: it
+/// depended entirely on `commit_site_bundle` never writing a non-`Visible` row.
+/// Here a `quarantined` row is planted under exactly the key the ACTIVE bundle's
+/// manifest resolves to -- the state a broken or future writer, or a
+/// hand-repaired registry, produces -- and the serve lookup must not return it.
+#[test]
+fn a_quarantined_site_file_is_not_served() {
+    let gw = gateway();
+    let commit = publish(&gw, "1.0.0", &[("index.html", b"<h1>clean</h1>")]);
+    assert!(matches!(commit, SiteBundleCommit::Committed { .. }));
+    assert_eq!(
+        served(&gw, "/").expect("clean site serves").1,
+        b"<h1>clean</h1>"
+    );
+
+    // Flip the very row the active manifest resolves to.
+    let resolved = block_on(gw.resolve_active_site_bundle(T, SITE))
+        .expect("resolve error")
+        .expect("site resolves");
+    let id = resolved.file_asset_id(T, SITE, "index.html");
+    let mut row = block_on(gw.state.current().get_asset(&id))
+        .expect("get_asset error")
+        .expect("file row exists");
+    row.visibility = AssetVisibility::Quarantined;
+    block_on(gw.state.current().upsert_asset(row)).expect("store quarantined row");
+
+    // The lookup the handler performs refuses it -- and reports it as ABSENT,
+    // so the refusal does not confirm that quarantined bytes are held here.
+    let refusal = block_on(gw.resolve_servable_site_file(&resolved, T, SITE, "index.html"))
+        .err()
+        .expect("a quarantined site file must not be servable");
+    assert_eq!(refusal.status, StatusCode::NOT_FOUND);
+    assert_eq!(refusal.code, "site_file_not_found");
+    assert!(
+        !refusal.message.contains("quarantin"),
+        "the refusal must not disclose the withholding reason: {}",
+        refusal.message
+    );
+    assert!(served(&gw, "/").is_none(), "no bytes may be served");
+
+    // `pending_scan` is withheld on the same terms -- not yet proven clean is
+    // not the same as proven safe.
+    let mut row = block_on(gw.state.current().get_asset(&id))
+        .expect("get_asset error")
+        .expect("file row exists");
+    row.visibility = AssetVisibility::PendingScan;
+    block_on(gw.state.current().upsert_asset(row)).expect("store pending row");
+    assert!(
+        block_on(gw.resolve_servable_site_file(&resolved, T, SITE, "index.html")).is_err(),
+        "a pending_scan site file must not be servable either"
     );
 }

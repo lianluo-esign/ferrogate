@@ -454,8 +454,10 @@ impl FerroGateway {
                     ],
                 )
             })
+            // #528: `visibility` now travels on the flattened `AssetSummary`
+            // itself, so this row keeps the same wire shape without a sibling
+            // field that would serialize the key a second time.
             .map(|asset| WithheldAssetSummary {
-                visibility: asset.visibility.as_str(),
                 screening_evidence: evidence_by_asset.get(&asset.id).cloned(),
                 asset: asset_summary(&asset),
             })
@@ -909,11 +911,14 @@ impl FerroGateway {
             }
         }
 
-        let body = AssetMutationResponse {
-            object: "asset",
-            asset: asset_summary(&asset),
-        };
-        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+        // #528: the terminal reports the screening verdict this push actually
+        // persisted. A `pending_scan`/`quarantined` push is stored but WITHHELD
+        // from every read surface, so answering the clean push's flat `200` --
+        // with a body that named no visibility -- told the caller the object was
+        // published when nothing would ever serve it. Status and body are
+        // derived together from the row by `AssetMutationResponse::for_asset`.
+        let (status, body) = AssetMutationResponse::for_asset(&asset);
+        write_json_response(session, status, &body, &ctx.request_id).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2052,19 +2057,14 @@ impl FerroGateway {
     }
 }
 
+/// #528: delegates to the ONE projection ([`AssetSummary::from_stored`]) rather
+/// than restating the field list. This module and `asset_presign` each carried
+/// an identical copy, so `visibility` would have had to be added to both -- and
+/// a summary that reports the screening state on one publish surface and omits
+/// it on the other is the same "cannot tell withheld from committed" gap in a
+/// narrower place.
 fn asset_summary(asset: &StoredAsset) -> AssetSummary {
-    AssetSummary {
-        id: asset.id.clone(),
-        asset_type: asset.asset_type.clone(),
-        name: asset.name.clone(),
-        version: asset.version.clone(),
-        content_type: asset.content_type.clone(),
-        content_hash: asset.content_hash.clone(),
-        size_bytes: asset.size_bytes,
-        storage_backed: asset.storage_uri.is_some(),
-        created_at_unix: asset.created_at_unix,
-        updated_at_unix: asset.updated_at_unix,
-    }
+    AssetSummary::from_stored(asset)
 }
 
 fn build_asset_storage_summary(

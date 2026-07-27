@@ -199,6 +199,16 @@ impl ResolvedSiteBundle {
     }
 }
 
+/// Why the serve path will not return one file object: the typed refusal of
+/// [`FerroGateway::resolve_servable_site_file`] (issue #528), so the lookup +
+/// withholding decision can be exercised without a live `Session` and the
+/// handler stays the only place that turns it into a response.
+struct SiteFileRefusal {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
 /// `true` when `data` starts with the ZIP local-file-header magic (`PK\x03\x04`).
 pub(super) fn is_zip_archive(data: &[u8]) -> bool {
     data.starts_with(&[0x50, 0x4b, 0x03, 0x04])
@@ -397,30 +407,22 @@ impl FerroGateway {
         };
         let entry = entry.clone();
 
-        let id = resolved.file_asset_id(tenant, site, &entry.path);
-        let asset = match state.get_asset(&id).await {
-            Ok(Some(asset)) => asset,
-            Ok(None) => {
+        let asset = match self
+            .resolve_servable_site_file(&resolved, tenant, site, &entry.path)
+            .await
+        {
+            Ok(asset) => asset,
+            Err(refusal) => {
+                let status = refusal.status;
                 write_json_error(
                     session,
-                    StatusCode::NOT_FOUND,
-                    "site_file_not_found",
-                    format!("manifest lists {} but its object is missing", entry.path),
+                    status,
+                    refusal.code,
+                    refusal.message,
                     &ctx.request_id,
                 )
                 .await?;
-                return Ok(StatusCode::NOT_FOUND);
-            }
-            Err(error) => {
-                write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "storage_unavailable",
-                    error.to_string(),
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(StatusCode::SERVICE_UNAVAILABLE);
+                return Ok(status);
             }
         };
 
@@ -848,6 +850,65 @@ impl FerroGateway {
                 manifest,
                 keying: SiteFileKeying::Legacy,
             }))
+    }
+
+    /// Loads the row for one resolved manifest entry AND enforces the #366
+    /// withholding on it (issue #528). The serve path's only file lookup.
+    ///
+    /// The withheld check lives HERE, on the row this surface is about to write
+    /// to a browser, because the other three bucket-backed read surfaces each
+    /// enforce it themselves -- the registry pull filters non-downloadable rows
+    /// out of resolution (`handle_asset_pull`), and `read_asset_content` refuses
+    /// them at the chokepoint the `fetch_asset` tool and MCP `resources/read`
+    /// share -- while the static-site serve had no check at all. It relied on
+    /// the INVARIANT that per-file rows are only ever written `Visible`, after
+    /// the parent bundle screened clean. That invariant holds today and is
+    /// enforced in `commit_site_bundle`, one function away, which is exactly the
+    /// problem: this is the anonymous, browser-facing, `text/html` surface, so
+    /// an unproven object reaching it is malware serving, and "no writer will
+    /// ever store a withheld row under a key the manifest names" must not be the
+    /// only thing standing between the two.
+    ///
+    /// A withheld row is refused as `site_file_not_found` -- indistinguishable
+    /// from an absent one, the disposition every other read surface uses -- so
+    /// the refusal never confirms that quarantined bytes exist.
+    ///
+    /// Extracted from the handler so the test helper resolves files through the
+    /// SAME code rather than a mirror of it: a mirrored lookup would keep
+    /// passing with the gate deleted.
+    async fn resolve_servable_site_file(
+        &self,
+        resolved: &ResolvedSiteBundle,
+        tenant: &str,
+        site: &str,
+        path: &str,
+    ) -> Result<StoredAsset, SiteFileRefusal> {
+        let id = resolved.file_asset_id(tenant, site, path);
+        let asset = match self.state.current().get_asset(&id).await {
+            Ok(Some(asset)) => asset,
+            Ok(None) => {
+                return Err(SiteFileRefusal {
+                    status: StatusCode::NOT_FOUND,
+                    code: "site_file_not_found",
+                    message: format!("manifest lists {path} but its object is missing"),
+                })
+            }
+            Err(error) => {
+                return Err(SiteFileRefusal {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "storage_unavailable",
+                    message: error.to_string(),
+                })
+            }
+        };
+        if !asset.is_downloadable() {
+            return Err(SiteFileRefusal {
+                status: StatusCode::NOT_FOUND,
+                code: "site_file_not_found",
+                message: format!("no file for {path} in site {tenant}/{site}"),
+            });
+        }
+        Ok(asset)
     }
 
     /// Maps the BARE per-file reference the admin console addresses a static

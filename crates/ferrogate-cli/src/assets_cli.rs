@@ -131,6 +131,19 @@ pub(crate) fn print_json_or_raise(response: &RawHttpResponse, action: &str) -> A
             String::from_utf8_lossy(&response.body)
         );
     }
+    // #528: 202 is the gateway's "stored, but WITHHELD" terminal -- the asset
+    // screened `pending_scan`/`quarantined` and no read surface will return it
+    // until it is promoted. The body says so in `asset.visibility`, but stdout
+    // here is a JSON pipe, so the human-facing warning goes to stderr rather
+    // than letting a silent success scroll past. It is NOT an error: the write
+    // committed and the version is claimed, so exiting non-zero would invite a
+    // retry against an immutable version that now exists.
+    if response.status == 202 {
+        eprintln!(
+            "warning: {action} was ACCEPTED but the asset is WITHHELD pending screening; \
+             it is not downloadable until promoted (see asset.visibility below)"
+        );
+    }
     println!("{}", String::from_utf8_lossy(&response.body));
     Ok(())
 }

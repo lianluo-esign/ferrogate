@@ -53,6 +53,9 @@ function assetRow(name: string, version: string): AdminSchema<"AssetSummary"> {
     content_hash: "a".repeat(64),
     size_bytes: 100,
     storage_backed: false,
+    // #528: AssetSummary now carries its screening state; a listed row is
+    // `visible` by construction (#366 withholds the others).
+    visibility: "visible",
     created_at_unix: 1000,
     updated_at_unix: 1000,
   };

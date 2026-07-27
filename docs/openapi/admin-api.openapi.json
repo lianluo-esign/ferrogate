@@ -10414,7 +10414,17 @@
         },
         "responses": {
           "200": {
-            "description": "Published asset metadata including authoritative size and SHA-256.",
+            "description": "Published asset metadata including authoritative size and SHA-256. The push screened clean: asset.visibility is visible and the asset is serving now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetMutationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Stored but WITHHELD (#528). The version is durably claimed and immutable, yet the screening verdict was not clean: asset.visibility is pending_scan (a deferred or out-of-band scan has not completed) or quarantined, so the asset is absent from every list, manifest, resolution, and download surface until it is promoted via POST /v1/assets/{asset_type}/{name}/{version}/visibility. Do not report a successful publication on this status; branch on it, or read asset.visibility.",
             "content": {
               "application/json": {
                 "schema": {
@@ -12699,7 +12709,17 @@
         },
         "responses": {
           "200": {
-            "description": "Verified committed asset metadata.",
+            "description": "Verified committed asset metadata. The commit screened clean: asset.visibility is visible and the asset is serving now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetMutationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Verified and stored, but WITHHELD (#528). The bytes are durable and the version is immutable, yet asset.visibility is pending_scan or quarantined, so the asset is absent from every list, manifest, resolution, and download surface until promoted via POST /v1/assets/{asset_type}/{name}/{version}/visibility. This is the ordinary terminal for a large object under a configured async scan threshold or an out-of-process scanner that never saw the streamed bytes. Do not report a successful publication on this status; branch on it, or read asset.visibility.",
             "content": {
               "application/json": {
                 "schema": {
@@ -25863,6 +25883,15 @@
             "type": "boolean",
             "description": "True for private bucket storage. Internal storage_uri, bucket endpoint, and credentials are not serialized."
           },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "pending_scan",
+              "quarantined"
+            ],
+            "description": "Durable trust-screening state of the row (#366). Only visible is downloadable: pending_scan (deferred or out-of-band scan not yet completed) and quarantined (the scanner or a fail-closed-unavailable policy flagged it) are stored but WITHHELD from every read surface and omitted from consumer listings until promoted. Read this rather than inferring publication from a 2xx."
+          },
           "created_at_unix": {
             "type": "integer",
             "format": "int64"
@@ -25882,6 +25911,7 @@
           "content_hash",
           "size_bytes",
           "storage_backed",
+          "visibility",
           "created_at_unix",
           "updated_at_unix"
         ]

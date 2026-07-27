@@ -76,7 +76,10 @@ use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
     auth::{authenticate, AuthContext},
-    responses::{write_json_error, write_json_response, AssetMutationResponse, AssetSummary},
+    // #528: this module no longer builds an `AssetSummary` itself -- every
+    // terminal goes through `AssetMutationResponse::for_asset`, which derives
+    // the body AND the status from the same durable row.
+    responses::{write_json_error, write_json_response, AssetMutationResponse},
 };
 
 /// Small ceiling for the intent/commit JSON control bodies -- these carry
@@ -663,12 +666,13 @@ impl FerroGateway {
                     &expected_sha256,
                     &content_type,
                 ) {
-                    let body = AssetMutationResponse {
-                        object: "asset",
-                        asset: asset_summary(&existing),
-                    };
-                    return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
-                        .await;
+                    // #528: an idempotent re-commit reports the durable row's
+                    // CURRENT screening state. A retry of a commit that landed
+                    // `pending_scan` must not be the one answer that says
+                    // "published" -- the retry's caller is exactly the client
+                    // that needs to learn it is still withheld.
+                    let (status, body) = AssetMutationResponse::for_asset(&existing);
+                    return write_json_response(session, status, &body, &ctx.request_id).await;
                 }
                 if !existing_asset_uses_upload(&existing, &id, &commit.upload_id) {
                     if let Some(bucket) = state.asset_bucket_client() {
@@ -787,17 +791,10 @@ impl FerroGateway {
                 .await
                 {
                     Ok(CommitWinner::Matching(existing)) => {
-                        let body = AssetMutationResponse {
-                            object: "asset",
-                            asset: asset_summary(&existing),
-                        };
-                        return write_json_response(
-                            session,
-                            StatusCode::OK,
-                            &body,
-                            &ctx.request_id,
-                        )
-                        .await;
+                        // #528: reconciling onto a concurrent winner reports
+                        // THAT row's screening state, not an assumed success.
+                        let (status, body) = AssetMutationResponse::for_asset(&existing);
+                        return write_json_response(session, status, &body, &ctx.request_id).await;
                     }
                     Ok(CommitWinner::Conflict) => {
                         let _ = best_effort_delete(&bucket, &staging_key).await;
@@ -1154,11 +1151,14 @@ impl FerroGateway {
                     ),
                 ));
                 let _ = best_effort_delete(&bucket, &staging_key).await;
-                let body = AssetMutationResponse {
-                    object: "asset",
-                    asset: asset_summary(&asset),
-                };
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                // #528: the presigned commit is the surface most likely to land
+                // withheld -- a streamed object above the buffer budget is
+                // `pending_scan` under any out-of-process scanner, and the async
+                // threshold defers large objects by design. That is exactly the
+                // production posture in which "Large object committed" was the
+                // response for an object no read surface would return.
+                let (status, body) = AssetMutationResponse::for_asset(&asset);
+                write_json_response(session, status, &body, &ctx.request_id).await
             }
             Ok(AssetQuotaAdmission::AlreadyExists) => {
                 let winner = match state.get_asset(&id).await {
@@ -1210,11 +1210,9 @@ impl FerroGateway {
                     &expected_sha256,
                     &content_type,
                 ) {
-                    let body = AssetMutationResponse {
-                        object: "asset",
-                        asset: asset_summary(&winner),
-                    };
-                    write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    // #528: same rule for the create-conflict winner.
+                    let (status, body) = AssetMutationResponse::for_asset(&winner);
+                    write_json_response(session, status, &body, &ctx.request_id).await
                 } else {
                     write_asset_version_immutable(session, ctx, asset_type, name, version).await
                 }
@@ -2342,21 +2340,6 @@ fn effective_max_object_bytes(
 /// True for a canonical 64-character lowercase-or-uppercase hex SHA-256.
 fn is_hex_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn asset_summary(asset: &StoredAsset) -> AssetSummary {
-    AssetSummary {
-        id: asset.id.clone(),
-        asset_type: asset.asset_type.clone(),
-        name: asset.name.clone(),
-        version: asset.version.clone(),
-        content_type: asset.content_type.clone(),
-        content_hash: asset.content_hash.clone(),
-        size_bytes: asset.size_bytes,
-        storage_backed: asset.storage_uri.is_some(),
-        created_at_unix: asset.created_at_unix,
-        updated_at_unix: asset.updated_at_unix,
-    }
 }
 
 fn now_unix_seconds() -> i64 {

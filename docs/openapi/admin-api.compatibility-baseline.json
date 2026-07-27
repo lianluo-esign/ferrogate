@@ -9761,7 +9761,7 @@
         },
         "responses": {
           "200": {
-            "description": "Published asset metadata including authoritative size and SHA-256.",
+            "description": "Published asset metadata including authoritative size and SHA-256. The push screened clean: asset.visibility is visible and the asset is serving now.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11768,7 +11768,7 @@
         },
         "responses": {
           "200": {
-            "description": "Verified committed asset metadata.",
+            "description": "Verified committed asset metadata. The commit screened clean: asset.visibility is visible and the asset is serving now.",
             "content": {
               "application/json": {
                 "schema": {
@@ -23812,6 +23812,15 @@
             "type": "boolean",
             "description": "True for private bucket storage. Internal storage_uri, bucket endpoint, and credentials are not serialized."
           },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "pending_scan",
+              "quarantined"
+            ],
+            "description": "Durable trust-screening state of the row (#366). Only visible is downloadable: pending_scan (deferred or out-of-band scan not yet completed) and quarantined (the scanner or a fail-closed-unavailable policy flagged it) are stored but WITHHELD from every read surface and omitted from consumer listings until promoted. Read this rather than inferring publication from a 2xx."
+          },
           "created_at_unix": {
             "type": "integer",
             "format": "int64"
@@ -23831,6 +23840,7 @@
           "content_hash",
           "size_bytes",
           "storage_backed",
+          "visibility",
           "created_at_unix",
           "updated_at_unix"
         ]

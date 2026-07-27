@@ -390,3 +390,130 @@ fn an_inline_asset_is_never_refused_by_the_bucket_memory_bound() {
     };
     assert_eq!(&*content, b"inline bytes");
 }
+
+/// #528: a push/commit that stored a WITHHELD row must not be
+/// indistinguishable from one that published. Both publish surfaces build
+/// their terminal with `AssetMutationResponse::for_asset`, so this walks every
+/// durable visibility through it and asserts the three responses differ on the
+/// wire -- in status AND in body.
+///
+/// The assertion is on the produced (status, body) pairs, not on source text:
+/// pinning the status to `OK` again, or dropping `visibility` from
+/// `AssetSummary`, reds it.
+#[test]
+fn a_withheld_push_is_distinguishable_from_a_published_one() {
+    use ferrogate_storage::AssetVisibility;
+
+    let terminal = |visibility| {
+        let (status, body) =
+            AssetMutationResponse::for_asset(&asset_with_visibility("1.0.0", visibility));
+        let json = serde_json::to_value(&body).expect("mutation response serializes");
+        (
+            status,
+            json["asset"]["visibility"]
+                .as_str()
+                .expect("the summary names the screening state")
+                .to_string(),
+        )
+    };
+
+    let published = terminal(AssetVisibility::Visible);
+    let pending = terminal(AssetVisibility::PendingScan);
+    let quarantined = terminal(AssetVisibility::Quarantined);
+
+    assert_eq!(published, (StatusCode::OK, "visible".to_string()));
+    // 202: durably stored and immutably claimed, but serving nothing yet.
+    assert_eq!(pending, (StatusCode::ACCEPTED, "pending_scan".to_string()));
+    assert_eq!(
+        quarantined,
+        (StatusCode::ACCEPTED, "quarantined".to_string())
+    );
+
+    // The property the issue is actually about: a client cannot mistake either
+    // withheld terminal for a publication, on the status code alone or on the
+    // body alone.
+    assert_ne!(published.0, pending.0);
+    assert_ne!(published.0, quarantined.0);
+    assert_ne!(published.1, pending.1);
+    assert_ne!(published.1, quarantined.1);
+    assert_ne!(pending.1, quarantined.1, "the two withheld states differ");
+}
+
+/// #528: every status the asset publish terminal can produce must be DECLARED
+/// for both publishing operations, so a generated client has a branch for the
+/// one that means "stored but not serving".
+///
+/// Coupled to the produced set rather than to a literal list: adding a fourth
+/// visibility with a new status and not declaring it reds this, and deleting
+/// either `202` declaration from the spec reds it too.
+#[test]
+fn every_asset_publish_terminal_is_declared_in_the_openapi_document() {
+    use ferrogate_storage::AssetVisibility;
+
+    const SPEC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/openapi/admin-api.openapi.json"
+    ));
+
+    let produced: std::collections::BTreeSet<u16> = [
+        AssetVisibility::Visible,
+        AssetVisibility::PendingScan,
+        AssetVisibility::Quarantined,
+    ]
+    .into_iter()
+    .map(|visibility| crate::responses::asset_mutation_status(visibility).as_u16())
+    .collect();
+    assert_eq!(
+        produced,
+        [200u16, 202].into_iter().collect(),
+        "asset publish terminals changed"
+    );
+
+    let spec: serde_json::Value =
+        serde_json::from_str(SPEC).expect("admin-api.openapi.json parses");
+    // Both surfaces that answer with an AssetMutationResponse for a row this
+    // request screened: the inline registry push and the presigned commit.
+    for (path, method) in [
+        ("/v1/assets/{asset_type}/{name}/{version}", "put"),
+        (
+            "/v1/assets/presign/commit/{asset_type}/{name}/{version}",
+            "post",
+        ),
+    ] {
+        let declared = spec["paths"][path][method]["responses"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{method} {path} declares responses"));
+        for status in &produced {
+            assert!(
+                declared.contains_key(&status.to_string()),
+                "{method} {path} can return {status} but does not declare it; declared = {:?}",
+                declared.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// #528 regression guard for the shape change: `WithheldAssetSummary` flattens
+/// an `AssetSummary` that now carries `visibility` itself. A sibling field of
+/// the same name beside a `#[serde(flatten)]` serializes the key TWICE -- valid
+/// JSON that `serde_json::Value` silently de-duplicates, so a `Value`-based
+/// assertion would never see it. This reads the raw serialized text.
+#[test]
+fn the_withheld_listing_emits_visibility_exactly_once() {
+    use ferrogate_storage::AssetVisibility;
+
+    let row = WithheldAssetSummary {
+        asset: AssetSummary::from_stored(&asset_with_visibility(
+            "1.0.0",
+            AssetVisibility::PendingScan,
+        )),
+        screening_evidence: Some("scan=pending_scan".to_string()),
+    };
+    let json = serde_json::to_string(&row).expect("withheld row serializes");
+    assert_eq!(
+        json.matches("\"visibility\"").count(),
+        1,
+        "visibility must appear exactly once: {json}"
+    );
+    assert!(json.contains("\"visibility\":\"pending_scan\""), "{json}");
+}

@@ -177,6 +177,9 @@ function buildState(): AssetsState {
     ],
   };
 
+  // #528: every row here is `visible` -- GET /v1/assets withholds the
+  // pending_scan/quarantined ones (#366), so a listed row cannot be anything
+  // else.
   const summaries: AssetSummary[] = [
     {
       id: "asset_deploy_cli_200",
@@ -187,6 +190,7 @@ function buildState(): AssetsState {
       content_hash: HASH_A,
       size_bytes: 734_003_200,
       storage_backed: true,
+      visibility: "visible",
       created_at_unix: 1_752_000_000,
       updated_at_unix: 1_752_000_900,
     },
@@ -199,6 +203,7 @@ function buildState(): AssetsState {
       content_hash: HASH_C,
       size_bytes: 1_048_576,
       storage_backed: false,
+      visibility: "visible",
       created_at_unix: 1_751_900_000,
       updated_at_unix: 1_752_000_500,
     },
@@ -211,6 +216,7 @@ function buildState(): AssetsState {
       content_hash: HASH_F,
       size_bytes: 2_097_152,
       storage_backed: false,
+      visibility: "visible",
       created_at_unix: 1_751_850_000,
       updated_at_unix: 1_751_860_000,
     },
@@ -223,6 +229,7 @@ function buildState(): AssetsState {
       content_hash: HASH_D,
       size_bytes: 524_288,
       storage_backed: false,
+      visibility: "visible",
       created_at_unix: 1_751_800_000,
       updated_at_unix: 1_751_850_000,
     },
@@ -235,6 +242,7 @@ function buildState(): AssetsState {
       content_hash: HASH_E,
       size_bytes: 4_096,
       storage_backed: false,
+      visibility: "visible",
       created_at_unix: 1_751_700_000,
       updated_at_unix: 1_751_760_000,
     },
@@ -430,6 +438,9 @@ async function handleAssetsRequest(
       content_hash: body.sha256 ?? HASH_A,
       size_bytes: body.size_bytes ?? 0,
       storage_backed: true,
+      // #528: this fixture models the CLEAN commit (answered 200 below). A
+      // withheld commit answers 202 with visibility pending_scan/quarantined.
+      visibility: "visible",
       created_at_unix: 1_752_100_000,
       updated_at_unix: 1_752_100_000,
     };
