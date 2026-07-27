@@ -10677,6 +10677,7 @@
           "admin-read"
         ],
         "summary": "List DB-backed permission actions.",
+        "description": "Lists the DB-backed permission actions visible to the caller. Scoped to the caller (issue #518): a platform-operator key (no organization_id) receives the entire global catalog; a tenant-scoped admin.read key receives only the slice its own tenant can actually reach -- the roles bound to it via /admin/v1/tenant-roles/{tenant_id}, and only the permission keys those roles compose. The RBAC catalog is deliberately not public-to-tenants: it is the platform's authority model.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {
@@ -10904,6 +10905,7 @@
           "admin-read"
         ],
         "summary": "List DB-backed roles.",
+        "description": "Lists the DB-backed roles visible to the caller. Scoped to the caller (issue #518): a platform-operator key (no organization_id) receives the entire global catalog; a tenant-scoped admin.read key receives only the slice its own tenant can actually reach -- the roles bound to it via /admin/v1/tenant-roles/{tenant_id}, and only the permission keys those roles compose. The RBAC catalog is deliberately not public-to-tenants: it is the platform's authority model.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {
