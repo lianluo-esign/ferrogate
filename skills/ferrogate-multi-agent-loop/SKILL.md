@@ -159,7 +159,9 @@ Two consequences worth stating, because they change what the other roles see:
    the gate owns → Done.
 2. Every failure bounces to **Ready** — never to In progress, never one lane
    back.
-3. ≤ 3 code-developing subagents in parallel (user-controlled ceiling).
+3. ≤ **6** code-developing subagents in parallel (user-controlled ceiling,
+   raised from 3 on 2026-07-27; the number has moved 3→2→3→6, so always honour
+   the latest directive over any figure written in a loop prompt).
 3b. The dev lane runs **`cargo check --all-targets` only** — no `build`, no
    `test`, no mutation pass — and every dev slice ends with the same five
    steps: merge to `main`, delete the worktree, comment, move to **In review**,
