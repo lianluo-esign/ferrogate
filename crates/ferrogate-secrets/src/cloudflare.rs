@@ -315,11 +315,18 @@ impl CloudflareSecretResolver {
             bail!(
                 "Cloudflare Secrets Store secret name {name:?} is not canonical: it must match \
                  [a-z0-9-]+ so that exactly one secret maps to \
-                 {prefix}{upper}. Writing a non-canonical name would let it \
+                 {variable}. Writing a non-canonical name would let it \
                  collide with a canonical sibling under the same environment variable, and the \
                  resolver would refuse to read it back",
-                prefix = crate::cloudflare_bindings::CF_BINDING_ENV_PREFIX,
-                upper = name.to_ascii_uppercase().replace('-', "_"),
+                // The point of naming the variable is to show the operator the
+                // collision, so it has to be the variable the export actually
+                // produces. Uppercasing and mapping only `-` left `.`, `/` and
+                // spaces intact, so `openai.api.key` was reported as colliding
+                // on `FERROGATE_CF_SECRET_OPENAI.API.KEY` -- a name no shell
+                // can even export, and not the `..._OPENAI_API_KEY` it really
+                // collides with. `cf_binding_env_var` is the one mapping the
+                // resolver reads through.
+                variable = crate::cloudflare_bindings::cf_binding_env_var(name),
             );
         }
         block_on_cloudflare(self.create_secret_async(store, name, value, comment))

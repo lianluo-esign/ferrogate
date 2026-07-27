@@ -64,6 +64,13 @@ jobs:
     name: rust-cli-tooling-tests
     uses: ./.github/workflows/rust-cli-tooling-tests.yml
 
+  # #561: the gateway trunk, agent-worker, and the secret/payment/edge crates.
+  # Every one of them was compiled by CI and executed by no job until this line
+  # existed.
+  platform-crate-tests:
+    name: rust-platform-crate-tests
+    uses: ./.github/workflows/rust-platform-crate-tests.yml
+
   gateway-runtime:
     name: rust-gateway-runtime
     uses: ./.github/workflows/rust-gateway-runtime.yml
@@ -92,6 +99,7 @@ jobs:
       - ai-proxy-tests
       - governed-decision-conformance
       - cli-tooling-tests
+      - platform-crate-tests
       - gateway-runtime
       - e2e-harness
       - supabase-storage-tests

@@ -65,6 +65,17 @@ jobs:
       - name: Validate module layout
         run: python3 scripts/check-module-layout.py
 
+      # #561: the reason a 136k-line crate ran nowhere for its whole life is
+      # that nothing was watching for it. This fails when a workspace member is
+      # selected by no `cargo test` in the workflows ci.yml reaches, or by none
+      # in scripts/local-test-modules.sh -- the second half matters because the
+      # local mirror had drifted from the CI matrices, and that drift is how the
+      # gap survived review.
+      - name: Validate CI crate coverage
+        run: |
+          python3 -m unittest scripts/test_ci_crate_coverage.py
+          python3 scripts/check-ci-crate-coverage.py
+
       - name: Validate OpenAPI schemas
         run: |
           PYTHONPATH=scripts python3 -m unittest scripts/test_openapi_contract.py

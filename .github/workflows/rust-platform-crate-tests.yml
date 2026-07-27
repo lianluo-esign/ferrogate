@@ -1,0 +1,95 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-27
+# description: FerroGate gateway trunk, agent worker, and secret/payment/edge
+# crate test CI (issue #561).
+
+# The crates this workflow runs were, until #561, compiled by CI and executed by
+# no job at all: ferrogate-gateway (136k lines, 1,067 tests, the largest crate in
+# the workspace, holding auth_test.rs, server/rbac_test.rs, auth_admission_test.rs
+# and tenant_scope_reads_fault.rs), agent-worker (342 tests), and the
+# secrets/payments/cloudflare/sync-bridge crates. `cargo check` compiled them, so
+# they never looked absent.
+#
+# Every slice below was executed locally before it was written down, and the
+# counts in each comment are what that run printed. `--skip` filters name real,
+# filed failures; no slice asserts a green run nobody has watched.
+name: Rust platform crate tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.88.0
+
+jobs:
+  platform-crate-tests:
+    name: rust-platform-crate-tests / ${{ matrix.slice }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 1,063 passed / 4 skipped / 0 ignored, 2.4s of test time after the
+          # crate builds. The four skips are issue #563: their shared fixture
+          # `signed_snapshot_test_api_key` mints an API key declaring neither
+          # organization_id nor platform_operator, which #540 turned into a hard
+          # `Config::validate()` refusal. Choosing which field it should declare
+          # is a #540 judgement, not a CI-wiring one, so the slice names them and
+          # runs the other 1,063 rather than waiting or pretending. Delete these
+          # four lines when #563 lands; they are substring filters and will go
+          # quietly no-op if the tests are renamed, which is what #563 tracks.
+          - slice: gateway
+            package: ferrogate-gateway
+            args: >-
+              --all-features --
+              --skip signed_shared_snapshot_verifies_activates_and_rejects_forgery
+              --skip signed_snapshot_replay_floor_advances_on_local_publish
+              --skip signed_snapshot_replay_floor_persists_across_restart
+              --skip unsigned_shared_snapshots_are_unaffected_by_the_persisted_replay_floor
+          # 342 passed / 0 failed / 0 ignored, 2.6s. Its only previous mention
+          # anywhere was `--test firecracker_boot_validation` inside
+          # firecracker-boot-validation.yml, which is workflow_dispatch-only and
+          # needs a KVM runner -- so it was not CI coverage, and the other 341
+          # tests ran nowhere. The Firecracker integration targets skip cleanly
+          # without /dev/kvm and are included here on that basis.
+          - slice: agent_worker
+            package: agent-worker
+            args: --all-features
+          # 115 passed / 0 failed / 0 ignored.
+          - slice: cloudflare
+            package: ferrogate-cloudflare
+            args: --all-features
+          # 50 passed / 0 failed / 0 ignored -- 49 of them until #561 fixed the
+          # cf:// collision guard's error text, which this slice's first run
+          # caught.
+          - slice: secrets
+            package: ferrogate-secrets
+            args: --all-features
+          # 47 passed / 0 failed / 0 ignored.
+          - slice: payments
+            package: ferrogate-payments
+            args: --all-features
+          # Zero tests today (80 lines). The slice exists so the crate is
+          # selected rather than merely compiled: the state #561 is about is
+          # indistinguishable, from the outside, from a crate that has no tests
+          # yet, and only one of those two is fine.
+          - slice: sync_bridge
+            package: ferrogate-sync-bridge
+            args: --all-features
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Test ${{ matrix.slice }} slice
+        run: cargo test -p "${{ matrix.package }}" ${{ matrix.args }}

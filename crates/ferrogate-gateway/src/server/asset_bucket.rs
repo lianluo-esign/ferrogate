@@ -2279,7 +2279,13 @@ mod tests {
         /// - `asset_presign.rs` calls `get_object_if_present` on the commit's
         ///   buffered leg, which is only reached after `actual_size <=
         ///   buffer_limit` and passes that same limit to the transport.
-        const ALLOWED: [&str; 2] = ["gateway/asset_bucket.rs", "gateway/asset_presign.rs"];
+        // Paths are relative to this crate's `src`. They said `gateway/...`
+        // until #561: #553 stage 3b moved the whole gateway trunk from
+        // `ferrogate-cli/src/gateway/` to `ferrogate-gateway/src/server/`, and
+        // the allow-list did not move with it, so every entry stopped matching
+        // and the two files this guard exists to exempt became its only
+        // offenders. Nothing ran the crate's suite, so the guard sat failing.
+        const ALLOWED: [&str; 2] = ["server/asset_bucket.rs", "server/asset_presign.rs"];
 
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders: Vec<String> = Vec::new();
@@ -2356,10 +2362,13 @@ mod tests {
         ///   which never came from the bucket.
         /// - `asset_bucket.rs` hosts this scan, whose own source carries the
         ///   needle it searches for.
+        //
+        // The `server/` prefixes are the #553 stage 3b location; see the
+        // allow-list above for why they were stale.
         const ALLOWED: [&str; 4] = [
-            "gateway/asset_admission.rs",
-            "gateway/asset_bucket.rs",
-            "gateway/assets.rs",
+            "server/asset_admission.rs",
+            "server/asset_bucket.rs",
+            "server/assets.rs",
             "state_assets.rs",
         ];
 
@@ -2461,7 +2470,7 @@ mod tests {
                     .replace('\\', "/");
                 // This file hosts the scan, so its own source carries the
                 // needle; the same exemption the two guards above take.
-                if relative == "gateway/asset_bucket.rs" {
+                if relative == "server/asset_bucket.rs" {
                     continue;
                 }
                 scanned += 1;
@@ -2544,7 +2553,7 @@ mod tests {
                     .replace('\\', "/");
                 // This file hosts the scan, so its own source carries the
                 // needle; the same exemption the guards above take.
-                if relative == "gateway/asset_bucket.rs" {
+                if relative == "server/asset_bucket.rs" {
                     continue;
                 }
                 let body = std::fs::read_to_string(&path).expect("readable source file");

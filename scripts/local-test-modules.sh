@@ -27,6 +27,7 @@ Modules:
   agentic-gateway
   ai-proxy
   cli-tooling
+  platform-crates
   gateway-runtime
   e2e-harness
   supabase-storage
@@ -64,6 +65,10 @@ run_quality() {
   cargo test -p ferrogate-cli --all-features config::tests
   cargo test -p ferrogate-cli --all-features config::validation_tests
   python3 scripts/check-openapi.py
+  # Coverage gate (#561): fails when a workspace member's tests are executed by
+  # no CI slice, or by no module in this file. Sub-second, no cargo work.
+  python3 -m unittest scripts/test_ci_crate_coverage.py
+  python3 scripts/check-ci-crate-coverage.py
   # Greppability gate (#487): a NUL byte makes git/grep/ripgrep treat a source
   # file as binary and skip it silently, so every repo-wide sweep (secret scan,
   # literal audits, dead-code greps) quietly loses coverage.
@@ -97,7 +102,30 @@ run_agentic_gateway() {
   cargo test -p ferrogate-providers --all-features
   cargo test -p ferrogate-mcp --all-features
   cargo test -p ferrogate-runtime --all-features
+  # The `guardrails` slice of rust-agentic-gateway-tests.yml. It was missing
+  # here (#561), so the crate ran in CI and nowhere locally.
+  cargo test -p ferrogate-guardrails --all-features
   cargo test -p ferrogate-cli --all-features --test agentic_lite
+}
+
+# Mirrors rust-platform-crate-tests.yml (#561). Until that workflow existed,
+# none of these crates -- ferrogate-gateway among them, the largest in the
+# workspace -- was executed by any job or any module here.
+run_platform_crates() {
+  ensure_toolchain
+  # The four skips are issue #563; keep them identical to the workflow's, and
+  # delete them in both places at once. See rust-platform-crate-tests.yml for
+  # why they are skipped rather than waited on.
+  cargo test -p ferrogate-gateway --all-features -- \
+    --skip signed_shared_snapshot_verifies_activates_and_rejects_forgery \
+    --skip signed_snapshot_replay_floor_advances_on_local_publish \
+    --skip signed_snapshot_replay_floor_persists_across_restart \
+    --skip unsigned_shared_snapshots_are_unaffected_by_the_persisted_replay_floor
+  cargo test -p agent-worker --all-features
+  cargo test -p ferrogate-cloudflare --all-features
+  cargo test -p ferrogate-secrets --all-features
+  cargo test -p ferrogate-payments --all-features
+  cargo test -p ferrogate-sync-bridge --all-features
 }
 
 run_ai_proxy() {
@@ -113,12 +141,20 @@ run_cli_tooling() {
   ensure_toolchain
   cargo test -p ferrogate-cli --all-features --bins
   cargo test -p ferrogate-cli --all-features --test check_command --test workspace_skeleton
+  # Mirrors the `cli_e2e` slice of `rust-cli-tooling-tests.yml`, which was the
+  # remaining hole in this mirror (#561).
+  cargo test -p ferrogate-cli --all-features \
+    --test control_cli_e2e --test control_cli_resource_e2e --test ctl_lifecycle_e2e
   # Mirrors the `control_plane_client` slice of `rust-cli-tooling-tests.yml`
   # (renamed from `cli_core` with the crate in #553). It was missing here, so
   # the crate's ~17k lines of hermetic client tests had no local invocation at
-  # all. This function is still not a complete mirror -- `cli_e2e` and a
-  # `ferrogate-gateway` slice are also absent, and the gateway one is absent
-  # from CI too; both are tracked in #561.
+  # all.
+  #
+  # This still does not run `cargo test -p ferrogate-cli` unfiltered: 50 of the
+  # crate's 63 integration targets are selected by nothing, and the unfiltered
+  # run is red on arrival -- 352 passed, 13 failed across 8 targets, measured in
+  # #561 and filed as #564. Adding a job for it before those land would just
+  # produce a red check that the next person turns off.
   cargo test -p ferrogate-control-plane-client --all-features
   cargo test -p ferrogate-test --all-features
 }
@@ -170,6 +206,7 @@ run_module() {
     agentic-gateway) run_agentic_gateway ;;
     ai-proxy) run_ai_proxy ;;
     cli-tooling) run_cli_tooling ;;
+    platform-crates) run_platform_crates ;;
     gateway-runtime) run_gateway_runtime ;;
     e2e-harness) run_e2e_harness ;;
     supabase-storage) run_supabase_storage ;;
@@ -201,6 +238,7 @@ if [[ "$1" == "all" ]]; then
     agentic-gateway
     ai-proxy
     cli-tooling
+    platform-crates
     gateway-runtime
     e2e-harness
     supabase-storage
