@@ -90,9 +90,10 @@ impl RequestSpec {
 ///
 /// They were public. Making them crate-private is the load-bearing half of "a
 /// new verb cannot issue an unattributable request": with a private field, a
-/// struct literal outside `ferrogate-cli-core` does not compile, so the **only**
-/// way any consumer can obtain a `PreparedRequest` is [`prepare_request`] — and
-/// [`prepare_request`] takes a [`ClientActionIdentity`] as a required argument.
+/// struct literal outside `ferrogate-control-plane-client` does not compile, so
+/// the **only** way any consumer can obtain a `PreparedRequest` is
+/// [`prepare_request`] — and [`prepare_request`] takes a
+/// [`ClientActionIdentity`] as a required argument.
 /// Since [`Transport::execute`] accepts nothing else, every byte this stack puts
 /// on the wire came out of a call that had an identity in hand.
 ///

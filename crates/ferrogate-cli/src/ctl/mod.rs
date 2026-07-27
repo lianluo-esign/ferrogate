@@ -4,10 +4,10 @@
 // Created: 2026-07-24
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-//! Control Plane API client commands wired onto the shared `ferrogate-cli-core`
+//! Control Plane API client commands wired onto the shared `ferrogate-control-plane-client`
 //! foundation (issue #360).
 //!
-//! The `ferrogate-cli-core` crate (foundation commit for #360) already owns the
+//! The `ferrogate-control-plane-client` crate (foundation commit for #360) already owns the
 //! typed transport, context/precedence resolution, credential sources, output
 //! rendering, error/exit taxonomy, and the compile-time command registry — with
 //! its own unit tests. What was missing was any *consumer*: nothing composed the
@@ -28,7 +28,7 @@
 //! * [`context_cmd`] — the `context` verbs (create/list/show/use/delete).
 //! * [`ops_cmd`] — the `ops status` vertical slice on the shared client.
 //! * [`resource_cmd`] — the generic `ctl <group> <verb>` tree (#361–#365) built
-//!   from the `ferrogate-cli-core` registry and dispatched through the same
+//!   from the `ferrogate-control-plane-client` registry and dispatched through the same
 //!   foundation, with no per-resource code in the binary.
 
 pub(crate) mod context_cmd;
@@ -40,7 +40,7 @@ pub(crate) mod store;
 /// Cross-crate pin that the CLI's `action_fingerprint` byte-matches the
 /// runtime's `CanonicalCapabilityTarget::fingerprint` (issue #505). It lives
 /// here, in the binary, because this is the only crate that depends on BOTH
-/// `ferrogate-cli-core` and `ferrogate-runtime`.
+/// `ferrogate-control-plane-client` and `ferrogate-runtime`.
 #[cfg(test)]
 #[path = "fingerprint_parity_test.rs"]
 mod fingerprint_parity_test;

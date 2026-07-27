@@ -200,7 +200,7 @@
 //! 2. [`crate::transport::prepare_request`] takes `&ClientActionIdentity` as a
 //!    **required parameter**. A request cannot be built without one.
 //! 3. [`crate::transport::PreparedRequest`]'s fields are `pub(crate)`, so no
-//!    crate outside `ferrogate-cli-core` can construct one — and
+//!    crate outside `ferrogate-control-plane-client` can construct one — and
 //!    [`crate::transport::Transport::execute`] accepts nothing else. Every byte
 //!    the CLI puts on the wire through this stack therefore came out of
 //!    `prepare_request`, which had an identity in hand.

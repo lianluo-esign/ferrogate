@@ -9,8 +9,8 @@
 //! and the guarantee that no token value is ever persisted.
 
 use super::*;
-use ferrogate_cli_core::auth::AuthSource;
-use ferrogate_cli_core::context::{Context, ContextStore};
+use ferrogate_control_plane_client::auth::AuthSource;
+use ferrogate_control_plane_client::context::{Context, ContextStore};
 
 fn sample_store() -> ContextStore {
     let mut store = ContextStore::default();

@@ -38,6 +38,51 @@
 //! abstraction the next slice deletes, and it would have put dynamic dispatch
 //! on the per-request path.
 //!
+//! # Testing a move this size: `-p ferrogate-gateway` is not enough
+//!
+//! Recorded here because it is the instruction a reviewer or a gate gets
+//! wrong. The code moved into this crate, so `cargo test -p
+//! ferrogate-gateway` looks like the right selector. It is not sufficient:
+//! `ferrogate-cli` kept its whole integration-test corpus, which on this tree
+//! is **40,816 lines across 63 targets in `crates/ferrogate-cli/tests/`** --
+//! more than seven times the 5,648 lines left in `crates/ferrogate-cli/src/`
+//! -- and nearly all of it drives code that now lives here. Those targets
+//! belong to the `ferrogate-cli` package and a `-p ferrogate-gateway` run
+//! cannot see them, so a verification that omits **`-p ferrogate-cli`** leaves
+//! the end-to-end suite for a 136k-line move unexecuted and still reports
+//! green.
+//!
+//! **CI does not close this, and the gap was measured rather than assumed.**
+//! `cargo test -p ferrogate-cli` is never run unfiltered anywhere; every
+//! workflow names individual targets. Counting the `--test` selectors across
+//! all of `.github/workflows/`, **13 of the 63 targets are selected (14,245
+//! lines); 50 targets and 26,571 lines are run by no workflow at all** --
+//! including `asset_presign_e2e` (3,278), `tenant_isolation_admin_api`
+//! (1,663), `control_cli_crud_round_trip_e2e` (1,399) and
+//! `config_catalog_scope_admin_api` (1,291). Several of those need live
+//! credentials or a Postgres and could not run on a hosted runner as written,
+//! which is a reason the corpus looks the way it does -- but it is not a
+//! reason to describe the suite as covered. Anyone verifying a #553 stage by
+//! hand should run `-p ferrogate-cli` explicitly, and anyone extending CI
+//! should treat this list, not the target count, as the coverage number.
+//!
+//! **And `-p ferrogate-gateway` is not run by CI at all.** Looking for where
+//! this crate's own tests execute turned up nothing: parsing every `package:`
+//! matrix key and every `-p <crate>` selector in `.github/workflows/`, the
+//! packages no workflow ever names are `ferrogate-gateway`,
+//! `ferrogate-cloudflare`, `ferrogate-payments`, `ferrogate-secrets` and
+//! `ferrogate-sync-bridge`. For this crate that is **963 `#[test]` plus 106
+//! `#[tokio::test]` -- 1,069 tests over 136,291 lines -- with no job that
+//! runs them**, including `auth_test.rs`, `server/rbac_test.rs`,
+//! `server/guardrail_policies_test.rs` and `tenant_scope_reads_fault.rs`.
+//! `scripts/local-test-modules.sh`, the local mirror of the CI slices, has
+//! the same gap. #553 created this crate; wiring it into CI was never part of
+//! any stage, so the largest crate in the workspace compiles in CI and is
+//! tested only by whatever `ferrogate-cli` integration targets happen to
+//! drive it. That is tracked as **#561** rather than fixed inside a rename
+//! slice -- adding a job whose suite has never been executed here would be
+//! asserting a green run nobody has seen.
+//!
 //! # The public surface, and why it is this and not more
 //!
 //! The rule this crate has used since stage 2: start from an empty export
@@ -53,9 +98,13 @@
 //! over `auth`, which had thirty-odd `pub` items for the same reason and now
 //! has four.
 //!
-//! The result, exactly: **22 `pub` declarations in 135k lines** -- five `pub
-//! mod` here, `server::assets`, and sixteen items -- against 1,301 that are
-//! `pub(crate)` or narrower. What `ferrogate-cli` names is the whole of it,
+//! The result, exactly: **22 bare-`pub` item declarations in 136,291 lines**
+//! -- five `pub mod` here, `server::assets`, and sixteen items -- against
+//! **1,317 item declarations that are `pub(crate)` or narrower**. (Both
+//! re-counted on this tree, item declarations only: a `pub(crate)` struct
+//! *field* is not an item and is not counted, which is why this number moves
+//! when a struct does. The earlier "1,301" was measured a few commits back.)
+//! What `ferrogate-cli` names is the whole of it,
 //! and it is eleven references from four files: [`server::serve`] and
 //! `server::assets::INLINE_ASSET_MAX_BYTES`,
 //! [`state::runtime_storage_repositories`], the four [`lifecycle`]
@@ -99,7 +148,13 @@
 //! crate the single enforcement authority for tenant scoping; it never asks
 //! the scope question. `ctl` speaks to the Control Plane API over HTTP and has
 //! no caller to scope. Every use of `CallerScope` on the current tree is in
-//! this crate, and the type is still `pub(crate)`.
+//! this crate, and the type is still `pub(crate)`. Counted rather than
+//! estimated, because this is the number a future reader re-checks:
+//! **35 occurrences in code across 7 files, 39 counting `UNSCOPED_TENANT_ID`
+//! (8 files), and 12 files in this crate mention the type at all.** The only
+//! file outside this crate that names it is `ferrogate-core`'s prose. (Stage
+//! 4 wrote "~25 uses across 11 files"; that was an estimate carried forward,
+//! and it was low.)
 //!
 //! So the move stays unmade, and now for a measured reason rather than a
 //! deferred one: it would publish a `pub` type with no external reader, and
@@ -112,7 +167,7 @@
 //!
 //! # What is NOT here, and should be
 //!
-//! This crate is now 135k lines and is the blob `ferrogate-cli` used to be,
+//! This crate is now 136,291 lines and is the blob `ferrogate-cli` used to be,
 //! moved. #553 stage 3b bought the crate boundary, not the decomposition:
 //! `server/` still holds the Pingora proxy and the ~50-resource Admin API
 //! handler surface in one directory, and [`state`] is still one `AppState`
@@ -120,6 +175,27 @@
 //! design decision with real answers to argue about, and doing it inside a
 //! move-only slice would have made the move unreviewable. It is the next
 //! stage's work, and the module names above are the seams to cut along.
+//!
+//! Two things #560 should NOT inherit as settled, written here because this
+//! is the file its reader opens:
+//!
+//! 1. **#553's stop condition cannot see the defect that remains.** It was
+//!    written as a measurement of `ferrogate-cli`, so it goes green when this
+//!    crate absorbs the blob. Measured on the tree that closes #553 (`.rs`
+//!    lines in git-tracked files under `crates/`): `ferrogate-gateway` is
+//!    **136,291 of 431,879 lines, 31.6%** -- down from `ferrogate-cli`'s
+//!    pre-#553 share, but still the largest single crate by a factor of
+//!    nearly two over `ferrogate-storage`. "One crate holds a third of the
+//!    workspace" is a real defect and #553's own objective test is blind to
+//!    it. #560's success criterion should measure *concentration*, not one
+//!    crate's name.
+//! 2. **`ferrogate-config` now exports data-plane rate-limiting primitives.**
+//!    `resolve_client_ip`, `IpCidr` and `UnauthenticatedIpRateLimiter` are
+//!    `pub` on the crate everything depends on. `pub` is the forced minimum
+//!    given their current placement -- each has a cross-crate reader -- but
+//!    the placement itself is a leftover of stage 3a, not a decision. The
+//!    reasoning is recorded next to the export in `ferrogate-config`'s
+//!    `lib.rs`.
 
 /// Certificate lifecycle: ACME issuance/renewal against the configured
 /// directory, the on-disk certificate paths, and the renewal scheduler the

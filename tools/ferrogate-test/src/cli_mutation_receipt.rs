@@ -14,7 +14,7 @@
 //!    by two server-side reads of the policy's revision list; the list is
 //!    byte-identical afterwards, and the receipt echoes `dry_run: true`. This
 //!    is the process-level companion to the transport-level assertion in
-//!    `ferrogate-cli-core`'s `receipt_test.rs` — here the *server* is the
+//!    `ferrogate-control-plane-client`'s `receipt_test.rs` — here the *server* is the
 //!    witness, so nothing about the client's internals is taken on trust.
 //! 2. **Every mutating verb returns a receipt, in both output formats.** The
 //!    create / create-revision / activate / rollback chain is run with

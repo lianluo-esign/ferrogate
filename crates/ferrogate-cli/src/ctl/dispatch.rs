@@ -5,7 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 //! Shared dispatch glue between the `ferrogate` binary and the
-//! `ferrogate-cli-core` foundation (issue #360).
+//! `ferrogate-control-plane-client` foundation (issue #360).
 //!
 //! This is the seam that turns parsed Clap flags plus process state (env,
 //! stdin, the on-disk store) into the fully resolved [`EffectiveContext`] the
@@ -16,17 +16,17 @@
 
 use std::io::Read;
 
-use ferrogate_cli_core::args::GlobalArgs;
-use ferrogate_cli_core::auth::SecretResolver;
-use ferrogate_cli_core::context::{self, EffectiveContext, EnvOverrides};
-use ferrogate_cli_core::error::{CliError, CliResult};
-use ferrogate_cli_core::resource::redact_secret_fields;
+use ferrogate_control_plane_client::args::GlobalArgs;
+use ferrogate_control_plane_client::auth::SecretResolver;
+use ferrogate_control_plane_client::context::{self, EffectiveContext, EnvOverrides};
+use ferrogate_control_plane_client::error::{CliError, CliResult};
+use ferrogate_control_plane_client::resource::redact_secret_fields;
 
 use super::store;
 
 /// Reads secrets from the real process environment and stdin. The foundation's
 /// resolver is a trait precisely so this side-effecting implementation lives in
-/// the binary while `ferrogate-cli-core`'s own tests stay hermetic.
+/// the binary while `ferrogate-control-plane-client`'s own tests stay hermetic.
 pub(crate) struct ProcessSecretResolver;
 
 impl SecretResolver for ProcessSecretResolver {

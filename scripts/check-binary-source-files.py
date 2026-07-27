@@ -35,7 +35,7 @@ Genuinely-binary tracked files (images, fixtures, test corpora) are excluded
 two ways: the scan is scoped to source-ish extensions in the first place, and
 `REVIEWED_BINARY_FILES` carries an explicit, owned, reasoned allowlist for the
 rest -- mirroring the `REVIEWED_EXCLUSIONS` discipline of the CLI parity gate
-(`crates/ferrogate-cli-core/src/parity.rs`). Like that gate, an allowlist entry
+(`crates/ferrogate-control-plane-client/src/parity.rs`). Like that gate, an allowlist entry
 that no longer applies is itself a failure, so the table cannot rot into a
 silent permanent exemption.
 

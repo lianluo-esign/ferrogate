@@ -9,7 +9,7 @@
 //! that leaks key material.
 
 use super::*;
-use ferrogate_cli_core::dispatch::secret_fields_for;
+use ferrogate_control_plane_client::dispatch::secret_fields_for;
 use serde_json::json;
 
 /// A server error echoing key material is redacted exactly like a success body.

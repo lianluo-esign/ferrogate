@@ -12,7 +12,7 @@ import { RESOURCE_ROUTES } from "@/resources";
 // ONE-TIME manual gap analysis with nothing re-checking it, so a new
 // `/admin/v1/<group>` could land without any operator surface and nobody would
 // notice. This is the console counterpart of the Rust parity gate
-// (`openapi_operations_are_covered_or_reviewed` in `ferrogate-cli-core`, whose
+// (`openapi_operations_are_covered_or_reviewed` in `ferrogate-control-plane-client`, whose
 // `REVIEWED_EXCLUSIONS` discipline — owner + specific reason, never a rubber
 // stamp — is mirrored below).
 //

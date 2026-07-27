@@ -7,7 +7,7 @@
 //! Cross-crate proof that the CLI's action fingerprint IS the runtime's
 //! (issue #505, acceptance box 3).
 //!
-//! `ferrogate-cli-core` deliberately does not depend on `ferrogate-runtime`:
+//! `ferrogate-control-plane-client` deliberately does not depend on `ferrogate-runtime`:
 //! the runtime crate pulls in storage, TLS, `rcgen` and a tokio runtime, which
 //! is the wrong weight for a client library that ships inside a CLI. So
 //! `receipt::CliActionTarget` mirrors the runtime's
@@ -22,10 +22,10 @@
 //! the CLI's fingerprint must join to the runtime's action-identity space, not
 //! merely look like it.
 
-use ferrogate_cli_core::receipt::{
+use ferrogate_control_plane_client::receipt::{
     is_canonical_action_fingerprint, CliActionTarget, ACTION_FINGERPRINT_CONTRACT,
 };
-use ferrogate_cli_core::transport::RequestSpec;
+use ferrogate_control_plane_client::transport::RequestSpec;
 use ferrogate_runtime::{
     is_canonical_action_fingerprint as runtime_is_canonical, CanonicalCapabilityTarget,
     ACTION_FINGERPRINT_CONTRACT as RUNTIME_CONTRACT,

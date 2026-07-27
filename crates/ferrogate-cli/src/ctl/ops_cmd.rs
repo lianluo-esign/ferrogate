@@ -13,22 +13,24 @@
 //! 1. resolve precedence into an [`EffectiveContext`] ([`super::dispatch`]);
 //! 2. resolve the credential source into an optional bearer credential;
 //! 3. build the request from the shared `ops` metadata via the declarative
-//!    [`ResourceApi`](ferrogate_cli_core::resource::ResourceApi) builder — no
+//!    [`ResourceApi`](ferrogate_control_plane_client::resource::ResourceApi) builder — no
 //!    hand-rolled URL;
 //! 4. execute it through the typed [`ControlPlaneClient`] over the workspace
 //!    async HTTP/TLS stack ([`ReqwestTransport`]);
 //! 5. fail closed on an incompatible server contract before rendering;
 //! 6. render data to stdout (table or stable JSON) and diagnostics to stderr;
-//! 7. map any failure onto a stable [`ExitClass`](ferrogate_cli_core::ExitClass).
+//! 7. map any failure onto a stable [`ExitClass`](ferrogate_control_plane_client::ExitClass).
 
-use ferrogate_cli_core::action_identity::{ClientActionIdentity, FingerprintEnv};
-use ferrogate_cli_core::auth::{resolve_credential, Credential};
-use ferrogate_cli_core::context::EffectiveContext;
-use ferrogate_cli_core::error::CliResult;
-use ferrogate_cli_core::output::{render_json, OutputFormat, Table};
-use ferrogate_cli_core::registry_helpers::ResourceInput;
-use ferrogate_cli_core::transport::{ApiResponse, ControlPlaneClient, ReqwestTransport};
-use ferrogate_cli_core::{ops, version};
+use ferrogate_control_plane_client::action_identity::{ClientActionIdentity, FingerprintEnv};
+use ferrogate_control_plane_client::auth::{resolve_credential, Credential};
+use ferrogate_control_plane_client::context::EffectiveContext;
+use ferrogate_control_plane_client::error::CliResult;
+use ferrogate_control_plane_client::output::{render_json, OutputFormat, Table};
+use ferrogate_control_plane_client::registry_helpers::ResourceInput;
+use ferrogate_control_plane_client::transport::{
+    ApiResponse, ControlPlaneClient, ReqwestTransport,
+};
+use ferrogate_control_plane_client::{ops, version};
 use serde_json::Value;
 
 use crate::cli::{OpsArgs, OpsCommands};

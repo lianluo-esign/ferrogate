@@ -1200,8 +1200,8 @@ dependencies = [
  "ferrogate-admin",
  "ferrogate-auth-service",
  "ferrogate-billing",
- "ferrogate-cli-core",
  "ferrogate-config",
+ "ferrogate-control-plane-client",
  "ferrogate-core",
  "ferrogate-gateway",
  "ferrogate-guardrails",
@@ -1223,19 +1223,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ferrogate-cli-core"
-version = "2026.7.9"
-dependencies = [
- "clap",
- "getrandom 0.2.17",
- "http",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1281,6 +1268,19 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "ferrogate-control-plane-client"
+version = "2026.7.9"
+dependencies = [
+ "clap",
+ "getrandom 0.2.17",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

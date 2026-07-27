@@ -59,6 +59,17 @@ pub use config::asset_endpoint::{
 /// the client-IP resolution and the unauthenticated rate limiter travelled with
 /// it because they share the module and its tests (see the crate note in the
 /// #553 stage 3a commit -- they belong with the data plane, not here).
+///
+/// **Open, and named so #560 does not inherit it silently:** this is
+/// `ferrogate-config` -- a crate everything else depends on -- exporting
+/// *data-plane rate-limiting* primitives as `pub`. `pub` is currently the
+/// minimum: each of these three has a cross-crate reader, so the visibility is
+/// mechanically forced, not chosen. But the placement is not forced, and the
+/// #553 stage-3a note conceded as much. `resolve_client_ip` and
+/// `UnauthenticatedIpRateLimiter` decide things about live traffic; the crate
+/// they sit in is supposed to decide only what a config file means. Whoever
+/// takes #560's decomposition should move them out with the data plane rather
+/// than treat their presence here as settled by precedent.
 pub use config::network_access::{resolve_client_ip, IpCidr, UnauthenticatedIpRateLimiter};
 /// Upstream-endpoint parsing and route-rule path rewriting: the inherent impls
 /// on [`Config`]'s own `RouteRule`, so they cannot live anywhere else.

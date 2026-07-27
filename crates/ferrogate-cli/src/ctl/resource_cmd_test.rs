@@ -10,7 +10,7 @@
 //! shapes.
 
 use super::*;
-use ferrogate_cli_core::register_resource_families;
+use ferrogate_control_plane_client::register_resource_families;
 use serde_json::json;
 
 fn registry() -> Registry {
@@ -597,7 +597,7 @@ fn dry_run_defaults_to_false() {
 }
 
 /// Every registered verb resolves to a render gate whose arm agrees with the
-/// declared effect. The binary-side companion to `ferrogate-cli-core`'s
+/// declared effect. The binary-side companion to `ferrogate-control-plane-client`'s
 /// registry enforcement test: it proves the *shipping tree* — not just the
 /// library registry — has no ungated mutating verb.
 #[test]

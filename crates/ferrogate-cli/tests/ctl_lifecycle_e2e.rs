@@ -7,7 +7,7 @@
 // driven through the REAL `ferrogate ctl <group> <verb>` binary against a REAL
 // in-process gateway (in-memory backend; no Docker, no Postgres, no Cloudflare).
 //
-// The #362 families are unit-covered in `ferrogate-cli-core` against a fake
+// The #362 families are unit-covered in `ferrogate-control-plane-client` against a fake
 // transport, and the OpenAPI operation-id parity gate proves every operation is
 // mapped or reviewed. What was NOT proven anywhere was the load-bearing product
 // claim: that invoking the shipped `ferrogate` binary — clap parse -> generic

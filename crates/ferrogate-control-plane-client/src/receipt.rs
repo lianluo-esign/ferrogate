@@ -142,7 +142,7 @@
 //! [`CliActionTarget`] is a byte-compatible mirror of the runtime
 //! `CanonicalCapabilityTarget::Network` variant, and [`CliActionTarget::fingerprint`]
 //! reproduces the `canonical_target_sha256` contract verbatim: `"sha256:" +
-//! hex(SHA-256(canonical JSON))`. `ferrogate-cli-core` deliberately does not
+//! hex(SHA-256(canonical JSON))`. `ferrogate-control-plane-client` deliberately does not
 //! depend on `ferrogate-runtime` (which pulls in storage, TLS, and a tokio
 //! runtime — the wrong weight for a client library), so the equality is proven
 //! rather than assumed: `crates/ferrogate-cli/src/ctl/fingerprint_parity_test.rs`

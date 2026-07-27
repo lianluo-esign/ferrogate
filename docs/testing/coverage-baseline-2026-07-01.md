@@ -2,6 +2,16 @@
 
 Generated with `cargo llvm-cov` on 2026-07-01, domain-logic crates.
 
+> **Paths are as of 2026-07-01 and are deliberately not rewritten.** This is a
+> dated measurement, and a table whose paths get silently updated stops being
+> one — you could no longer tell whether a number was re-measured or just
+> re-labelled. Two rows name crates that #553 renamed on 2026-07-27:
+> `ferrogate-auth/src/lib.rs` and `ferrogate-auth/src/main.rs` are today
+> `ferrogate-auth-service/src/lib.rs` and `ferrogate-auth-service/src/main.rs`.
+> (`ferrogate-cli-core`, also renamed by #553 — to
+> `ferrogate-control-plane-client` — did not exist at this date and appears in
+> no row.) Re-measuring is what updates this file; renaming is not.
+
 | Crate / file | Line cover | Missed regions | Priority |
 |---|---|---|---|
 | ferrogate-core/src/lib.rs | 0.00% | 5/5 | high (tiny, trivial win) |

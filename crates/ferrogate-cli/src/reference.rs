@@ -46,7 +46,7 @@ The `reference` sync test fails CI when this file drifts from the command tree.
 This is the full `ferrogate` command surface the shipped binary assembles: the
 derived top-level commands plus the generic Control Plane API resource families
 mounted under `ferrogate ctl <group> <verb>` (issues #361-#365), whose subtree
-is derived from the `ferrogate-cli-core` registry metadata. Shell completions
+is derived from the `ferrogate-control-plane-client` registry metadata. Shell completions
 (`ferrogate completions <shell>`) are generated from this same command tree.
 
 ## Examples

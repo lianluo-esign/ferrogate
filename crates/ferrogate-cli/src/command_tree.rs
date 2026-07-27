@@ -9,8 +9,8 @@
 //!
 //! The shipped binary parses the derived [`Cli`](crate::cli::Cli) tree
 //! *augmented* with the generic Control Plane API resource families —
-//! `ferrogate ctl <group> <verb>`, built from the `ferrogate-cli-core`
-//! [`Registry`](ferrogate_cli_core::Registry) metadata (#361–#365). Shell
+//! `ferrogate ctl <group> <verb>`, built from the `ferrogate-control-plane-client`
+//! [`Registry`](ferrogate_control_plane_client::Registry) metadata (#361–#365). Shell
 //! completions (`ferrogate completions`) and the generated command reference
 //! (`docs/cli-reference.md`) must describe *exactly that* surface, or they
 //! silently drift from what the binary accepts.
@@ -26,13 +26,13 @@ use clap::{Command, CommandFactory};
 use crate::cli::Cli;
 
 /// Build the resource-family registry the binary ships: every family the
-/// `ferrogate-cli-core` library provides (#361–#365). Registration is a
+/// `ferrogate-control-plane-client` library provides (#361–#365). Registration is a
 /// compile-time-metadata operation that only fails on a duplicate group/verb —
 /// a programming error — so it panics loudly rather than returning, exactly as
 /// `main` does.
-pub(crate) fn resource_registry() -> ferrogate_cli_core::Registry {
-    let mut registry = ferrogate_cli_core::Registry::new();
-    ferrogate_cli_core::register_resource_families(&mut registry)
+pub(crate) fn resource_registry() -> ferrogate_control_plane_client::Registry {
+    let mut registry = ferrogate_control_plane_client::Registry::new();
+    ferrogate_control_plane_client::register_resource_families(&mut registry)
         .expect("resource command families register cleanly");
     registry
 }
@@ -42,6 +42,6 @@ pub(crate) fn resource_registry() -> ferrogate_cli_core::Registry {
 /// exact `clap::Command` `main` parses, so completions and the command
 /// reference generated from it cover every shipped command including each
 /// resource family.
-pub(crate) fn assembled_command(registry: &ferrogate_cli_core::Registry) -> Command {
+pub(crate) fn assembled_command(registry: &ferrogate_control_plane_client::Registry) -> Command {
     Cli::command().subcommand(crate::ctl::build_ctl_command(registry))
 }

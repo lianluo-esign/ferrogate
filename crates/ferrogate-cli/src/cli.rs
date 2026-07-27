@@ -409,7 +409,7 @@ pub(crate) struct ContextRefArgs {
 #[derive(Debug, Args)]
 pub(crate) struct OpsArgs {
     #[command(flatten)]
-    pub(crate) global: ferrogate_cli_core::args::GlobalArgs,
+    pub(crate) global: ferrogate_control_plane_client::args::GlobalArgs,
     #[command(subcommand)]
     pub(crate) command: OpsCommands,
 }
@@ -596,13 +596,14 @@ mod cli_parse_tests {
 
     /// The full shipped tree — the derived commands plus the generic
     /// `ctl <group> <verb>` resource families (#361–#365) built from the
-    /// `ferrogate-cli-core` registry — is internally valid. This is the exact
+    /// `ferrogate-control-plane-client` registry — is internally valid. This is the exact
     /// command `main` assembles and parses, so the generic subtree cannot
     /// introduce a duplicate/ambiguous arg or subcommand.
     #[test]
     fn augmented_command_tree_with_resource_families_is_valid() {
-        let mut registry = ferrogate_cli_core::Registry::new();
-        ferrogate_cli_core::register_resource_families(&mut registry).expect("families register");
+        let mut registry = ferrogate_control_plane_client::Registry::new();
+        ferrogate_control_plane_client::register_resource_families(&mut registry)
+            .expect("families register");
         Cli::command()
             .subcommand(crate::ctl::build_ctl_command(&registry))
             .debug_assert();

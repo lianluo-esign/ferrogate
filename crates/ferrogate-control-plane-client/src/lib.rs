@@ -4,10 +4,39 @@
 // Created: 2026-07-23
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-//! # ferrogate-cli-core
+//! # ferrogate-control-plane-client
 //!
-//! Reusable foundation for the FerroGate **Control Plane API** command-line
-//! client (epic #358, foundation slice #360).
+//! The typed **client** for the FerroGate **Control Plane API** (epic #358,
+//! foundation slice #360): the transport, the credential and context
+//! resolution in front of it, the receipt envelope behind it, and the
+//! resource command registry the `ferrogate` binary composes into
+//! `ferrogate ctl <group> <verb>`.
+//!
+//! ## What the name asserts, and how to check it
+//!
+//! Renamed from `ferrogate-cli-core` in #553's rework. Two claims are packed
+//! into the new name, and both are falsifiable rather than aspirational:
+//!
+//! * **"control-plane"** — every path this crate builds is under
+//!   `/admin/v1/`. That is not a convention here, it is enforced: the #365
+//!   parity gate in [`parity`] places the *data plane* — the
+//!   OpenAI-compatible inference endpoints, MCP/tool execution, and agent
+//!   invoke/messaging — structurally outside the surface this crate is
+//!   allowed to cover, via the operation-level `x-ferrogate-data-plane`
+//!   OpenAPI extension (#390). A verb for live inference is a gate failure,
+//!   not a coverage win. So "the client of the control plane, and nothing
+//!   else" is the one thing about this crate a test can already fail on.
+//! * **"client"** — it binds no listener, exposes no `main`, and its
+//!   dependency list contains no `ferrogate-*` crate at all: `clap`, `http`,
+//!   `reqwest`, `serde`, `serde_json`, `sha2`. Nothing here can serve the API
+//!   it talks to.
+//!
+//! The old name asserted neither. Worse, it asserted something false: on the
+//! tree that lands this rename, the crate is **19,638 `.rs` lines against
+//! `ferrogate-cli/src`'s 5,648 across 26 files — 3.48×** the crate it claimed
+//! to be the `-core` of, and "core" described none of the contents. #553's
+//! objective is that a module's name and its code agree; the fold below is
+//! refused, so the rename is what carries that objective for this crate.
 //!
 //! ## Crate boundary and why it is a library, not a binary
 //!
@@ -98,14 +127,29 @@
 //!    justification is the dependency list above, not the line count that
 //!    happened to prompt the carve-out.
 //! 3. **CI would lose a fast hermetic slice.** `rust-cli-tooling-tests.yml`
-//!    runs `cargo test -p ferrogate-cli-core --all-features` over ~17k lines
-//!    with no gateway, storage or TLS in the build. Folded, those cases only
-//!    run behind a full Pingora + storage + runtime compile.
+//!    runs `cargo test -p ferrogate-control-plane-client --all-features` over
+//!    19.6k lines with **no pingora, no gateway, no storage and no
+//!    `ferrogate-runtime`** in the build. Folded, those cases only run behind
+//!    a full Pingora + storage + runtime compile.
 //!
-//! The `-core` suffix is the weakest part of the arrangement -- it reads like
-//! "the important half of the CLI" when it means "the client library the CLI
-//! composes". That is a naming argument, and the answer to it is a rename, not
-//! a fold that costs a real test.
+//!    An earlier draft of this box said "no gateway, storage or TLS in the
+//!    build". The TLS half was wrong and is corrected here rather than
+//!    quietly dropped: the workspace pins `reqwest` with
+//!    `features = ["rustls-no-provider", "stream"]`, so rustls and reqwest's
+//!    tokio client ARE linked into this slice. What is absent is a rustls
+//!    *crypto provider* (the composing binary installs one) and the whole
+//!    server stack. The absence that makes the slice worth having is the
+//!    dependency-graph one, not a TLS one.
+//!
+//! ## The name was the remaining defect, and it is fixed rather than deferred
+//!
+//! Refusing the fold left `ferrogate-cli-core` — a name that claimed to be
+//! the core of a crate a third its size. #553's objective is that a module's
+//! name and its code agree, so refusing the fold and keeping the name would
+//! have closed the issue with the defect intact. The crate is therefore
+//! `ferrogate-control-plane-client`, and the two claims that name makes are
+//! stated and made checkable at the top of this file. The fold stays refused;
+//! the naming argument is answered by the rename, which costs no test.
 
 pub mod action_identity;
 pub mod agent;

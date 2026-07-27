@@ -1,0 +1,51 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-23
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+[package]
+# Renamed from `ferrogate-cli-core` (#553 rework). The old name asserted a
+# containment relation that was false in both directions: this crate is 17,060
+# lines against `ferrogate-cli`'s 5,629, so it was not the "core" of anything
+# it was named after, and "core" said nothing about what is inside. The new
+# name is an assertion that can be checked: every request this crate builds
+# targets the Control Plane API (`/admin/v1/...`), and `src/parity.rs` puts
+# the data plane -- inference, MCP/tool execution, agent invoke/messaging --
+# structurally OUTSIDE the surface it is allowed to cover (#390). It is a
+# client and only a client: it binds no listener and the dependency list below
+# has no `ferrogate-*` entry at all. See `src/lib.rs` for why the fold this
+# rename replaces was refused.
+name = "ferrogate-control-plane-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Typed client library for the FerroGate Control Plane API: contexts, auth, transport, receipts, output, errors, and the resource command registry the `ferrogate` CLI composes."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+# OS CSPRNG for minting the per-invocation `action_id` (issue #548). A
+# predictable action id is worse than an absent one — it can be claimed by
+# someone else's log line — so the id comes from the OS random source and a
+# failure to read it fails the command.
+getrandom = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Reproduces the runtime `canonical_target_sha256` action-fingerprint contract
+# (issue #505) inside the receipt module. `ferrogate-runtime` itself is NOT a
+# dependency here on purpose: it pulls in `ferrogate-storage`, a tokio runtime
+# and a rustls crypto provider, which is the wrong weight for a client
+# library. (rustls itself IS already in this build, via the workspace
+# `reqwest` pin's `rustls-no-provider` -- see `src/lib.rs`.) Byte-equality with
+# `CanonicalCapabilityTarget::fingerprint` is proven by a test in
+# `ferrogate-cli` (which depends on both crates) instead of assumed.
+sha2 = { workspace = true }
+
+[features]
+default = []

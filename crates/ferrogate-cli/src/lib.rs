@@ -92,7 +92,7 @@ pub fn run() -> AnyResult<()> {
 
     // Build the full command surface: the derived `ferrogate` tree plus the
     // generic Control Plane API resource families (#361–#365), whose entire
-    // `ctl <group> <verb>` subtree is derived from the `ferrogate-cli-core`
+    // `ctl <group> <verb>` subtree is derived from the `ferrogate-control-plane-client`
     // registry metadata rather than hand-enumerated here (registering a new
     // family in the library needs no change in this binary). Assembled through
     // the shared `command_tree` helper so shell completions (`completions`) and

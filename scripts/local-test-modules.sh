@@ -113,6 +113,13 @@ run_cli_tooling() {
   ensure_toolchain
   cargo test -p ferrogate-cli --all-features --bins
   cargo test -p ferrogate-cli --all-features --test check_command --test workspace_skeleton
+  # Mirrors the `control_plane_client` slice of `rust-cli-tooling-tests.yml`
+  # (renamed from `cli_core` with the crate in #553). It was missing here, so
+  # the crate's ~17k lines of hermetic client tests had no local invocation at
+  # all. This function is still not a complete mirror -- `cli_e2e` and a
+  # `ferrogate-gateway` slice are also absent, and the gateway one is absent
+  # from CI too; both are tracked in #561.
+  cargo test -p ferrogate-control-plane-client --all-features
   cargo test -p ferrogate-test --all-features
 }
 

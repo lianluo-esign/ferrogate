@@ -14,10 +14,10 @@
 //! credential only through the foundation's `AuthSource::describe` (`env:VAR`,
 //! `stdin`, `none`), which is secret-free by construction.
 
-use ferrogate_cli_core::auth::AuthSource;
-use ferrogate_cli_core::context::Context;
-use ferrogate_cli_core::error::{CliError, CliResult};
-use ferrogate_cli_core::output::Table;
+use ferrogate_control_plane_client::auth::AuthSource;
+use ferrogate_control_plane_client::context::Context;
+use ferrogate_control_plane_client::error::{CliError, CliResult};
+use ferrogate_control_plane_client::output::Table;
 
 use crate::cli::{ContextCommands, ContextCreateArgs};
 

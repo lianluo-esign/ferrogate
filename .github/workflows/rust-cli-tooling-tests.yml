@@ -43,8 +43,16 @@ jobs:
             args: >-
               --all-features --test control_cli_e2e --test control_cli_resource_e2e
               --test ctl_lifecycle_e2e
-          - slice: cli_core
-            package: ferrogate-cli-core
+          # Renamed from `cli_core` with the crate (#553). The slice label is
+          # the visible check name, so it was checked against branch
+          # protection before moving: `main`'s required contexts are exactly
+          # `["rust-ci"]`, the aggregating job, not the per-slice names — so
+          # renaming a slice cannot leave a required check permanently
+          # pending. (This is why stage 4 could leave `slice: auth` alone and
+          # still be right: that label did not name a crate that had ceased
+          # to exist.)
+          - slice: control_plane_client
+            package: ferrogate-control-plane-client
             args: --all-features
           - slice: test_harness
             package: ferrogate-test

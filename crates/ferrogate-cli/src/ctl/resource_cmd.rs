@@ -11,16 +11,16 @@
 //! resource command families — organization/IAM (#361), agent/worker/MCP/
 //! tool-approval/guardrail (#362), asset/transfer/channel/static-site (#363),
 //! and billing/usage/evidence/operator-action (#364) — are fully implemented in
-//! `ferrogate-cli-core` and registered onto a
-//! [`Registry`](ferrogate_cli_core::command::Registry), but nothing exposed them
+//! `ferrogate-control-plane-client` and registered onto a
+//! [`Registry`](ferrogate_control_plane_client::command::Registry), but nothing exposed them
 //! to an operator. This module is that exposure, and it is deliberately
 //! **generic**: the whole `ferrogate ctl <group> <verb>` command tree is built
 //! from the registry's compile-time metadata
-//! ([`GroupDescriptor`](ferrogate_cli_core::command::GroupDescriptor) /
-//! [`VerbDescriptor`](ferrogate_cli_core::command::VerbDescriptor)), and every
+//! ([`GroupDescriptor`](ferrogate_control_plane_client::command::GroupDescriptor) /
+//! [`VerbDescriptor`](ferrogate_control_plane_client::command::VerbDescriptor)), and every
 //! matched command is routed through the shared
-//! [`build_request`](ferrogate_cli_core::dispatch::build_request) seam. Adding a
-//! resource family in `ferrogate-cli-core` therefore requires **no change here**
+//! [`build_request`](ferrogate_control_plane_client::dispatch::build_request) seam. Adding a
+//! resource family in `ferrogate-control-plane-client` therefore requires **no change here**
 //! — the new group appears in the tree and dispatches on its own.
 //!
 //! The families are namespaced under `ctl` (rather than mounted at the binary
@@ -37,20 +37,20 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use ferrogate_cli_core::action_identity::{ClientActionIdentity, FingerprintEnv};
-use ferrogate_cli_core::args::GlobalArgs;
-use ferrogate_cli_core::auth::{resolve_credential, Credential};
-use ferrogate_cli_core::command::Registry;
-use ferrogate_cli_core::context::EffectiveContext;
-use ferrogate_cli_core::dispatch::{build_request, redact_response, secret_fields_for};
-use ferrogate_cli_core::error::{CliError, CliResult};
-use ferrogate_cli_core::output::{render_output, Table};
-use ferrogate_cli_core::receipt::{
+use ferrogate_control_plane_client::action_identity::{ClientActionIdentity, FingerprintEnv};
+use ferrogate_control_plane_client::args::GlobalArgs;
+use ferrogate_control_plane_client::auth::{resolve_credential, Credential};
+use ferrogate_control_plane_client::command::Registry;
+use ferrogate_control_plane_client::context::EffectiveContext;
+use ferrogate_control_plane_client::dispatch::{build_request, redact_response, secret_fields_for};
+use ferrogate_control_plane_client::error::{CliError, CliResult};
+use ferrogate_control_plane_client::output::{render_output, Table};
+use ferrogate_control_plane_client::receipt::{
     BareRenderer, MutationPlan, MutationReport, ReceiptRenderer, RenderGate, VerbOutput,
 };
-use ferrogate_cli_core::registry_helpers::ResourceInput;
-use ferrogate_cli_core::resource::ListParams;
-use ferrogate_cli_core::transport::{
+use ferrogate_control_plane_client::registry_helpers::ResourceInput;
+use ferrogate_control_plane_client::resource::ListParams;
+use ferrogate_control_plane_client::transport::{
     page_cursor_state, page_envelope, ApiResponse, ControlPlaneClient, PageCursorState,
     PageRequest, RequestSpec, ReqwestTransport, DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
 };
@@ -64,7 +64,7 @@ pub(crate) const CTL_COMMAND: &str = "ctl";
 /// Resource-specific arguments shared by every generic verb: the id path
 /// segments, an optional JSON request document (for writes), and list
 /// pagination/filters. Reused verbatim across all verbs, so the request shape a
-/// verb needs is validated by the shared `ferrogate-cli-core` builders (which
+/// verb needs is validated by the shared `ferrogate-control-plane-client` builders (which
 /// error when a required id or body is missing) rather than re-declared per
 /// resource — the point of the generic wiring.
 #[derive(Debug, Args)]
@@ -307,7 +307,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     // `--sort` is honest about being unhonored. A structural parse of
     // `docs/openapi/admin-api.openapi.json` finds **zero** operations declaring
     // a `sort` query parameter (pinned by `sort_is_not_yet_an_openapi_query_
-    // parameter` in `ferrogate-cli-core`), so the key reaches the server and is
+    // parameter` in `ferrogate-control-plane-client`), so the key reaches the server and is
     // ignored. Forwarding it verbatim is the right client design — sort order is
     // only meaningful over the whole collection, so re-sorting a page locally
     // would be a lie — but a flag documented as working that provably does
@@ -491,7 +491,7 @@ fn read_output(
 /// takes no client, so on this path no `ReqwestTransport` is ever built and no
 /// socket is ever opened. That is the structural half of "a dry run issues no
 /// state-changing request"; the transport-level assertion lives in
-/// `ferrogate-cli-core`'s `receipt_test.rs`.
+/// `ferrogate-control-plane-client`'s `receipt_test.rs`.
 #[allow(clippy::too_many_arguments)]
 fn mutation_output(
     renderer: ReceiptRenderer<'_>,

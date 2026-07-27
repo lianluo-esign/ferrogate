@@ -33,8 +33,8 @@ bytes.workspace = true
 chrono.workspace = true
 # The `string` feature lets the generic Control Plane API resource command tree
 # (#361–#365) be built from runtime `String` group/verb names sourced from the
-# `ferrogate-cli-core` registry metadata (clap's default builder only accepts
-# `&'static str` names).
+# `ferrogate-control-plane-client` registry metadata (clap's default builder
+# only accepts `&'static str` names).
 clap = { workspace = true, features = ["string"] }
 # Generates the shell completion scripts emitted by `ferrogate completions
 # <shell>` (#365) from the SAME assembled `clap::Command` the binary runs, so
@@ -44,8 +44,8 @@ ed25519-dalek.workspace = true
 ferrogate-admin = { path = "../ferrogate-admin" }
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-auth-service = { path = "../ferrogate-auth-service" }
-ferrogate-cli-core = { path = "../ferrogate-cli-core" }
 ferrogate-config = { path = "../ferrogate-config" }
+ferrogate-control-plane-client = { path = "../ferrogate-control-plane-client" }
 ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-gateway = { path = "../ferrogate-gateway" }
 ferrogate-guardrails = { path = "../ferrogate-guardrails" }

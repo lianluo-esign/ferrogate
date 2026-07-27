@@ -6,7 +6,7 @@
 
 //! On-disk persistence for the shared `ContextStore` (issue #360).
 //!
-//! `ferrogate-cli-core` deliberately keeps `ContextStore` an in-memory,
+//! `ferrogate-control-plane-client` deliberately keeps `ContextStore` an in-memory,
 //! serializable model and leaves "where it lives on disk" to the composing
 //! binary. This module is that binary-side layer: it resolves the config path,
 //! loads a missing file as an empty store (first run is not an error), and
@@ -19,8 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
-use ferrogate_cli_core::context::{Context, ContextStore};
-use ferrogate_cli_core::error::{CliError, CliResult};
+use ferrogate_control_plane_client::context::{Context, ContextStore};
+use ferrogate_control_plane_client::error::{CliError, CliResult};
 use serde::{Deserialize, Serialize};
 
 /// Environment variable that overrides the CLI config *directory* (the folder

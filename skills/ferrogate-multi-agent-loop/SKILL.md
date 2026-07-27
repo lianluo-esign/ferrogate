@@ -58,7 +58,7 @@ it writes:**
   `/home/dev/ferrogate/target` is not safe under concurrency: on 2026-07-27 an
   agent got `cargo check` errors in a file it had never touched, whose source
   in its own worktree was correct, reproducing even with its changes stashed —
-  a stale `ferrogate-cli-core` artifact from a *concurrent* agent, which cargo
+  a stale `ferrogate-control-plane-client` artifact from a *concurrent* agent, which cargo
   reported as "fresh". `touch`ing the source forced a rebuild and it went
   green.
 
