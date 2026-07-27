@@ -44,6 +44,29 @@ export_endpoint = "https://api.token4ai.cloud/v1/metering/events"
 # export_token_env = "FERROGATE_METERING_TOKEN"
 # export_timeout_secs = 3
 
+# Tenant-identity semantics (issue #515). `organization_id` on an API key is a
+# foreign key to `tenants.id` AND the authorization identity every
+# tenant-isolation check reads -- so the two answers below decide how much a
+# credential can reach, and both used to be implicit.
+[tenancy]
+# DEPRECATED, and `true` only for backwards compatibility. While it is on, an
+# [[api_keys]] entry that declares neither `organization_id` nor
+# `platform_operator` is treated as a PLATFORM-ROOT credential that can read
+# and mutate every tenant -- i.e. an omitted field grants root. The gateway
+# logs every key in that state at startup.
+#
+# To migrate: add `platform_operator = true` to the bootstrap/operator keys
+# that really do administer the whole platform (accepted under both settings),
+# give every other tenant-less key an `organization_id`, then set this to
+# `false`. Once off, a key that declares neither is refused at authentication
+# (`tenant_identity_required`) instead of being promoted to root.
+implicit_platform_operator = true
+# When `true`, `POST`/`PUT /admin/v1/api-keys` refuses an `organization_id`
+# that names no `tenants` row (400) instead of storing the dangling reference
+# and reporting it in the log/audit trail. Turn this on once every tenant your
+# keys reference is registered through /admin/v1/tenant-accounts.
+require_registered_tenant = false
+
 [storage]
 request_log_retention_records = 10000
 audit_event_retention_records = 10000

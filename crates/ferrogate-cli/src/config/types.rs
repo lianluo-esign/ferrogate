@@ -142,6 +142,73 @@ pub(crate) struct Config {
     /// default `None`).
     #[serde(default)]
     pub(crate) cloudflare: Option<CloudflareConfig>,
+    /// #515: how this deployment spells the two tenant-identity defaults that
+    /// used to be implicit (platform-root, and whether `organization_id` is a
+    /// checked foreign key). See [`TenancyConfig`].
+    #[serde(default)]
+    pub(crate) tenancy: TenancyConfig,
+}
+
+/// Deployment-wide tenant-identity semantics (issue #515).
+///
+/// `organization_id` is simultaneously (a) the tenant/billing boundary, (b) a
+/// foreign key to `tenants.id`, and (c) the *authorization identity* every
+/// tenant-isolation check in `crate::auth` reads. Two of its semantics were
+/// never written down anywhere an operator could see them, and both defaulted
+/// to the permissive answer:
+///
+/// 1. `organization_id: None` did not mean "no tenant access", it meant
+///    **platform root** -- so an *omitted* config field silently minted a
+///    credential that reads and mutates every tenant. That is now spelled by
+///    [`ApiKey::platform_operator`], and this section decides what happens to a
+///    credential that spells neither.
+/// 2. an `organization_id` that names no `tenants` row was accepted verbatim on
+///    the native/static-config write path -- so a typo silently created a new
+///    tenancy island rather than being refused.
+///
+/// Both flags start in the *legacy* (pre-#515) position so this change is not a
+/// silent break for deployments whose env-derived/bootstrap keys are root today
+/// (see the migration note on each field); both are logged at load time when a
+/// key actually depends on the legacy answer, and both are intended to flip in
+/// a subsequent release once operators have written the intent down.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TenancyConfig {
+    /// DEPRECATED (#515 stage 1). `true` (the legacy default) keeps the
+    /// pre-#515 behaviour: an API key that declares neither `organization_id`
+    /// nor `platform_operator` is treated as a platform-root credential.
+    ///
+    /// Set to `false` to fail closed: such a credential is then refused at
+    /// authentication with `tenant_identity_required` instead of being promoted
+    /// to root, and every key that legitimately administers the whole platform
+    /// must say `platform_operator = true` out loud.
+    ///
+    /// Migration: set `platform_operator = true` on your bootstrap/operator
+    /// `[[api_keys]]` entries first (that is accepted under both settings),
+    /// then flip this to `false`.
+    #[serde(default = "default_true")]
+    pub(crate) implicit_platform_operator: bool,
+    /// `false` (the legacy default) keeps an `organization_id` that resolves to
+    /// no `tenants` row acceptable on `POST`/`PUT /admin/v1/api-keys`; the
+    /// dangling reference is reported in the gateway log and the admin audit
+    /// trail (exactly like an unresolvable `project_id`/`workspace_id`) instead
+    /// of being refused.
+    ///
+    /// `true` makes `organization_id` a checked foreign key on that write path:
+    /// naming a tenant that does not exist is a `400`, so a typo can no longer
+    /// silently create a tenancy island that no console, quota policy or RBAC
+    /// binding will ever match.
+    #[serde(default)]
+    pub(crate) require_registered_tenant: bool,
+}
+
+impl Default for TenancyConfig {
+    fn default() -> Self {
+        Self {
+            implicit_platform_operator: true,
+            require_registered_tenant: false,
+        }
+    }
 }
 
 /// Time-based agent schedule triggers (#246). The scheduler is a control-plane
@@ -1336,8 +1403,40 @@ pub(crate) struct ApiKey {
     /// not open).
     #[serde(default)]
     pub(crate) region_allowlist: Vec<String>,
+    /// The tenant this credential speaks for: a foreign key to `tenants.id`,
+    /// and the authorization identity every tenant-isolation check in
+    /// `crate::auth` reads (`authorize_tenant_scope`, `filter_by_tenant_scope`,
+    /// `enforce_tenant_filter`, ...). It is NOT free-form attribution: a value
+    /// that names no tenant scopes the key to a tenancy island that no console,
+    /// quota policy or RBAC binding will ever match, and `[tenancy]
+    /// require_registered_tenant = true` refuses it outright on the admin write
+    /// path (issue #515).
+    ///
+    /// Absent means "this key names no tenant" -- which is only a legitimate
+    /// shape for a platform operator, and one that must now say so via
+    /// [`Self::platform_operator`].
     #[serde(default)]
     pub(crate) organization_id: Option<String>,
+    /// Explicit platform-root opt-in (issue #515). `Some(true)` grants the
+    /// unrestricted, cross-tenant identity that `organization_id: None` used to
+    /// confer implicitly; it is mutually exclusive with `organization_id`
+    /// (rejected at load) because root is the absence of a tenant, not a
+    /// tenant.
+    ///
+    /// `Some(false)` is an explicit refusal of root. Combined with an
+    /// `organization_id` it is redundant but harmless (a key that names a
+    /// tenant is never root anyway); combined with NO `organization_id` it
+    /// leaves the key with no tenant identity at all, and such a credential is
+    /// refused at authentication (`tenant_identity_required`) rather than
+    /// served -- `organization_id` is also the attribution key for quota,
+    /// metering and lifecycle, so an identity-less credential is wrong on the
+    /// data plane too, not just on admin routes.
+    ///
+    /// `None` (field omitted) is resolved by
+    /// [`super::TenancyConfig::implicit_platform_operator`]: root under the
+    /// legacy default, refused at authentication once that is flipped off.
+    #[serde(default)]
+    pub(crate) platform_operator: Option<bool>,
     #[serde(default)]
     pub(crate) team_id: Option<String>,
     #[serde(default)]
@@ -2891,6 +2990,7 @@ impl Default for Config {
             x402_spend_policies: Vec::new(),
             asset_egress_price_per_gb: None,
             cloudflare: None,
+            tenancy: TenancyConfig::default(),
         }
     }
 }

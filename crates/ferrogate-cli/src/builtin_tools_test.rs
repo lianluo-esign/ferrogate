@@ -38,6 +38,7 @@ fn api_key(id: &str, secret: &str, scopes: &[&str], tenant: Option<&str>) -> Api
         allowed_providers: vec![],
         denied_providers: vec![],
         organization_id: tenant.map(ToOwned::to_owned),
+        platform_operator: None,
         team_id: None,
         project_id: None,
         workspace_id: None,

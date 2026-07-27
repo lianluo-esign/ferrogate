@@ -103,6 +103,7 @@ impl Config {
         self.validate_admin_api()?;
         self.add_mcp_policy_targets(&mut model_names, &mut provider_names);
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
+        self.warn_implicit_platform_operators();
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_gateway_configs(&api_key_ids)?;
         self.validate_plugins()?;
@@ -1784,6 +1785,38 @@ impl Config {
             if key.key_env.is_none() && key.key.is_none() && key.key_hash.is_none() {
                 bail!("field api_keys[{index}].key_env: key_env, key, or key_hash is required");
             }
+            // #515. `organization_id` is the authorization identity every
+            // tenant-isolation check reads, so the two ways of writing it
+            // wrong are load-time errors rather than runtime surprises:
+            //
+            // - a blank/whitespace value is neither "no tenant" (which the
+            //   isolation checks read as platform root) nor a tenant id that
+            //   can ever match a `tenants` row -- it is a typo that would
+            //   otherwise be carried verbatim into every scope comparison;
+            // - claiming a tenant AND platform root at once is a contradiction:
+            //   root is the *absence* of a tenant boundary, so the two spellings
+            //   can never both be true, and silently letting one win is exactly
+            //   the ambiguity this issue is about.
+            if key
+                .organization_id
+                .as_deref()
+                .is_some_and(|organization_id| organization_id.trim().is_empty())
+            {
+                bail!(
+                    "field api_keys[{index}].organization_id: cannot be blank; omit it for a \
+                     platform-operator key (and set platform_operator = true) or name the tenant \
+                     it belongs to"
+                );
+            }
+            if key.platform_operator == Some(true) && key.organization_id.is_some() {
+                bail!(
+                    "field api_keys[{index}].platform_operator: api key {} sets \
+                     platform_operator = true and organization_id = {}; a platform-operator key \
+                     is unscoped by definition, so it must not also claim a tenant",
+                    key.id,
+                    key.organization_id.as_deref().unwrap_or_default()
+                );
+            }
             for allowed_model in &key.allowed_models {
                 if !model_names.contains(allowed_model.as_str()) {
                     bail!(
@@ -1848,6 +1881,45 @@ impl Config {
             }
         }
         Ok(ids)
+    }
+
+    /// #515. Names, at load time, every static key that is a platform-root
+    /// credential only because it happens to declare no tenant -- the implicit
+    /// default this issue is about.
+    ///
+    /// Deliberately a warning and not an error: a hard failure here would take
+    /// down every existing deployment whose bootstrap/env-derived key is root
+    /// today (the exact migration hazard #515 flags), and "your gateway no
+    /// longer starts" is a worse first contact with this change than "your
+    /// gateway told you which keys to annotate". Once `[tenancy]
+    /// implicit_platform_operator = false` those same keys are refused at
+    /// authentication instead, so the warning is the migration window, not the
+    /// fix.
+    ///
+    /// Returns the ids it warned about so the behaviour is assertable without
+    /// scraping a log.
+    pub(crate) fn warn_implicit_platform_operators(&self) -> Vec<&str> {
+        if !self.tenancy.implicit_platform_operator {
+            return Vec::new();
+        }
+        let implicit: Vec<&str> = self
+            .api_keys
+            .iter()
+            .filter(|key| key.platform_operator.is_none() && key.organization_id.is_none())
+            .map(|key| key.id.as_str())
+            .collect();
+        if !implicit.is_empty() {
+            tracing::warn!(
+                api_key_ids = %implicit.join(", "),
+                "these API keys declare neither organization_id nor platform_operator, so they \
+                 are granted UNRESTRICTED cross-tenant (platform-operator) access by the \
+                 deprecated [tenancy] implicit_platform_operator default. Add \
+                 platform_operator = true to the ones that really administer the whole platform, \
+                 give the rest an organization_id, then set [tenancy] \
+                 implicit_platform_operator = false (issue #515)."
+            );
+        }
+        implicit
     }
 
     fn validate_policies(

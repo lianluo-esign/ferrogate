@@ -627,7 +627,9 @@ pub(crate) async fn authorize_scope_chain(
     auth: &AuthContext,
     scope: &X402ScopeRequest,
 ) -> Result<(), crate::auth::AuthError> {
-    if auth.organization_id.is_none() {
+    // #515: platform root is a declared property of the credential, not the
+    // absence of an `organization_id`.
+    if auth.is_platform_operator() {
         return Ok(());
     }
     // Normalized, so a padded id cannot be authorized at one spelling and then
@@ -670,7 +672,9 @@ pub(crate) async fn visible_declared_policies(
 ) -> Vec<X402DeclaredPolicyView> {
     let mut data = Vec::new();
     for entry in declared {
-        if auth.organization_id.is_some() {
+        // #515: see `authorize_scope_chain` -- only a declared platform
+        // operator sees every tenant's spend profile.
+        if !auth.is_platform_operator() {
             let Some(tenancy) = tenancy_scope_kind(entry.scope_type) else {
                 continue;
             };

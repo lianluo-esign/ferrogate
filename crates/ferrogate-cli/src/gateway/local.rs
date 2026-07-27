@@ -119,10 +119,14 @@ pub(super) enum ToolExecuteBackend {
 /// (directly or via `ToolExecutionRequest`) must call this first.
 ///
 /// Only enforced when a `StoredTenantAccount` actually exists for this
-/// tenant_id: a virtual key's `organization_id` is free-form attribution,
-/// not a foreign key, and plenty of legitimate setups (and most of this
-/// repo's own test fixtures) tag a key with an `organization_id` without
-/// ever registering it through `/admin/v1/tenant-accounts`. Since these
+/// tenant_id. NOT because `organization_id` is free-form attribution -- it is
+/// a foreign key to `tenants.id` and the authorization identity of every
+/// isolation check (issue #515), and the admin write path validates it as one
+/// under `[tenancy] require_registered_tenant` -- but because pre-#515 keys,
+/// keys declared in `ferrogate.toml` (where `Config::validate` is sync and
+/// storage-free, so it cannot look a tenant up), and most of this repo's own
+/// test fixtures tag a key with an `organization_id` that was never registered
+/// through `/admin/v1/tenant-accounts`. Since these
 /// flags were dead/unchecked until #182, treating "no formal tenant
 /// record" as an implicit denial would be a silent breaking change for
 /// exactly that setup; role-based grants still apply regardless of
@@ -8287,6 +8291,26 @@ impl FerroGateway {
             .await;
         }
         if refs.needs_lookup() {
+            // #515: `organization_id` is resolved here for the first time. It
+            // was the one tenancy reference the upsert copied verbatim -- and
+            // the only one that is an authorization identity rather than an
+            // attribution scope.
+            let tenant = match refs.organization_id {
+                Some(organization_id) => match state.get_tenant_account(organization_id).await {
+                    Ok(tenant) => tenant,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                },
+                None => None,
+            };
             let project = match refs.project_id {
                 Some(project_id) => match state.get_project(project_id).await {
                     Ok(project) => project,
@@ -8319,7 +8343,13 @@ impl FerroGateway {
                 },
                 None => None,
             };
-            match check_api_key_tenancy(refs, project.as_ref(), workspace.as_ref()) {
+            match check_api_key_tenancy(
+                refs,
+                tenant.as_ref(),
+                project.as_ref(),
+                workspace.as_ref(),
+                state.config.tenancy.require_registered_tenant,
+            ) {
                 Ok(outcome) => {
                     // Defence in depth: this endpoint is platform-operator only
                     // (`require_platform_operator` above, so the caller has no
@@ -10060,6 +10090,7 @@ fn admin_api_key(key: &crate::config::ApiKey) -> AdminApiKey {
         allowed_providers: key.allowed_providers.clone(),
         denied_providers: key.denied_providers.clone(),
         organization_id: key.organization_id.clone(),
+        platform_operator: key.platform_operator.unwrap_or(false),
         team_id: key.team_id.clone(),
         project_id: key.project_id.clone(),
         workspace_id: key.workspace_id.clone(),
@@ -10763,6 +10794,12 @@ fn api_key_from_mutation(
         allowed_providers: payload.allowed_providers.unwrap_or_default(),
         denied_providers: payload.denied_providers.unwrap_or_default(),
         organization_id: payload.organization_id,
+        // #515: carried through so the admin API can mint an explicitly-rooted
+        // key (and so `check_api_key_tenancy` can refuse a payload that claims
+        // both root and a tenant). Absent still means "inherit the deployment's
+        // `[tenancy] implicit_platform_operator` answer", never a silent root
+        // invented here.
+        platform_operator: payload.platform_operator,
         team_id: payload.team_id,
         project_id: payload.project_id,
         workspace_id: payload.workspace_id,

@@ -211,7 +211,18 @@ impl Config {
                     denied_models: key.denied_models,
                     allowed_providers: key.allowed_providers,
                     denied_providers: key.denied_providers,
+                    // #515: the Caddyfile bridge has no tenancy surface at all,
+                    // so a bridged key can neither name a tenant nor declare
+                    // itself a platform operator. Both stay absent rather than
+                    // being invented here, which means such a key is classified
+                    // by the deployment-wide `[tenancy]
+                    // implicit_platform_operator` switch -- root under the
+                    // legacy default (unchanged from before #515), refused at
+                    // authentication once an operator flips that off. What it
+                    // must NOT do is keep quietly *meaning* root at a site that
+                    // never says the word.
                     organization_id: None,
+                    platform_operator: None,
                     team_id: None,
                     project_id: None,
                     workspace_id: None,
@@ -299,6 +310,9 @@ impl Config {
             // #405: the Caddyfile bridge has no Cloudflare surface; it stays
             // disabled here and is only configurable via the native config.
             cloudflare: None,
+            // #515: no `[tenancy]` surface in a Caddyfile either, so bridged
+            // deployments get the legacy-compatible defaults.
+            tenancy: crate::config::TenancyConfig::default(),
         }
     }
 

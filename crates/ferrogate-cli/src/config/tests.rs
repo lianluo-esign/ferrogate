@@ -858,3 +858,89 @@ fn write_self_signed_test_certificate(cert: &std::path::Path, key: &std::path::P
     };
     status.success()
 }
+
+/// #515: the two tenant-identity semantics are declarable in the config file
+/// and round-trip through serde, and a config that says nothing lands on the
+/// documented legacy-compatible answers.
+#[test]
+fn tenancy_section_parses_and_defaults_to_the_legacy_answers() {
+    let declared = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[tenancy]
+implicit_platform_operator = false
+require_registered_tenant = true
+
+[[api_keys]]
+id = "operator"
+name = "Operator"
+key = "operator-secret"
+platform_operator = true
+
+[[api_keys]]
+id = "tenant-key"
+name = "Tenant key"
+key = "tenant-secret"
+organization_id = "tenant-a"
+"#,
+    )
+    .expect("a config that declares both identities must load");
+
+    assert!(!declared.tenancy.implicit_platform_operator);
+    assert!(declared.tenancy.require_registered_tenant);
+    assert_eq!(declared.api_keys[0].platform_operator, Some(true));
+    assert_eq!(declared.api_keys[0].organization_id, None);
+    assert_eq!(declared.api_keys[1].platform_operator, None);
+    assert_eq!(
+        declared.api_keys[1].organization_id.as_deref(),
+        Some("tenant-a")
+    );
+
+    let silent = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[[api_keys]]
+id = "bootstrap"
+name = "Bootstrap"
+key = "bootstrap-secret"
+"#,
+    )
+    .expect("a pre-#515 config must still load unchanged");
+
+    assert!(
+        silent.tenancy.implicit_platform_operator,
+        "omitting [tenancy] must keep pre-#515 deployments working"
+    );
+    assert!(!silent.tenancy.require_registered_tenant);
+    assert_eq!(silent.api_keys[0].platform_operator, None);
+    assert_eq!(
+        silent.warn_implicit_platform_operators(),
+        vec!["bootstrap"],
+        "...and must say out loud which key that leaves holding platform root"
+    );
+}
+
+/// #515: the contradiction is refused at load, not resolved by precedence.
+#[test]
+fn platform_operator_with_a_tenant_fails_config_load() {
+    let error = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[[api_keys]]
+id = "confused"
+name = "Confused"
+key = "confused-secret"
+platform_operator = true
+organization_id = "tenant-a"
+"#,
+    )
+    .expect_err("root and a tenant are mutually exclusive");
+
+    assert!(
+        error.to_string().contains("platform_operator"),
+        "unexpected error: {error}"
+    );
+}

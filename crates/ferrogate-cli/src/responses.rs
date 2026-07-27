@@ -953,6 +953,11 @@ pub(crate) struct AdminApiKey {
     pub(crate) allowed_providers: Vec<String>,
     pub(crate) denied_providers: Vec<String>,
     pub(crate) organization_id: Option<String>,
+    /// #515: surfaced so an operator (and the console, when it catches up) can
+    /// SEE which keys hold platform root instead of inferring it from a null
+    /// `organization_id`. `false` here means "not root"; `true` means the key
+    /// declared it.
+    pub(crate) platform_operator: bool,
     pub(crate) team_id: Option<String>,
     pub(crate) project_id: Option<String>,
     pub(crate) workspace_id: Option<String>,
@@ -988,6 +993,12 @@ pub(crate) struct AdminApiKeyMutation {
     pub(crate) denied_providers: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) organization_id: Option<String>,
+    /// Explicit platform-root opt-in (issue #515), mirroring
+    /// [`crate::config::ApiKey::platform_operator`]. Mutually exclusive with
+    /// `organization_id`; omitted leaves the key on the deployment-wide
+    /// `[tenancy] implicit_platform_operator` answer.
+    #[serde(default)]
+    pub(crate) platform_operator: Option<bool>,
     #[serde(default)]
     pub(crate) team_id: Option<String>,
     #[serde(default)]

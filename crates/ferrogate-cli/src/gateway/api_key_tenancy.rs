@@ -9,7 +9,7 @@
 use http::StatusCode;
 
 use crate::config::ApiKey;
-use ferrogate_storage::{StoredProject, StoredWorkspace};
+use ferrogate_storage::{StoredProject, StoredTenantAccount, StoredWorkspace};
 
 /// Why an api-key upsert's `organization_id`/`project_id`/`workspace_id`
 /// combination was refused.
@@ -39,6 +39,16 @@ pub(super) enum ApiKeyTenancyRejection {
         owner_tenant_id: String,
         organization_id: String,
     },
+    /// `organization_id` names no `tenants` row (issue #515). Only produced
+    /// when the deployment opted in via `[tenancy] require_registered_tenant =
+    /// true`; otherwise a dangling tenant reference is reported through
+    /// [`ApiKeyTenancyOutcome::unresolved`] like any other.
+    UnknownTenant { organization_id: String },
+    /// The payload declares platform-root and a tenant at once (issue #515) --
+    /// the same contradiction `Config::validate` refuses on the static-config
+    /// path, refused identically here so the admin API cannot persist a key
+    /// shape the config loader would reject.
+    PlatformOperatorWithTenant { organization_id: String },
 }
 
 impl ApiKeyTenancyRejection {
@@ -71,6 +81,14 @@ impl ApiKeyTenancyRejection {
                 "{reference} {reference_id} belongs to tenant {owner_tenant_id}, not to \
                  organization {organization_id}"
             ),
+            Self::UnknownTenant { organization_id } => format!(
+                "organization_id {organization_id} names no tenant; it is a foreign key to \
+                 tenants.id, not free-form attribution"
+            ),
+            Self::PlatformOperatorWithTenant { organization_id } => format!(
+                "platform_operator = true cannot be combined with organization_id \
+                 {organization_id}; a platform-operator key is unscoped by definition"
+            ),
         }
     }
 }
@@ -90,6 +108,10 @@ pub(super) struct ApiKeyTenancyRefs<'a> {
     pub(super) organization_id: Option<&'a str>,
     pub(super) project_id: Option<&'a str>,
     pub(super) workspace_id: Option<&'a str>,
+    /// The payload's explicit `platform_operator` opt-in (issue #515), carried
+    /// here so the contradiction check lives beside the other tenancy rules
+    /// rather than in the handler.
+    pub(super) platform_operator: Option<bool>,
 }
 
 impl<'a> ApiKeyTenancyRefs<'a> {
@@ -98,11 +120,17 @@ impl<'a> ApiKeyTenancyRefs<'a> {
             organization_id: present(key.organization_id.as_ref()),
             project_id: present(key.project_id.as_ref()),
             workspace_id: present(key.workspace_id.as_ref()),
+            platform_operator: key.platform_operator,
         }
     }
 
+    /// #515 added `organization_id` here: it is a foreign key to `tenants.id`
+    /// and the authorization identity of every key minted with it, so the
+    /// handler must resolve it exactly like the project/workspace references
+    /// it already resolved -- previously it was the only one of the three
+    /// copied through with no lookup at all.
     pub(super) fn needs_lookup(&self) -> bool {
-        self.project_id.is_some() || self.workspace_id.is_some()
+        self.organization_id.is_some() || self.project_id.is_some() || self.workspace_id.is_some()
     }
 }
 
@@ -131,19 +159,38 @@ pub(super) struct ApiKeyTenancyOutcome {
 /// resolved (`None` = the id was not found in storage).
 ///
 /// The rules, in order:
+/// 0. `platform_operator = true` and an `organization_id` are mutually
+///    exclusive (issue #515): root is the absence of a tenant boundary, so a
+///    payload claiming both is refused rather than having one silently win;
 /// 1. when both a project and a workspace resolve, the workspace must be
 ///    parented by that project;
 /// 2. when `organization_id` is set, every row that resolved must be owned by
 ///    it;
-/// 3. anything that did not resolve is reported as `unresolved` (see
+/// 3. when `require_registered_tenant` is on, `organization_id` must resolve to
+///    a real `tenants` row (issue #515) -- it is the authorization identity of
+///    every request the minted key will ever make, so a value that names no
+///    tenant is a typo that creates a tenancy island, not attribution;
+/// 4. anything else that did not resolve is reported as `unresolved` (see
 ///    [`ApiKeyTenancyOutcome::unresolved`]) rather than refused.
 pub(super) fn check_api_key_tenancy(
     refs: ApiKeyTenancyRefs<'_>,
+    tenant: Option<&StoredTenantAccount>,
     project: Option<&StoredProject>,
     workspace: Option<&StoredWorkspace>,
+    require_registered_tenant: bool,
 ) -> Result<ApiKeyTenancyOutcome, ApiKeyTenancyRejection> {
+    let tenant = refs.organization_id.and(tenant);
     let project = refs.project_id.and(project);
     let workspace = refs.workspace_id.and(workspace);
+
+    if let Some(organization_id) = refs
+        .organization_id
+        .filter(|_| refs.platform_operator == Some(true))
+    {
+        return Err(ApiKeyTenancyRejection::PlatformOperatorWithTenant {
+            organization_id: organization_id.to_string(),
+        });
+    }
 
     if let (Some(project), Some(workspace)) = (project, workspace) {
         if workspace.project_id != project.id {
@@ -178,7 +225,28 @@ pub(super) fn check_api_key_tenancy(
         }
     }
 
+    // #515. A dangling `organization_id` is refused only when the deployment
+    // has opted in: on the legacy default it stays a reported `unresolved`
+    // reference, exactly like a dangling project/workspace, because a native
+    // api-key is also declarable in `ferrogate.toml` where `Config::validate`
+    // does no storage lookup at all, and existing operator bootstrap flows tag
+    // keys with tenants that are created later or live in another system.
+    // Refusing unconditionally would make the admin API stricter than the
+    // config path overnight; the opt-in is how a deployment says it has
+    // finished registering its tenants.
+    if let Some(organization_id) = refs
+        .organization_id
+        .filter(|_| require_registered_tenant && tenant.is_none())
+    {
+        return Err(ApiKeyTenancyRejection::UnknownTenant {
+            organization_id: organization_id.to_string(),
+        });
+    }
+
     let mut unresolved = Vec::new();
+    if let Some(organization_id) = refs.organization_id.filter(|_| tenant.is_none()) {
+        unresolved.push(format!("tenant {organization_id}"));
+    }
     if let Some(project_id) = refs.project_id.filter(|_| project.is_none()) {
         unresolved.push(format!("project {project_id}"));
     }
@@ -189,9 +257,14 @@ pub(super) fn check_api_key_tenancy(
     Ok(ApiKeyTenancyOutcome {
         // Prefer the workspace's tenant: it is the deepest resolved row, and
         // rule 1 already proved it agrees with the project's when both resolved.
+        // #515 adds the declared `organization_id` as the final fallback: a key
+        // scoped to a tenant and nothing else still names a tenant the caller
+        // must be authorized for, and rule 2 already proved the three agree
+        // whenever more than one is present.
         owner_tenant_id: workspace
             .map(|workspace| workspace.tenant_id.clone())
-            .or_else(|| project.map(|project| project.tenant_id.clone())),
+            .or_else(|| project.map(|project| project.tenant_id.clone()))
+            .or_else(|| refs.organization_id.map(ToOwned::to_owned)),
         unresolved,
     })
 }

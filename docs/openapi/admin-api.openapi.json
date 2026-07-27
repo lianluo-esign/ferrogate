@@ -15844,6 +15844,10 @@
               "null"
             ]
           },
+          "platform_operator": {
+            "type": "boolean",
+            "description": "Whether this key holds unrestricted, cross-tenant platform-root access (issue #515). Declared via the request body, never inferred from a null organization_id."
+          },
           "team_id": {
             "type": [
               "string",
@@ -15944,6 +15948,10 @@
           },
           "organization_id": {
             "type": "string"
+          },
+          "platform_operator": {
+            "type": "boolean",
+            "description": "Explicit platform-root opt-in (issue #515). Mutually exclusive with organization_id; omitting it leaves the key on the deployment's [tenancy] implicit_platform_operator setting."
           },
           "team_id": {
             "type": "string"

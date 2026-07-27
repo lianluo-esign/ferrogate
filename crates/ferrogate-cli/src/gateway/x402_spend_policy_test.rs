@@ -841,6 +841,7 @@ fn admin_key(id: &str, secret: &str, tenant: Option<&str>) -> ApiKey {
         allowed_providers: vec![],
         denied_providers: vec![],
         organization_id: tenant.map(ToOwned::to_owned),
+        platform_operator: None,
         team_id: None,
         project_id: None,
         workspace_id: None,

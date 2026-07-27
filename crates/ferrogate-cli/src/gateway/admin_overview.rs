@@ -723,9 +723,13 @@ impl FerroGateway {
 
         let now_unix = now_unix_seconds();
         let current_period_month = ferrogate_storage::period_month_from_unix(now_unix as i64);
-        let scope = match auth.organization_id.as_deref() {
-            Some(tenant_id) => OverviewScope::Tenant(tenant_id.to_string()),
-            None => OverviewScope::Global,
+        // #515: a global (all-tenant) overview is for a declared platform
+        // operator; anything else is pinned to its own tenant.
+        let scope = match auth.caller_scope() {
+            crate::auth::CallerScope::PlatformOperator => OverviewScope::Global,
+            crate::auth::CallerScope::Tenant(tenant_id) => {
+                OverviewScope::Tenant(tenant_id.to_string())
+            }
         };
 
         // Runtime/config counts + runtime-health alerts: in-memory, always

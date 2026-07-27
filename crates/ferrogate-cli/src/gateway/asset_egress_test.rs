@@ -63,6 +63,7 @@ fn auth_with_quota(quota: EffectiveQuota) -> AuthContext {
         monthly_token_budget: None,
         request_limit_per_minute: None,
         organization_id: Some("org".into()),
+        platform_operator: false,
         team_id: None,
         project_id: Some("project".into()),
         workspace_id: None,

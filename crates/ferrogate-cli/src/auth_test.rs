@@ -50,6 +50,7 @@ fn decoy_yaml_key() -> ApiKey {
         allowed_providers: vec![],
         denied_providers: vec![],
         organization_id: None,
+        platform_operator: None,
         team_id: None,
         project_id: None,
         workspace_id: None,
@@ -965,6 +966,7 @@ fn auth_with_scopes(scopes: &[&str]) -> AuthContext {
         monthly_token_budget: None,
         request_limit_per_minute: None,
         organization_id: None,
+        platform_operator: false,
         team_id: None,
         project_id: None,
         workspace_id: None,
@@ -1024,6 +1026,7 @@ fn auth_context_model_allowlist() {
         monthly_token_budget: None,
         request_limit_per_minute: None,
         organization_id: None,
+        platform_operator: false,
         team_id: None,
         project_id: None,
         workspace_id: None,
@@ -1050,6 +1053,7 @@ fn auth_context_provider_allowlist() {
         monthly_token_budget: Some(1_000),
         request_limit_per_minute: Some(60),
         organization_id: Some("org".into()),
+        platform_operator: false,
         team_id: None,
         project_id: Some("project".into()),
         workspace_id: None,
@@ -1077,6 +1081,7 @@ fn auth_context_denylist_overrides_allowlist() {
         monthly_token_budget: None,
         request_limit_per_minute: None,
         organization_id: None,
+        platform_operator: false,
         team_id: None,
         project_id: None,
         workspace_id: None,
@@ -1120,6 +1125,7 @@ fn verifies_hashed_api_key_secret() {
         allowed_providers: vec![],
         denied_providers: vec![],
         organization_id: None,
+        platform_operator: None,
         team_id: None,
         project_id: None,
         workspace_id: None,
@@ -1134,4 +1140,351 @@ fn verifies_hashed_api_key_secret() {
     assert!(hash.starts_with("blake2b:"));
     assert!(key.matches_presented_key("client-secret"));
     assert!(!key.matches_presented_key("wrong-secret"));
+}
+
+// --- issue #515: `organization_id` is a validated tenant identity, and
+// --- platform root is a declared opt-in rather than an omitted field ---
+
+fn auth_with_identity(organization_id: Option<&str>, platform_operator: bool) -> AuthContext {
+    AuthContext {
+        region_allowlist: HashSet::new(),
+        api_key_id: Some("key".into()),
+        scopes: HashSet::from([WILDCARD_SCOPE.to_string()]),
+        allowed_models: HashSet::new(),
+        denied_models: HashSet::new(),
+        allowed_providers: HashSet::new(),
+        denied_providers: HashSet::new(),
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        organization_id: organization_id.map(ToOwned::to_owned),
+        platform_operator,
+        team_id: None,
+        project_id: None,
+        workspace_id: None,
+        user_id: None,
+        log_bodies: false,
+        rbac_subject: None,
+        effective_quota: ferrogate_policy::EffectiveQuota::default(),
+    }
+}
+
+/// The resolver is the ONE place a credential is classified. An explicit
+/// declaration always wins; naming a tenant is never root; and the legacy
+/// "declared nothing" shape is root only while the deprecated compatibility
+/// switch is on.
+#[test]
+fn platform_operator_is_resolved_from_what_the_key_declares() {
+    // Explicit opt-in wins, under either compatibility setting.
+    assert!(resolve_platform_operator(false, Some(true), None));
+    assert!(resolve_platform_operator(true, Some(true), None));
+
+    // An explicit refusal also wins: a key pinned to `false` never becomes
+    // root just because the deployment is still on the legacy default.
+    assert!(!resolve_platform_operator(true, Some(false), None));
+    assert!(!resolve_platform_operator(false, Some(false), None));
+
+    // Naming a tenant is never root.
+    assert!(!resolve_platform_operator(true, None, Some("tenant-a")));
+    assert!(!resolve_platform_operator(false, None, Some("tenant-a")));
+
+    // The legacy shape -- neither field -- is exactly what the switch governs.
+    assert!(resolve_platform_operator(true, None, None));
+    assert!(!resolve_platform_operator(false, None, None));
+}
+
+/// The config default is legacy-compatible on purpose (existing deployments'
+/// bootstrap keys are root today), and the compatibility answer is reachable
+/// only through this one field.
+#[test]
+fn tenancy_config_defaults_are_legacy_compatible_and_explicit() {
+    let config = Config::default();
+
+    assert!(
+        config.tenancy.implicit_platform_operator,
+        "flipping this default is a breaking change for every deployment whose bootstrap key \
+         declares no tenancy; it must be a deliberate release decision, not a silent one"
+    );
+    assert!(
+        !config.tenancy.require_registered_tenant,
+        "the api-key write path must stay no stricter than the storage-free config path until a \
+         deployment opts in"
+    );
+}
+
+/// A config that omits `platform_operator` on a tenant-less key is told so, by
+/// id, at load time -- the migration window for the flip above.
+#[test]
+fn config_load_names_every_key_that_relies_on_implicit_platform_root() {
+    let mut operator = decoy_yaml_key();
+    operator.id = "bootstrap".into();
+    let mut declared = decoy_yaml_key();
+    declared.id = "declared-root".into();
+    declared.platform_operator = Some(true);
+    let mut scoped = decoy_yaml_key();
+    scoped.id = "tenant-key".into();
+    scoped.organization_id = Some("tenant-a".into());
+
+    let config = Config {
+        api_keys: vec![operator, declared, scoped],
+        ..Config::default()
+    };
+
+    assert_eq!(
+        config.warn_implicit_platform_operators(),
+        vec!["bootstrap"],
+        "only the key that declared neither identity is relying on the deprecated default"
+    );
+}
+
+/// Root and a tenant are mutually exclusive, and a blank tenant id is a typo
+/// rather than an identity -- both refused before the gateway ever starts.
+#[test]
+fn config_validation_rejects_contradictory_and_blank_tenant_identities() {
+    let mut both = decoy_yaml_key();
+    both.platform_operator = Some(true);
+    both.organization_id = Some("tenant-a".into());
+    let error = Config {
+        api_keys: vec![both],
+        ..Config::default()
+    }
+    .validate()
+    .expect_err("platform_operator = true must not be combined with organization_id");
+    assert!(
+        error.to_string().contains("platform_operator"),
+        "unexpected error: {error}"
+    );
+
+    let mut blank = decoy_yaml_key();
+    blank.organization_id = Some("   ".into());
+    let error = Config {
+        api_keys: vec![blank],
+        ..Config::default()
+    }
+    .validate()
+    .expect_err("a blank organization_id is neither a tenant nor an operator");
+    assert!(
+        error.to_string().contains("organization_id"),
+        "unexpected error: {error}"
+    );
+}
+
+/// The scope check: root passes everything, a tenant passes only its own, and
+/// a credential that never declared either identity is denied rather than
+/// treated as root.
+#[test]
+fn tenant_scope_check_reads_the_declared_identity_not_a_missing_field() {
+    let operator = auth_with_identity(None, true);
+    assert!(authorize_tenant_scope(&operator, "tenant-a").is_ok());
+    assert!(authorize_tenant_scope(&operator, "tenant-b").is_ok());
+    assert!(operator.is_platform_operator());
+
+    let tenant_a = auth_with_identity(Some("tenant-a"), false);
+    assert!(authorize_tenant_scope(&tenant_a, "tenant-a").is_ok());
+    assert_eq!(
+        authorize_tenant_scope(&tenant_a, "tenant-b")
+            .expect_err("cross-tenant access must be denied")
+            .code,
+        "tenant_scope_denied"
+    );
+    assert!(!tenant_a.is_platform_operator());
+
+    // The shape #515 is about: no tenant, no opt-in. It must NOT inherit the
+    // operator branch.
+    let unclassified = auth_with_identity(None, false);
+    assert!(!unclassified.is_platform_operator());
+    assert_eq!(
+        authorize_tenant_scope(&unclassified, "tenant-a")
+            .expect_err("an unclassified credential must not reach any tenant")
+            .code,
+        "tenant_scope_denied"
+    );
+    assert_eq!(
+        require_platform_operator(&unclassified)
+            .expect_err("an unclassified credential must not hold operator-only routes")
+            .code,
+        "platform_operator_required"
+    );
+    assert!(require_platform_operator(&operator).is_ok());
+    assert_eq!(
+        require_platform_operator(&tenant_a)
+            .expect_err("a tenant-scoped key must not mint platform credentials")
+            .code,
+        "platform_operator_required"
+    );
+}
+
+/// The list filter: same three identities, same three answers -- and the
+/// unclassified one sees nothing rather than every tenant's rows.
+#[test]
+fn list_filter_reads_the_declared_identity_not_a_missing_field() {
+    let rows = || vec![("tenant-a".to_string(), 1), ("tenant-b".to_string(), 2)];
+    fn tenant_of(row: &(String, i32)) -> &str {
+        row.0.as_str()
+    }
+
+    assert_eq!(
+        filter_by_tenant_scope(&auth_with_identity(None, true), rows(), tenant_of).len(),
+        2,
+        "a declared platform operator lists every tenant's rows"
+    );
+    assert_eq!(
+        filter_by_tenant_scope(
+            &auth_with_identity(Some("tenant-a"), false),
+            rows(),
+            tenant_of
+        ),
+        vec![("tenant-a".to_string(), 1)]
+    );
+    assert!(
+        filter_by_tenant_scope(&auth_with_identity(None, false), rows(), tenant_of).is_empty(),
+        "a credential with no declared identity must not read every tenant's rows"
+    );
+}
+
+/// The forced `?tenant=` path: a tenant-scoped caller's requested filter is
+/// overwritten, an operator's passes through, and an unclassified caller is
+/// pinned to a tenant id no row can match.
+#[test]
+fn forced_tenant_filter_reads_the_declared_identity_not_a_missing_field() {
+    assert_eq!(
+        enforce_tenant_filter(&auth_with_identity(None, true), Some("tenant-b".into())),
+        Some("tenant-b".into()),
+        "a declared operator may filter to any tenant"
+    );
+    assert_eq!(
+        enforce_tenant_filter(&auth_with_identity(None, true), None),
+        None,
+        "a declared operator's unfiltered listing stays unfiltered"
+    );
+    assert_eq!(
+        enforce_tenant_filter(
+            &auth_with_identity(Some("tenant-a"), false),
+            Some("tenant-b".into())
+        ),
+        Some("tenant-a".into()),
+        "a tenant-scoped caller cannot ask for another tenant's rows"
+    );
+    assert_eq!(
+        enforce_tenant_filter(&auth_with_identity(Some("tenant-a"), false), None),
+        Some("tenant-a".into()),
+        "nor can it omit the filter to read every tenant's rows"
+    );
+    assert_eq!(
+        enforce_tenant_filter(&auth_with_identity(None, false), Some("tenant-b".into())),
+        Some(UNSCOPED_TENANT_ID.to_string()),
+        "an unclassified credential is pinned to a tenant id no row can match"
+    );
+    assert_eq!(
+        enforce_tenant_filter(&auth_with_identity(None, false), None),
+        Some(UNSCOPED_TENANT_ID.to_string()),
+        "and cannot fall back to the unfiltered, every-tenant listing"
+    );
+}
+
+/// End to end over the static-config path: the same key is platform root under
+/// the legacy default, and is refused outright once the deployment says its
+/// operators must declare themselves.
+#[test]
+fn static_config_key_without_any_declared_identity_is_governed_by_the_switch() {
+    let legacy = AppState::new(Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    });
+    let auth = authenticate(
+        &legacy,
+        &bearer_headers("decoy-secret"),
+        "admin.read",
+        "req-1",
+    )
+    .expect("the legacy default must keep existing bootstrap keys working");
+    assert!(
+        auth.is_platform_operator(),
+        "legacy compatibility: an undeclared key is still root, but now says so in a field"
+    );
+
+    let mut strict_config = Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    };
+    strict_config.tenancy.implicit_platform_operator = false;
+    let strict = AppState::new(strict_config);
+    let error = authenticate(
+        &strict,
+        &bearer_headers("decoy-secret"),
+        "chat.completions",
+        "req-2",
+    )
+    .expect_err("a credential with no tenant identity must fail closed, not become root");
+    assert_eq!(error.code, "tenant_identity_required");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+/// The migration path an operator is told to take: annotate the key, and it
+/// authenticates as root under BOTH settings.
+#[test]
+fn declared_platform_operator_authenticates_under_both_settings() {
+    for implicit in [true, false] {
+        let mut key = decoy_yaml_key();
+        key.platform_operator = Some(true);
+        let mut config = Config {
+            api_keys: vec![key],
+            ..Config::default()
+        };
+        config.tenancy.implicit_platform_operator = implicit;
+        let state = AppState::new(config);
+
+        let auth = authenticate(
+            &state,
+            &bearer_headers("decoy-secret"),
+            "admin.write",
+            "req-1",
+        )
+        .expect("an explicitly declared operator key always authenticates");
+        assert!(auth.is_platform_operator());
+    }
+}
+
+/// A tenant-scoped static key is never root, under either setting, and carries
+/// its tenant as both identity and attribution.
+#[test]
+fn tenant_scoped_static_key_is_never_platform_root() {
+    for implicit in [true, false] {
+        let mut key = decoy_yaml_key();
+        key.organization_id = Some("tenant-a".into());
+        let mut config = Config {
+            api_keys: vec![key],
+            ..Config::default()
+        };
+        config.tenancy.implicit_platform_operator = implicit;
+        let state = AppState::new(config);
+
+        let auth = authenticate(
+            &state,
+            &bearer_headers("decoy-secret"),
+            "chat.completions",
+            "req-1",
+        )
+        .expect("a tenant-scoped key authenticates normally");
+        assert!(!auth.is_platform_operator());
+        assert_eq!(auth.organization_id.as_deref(), Some("tenant-a"));
+        assert_eq!(auth.caller_scope(), CallerScope::Tenant("tenant-a"));
+    }
+}
+
+/// A durable/virtual key is minted under a tenant, so it is tenant-scoped no
+/// matter what the compatibility switch says: the storage path can never
+/// produce a platform-root credential.
+#[test]
+fn durable_virtual_key_is_never_platform_root() {
+    let secret = "fg_live_e2e_0123456789abcdef";
+    let mut config = Config::default();
+    config.tenancy.implicit_platform_operator = true;
+    let state = AppState::new(config);
+    seed_durable_virtual_key(&state, "vk-515", secret, |_| {});
+
+    let auth = authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1")
+        .expect("durable key should authenticate");
+
+    assert!(!auth.is_platform_operator());
+    assert_eq!(auth.caller_scope(), CallerScope::Tenant("tenant-1"));
 }

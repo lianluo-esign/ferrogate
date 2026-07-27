@@ -19,6 +19,7 @@ fn tenant_auth(tenant_id: &str) -> AuthContext {
         monthly_token_budget: None,
         request_limit_per_minute: None,
         organization_id: Some(tenant_id.into()),
+        platform_operator: false,
         team_id: None,
         project_id: None,
         workspace_id: None,

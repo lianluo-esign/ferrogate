@@ -787,6 +787,7 @@ fn api_key_request_window_rejects_after_configured_limit() {
             allowed_providers: vec![],
             denied_providers: vec![],
             organization_id: None,
+            platform_operator: None,
             team_id: None,
             project_id: None,
             workspace_id: None,

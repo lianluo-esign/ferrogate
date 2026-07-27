@@ -40,8 +40,19 @@ pub(crate) struct AuthContext {
     pub(crate) region_allowlist: HashSet<String>,
     pub(crate) monthly_token_budget: Option<u64>,
     pub(crate) request_limit_per_minute: Option<u64>,
+    /// The tenant this credential speaks for -- a `tenants.id`, not free-form
+    /// attribution. Read as an authorization identity by every function in the
+    /// [`CallerScope`] block below, and as an attribution scope by quota,
+    /// metering and lifecycle. `None` is meaningful ONLY together with
+    /// [`Self::platform_operator`]; see [`AuthContext::caller_scope`].
     #[allow(dead_code)]
     pub(crate) organization_id: Option<String>,
+    /// Whether this credential holds the unrestricted, cross-tenant
+    /// platform-root identity (issue #515). Resolved exactly once per request,
+    /// by [`resolve_platform_operator`], from what the credential *declares* --
+    /// never re-derived downstream from `organization_id.is_none()`, which is
+    /// how "an omitted field" came to mean "root" in the first place.
+    pub(crate) platform_operator: bool,
     #[allow(dead_code)]
     pub(crate) team_id: Option<String>,
     #[allow(dead_code)]
@@ -166,6 +177,35 @@ impl AuthContext {
         global_log_bodies && self.log_bodies
     }
 
+    /// The caller's tenant-isolation identity (issue #515). This is the ONE
+    /// place `organization_id` is turned into an authorization answer, so
+    /// "which tenant is this?" and "is this root?" can never be spelled two
+    /// different ways at two different call sites again.
+    pub(crate) fn caller_scope(&self) -> CallerScope<'_> {
+        if self.platform_operator {
+            return CallerScope::PlatformOperator;
+        }
+        // Defence in depth. A credential that declares neither a tenant nor
+        // platform-root is refused in `finalize_auth`, so this branch is
+        // unreachable for anything that actually authenticated. If one ever
+        // does reach here (a hand-built context in a test, a future auth
+        // source that forgets the classification), it must NOT fall into the
+        // platform-root branch: it gets a tenant id that no `tenants.id` can
+        // equal, which denies every cross-tenant check and filters every
+        // listing to nothing.
+        CallerScope::Tenant(
+            self.organization_id
+                .as_deref()
+                .unwrap_or(UNSCOPED_TENANT_ID),
+        )
+    }
+
+    /// True only for a credential that *declared* platform-root, never for one
+    /// that merely omitted its tenant.
+    pub(crate) fn is_platform_operator(&self) -> bool {
+        matches!(self.caller_scope(), CallerScope::PlatformOperator)
+    }
+
     pub(crate) fn service_account_id(&self) -> Option<&str> {
         match self.rbac_subject.as_ref() {
             Some(ferrogate_auth::PolicySubject::ServiceAccount { service_account_id }) => {
@@ -198,6 +238,57 @@ pub(crate) fn scope_set_allows(scopes: &HashSet<String>, scope: &str) -> bool {
     scopes.is_empty() && !AuthContext::is_privileged_scope(scope)
 }
 
+/// The tenant id handed to a credential that reached an isolation check
+/// without a classification (see [`AuthContext::caller_scope`]). Empty is
+/// unforgeable as a real tenant: `Config::validate` refuses a blank
+/// `organization_id`, and no `tenants.id` row is the empty string, so every
+/// comparison against it fails and every listing filtered by it is empty.
+const UNSCOPED_TENANT_ID: &str = "";
+
+/// Who a credential is, for tenant-isolation purposes (issue #515).
+///
+/// Before this existed the same question was asked as `organization_id
+/// .is_none()` at a dozen call sites, which made "the operator omitted a
+/// field" and "the operator asked for platform root" literally the same value.
+/// They are now different states of a different field, and this enum is the
+/// only way to read the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallerScope<'a> {
+    /// Unrestricted, cross-tenant. Reached only via an explicit
+    /// `platform_operator = true` (or the deprecated `[tenancy]
+    /// implicit_platform_operator` compatibility default, which says so in the
+    /// startup log).
+    PlatformOperator,
+    /// Scoped to exactly one `tenants.id`.
+    Tenant(&'a str),
+}
+
+/// Turn what a credential *declares* into whether it holds platform root
+/// (issue #515) -- the single chokepoint every auth source funnels through, so
+/// a new source cannot accidentally reintroduce "no tenant means root".
+///
+/// * an explicit `platform_operator` (true or false) always wins: root is
+///   something an operator wrote down, and an explicit `false` is a refusal
+///   that survives any compatibility default;
+/// * a credential that names a tenant is that tenant, never root;
+/// * a credential that declares neither is the legacy shape. It is root only
+///   while `[tenancy] implicit_platform_operator` is on (the deprecated
+///   default, which keeps existing deployments' bootstrap keys working and is
+///   warned about at config load); with it off the credential is
+///   unclassifiable and [`finalize_auth`] refuses it outright rather than
+///   guessing.
+pub(crate) fn resolve_platform_operator(
+    implicit_platform_operator: bool,
+    declared: Option<bool>,
+    organization_id: Option<&str>,
+) -> bool {
+    match (declared, organization_id) {
+        (Some(declared), _) => declared,
+        (None, Some(_)) => false,
+        (None, None) => implicit_platform_operator,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct AuthError {
     pub(crate) status: StatusCode,
@@ -219,24 +310,28 @@ pub(crate) struct AuthError {
 /// read AND financially adjust tenant B's wallet balance via `POST
 /// /admin/v1/wallets/{other_tenant}/adjust`).
 ///
-/// A platform-operator key (`organization_id: None` -- the "root/
-/// bootstrap key manages every tenant" shape this codebase's entire test
-/// suite already relies on, and the only way to legitimately administer
-/// more than one tenant) is always allowed through unrestricted, exactly
-/// as before this check existed. A tenant-scoped key (`organization_id:
-/// Some(_)`) is denied whenever the resource it's trying to reach
+/// A platform-operator key (the "root/bootstrap key manages every tenant"
+/// shape this codebase's entire test suite already relies on, and the only
+/// way to legitimately administer more than one tenant) is always allowed
+/// through unrestricted, exactly as before this check existed. A
+/// tenant-scoped key is denied whenever the resource it's trying to reach
 /// belongs to a *different* tenant.
+///
+/// Since #515 "is this a platform operator?" is [`CallerScope`], resolved
+/// from a declared `platform_operator`, and no longer a synonym for "the
+/// `organization_id` field was omitted".
 pub(crate) fn authorize_tenant_scope(
     auth: &AuthContext,
     target_tenant_id: &str,
 ) -> Result<(), AuthError> {
-    match auth.organization_id.as_deref() {
-        Some(caller_tenant_id) if caller_tenant_id != target_tenant_id => Err(AuthError {
+    match auth.caller_scope() {
+        CallerScope::PlatformOperator => Ok(()),
+        CallerScope::Tenant(caller_tenant_id) if caller_tenant_id == target_tenant_id => Ok(()),
+        CallerScope::Tenant(_) => Err(AuthError {
             status: StatusCode::FORBIDDEN,
             code: "tenant_scope_denied",
             message: "API key is not authorized to access this tenant's resources".into(),
         }),
-        _ => Ok(()),
     }
 }
 
@@ -250,12 +345,12 @@ pub(crate) fn filter_by_tenant_scope<T>(
     rows: Vec<T>,
     tenant_id: impl Fn(&T) -> &str,
 ) -> Vec<T> {
-    match auth.organization_id.as_deref() {
-        Some(caller_tenant_id) => rows
+    match auth.caller_scope() {
+        CallerScope::PlatformOperator => rows,
+        CallerScope::Tenant(caller_tenant_id) => rows
             .into_iter()
             .filter(|row| tenant_id(row) == caller_tenant_id)
             .collect(),
-        None => rows,
     }
 }
 
@@ -275,7 +370,7 @@ pub(crate) async fn authorize_scoped_resource(
     scope_id: &str,
 ) -> Result<(), AuthError> {
     use ferrogate_storage::QuotaScopeKind;
-    let Some(caller_tenant_id) = auth.organization_id.as_deref() else {
+    let CallerScope::Tenant(caller_tenant_id) = auth.caller_scope() else {
         return Ok(());
     };
     let resolved_tenant_id = match scope_type {
@@ -317,14 +412,16 @@ pub(crate) async fn authorize_scoped_resource(
 /// tenant-scoped key could pass an explicit cross-tenant filter, or omit
 /// the filter entirely, to read every tenant's logs/events. A
 /// platform-operator key's requested filter passes through unchanged
-/// (`None` legitimately means "show every tenant").
+/// (`None` legitimately means "show every tenant" -- but only for a caller
+/// that *declared* platform root, since #515; an unclassified credential is
+/// pinned to [`UNSCOPED_TENANT_ID`], which matches no row).
 pub(crate) fn enforce_tenant_filter(
     auth: &AuthContext,
     requested: Option<String>,
 ) -> Option<String> {
-    match auth.organization_id.as_ref() {
-        Some(tenant_id) => Some(tenant_id.clone()),
-        None => requested,
+    match auth.caller_scope() {
+        CallerScope::PlatformOperator => requested,
+        CallerScope::Tenant(tenant_id) => Some(tenant_id.to_string()),
     }
 }
 
@@ -342,7 +439,7 @@ pub(crate) fn authorize_self_hosted_worker_scope(
     auth: &AuthContext,
     worker_id: &str,
 ) -> Result<(), AuthError> {
-    let Some(caller_tenant_id) = auth.organization_id.as_deref() else {
+    let CallerScope::Tenant(caller_tenant_id) = auth.caller_scope() else {
         return Ok(());
     };
     let resolved_tenant_id = state
@@ -371,8 +468,14 @@ pub(crate) fn authorize_self_hosted_worker_scope(
 /// key-management UI goes through the tenant-safe `/admin/v1/virtual-keys`
 /// instead), so this is a dead capability for tenant-scoped keys, not a
 /// designed one.
+///
+/// #515 narrowed what gets through: it is no longer "any credential whose
+/// `organization_id` happens to be absent" but "a credential that declared
+/// itself a platform operator". Under `[tenancy] implicit_platform_operator =
+/// false` an unclassified credential never reaches here at all -- it is
+/// refused at authentication.
 pub(crate) fn require_platform_operator(auth: &AuthContext) -> Result<(), AuthError> {
-    if auth.organization_id.is_some() {
+    if !auth.is_platform_operator() {
         return Err(AuthError {
             status: StatusCode::FORBIDDEN,
             code: "platform_operator_required",
@@ -402,6 +505,11 @@ pub(crate) async fn authenticate(
             monthly_token_budget: None,
             request_limit_per_minute: None,
             organization_id: None,
+            // Auth is switched off: there is no credential to scope, and the
+            // whole mode is "unrestricted access". #515 only requires that root
+            // be *stated*, and this states it, in code, at the one place that
+            // decided it.
+            platform_operator: true,
             team_id: None,
             project_id: None,
             workspace_id: None,
@@ -423,6 +531,7 @@ pub(crate) async fn authenticate(
     if state.config.auth_service.enabled {
         let auth = authenticate_external(
             &state.config.auth_service,
+            state.config.tenancy.implicit_platform_operator,
             &provided_key,
             required_scope,
             request_id,
@@ -484,6 +593,15 @@ pub(crate) async fn authenticate(
                 monthly_token_budget: configured_key.monthly_token_budget,
                 request_limit_per_minute: configured_key.request_limit_per_minute,
                 organization_id: configured_key.organization_id.clone(),
+                // #515: the static-config path used to copy `organization_id`
+                // verbatim and let its absence *become* platform root further
+                // downstream. The classification is made here instead, from
+                // what the key declares.
+                platform_operator: resolve_platform_operator(
+                    state.config.tenancy.implicit_platform_operator,
+                    configured_key.platform_operator,
+                    configured_key.organization_id.as_deref(),
+                ),
                 team_id: configured_key.team_id.clone(),
                 project_id: configured_key.project_id.clone(),
                 workspace_id: configured_key.workspace_id.clone(),
@@ -545,7 +663,18 @@ pub(crate) fn authenticate_admin_gate(
     };
 
     if auth_service.enabled {
-        authenticate_external(auth_service, provided_key, required_scope, request_id)?;
+        // The resulting `AuthContext` is discarded here (this gate checks
+        // scope only; the gateway re-authenticates the forwarded bearer and
+        // remains the single tenancy authority), so the #515 classification
+        // input is irrelevant -- pass the fail-closed value rather than
+        // pretending this gate can mint root.
+        authenticate_external(
+            auth_service,
+            false,
+            provided_key,
+            required_scope,
+            request_id,
+        )?;
         return Ok(());
     }
 
@@ -641,6 +770,16 @@ fn authenticate_durable(
         denied_providers: HashSet::new(),
         monthly_token_budget: decision.monthly_token_budget,
         request_limit_per_minute: decision.request_limit_per_minute,
+        // #515: a durable/virtual key is minted under a tenant
+        // (`ferrogate_auth::api_key` sets `organization_id = Some(tenant_id)`),
+        // so it is always tenant-scoped and there is no way to *declare* root
+        // over this path. The same resolver still runs so the compatibility
+        // switch has exactly one meaning across every auth source.
+        platform_operator: resolve_platform_operator(
+            state.config.tenancy.implicit_platform_operator,
+            None,
+            decision.tenant.organization_id.as_deref(),
+        ),
         organization_id: decision.tenant.organization_id,
         team_id: decision.tenant.team_id,
         project_id: decision.tenant.project_id,
@@ -664,6 +803,31 @@ async fn finalize_auth(
     mut auth: AuthContext,
     request_id: &str,
 ) -> std::result::Result<AuthContext, AuthError> {
+    // #515, the identity seam. Every auth source funnels through here, so this
+    // is the one place that can guarantee no request is ever served by a
+    // credential whose tenant-isolation identity is unknown.
+    //
+    // A credential is unclassified when it names no tenant AND never declared
+    // `platform_operator` -- historically the shape that silently became
+    // platform root. It is refused here (not downgraded to "tenant with no
+    // rows") precisely because a credential whose blast radius is ambiguous
+    // must not serve traffic at all: `organization_id` is also the attribution
+    // key for quota, metering and lifecycle, so an unscoped identity is wrong
+    // on the data plane too, not just on admin routes.
+    //
+    // Reachable only when an operator has set `[tenancy]
+    // implicit_platform_operator = false`; under the (deprecated) legacy
+    // default such a credential is classified as an operator, exactly as
+    // before #515, and this never fires.
+    if !auth.platform_operator && auth.organization_id.is_none() {
+        return Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "tenant_identity_required",
+            message: "API key declares neither an organization_id nor platform_operator = true, \
+                      so it has no tenant identity to authorize against"
+                .into(),
+        });
+    }
     // #514, the request-time seam. This is the ONE place it lives: every auth
     // source (durable/virtual, YAML config, external auth service) funnels
     // through `finalize_auth`, so a suspended tenant's pre-existing keys stop
@@ -822,6 +986,7 @@ pub(crate) fn authorize_external_rbac(
 
 fn authenticate_external(
     service: &crate::config::AuthServiceConfig,
+    implicit_platform_operator: bool,
     provided_key: &str,
     required_scope: &str,
     request_id: &str,
@@ -842,6 +1007,16 @@ fn authenticate_external(
         denied_providers: HashSet::new(),
         monthly_token_budget: decision.monthly_token_budget,
         request_limit_per_minute: decision.request_limit_per_minute,
+        // #515: the external auth contract (`ferrogate_auth::AuthDecision`)
+        // has no way to say "platform operator", so an external service can
+        // only produce a tenant-scoped identity or an unclassified one -- and
+        // the unclassified one is governed by the same deployment-wide switch
+        // as every other source, not by a rule of its own.
+        platform_operator: resolve_platform_operator(
+            implicit_platform_operator,
+            None,
+            decision.tenant.organization_id.as_deref(),
+        ),
         organization_id: decision.tenant.organization_id,
         team_id: decision.tenant.team_id,
         project_id: decision.tenant.project_id,

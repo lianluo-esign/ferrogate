@@ -45,6 +45,7 @@ fn sample_api_key(id: &str) -> ApiKey {
         denied_providers: vec![],
         region_allowlist: vec!["eu-west-1".to_string()],
         organization_id: Some("org-1".to_string()),
+        platform_operator: None,
         team_id: None,
         project_id: Some("proj-1".to_string()),
         workspace_id: None,

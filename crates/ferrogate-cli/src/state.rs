@@ -7043,6 +7043,7 @@ mod tests {
             allowed_providers: vec!["openai".into()],
             denied_providers: Vec::new(),
             organization_id: Some("org".into()),
+            platform_operator: None,
             team_id: None,
             project_id: Some("project".into()),
             workspace_id: None,

@@ -48,6 +48,6 @@ pub(crate) use self::types::{
     ProviderCloudflareAiGatewayConfig, ProviderCloudflareAiGatewayMode, ReliabilityConfig,
     RouteRule, SchedulerConfig, ShadowRoute, SkillPackage, SkillPackageCapability,
     SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
-    StorageMigrationMode, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    StorageMigrationMode, TelemetryConfig, TenancyConfig, TlsAcmeConfig, TlsConfig, Upstream,
     X402ReconcilerConfig, X402SweeperConfig,
 };

@@ -67,6 +67,16 @@ pub struct RequestContext {
 /// that a virtual API key ultimately binds to. `workspace_id` is additive and
 /// `#[serde(default)]` so existing serialized contexts (which predate the
 /// multi-tenant hierarchy) still deserialize unchanged.
+///
+/// `organization_id` IS the tenant id (`tenants.id`, `StoredProject.tenant_id`,
+/// `StoredVirtualApiKey.tenant_id`) -- the field is named for the API-facing
+/// spelling, not for a second, looser concept. It is load-bearing for
+/// authorization, not merely attribution: the gateway's tenant-isolation
+/// checks compare the caller's `organization_id` against the tenant that owns
+/// the resource being reached. `None` therefore means "this identity names no
+/// tenant", which is only legitimate for a platform operator, and since issue
+/// #515 that has to be declared (`ApiKey::platform_operator`) rather than
+/// inferred from this field being absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantContext {
     pub organization_id: Option<String>,

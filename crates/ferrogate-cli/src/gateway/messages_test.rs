@@ -84,6 +84,7 @@ fn messages_plan_config() -> Config {
             allowed_providers: Vec::new(),
             denied_providers: Vec::new(),
             organization_id: None,
+            platform_operator: None,
             team_id: None,
             project_id: None,
             workspace_id: None,

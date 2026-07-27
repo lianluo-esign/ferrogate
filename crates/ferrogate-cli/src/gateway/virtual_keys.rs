@@ -421,7 +421,12 @@ impl FerroGateway {
                 // require_platform_operator). Without this a tenant reads a
                 // higher plan id via GET /admin/v1/plans and PATCHes itself onto
                 // it with no operator approval or billing.
-                if auth.organization_id.is_some() {
+                //
+                // #515: asked as "is this NOT a declared platform operator?"
+                // rather than "does it carry an organization_id?", so a
+                // credential that merely omitted its tenant is held to the
+                // tenant-scoped rule instead of being waved through as root.
+                if !auth.is_platform_operator() {
                     let changes_plan = payload
                         .plan_id
                         .as_deref()
