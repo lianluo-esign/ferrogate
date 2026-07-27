@@ -482,10 +482,9 @@ mod tests {
     /// are all virtual must boot, and must boot REQUIRING authentication.
     #[test]
     fn any_credential_source_starts_with_authentication_required() {
-        let with_static_key = Config::from_toml_str(
-            "[[api_keys]]\nid = \"k1\"\nname = \"k1\"\nkey = \"secret\"\n",
-        )
-        .expect("a config with one static key");
+        let with_static_key =
+            Config::from_toml_str("[[api_keys]]\nid = \"k1\"\nname = \"k1\"\nkey = \"secret\"\n")
+                .expect("a config with one static key");
         assert!(ensure_auth_posture_is_declared(&with_static_key).is_ok());
         assert!(with_static_key.auth_required());
 
