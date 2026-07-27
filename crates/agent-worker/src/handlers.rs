@@ -460,13 +460,21 @@ pub(crate) fn redacted_args(args: &[String], prompt_arg_index: usize) -> Vec<Str
 /// raw-capture #526 swept out: a configured handler binary that prints an HTTP
 /// exchange (a `curl -i`, a debug dump of its own upstream call) put every
 /// credential header it saw into `stdout_excerpt` on a `cli.requested` event.
-/// It now goes through the crate's one recorded-evidence chokepoint, which
-/// redacts before it truncates.
-fn output_excerpt(output: &[u8]) -> String {
+/// It now goes through the crate's one recorded-evidence chokepoint.
+///
+/// Worth naming because it is easy to assume otherwise: this result is NOT only
+/// event metadata. `smoke_handler_binary_command` prints it straight to the
+/// worker's stdout as JSON, where no metadata sweep runs — this call is the
+/// only redaction on that path.
+pub(crate) fn output_excerpt(output: &[u8]) -> String {
     const MAX_EXCERPT_BYTES: u64 = 512;
-    crate::recorded_evidence::recorded_excerpt(output, MAX_EXCERPT_BYTES)
-        .trim()
-        .to_string()
+    crate::recorded_evidence::recorded_excerpt(
+        crate::recorded_evidence::RecordedSurface::HandlerBinaryOutput,
+        output,
+        MAX_EXCERPT_BYTES,
+    )
+    .trim()
+    .to_string()
 }
 
 fn expected_exact_output(prompt: &str) -> Option<String> {

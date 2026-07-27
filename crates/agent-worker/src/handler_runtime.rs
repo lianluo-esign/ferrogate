@@ -346,7 +346,10 @@ fn process_handler_binary_event(
                 "binary_path".to_string(),
                 smoke.binary_path.display().to_string(),
             ),
-            ("probe_args".to_string(), smoke.probe_args.join(" ")),
+            (
+                "probe_args".to_string(),
+                crate::recorded_evidence::recorded_argv(&smoke.probe_args),
+            ),
             (
                 "status_code".to_string(),
                 smoke
@@ -434,8 +437,16 @@ fn process_handler_task_event(
                 smoke.binary_path.display().to_string(),
             ),
             (
+                // Newline-joined by `recorded_argv`, NOT space-joined: a
+                // `--header authorization: Bearer …` pair whose two argv
+                // entries share a line hides the credential's header name
+                // behind the flag, and the scan classifies the line by the
+                // FIRST colon (#526 rework).
                 "task_args".to_string(),
-                crate::handlers::redacted_args(&smoke.task_args, smoke.prompt_arg_index).join(" "),
+                crate::recorded_evidence::recorded_argv(&crate::handlers::redacted_args(
+                    &smoke.task_args,
+                    smoke.prompt_arg_index,
+                )),
             ),
             ("prompt_chars".to_string(), smoke.prompt_chars.to_string()),
             (

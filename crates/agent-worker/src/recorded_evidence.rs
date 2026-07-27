@@ -19,10 +19,11 @@
 //!
 //! So the redaction is no longer a REST detail. It is the definition of
 //! "recorded": every builder goes through [`recorded_metadata`] /
-//! [`redact_recorded_values`], and every excerpt through
-//! [`recorded_excerpt`] / [`recorded_http_excerpt`] / [`recorded_line_excerpt`]
-//! / [`recorded_value`]. There is ONE implementation of the redaction
-//! ([`redact_scoped`]); everything else in the crate delegates to it.
+//! [`redact_recorded_values`], every excerpt through [`recorded_excerpt`] /
+//! [`recorded_http_excerpt`] / [`recorded_line_excerpt`] / [`recorded_value`],
+//! and every argument vector through [`recorded_argv`]. There is ONE
+//! implementation of the redaction ([`redact_scoped`]); everything else in the
+//! crate delegates to it.
 //!
 //! # The policy decision: names are recorded, bearer VALUES are not (#526)
 //!
@@ -48,12 +49,22 @@
 //!   sees the shape of the exchange; the record does not become a way to spend
 //!   the money.
 //!
-//! Residual risk, stated rather than hidden: a deny-list cannot know a bespoke
-//! credential header name (`x-acme-session`). That risk is now bounded by
-//! being CENTRAL — adding one entry to [`is_bearer_header`] covers every
-//! family at once, which was not true before this module existed.
+//! Residual risk, stated accurately (#526 rework). The deny-list is not
+//! "everything except a name nobody has heard of": it must at minimum contain
+//! every credential header FerroGate ITSELF sends, because a workload that
+//! prints its own upstream call is the likeliest way one of them is observed.
+//! [`is_bearer_header`] therefore names each one against its definition site in
+//! this repo, and `recorded_evidence_test.rs` pins that list from the OTHER
+//! side — it enumerates the header names the provider/secret crates emit, not
+//! the deny-list, so dropping an entry here fails a test instead of passing one.
 //!
-//! # Two scopes, one implementation
+//! What genuinely remains uncovered is (a) a credential header name that no
+//! crate in this repo emits and that no upstream we call has yet used, and (b)
+//! a credential echoed inside a BODY rather than on a header-shaped line. Both
+//! are bounded by this being CENTRAL: one entry covers every family at once,
+//! which was not true before this module existed.
+//!
+//! # Two scopes, one implementation, chosen by the SURFACE
 //!
 //! A raw HTTP message has a header section; a process's stdout does not. So
 //! [`RedactionScope`] selects which lines are eligible, and nothing else:
@@ -67,12 +78,45 @@
 //!   middle of a `curl -i` dump on a tool's stdout is exactly as spendable as
 //!   one in a real header section.
 //!
-//! # Ordering is load-bearing
+//! The scope is NOT a call-site argument. Every recording helper takes a
+//! [`RecordedSurface`] and derives the scope from it, so "is this blob a raw
+//! HTTP message?" is answered once per surface, in this module, where the
+//! answer can be reviewed against the whole list at a glance. That also makes
+//! the enum the crate's register of recorded-evidence surfaces: a surface added
+//! tomorrow must name itself here, and the exhaustive match in
+//! `external_actions_recorded_evidence_test.rs` does not compile until the new
+//! surface is fed a credential and its artifact asserted clean.
 //!
-//! Redaction happens BEFORE truncation in every helper here. Truncating first
-//! and redacting after would ship a long usable PREFIX of a proof, which is not
-//! meaningfully better than shipping the whole thing. The helpers own both
-//! steps precisely so a caller cannot get the order wrong.
+//! # Why the ORDER of redaction and truncation is not the safety property
+//!
+//! An earlier draft of this module claimed redaction-before-truncation was
+//! load-bearing: truncating first would supposedly ship a usable PREFIX of a
+//! proof. Against THIS redactor that claim is false, and it was withdrawn
+//! rather than left as a comforting sentence no test could hold (#526 rework).
+//!
+//! The redactor is line-anchored and prefix-stable: a line's classification
+//! depends only on the header NAME that precedes its value on the same line,
+//! plus the classification of the complete lines before it. Truncation only
+//! ever removes a SUFFIX. So for any surviving line, either it is a complete
+//! original line (identical classification, identical redaction) or it is a
+//! proper prefix of one — and a prefix of a bearer line either still contains
+//! the colon, in which case it is classified and blanked exactly as before, or
+//! it stops inside the header NAME, which carries no credential. Truncate-first
+//! cannot leak here, and the two orderings differ only in the LENGTH of what is
+//! recorded.
+//!
+//! The helpers still own both steps, for two reasons that ARE load-bearing:
+//!
+//! * A caller that owns truncation is a caller that can forget redaction
+//!   entirely — which is precisely how every non-REST family got here.
+//! * [`recorded_excerpt`]'s scan window must never be smaller than what it is
+//!   about to record, which is only checkable in one place.
+//!
+//! If the redactor ever stops being prefix-stable — if it grows a value-shaped
+//! rule (entropy, a bare `Bearer <token>` with no name anchor, a JSON path)
+//! then a truncated prefix stops being recognizable and the ordering becomes
+//! load-bearing for real. Restore the claim WITH a fixture that fails under the
+//! swap; do not restore it on its own.
 
 use std::collections::BTreeMap;
 
@@ -83,11 +127,12 @@ pub(crate) const REDACTED_HEADER_VALUE: &str = "<redacted>";
 
 /// How much of a byte buffer is decoded and scanned before truncation.
 ///
-/// Redaction must precede truncation, so the scan window can never be smaller
-/// than the excerpt limit. It is capped anyway so that excerpting a 512-byte
-/// slice of a multi-gigabyte file does not decode the whole file: any content
-/// beyond the window is dropped, never recorded, so the cap can only
-/// over-redact relative to an unbounded scan.
+/// The window can never be smaller than the excerpt limit: the scanner must see
+/// at least everything that could survive truncation, or a credential that fits
+/// inside the record would never have been looked at. It is capped anyway so
+/// that excerpting a 512-byte slice of a multi-gigabyte file does not decode the
+/// whole file: any content beyond the window is dropped, never recorded, so the
+/// cap can only over-redact relative to an unbounded scan.
 const EVIDENCE_SCAN_BYTES: usize = 64 * 1024;
 
 /// Which lines of a blob are eligible to be parsed as headers.
@@ -99,6 +144,114 @@ pub(crate) enum RedactionScope {
     /// Unstructured text (stdout, file bytes, a serial log, a metadata value):
     /// every line is eligible.
     AnyText,
+}
+
+/// Every place in this crate that turns observed bytes into RECORDED evidence.
+///
+/// This enum is the crate's register of recorded-evidence surfaces, and it is
+/// not decoration: [`RecordedSurface::scope`] is what decides whether a blob is
+/// parsed as a raw HTTP message or as unstructured text, so a surface cannot be
+/// recorded without that question having been answered for it, here, in review.
+///
+/// It exists because #526's first attempt proved the redaction with an
+/// exhaustive match over `ManagedExternalAction` — which is structurally blind
+/// to every surface that is not a governed external action, and four of those
+/// had no assertion at all. A new surface must now name itself here, and the
+/// exhaustive match in `external_actions_recorded_evidence_test.rs` fails to
+/// compile until that surface has been fed a credential and its ARTIFACT
+/// asserted clean.
+///
+/// What this still does not force: a future recording path that reaches none of
+/// this module's helpers at all. [`recorded_metadata`] is the net under that
+/// case for anything that lands in event metadata; a path that is neither is a
+/// genuine hole, and the reason `recorded_evidence.rs` is the only file in the
+/// crate allowed to own a redactor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordedSurface {
+    /// `tool.requested` → `output_excerpt` (`external_actions.rs`).
+    ToolOutput,
+    /// `mcp.tool.requested` → `output_excerpt` (`external_actions.rs`).
+    McpToolOutput,
+    /// `skill.requested` → `output_excerpt` (`external_actions.rs`).
+    SkillOutput,
+    /// `memory.requested` → `value_excerpt` (`external_actions.rs`).
+    MemoryValue,
+    /// `filesystem.requested` → `content_excerpt` (`external_actions.rs`).
+    FilesystemContent,
+    /// `cli.requested` → `stdout_excerpt` / `stderr_excerpt`
+    /// (`external_actions.rs`).
+    CliOutput,
+    /// `rest.requested` → `response_excerpt` (`external_actions.rs`). The ONLY
+    /// surface whose blob is a raw HTTP message, and #353's original subject.
+    RestResponse,
+    /// A configured handler binary's stdout/stderr (`handlers.rs`). Recorded
+    /// into `cli.requested` metadata AND printed straight to worker stdout by
+    /// `smoke_handler_binary_command`, which no metadata sweep covers.
+    HandlerBinaryOutput,
+    /// A microVM guest workload's stdout/stderr
+    /// (`firecracker_guest_exec.rs`). Recorded into the guest `run.completed`
+    /// frame AND into the guest RPC response, which no metadata sweep covers.
+    GuestWorkloadOutput,
+    /// A microVM serial console / Firecracker log (`backends.rs`), recorded as
+    /// `FirecrackerBootEvidence` and serialized straight to worker stdout —
+    /// there is NO downstream metadata sweep on this path at all.
+    FirecrackerBootEvidence,
+    /// A governed workload's output (`self_hosted_execution.rs`), recorded into
+    /// `evidence_json()`, which no metadata sweep covers.
+    GovernedWorkloadOutput,
+    /// An argument vector recorded back into evidence, via [`recorded_argv`]:
+    /// the CLI family's `args` and the handler runtime's `probe_args` /
+    /// `task_args`. One variant for all three because they share the one
+    /// implementation — the leak they can have is the JOIN, not the call site.
+    Argv,
+}
+
+impl RecordedSurface {
+    /// The register, in list form, for the tests that must walk every surface.
+    ///
+    /// Kept next to the variants deliberately: a variant added below and not
+    /// added here is visible in the same screen of the same diff, and the
+    /// exhaustive match in `external_actions_recorded_evidence_test.rs` will
+    /// have forced the author to write an artifact arm for it regardless.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 12] = [
+        Self::ToolOutput,
+        Self::McpToolOutput,
+        Self::SkillOutput,
+        Self::MemoryValue,
+        Self::FilesystemContent,
+        Self::CliOutput,
+        Self::RestResponse,
+        Self::HandlerBinaryOutput,
+        Self::GuestWorkloadOutput,
+        Self::FirecrackerBootEvidence,
+        Self::GovernedWorkloadOutput,
+        Self::Argv,
+    ];
+
+    /// Whether this surface's blob may be trusted to have an HTTP header
+    /// section.
+    ///
+    /// Exactly one surface may. Everything else is unstructured text where a
+    /// credential-shaped line can appear anywhere, so narrowing any of them to
+    /// [`RedactionScope::HttpMessage`] re-opens the leak below the first blank
+    /// line.
+    fn scope(self) -> RedactionScope {
+        match self {
+            Self::RestResponse => RedactionScope::HttpMessage,
+            Self::ToolOutput
+            | Self::McpToolOutput
+            | Self::SkillOutput
+            | Self::MemoryValue
+            | Self::FilesystemContent
+            | Self::CliOutput
+            | Self::HandlerBinaryOutput
+            | Self::GuestWorkloadOutput
+            | Self::FirecrackerBootEvidence
+            | Self::GovernedWorkloadOutput
+            | Self::Argv => RedactionScope::AnyText,
+        }
+    }
 }
 
 /// Header names whose VALUE is bearer material: possession of the value alone
@@ -115,8 +268,17 @@ pub(crate) enum RedactionScope {
 /// trail #354 needs in order to answer "why was this payment made and what
 /// happened to it?". Redacting them would destroy evidence without protecting
 /// anything.
+///
+/// The second block is the one the first #526 attempt got wrong. A deny-list
+/// that does not contain the credential headers FERROGATE ITSELF sends is not a
+/// deny-list with a bespoke-name gap, it is a deny-list with a hole where the
+/// most likely observation goes: the blob most likely to be recorded is a
+/// workload's own dump of its own upstream call. Each entry names its
+/// definition site so the pairing can be re-checked, and
+/// `recorded_evidence_test.rs` enumerates those emitters independently of this
+/// list so removing an entry fails a test rather than passing one.
 fn is_bearer_header(name: &str) -> bool {
-    const BEARER_HEADERS: [&str; 7] = [
+    const BEARER_HEADERS: [&str; 13] = [
         "authorization",
         "proxy-authorization",
         "cookie",
@@ -126,6 +288,31 @@ fn is_bearer_header(name: &str) -> bool {
         "authentication",
         "x-api-key",
         "x-auth-token",
+        // Credential headers this repository emits. `authorization` above
+        // already covers openai.rs, vertex.rs and bedrock.rs's SigV4 header;
+        // these are the ones that are NOT spelled `authorization`, and none of
+        // them matched before the #526 rework.
+        //
+        // `api-key`              — ferrogate-providers/src/azure.rs
+        // `x-goog-api-key`       — ferrogate-providers/src/gemini.rs
+        // `x-amz-security-token` — ferrogate-providers/src/bedrock.rs
+        // `cf-aig-authorization` — ferrogate-providers/src/cloudflare.rs
+        //                          (a distinct token from `authorization`, and
+        //                          not a substring match of it)
+        // `x-vault-token`        — ferrogate-secrets/src/lib.rs
+        // `x-access-token`       — ferrogate-runtime/src/coding_agent/
+        //                          credential_broker.rs. There it is the git
+        //                          USERNAME that carries an installation
+        //                          token; it is listed because a line shaped
+        //                          `x-access-token: <token>` is exactly how
+        //                          that pair gets printed, and over-redacting a
+        //                          username is free.
+        "api-key",
+        "x-goog-api-key",
+        "x-amz-security-token",
+        "cf-aig-authorization",
+        "x-vault-token",
+        "x-access-token",
     ];
     name.eq_ignore_ascii_case(HEADER_PAYMENT_SIGNATURE)
         || BEARER_HEADERS
@@ -142,8 +329,6 @@ fn is_bearer_header(name: &str) -> bool {
 ///
 /// Fail-safe by construction:
 ///
-/// * Redaction happens BEFORE truncation at the call site, so a truncated
-///   excerpt can never carry a surviving prefix of a proof.
 /// * A message with no header/body separator (a truncated or malformed
 ///   response) is treated as ALL headers, which over-redacts rather than
 ///   under-redacts.
@@ -155,6 +340,12 @@ fn is_bearer_header(name: &str) -> bool {
 /// Scope limit, stated honestly: this redacts the header section only. A body
 /// that echoes a credential back is not covered — guessing at secrets inside
 /// arbitrary payloads is a different problem with a different failure mode.
+///
+/// Test-only entry point. Production reaches HTTP scope through
+/// [`recorded_http_excerpt`] with [`RecordedSurface::RestResponse`], so the
+/// scope decision cannot be made at a call site; #353's tests still address the
+/// scope directly, and this is how.
+#[cfg(test)]
 pub(crate) fn redact_bearer_headers(raw_http_message: &str) -> String {
     redact_scoped(raw_http_message, RedactionScope::HttpMessage)
 }
@@ -172,6 +363,25 @@ pub(crate) fn redact_recorded_text(text: &str) -> String {
 
 /// THE redaction. Every recorded-evidence path in this crate reaches this
 /// function; there is deliberately no second implementation to keep in sync.
+///
+/// # The one shape this does not catch, and the obligation it creates
+///
+/// A header is recognised only when its NAME starts the line: the scan takes
+/// `split_once(':')`, i.e. the FIRST colon. So
+/// `"upstream said: authorization: Bearer SECRET"` parses as the field
+/// `upstream said` and passes through verbatim.
+///
+/// That is deliberate — a scan that hunted for a bearer name anywhere in a line
+/// would blank the tail of any prose containing the word `cookie:` — but it
+/// makes a rule for CALLERS, not a footnote: anything that concatenates
+/// independently-sourced strings into one recorded value must join them with a
+/// NEWLINE, so each piece gets its own line and its own chance to be classified.
+///
+/// `args.join(" ")` is the exact defect this rule exists for: a handler invoked
+/// with `["--header", "authorization: Bearer SECRET"]` joins to
+/// `--header authorization: Bearer SECRET`, whose first colon belongs to
+/// `--header authorization`, and the credential is recorded in full. Argument
+/// vectors therefore go through [`recorded_argv`], which owns the separator.
 fn redact_scoped(text: &str, scope: RedactionScope) -> String {
     let http = matches!(scope, RedactionScope::HttpMessage);
     let mut redacted = String::with_capacity(text.len());
@@ -228,10 +438,15 @@ fn redact_scoped(text: &str, scope: RedactionScope) -> String {
 /// Excerpt a RAW HTTP MESSAGE for recording: redact, then cap at `char_limit`
 /// characters.
 ///
-/// The order is the point. Capping first would leave a `char_limit`-long prefix
-/// of a signed payment proof in the record.
-pub(crate) fn recorded_http_excerpt(raw_http_message: &str, char_limit: usize) -> String {
-    redact_bearer_headers(raw_http_message)
+/// `surface` is what makes the blob eligible for HTTP parsing at all — see
+/// [`RecordedSurface::scope`]. A surface that is not really a raw HTTP message
+/// must not be excerpted here.
+pub(crate) fn recorded_http_excerpt(
+    surface: RecordedSurface,
+    raw_http_message: &str,
+    char_limit: usize,
+) -> String {
+    redact_scoped(raw_http_message, surface.scope())
         .chars()
         .take(char_limit)
         .collect()
@@ -242,19 +457,23 @@ pub(crate) fn recorded_http_excerpt(raw_http_message: &str, char_limit: usize) -
 ///
 /// This replaced a `String::from_utf8_lossy(&bytes[..limit])` that every
 /// non-REST family used, which is how #353's fix missed them all.
-pub(crate) fn recorded_excerpt(bytes: &[u8], byte_limit: u64) -> String {
+pub(crate) fn recorded_excerpt(surface: RecordedSurface, bytes: &[u8], byte_limit: u64) -> String {
     let byte_limit = usize::try_from(byte_limit).unwrap_or(usize::MAX);
     // Never scan less than we are about to record: redaction has to see at
     // least everything that could survive truncation.
     let window = byte_limit.max(EVIDENCE_SCAN_BYTES).min(bytes.len());
-    let redacted = redact_recorded_text(&String::from_utf8_lossy(&bytes[..window]));
+    let redacted = redact_scoped(&String::from_utf8_lossy(&bytes[..window]), surface.scope());
     truncate_on_char_boundary(redacted, byte_limit)
 }
 
 /// Excerpt unstructured text by LINES (a microVM serial log, a hypervisor log):
 /// redact, then keep the first `max_lines` lines.
-pub(crate) fn recorded_line_excerpt(text: &str, max_lines: usize) -> String {
-    redact_recorded_text(text)
+pub(crate) fn recorded_line_excerpt(
+    surface: RecordedSurface,
+    text: &str,
+    max_lines: usize,
+) -> String {
+    redact_scoped(text, surface.scope())
         .lines()
         .take(max_lines)
         .collect::<Vec<_>>()
@@ -263,9 +482,34 @@ pub(crate) fn recorded_line_excerpt(text: &str, max_lines: usize) -> String {
 
 /// Redact a single already-assembled recorded value (a workload output blob, an
 /// evidence field). Untruncated: callers that also truncate must use one of the
-/// excerpt helpers so the ordering stays correct.
-pub(crate) fn recorded_value(value: &str) -> String {
-    redact_recorded_text(value)
+/// excerpt helpers, which own both steps.
+pub(crate) fn recorded_value(surface: RecordedSurface, value: &str) -> String {
+    redact_scoped(value, surface.scope())
+}
+
+/// Join an ARGUMENT VECTOR into one recorded value.
+///
+/// The separator is the whole point, which is why no caller is allowed to pick
+/// it. [`redact_scoped`] classifies a line by the field name that STARTS it, so
+/// `["--header", "authorization: Bearer SECRET"].join(" ")` produces
+/// `--header authorization: Bearer SECRET` — first colon belongs to
+/// `--header authorization`, not a bearer name, and the credential is recorded
+/// verbatim. Joining with a newline gives every argument its own line and its
+/// own classification.
+///
+/// This covers the CLI family's `args` and the handler runtime's `probe_args`
+/// and `task_args`; the last two were joined with a SPACE until the #526
+/// rework, so a handler binary invoked with a `--header` credential recorded it
+/// in full on its `run.started` event.
+pub(crate) fn recorded_argv<S: AsRef<str>>(args: &[S]) -> String {
+    recorded_value(
+        RecordedSurface::Argv,
+        &args
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// Build an event-metadata map whose VALUES have been swept for bearer

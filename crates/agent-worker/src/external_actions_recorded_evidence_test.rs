@@ -18,13 +18,40 @@
 //! metadata must still be clean, because the redaction is a property of
 //! recording, not of remembering to call the right helper.
 //!
-//! The dispatch below is an exhaustive `match` on [`ManagedExternalAction`] on
-//! purpose: a family added tomorrow does not compile until it is listed here,
-//! so "the new family was never audited" cannot happen again silently.
+//! There are TWO exhaustive dispatches here, over two different domains,
+//! because #526's first attempt only had the first one and it was structurally
+//! blind to most of the crate:
+//!
+//! 1. [`ManagedExternalAction`] — the governed external-action families. A
+//!    family added tomorrow does not compile until its builder is listed.
+//! 2. [`RecordedSurface`] — EVERY recorded-evidence surface in the crate,
+//!    including the four that are not external actions at all: a configured
+//!    handler binary's stdout, a microVM guest workload's stdout, the
+//!    Firecracker serial console, and a governed workload's output. Reverting
+//!    any of those to its pre-#526 raw capture changed no assertion anywhere
+//!    until this dispatch existed. Each arm feeds a credential to the REAL
+//!    production recording site and asserts on the ARTIFACT it produces.
+//!
+//! What (2) forces and what it does not, stated rather than implied: a new
+//! variant of `RecordedSurface` does not compile until an artifact arm exists
+//! for it, and a new recording site cannot call an excerpt helper without
+//! naming a surface (the helpers take one, and derive the redaction scope from
+//! it). What it cannot force is a recording path that reaches none of
+//! `recorded_evidence`'s helpers at all; `recorded_metadata` is the net under
+//! that case for anything landing in event metadata, and the guest-frame and
+//! REST-rejection sweeps below are the net for the two paths that are not
+//! metadata maps.
+
+use std::io::Write as _;
+
+use ferrogate_runtime::{
+    AgentWorkerFrameworkEventResult, CapabilityPolicy, ClassOnlyPolicyMode,
+    SimpleCapabilityAuthorizer,
+};
 
 use super::*;
 
-use crate::recorded_evidence::REDACTED_HEADER_VALUE;
+use crate::recorded_evidence::{RecordedSurface, REDACTED_HEADER_VALUE};
 
 /// Obviously-fake credential material. Long enough that a surviving prefix
 /// would still be a leak worth failing on.
@@ -356,4 +383,289 @@ fn credential_bearing_cli_arguments_are_not_echoed_back_into_metadata() {
     let args = metadata.get("args").expect("args recorded");
     assert!(!args.contains(&FAKE_SECRET[..12]), "{args}");
     assert!(args.contains("authorization"), "{args}");
+}
+
+// ---------------------------------------------------------------------------
+// Every recorded-evidence SURFACE, not just every external-action family
+// ---------------------------------------------------------------------------
+
+/// The artifact a recorded-evidence surface actually emits, plus a marker that
+/// proves the capture reached it.
+struct SurfaceArtifact {
+    /// Exactly what leaves the worker: an event-metadata map serialized as it
+    /// is emitted, a JSON evidence blob, or the excerpt string that is embedded
+    /// verbatim in one.
+    recorded: String,
+    /// A non-credential fragment of the capture. If this is missing the arm is
+    /// vacuous — it proved nothing was leaked because nothing was recorded.
+    reached_marker: &'static str,
+}
+
+/// A denying gateway authorizer. Self-hosted mode runs the workload regardless,
+/// so this needs no allow policy to exercise the recording path.
+fn report_only_authorizer() -> RuntimeGatewayExternalActionAuthorizer<SimpleCapabilityAuthorizer> {
+    RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(CapabilityPolicy {
+        allowed_actions: std::collections::BTreeSet::new(),
+        class_only_policy_mode: ClassOnlyPolicyMode::LegacyClassWide,
+        ..CapabilityPolicy::default()
+    }))
+}
+
+fn recorded_evidence_session() -> FrameworkAdapterSession {
+    FrameworkAdapterSession {
+        session_id: "agent-worker-recorded-evidence-session".to_string(),
+        run_id: "agent-worker-recorded-evidence-run".to_string(),
+        tenant_id: "recorded-evidence-tenant".to_string(),
+        workspace_id: "recorded-evidence-workspace".to_string(),
+        worker_id: "agent-worker-recorded-evidence".to_string(),
+        isolation_backend: "local-process".to_string(),
+        adapter_name: "native-harness".to_string(),
+        adapter_version: env!("CARGO_PKG_VERSION").to_string(),
+        framework: SupportedFramework::NativeHarness,
+        mode: FrameworkAdapterMode::SelfHosted,
+    }
+}
+
+/// One external-action family's real metadata builder, serialized the way the
+/// event carrying it is.
+fn family_artifact(action: &ManagedExternalAction, raw_capture: &str) -> SurfaceArtifact {
+    let (metadata, _) = recorded_metadata_for(action, raw_capture);
+    SurfaceArtifact {
+        recorded: serde_json::to_string(&metadata).expect("metadata serializes"),
+        reached_marker: "upstream body",
+    }
+}
+
+/// Feed one recorded-evidence surface a credential through its REAL production
+/// recording site and hand back what that site emits.
+///
+/// This `match` is exhaustive on purpose, and on the RIGHT enum this time: a
+/// surface added to [`RecordedSurface`] does not compile until someone has had
+/// to answer "what artifact does it produce, and is the credential in it?".
+/// `ManagedExternalAction` could not do that job — it is structurally blind to
+/// every surface that is not a governed external action, which is exactly how
+/// `handlers::output_excerpt`, `backends::excerpt`,
+/// `firecracker_guest_exec::execute_guest_workload` and
+/// `run_governed_workload`'s `workload_output` were "fixed" with no assertion
+/// anywhere.
+fn artifact_for(surface: RecordedSurface, raw_capture: &str) -> SurfaceArtifact {
+    match surface {
+        // --- governed external-action families: the artifact is event metadata
+        RecordedSurface::ToolOutput => family_artifact(&tool_action(), raw_capture),
+        RecordedSurface::McpToolOutput => family_artifact(&mcp_action(), raw_capture),
+        RecordedSurface::SkillOutput => family_artifact(&skill_action(), raw_capture),
+        RecordedSurface::MemoryValue => family_artifact(&memory_action(), raw_capture),
+        RecordedSurface::FilesystemContent => family_artifact(&filesystem_action(), raw_capture),
+        RecordedSurface::CliOutput => family_artifact(&cli_action(), raw_capture),
+        RecordedSurface::RestResponse => family_artifact(&rest_action(), raw_capture),
+
+        // --- a configured handler binary's stdout/stderr. `output_excerpt`'s
+        // return value is embedded verbatim in `cli.requested` metadata AND
+        // printed straight to worker stdout by `smoke_handler_binary_command`,
+        // where no metadata sweep runs.
+        RecordedSurface::HandlerBinaryOutput => SurfaceArtifact {
+            recorded: serde_json::json!({
+                "process": "agent-worker",
+                "stdout_excerpt": crate::handlers::output_excerpt(raw_capture.as_bytes()),
+            })
+            .to_string(),
+            reached_marker: "upstream body",
+        },
+
+        // --- a microVM guest workload's own stdout, really spawned. This is
+        // arbitrary attacker-reachable output: the guest prints it, the host
+        // records it into the `run.completed` frame and the guest RPC response.
+        RecordedSurface::GuestWorkloadOutput => {
+            let workspace = tempfile::tempdir().expect("guest workspace");
+            std::fs::write(workspace.path().join("capture.txt"), raw_capture)
+                .expect("guest capture written");
+            let result = crate::firecracker_guest_exec::execute_guest_workload(
+                &crate::firecracker_guest_exec::FirecrackerGuestWorkloadSpec {
+                    capability_action: "cli".to_string(),
+                    command: "/bin/cat".to_string(),
+                    args: vec!["capture.txt".to_string()],
+                    timeout_millis: 10_000,
+                    output_limit_bytes: 8_192,
+                },
+                workspace.path(),
+            );
+            assert!(
+                result.executed,
+                "guest workload did not run: {:?}",
+                result.denial_reason
+            );
+            SurfaceArtifact {
+                recorded: serde_json::to_string(&serde_json::json!({
+                    "output_excerpt": result.output_excerpt,
+                }))
+                .expect("guest result serializes"),
+                reached_marker: "upstream body",
+            }
+        }
+
+        // --- the microVM serial console. The worst case in the crate: this
+        // evidence is serialized straight to worker stdout by
+        // `firecracker_boot_smoke_command` and there is NO downstream metadata
+        // sweep anywhere on the path, so `backends::excerpt` is the only thing
+        // between a guest and the operator's terminal.
+        RecordedSurface::FirecrackerBootEvidence => {
+            let evidence = crate::backends::FirecrackerBootEvidence {
+                serial_boot_markers: vec!["linux_version"],
+                serial_excerpt: crate::backends::excerpt(raw_capture, 16),
+                firecracker_log_excerpt: crate::backends::excerpt(raw_capture, 12),
+            };
+            SurfaceArtifact {
+                recorded: serde_json::to_string(&evidence).expect("boot evidence serializes"),
+                reached_marker: "upstream body",
+            }
+        }
+
+        // --- a governed workload's output, through the real enforcement core.
+        // `workload_output` lands in `evidence_json()`, which no metadata sweep
+        // covers.
+        RecordedSurface::GovernedWorkloadOutput => {
+            let capture = raw_capture.to_string();
+            let execution = run_governed_workload(
+                FrameworkAdapterMode::SelfHosted,
+                &recorded_evidence_session(),
+                &report_only_authorizer(),
+                cli_action(),
+                false,
+                1_000,
+                move || {
+                    Ok(GovernedWorkloadOutcome {
+                        exit_code: Some(0),
+                        output: capture,
+                        backend_name: "local-process".to_string(),
+                        containment_summary: "recorded-evidence-probe".to_string(),
+                    })
+                },
+            )
+            .expect("self-hosted report-only execution must never block");
+            assert!(execution.workload_ran, "the probe workload must have run");
+            SurfaceArtifact {
+                recorded: execution.evidence_json().to_string(),
+                reached_marker: "upstream body",
+            }
+        }
+
+        // --- an argument vector recorded back into evidence. The leak here is
+        // the JOIN, not the call site: a space join hides a credential's header
+        // name behind the flag that precedes it.
+        RecordedSurface::Argv => SurfaceArtifact {
+            recorded: crate::recorded_evidence::recorded_argv(&[
+                "--header".to_string(),
+                raw_capture.to_string(),
+            ]),
+            reached_marker: "upstream body",
+        },
+    }
+}
+
+/// The acceptance criterion for #526, per SURFACE: no recorded-evidence
+/// artifact this crate emits carries an upstream `authorization`, `cookie`,
+/// `set-cookie` or `PAYMENT-SIGNATURE` value — whichever surface produced it,
+/// and whether or not a metadata sweep runs downstream of it.
+///
+/// Reverting any of the four non-family surfaces to its pre-#526 raw capture
+/// (`String::from_utf8_lossy(&output[..length])`, `text.lines().take(n)`,
+/// dropping `recorded_value`) fails here. Before this test, all three reverts
+/// were silent.
+#[test]
+fn no_recorded_evidence_surface_emits_bearer_material() {
+    let raw = leaky_capture();
+
+    for surface in RecordedSurface::ALL {
+        let artifact = artifact_for(surface, &raw);
+
+        assert!(
+            !artifact.recorded.contains(&FAKE_SECRET[..12]),
+            "{surface:?} recorded bearer material: {}",
+            artifact.recorded
+        );
+        // Non-vacuity: the capture really did reach this surface and was
+        // rewritten there, rather than being dropped or never stored.
+        assert!(
+            artifact.recorded.contains(artifact.reached_marker),
+            "{surface:?} did not actually record the capture: {}",
+            artifact.recorded
+        );
+        assert!(
+            artifact.recorded.contains(REDACTED_HEADER_VALUE),
+            "{surface:?} recorded the capture without redacting anything: {}",
+            artifact.recorded
+        );
+        // The NAME survives, so the record still shows a credential was there.
+        assert!(
+            artifact.recorded.contains("authorization"),
+            "{surface:?} lost the header name: {}",
+            artifact.recorded
+        );
+    }
+}
+
+/// `write_guest_event` is the ONE exit for a guest-side event frame, which is
+/// why the sweep lives there instead of at the four call sites that build one.
+/// Deleting it leaves the guest free to write a credential into any metadata
+/// key it likes and have the host record the frame verbatim.
+#[test]
+fn the_guest_event_writer_sweeps_every_frame_it_emits() {
+    let mut event = AgentWorkerFrameworkEventResult {
+        session_id: "guest-session".to_string(),
+        run_id: "guest-run".to_string(),
+        adapter_name: "native-harness".to_string(),
+        adapter_version: "test".to_string(),
+        framework: "firecracker".to_string(),
+        mode: "managed".to_string(),
+        kind: "run.completed".to_string(),
+        message: Some("guest workload completed".to_string()),
+        metadata: std::collections::HashMap::new(),
+    };
+    // A key nobody classified as an excerpt, holding raw guest output — the
+    // shape a new guest event added tomorrow would have.
+    event
+        .metadata
+        .insert("a_new_guest_key".to_string(), leaky_capture());
+
+    let mut frame = Vec::new();
+    crate::firecracker_guest_exec::write_guest_event(&mut frame, event).expect("frame written");
+    frame.flush().expect("frame flushed");
+
+    let written = String::from_utf8(frame).expect("frame is utf-8");
+    assert!(!written.contains(&FAKE_SECRET[..12]), "{written}");
+    assert!(written.contains("upstream body"), "{written}");
+    assert!(written.contains(REDACTED_HEADER_VALUE), "{written}");
+}
+
+/// `GovernedRestRejection::build` records `failure_reason`, an error string
+/// built over data the UPSTREAM controlled, into a `rest.requested` event whose
+/// metadata is assembled incrementally rather than through `recorded_metadata`.
+/// Dropping its sweep re-opens #353 on the failure path.
+#[test]
+fn the_rest_rejection_builder_sweeps_its_upstream_derived_failure_reason() {
+    let ManagedExternalAction::Rest(action) = rest_action() else {
+        unreachable!("rest_action builds a REST action")
+    };
+    let rejection = GovernedRestRejection::build(
+        &recorded_evidence_session(),
+        &action,
+        RequestWireStage::SentOrUnknown,
+        true,
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action failed; upstream answered:\n{}",
+            leaky_capture()
+        )),
+    );
+
+    let recorded = rejection
+        .event
+        .metadata
+        .get("failure_reason")
+        .expect("failure_reason recorded");
+    assert!(!recorded.contains(&FAKE_SECRET[..12]), "{recorded}");
+    assert!(
+        recorded.contains("managed REST action failed"),
+        "the diagnostic must survive: {recorded}"
+    );
+    assert!(recorded.contains(REDACTED_HEADER_VALUE), "{recorded}");
 }

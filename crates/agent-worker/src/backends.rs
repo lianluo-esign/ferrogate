@@ -2401,9 +2401,14 @@ impl FirecrackerBootSmokeReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct FirecrackerBootEvidence {
-    serial_boot_markers: Vec<&'static str>,
-    serial_excerpt: String,
-    firecracker_log_excerpt: String,
+    pub(crate) serial_boot_markers: Vec<&'static str>,
+    /// Whatever the GUEST printed to its serial console, so it is
+    /// attacker-reachable text. It is serialized straight to worker stdout by
+    /// `firecracker_boot_smoke_command` with no metadata sweep anywhere
+    /// downstream, which makes [`excerpt`] the only thing between a guest and
+    /// the operator's terminal (#526).
+    pub(crate) serial_excerpt: String,
+    pub(crate) firecracker_log_excerpt: String,
 }
 
 #[derive(Debug)]
@@ -3429,8 +3434,12 @@ fn serial_has_microvm_userspace_evidence(markers: &[&str]) -> bool {
 /// A serial console carries whatever the guest printed to it, so it is a
 /// recorded-evidence surface like any other and goes through the crate's one
 /// redaction chokepoint before it is cut down (#526).
-fn excerpt(text: &str, max_lines: usize) -> String {
-    crate::recorded_evidence::recorded_line_excerpt(text, max_lines)
+pub(crate) fn excerpt(text: &str, max_lines: usize) -> String {
+    crate::recorded_evidence::recorded_line_excerpt(
+        crate::recorded_evidence::RecordedSurface::FirecrackerBootEvidence,
+        text,
+        max_lines,
+    )
 }
 
 fn first_non_empty_line(text: &str) -> String {

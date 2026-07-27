@@ -362,7 +362,10 @@ where
                 identity_expiry_unix_millis: 0,
                 workload_ran: true,
                 workload_exit_code: workload.exit_code,
-                workload_output: crate::recorded_evidence::recorded_value(&workload.output),
+                workload_output: crate::recorded_evidence::recorded_value(
+                    crate::recorded_evidence::RecordedSurface::GovernedWorkloadOutput,
+                    &workload.output,
+                ),
                 backend_name: workload.backend_name,
                 containment_summary: workload.containment_summary,
                 lease_correlation: SelfHostedRunEvidenceCorrelation::default(),
@@ -385,7 +388,10 @@ where
                 identity_expiry_unix_millis: self_hosted_identity_expiry(server_clock_unix_millis),
                 workload_ran: true,
                 workload_exit_code: workload.exit_code,
-                workload_output: crate::recorded_evidence::recorded_value(&workload.output),
+                workload_output: crate::recorded_evidence::recorded_value(
+                    crate::recorded_evidence::RecordedSurface::GovernedWorkloadOutput,
+                    &workload.output,
+                ),
                 backend_name: workload.backend_name,
                 containment_summary: workload.containment_summary,
                 lease_correlation: SelfHostedRunEvidenceCorrelation::default(),

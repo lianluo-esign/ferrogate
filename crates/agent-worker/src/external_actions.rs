@@ -48,7 +48,8 @@ use ferrogate_runtime::{
 use ferrogate_payments::HEADER_PAYMENT_REQUIRED;
 
 use crate::recorded_evidence::{
-    recorded_excerpt, recorded_http_excerpt, recorded_metadata, redact_recorded_values,
+    recorded_argv, recorded_excerpt, recorded_http_excerpt, recorded_metadata,
+    redact_recorded_values, RecordedSurface,
 };
 use crate::self_hosted_execution::{
     run_governed_workload, GovernedWorkloadExecution, GovernedWorkloadOutcome,
@@ -1946,7 +1947,7 @@ fn governed_cli_failure_metadata(
         ("external_action".to_string(), "cli".to_string()),
         ("external_target".to_string(), action.command.clone()),
         ("command".to_string(), action.command.clone()),
-        ("args".to_string(), action.args.join("\n")),
+        ("args".to_string(), recorded_argv(&action.args)),
         ("working_dir".to_string(), action.working_dir.clone()),
         ("env_policy".to_string(), action.env_policy.clone()),
         (
@@ -1982,7 +1983,7 @@ impl GovernedCliCancellation {
             ("external_action".to_string(), "cli".to_string()),
             ("external_target".to_string(), action.command.clone()),
             ("command".to_string(), action.command.clone()),
-            ("args".to_string(), action.args.join("\n")),
+            ("args".to_string(), recorded_argv(&action.args)),
             ("working_dir".to_string(), action.working_dir.clone()),
             ("env_policy".to_string(), action.env_policy.clone()),
             (
@@ -2189,7 +2190,7 @@ fn run_authorized_tool_action(
     }
     let message = smoke_literal_argument(&action.arguments_policy)?;
     Ok(GovernedToolExecution {
-        output_excerpt: recorded_excerpt(message.as_bytes(), 512),
+        output_excerpt: recorded_excerpt(RecordedSurface::ToolOutput, message.as_bytes(), 512),
     })
 }
 
@@ -2240,7 +2241,7 @@ fn run_authorized_mcp_tool_action(
             )
         })?;
     Ok(GovernedMcpToolExecution {
-        output_excerpt: recorded_excerpt(message.as_bytes(), 512),
+        output_excerpt: recorded_excerpt(RecordedSurface::McpToolOutput, message.as_bytes(), 512),
     })
 }
 
@@ -2291,7 +2292,11 @@ fn run_authorized_skill_action(
         )));
     }
     Ok(GovernedSkillExecution {
-        output_excerpt: recorded_excerpt(action.declared_capabilities.join(",").as_bytes(), 512),
+        output_excerpt: recorded_excerpt(
+            RecordedSurface::SkillOutput,
+            action.declared_capabilities.join(",").as_bytes(),
+            512,
+        ),
     })
 }
 
@@ -2345,7 +2350,11 @@ fn run_authorized_memory_action(
             let value = "ferrogate governed memory smoke".to_string();
             store.insert(store_key, value.clone());
             Ok(GovernedMemoryExecution {
-                value_excerpt: recorded_excerpt(value.as_bytes(), 512),
+                value_excerpt: recorded_excerpt(
+                    RecordedSurface::MemoryValue,
+                    value.as_bytes(),
+                    512,
+                ),
             })
         }
         ManagedMemoryAccess::Read => {
@@ -2355,7 +2364,11 @@ fn run_authorized_memory_action(
                 )
             })?;
             Ok(GovernedMemoryExecution {
-                value_excerpt: recorded_excerpt(value.as_bytes(), 512),
+                value_excerpt: recorded_excerpt(
+                    RecordedSurface::MemoryValue,
+                    value.as_bytes(),
+                    512,
+                ),
             })
         }
     }
@@ -2612,7 +2625,7 @@ fn run_authorized_filesystem_action(
     Ok(GovernedFilesystemExecution {
         resolved_path,
         byte_len: bytes.len(),
-        content_excerpt: recorded_excerpt(&bytes, 512),
+        content_excerpt: recorded_excerpt(RecordedSurface::FilesystemContent, &bytes, 512),
     })
 }
 
@@ -3124,7 +3137,7 @@ impl GovernedCliExecution {
             ("external_action".to_string(), "cli".to_string()),
             ("external_target".to_string(), action.command.clone()),
             ("command".to_string(), action.command.clone()),
-            ("args".to_string(), action.args.join("\n")),
+            ("args".to_string(), recorded_argv(&action.args)),
             ("working_dir".to_string(), action.working_dir.clone()),
             ("env_policy".to_string(), action.env_policy.clone()),
             (
@@ -3190,8 +3203,16 @@ fn run_authorized_cli_action(
     }
     Ok(GovernedCliExecution {
         status_code: output.status.code(),
-        stdout_excerpt: recorded_excerpt(&output.stdout, action.stdout_limit_bytes),
-        stderr_excerpt: recorded_excerpt(&output.stderr, action.stderr_limit_bytes),
+        stdout_excerpt: recorded_excerpt(
+            RecordedSurface::CliOutput,
+            &output.stdout,
+            action.stdout_limit_bytes,
+        ),
+        stderr_excerpt: recorded_excerpt(
+            RecordedSurface::CliOutput,
+            &output.stderr,
+            action.stderr_limit_bytes,
+        ),
     })
 }
 
@@ -4047,9 +4068,11 @@ fn run_authorized_rest_action(
     }
     Ok(GovernedRestExecution {
         status_code,
-        // Redact BEFORE truncating: a 512-char prefix of an unredacted response
-        // would otherwise carry a usable prefix of a bearer credential.
-        response_excerpt: recorded_http_excerpt(&response, 512),
+        // The helper owns BOTH the redaction and the 512-char cap, so this call
+        // site cannot record a response by capping it and forgetting the rest —
+        // which is how every other family got here (#526). `RestResponse` is
+        // the only surface parsed as a raw HTTP message.
+        response_excerpt: recorded_http_excerpt(RecordedSurface::RestResponse, &response, 512),
     })
 }
 

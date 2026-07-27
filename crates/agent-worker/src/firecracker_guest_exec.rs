@@ -413,7 +413,7 @@ pub(crate) fn serve_guest_session_with_config<S: Read + Write>(
     )
 }
 
-fn execute_guest_workload(
+pub(crate) fn execute_guest_workload(
     workload: &FirecrackerGuestWorkloadSpec,
     workspace: &Path,
 ) -> FirecrackerGuestWorkloadResult {
@@ -495,9 +495,13 @@ fn execute_guest_workload(
         // reachable output — a workload that curls an upstream and prints the
         // exchange used to put every credential header it saw into the
         // `output_excerpt` of the `run.completed` frame the host records (#526).
-        output_excerpt: crate::recorded_evidence::recorded_excerpt(&output, limit as u64)
-            .trim()
-            .to_string(),
+        output_excerpt: crate::recorded_evidence::recorded_excerpt(
+            crate::recorded_evidence::RecordedSurface::GuestWorkloadOutput,
+            &output,
+            limit as u64,
+        )
+        .trim()
+        .to_string(),
         capability_denial_enforced: false,
         denial_reason: None,
     }
@@ -862,7 +866,7 @@ fn validate_vsock_response_status(
 /// swept for bearer material once, centrally, instead of at each of the four
 /// call sites that build one (#526). A new guest event added tomorrow inherits
 /// the sweep by virtue of being written at all.
-fn write_guest_event<S: Write>(
+pub(crate) fn write_guest_event<S: Write>(
     stream: &mut S,
     mut event: AgentWorkerFrameworkEventResult,
 ) -> Result<(), String> {

@@ -7,9 +7,10 @@
 //! The shared recorded-evidence chokepoint (#526).
 //!
 //! #353 proved the REST family's excerpt does not leak. These tests pin the
-//! properties that make that true for EVERY family — the ordering, the scope
-//! split, and the metadata sweep — at the one place they are implemented, so a
-//! family added later inherits proven behaviour instead of a copied fix.
+//! properties that make that true for EVERY family — the truncation sweep, the
+//! scope split, the argv join and the metadata net — at the one place they are
+//! implemented, so a family added later inherits proven behaviour instead of a
+//! copied fix.
 //!
 //! Every assertion here is on the RECORDED VALUE. None of them asserts that a
 //! function was called or that a line of source exists.
@@ -22,61 +23,90 @@ const FAKE_PROOF: &str = "FAKEPROOFDONOTLOG0123456789abcdefghijklmnopqrstuvwxyz\
                           FAKEPROOFDONOTLOG0123456789abcdefghijklmnopqrstuvwxyz";
 
 // ---------------------------------------------------------------------------
-// Ordering: redaction precedes truncation, in every excerpt helper
+// Truncation cannot leave a usable credential prefix — at ANY cut point
 // ---------------------------------------------------------------------------
 
-/// The byte-excerpt helper that every non-REST family now uses must redact
-/// BEFORE it truncates. Truncating first leaves a `limit`-long prefix of the
-/// credential in the record, which is not meaningfully safer than the whole
-/// thing.
+/// The property the excerpt helpers actually owe, swept over the WHOLE
+/// truncation space rather than at one hand-picked limit.
 ///
-/// The credential is placed FIRST, exactly where a surviving prefix would land.
+/// This deliberately replaces an earlier `recorded_excerpt_redacts_before_it_
+/// truncates`, which claimed to hold an ORDERING and did not: this redactor is
+/// line-anchored and prefix-stable, so swapping redaction and truncation
+/// changes only the LENGTH of the record, never its safety (see the module
+/// docs). What is real, and what this holds, is that no cut point of a
+/// credential-bearing blob yields a recorded excerpt containing any usable
+/// prefix of the credential — while the header NAME still survives wherever the
+/// cut left room for it.
 #[test]
-fn recorded_excerpt_redacts_before_it_truncates() {
+fn no_truncation_point_of_recorded_excerpt_leaves_a_usable_credential_prefix() {
+    // Credential FIRST, exactly where a surviving prefix would land.
     let raw = format!("authorization: Bearer {FAKE_PROOF}\nbody line\n");
 
-    let excerpt = recorded_excerpt(raw.as_bytes(), 64);
-
-    assert!(excerpt.len() <= 64, "limit not honored: {excerpt:?}");
-    // Not just the whole proof — no usable prefix of it either.
-    for prefix_len in [8, 16, 32] {
-        assert!(
-            !excerpt.contains(&FAKE_PROOF[..prefix_len]),
-            "a {prefix_len}-char credential prefix survived truncation: {excerpt:?}"
+    let mut saw_a_surviving_header_name = false;
+    for byte_limit in 0..=raw.len() {
+        let excerpt = recorded_excerpt(
+            RecordedSurface::CliOutput,
+            raw.as_bytes(),
+            byte_limit as u64,
         );
+
+        assert!(
+            excerpt.len() <= byte_limit,
+            "limit {byte_limit} not honored: {excerpt:?}"
+        );
+        for prefix_len in [8, 16, 32] {
+            assert!(
+                !excerpt.contains(&FAKE_PROOF[..prefix_len]),
+                "a {prefix_len}-char credential prefix survived a {byte_limit}-byte cut: \
+                 {excerpt:?}"
+            );
+        }
+        saw_a_surviving_header_name |= excerpt.contains("authorization");
     }
+
+    // Non-vacuity: the loop is not passing because everything was cut away.
     assert!(
-        excerpt.contains("authorization"),
-        "the header NAME must survive so the record still shows a credential was present: \
-         {excerpt:?}"
+        saw_a_surviving_header_name,
+        "the header NAME must survive at wide limits so the record still shows a credential \
+         was present"
     );
+    let wide = recorded_excerpt(RecordedSurface::CliOutput, raw.as_bytes(), 4_096);
+    assert!(wide.contains("body line"), "{wide:?}");
+    assert!(wide.contains(REDACTED_HEADER_VALUE), "{wide:?}");
 }
 
-/// Same ordering obligation for the line-oriented helper (microVM serial /
-/// hypervisor logs). Cutting to `max_lines` first and redacting after would
-/// still record the credential when it sits inside the kept lines.
+/// Same obligation for the line-oriented helper (microVM serial / hypervisor
+/// logs), swept over every line cap: the credential must never be recorded, at
+/// any cap that keeps its line.
 #[test]
-fn recorded_line_excerpt_redacts_before_it_cuts_lines() {
+fn no_line_cap_of_recorded_line_excerpt_records_the_credential() {
     let raw = format!("boot line\nauthorization: Bearer {FAKE_PROOF}\ntail line\n");
 
-    let excerpt = recorded_line_excerpt(&raw, 2);
+    for max_lines in 0..=4 {
+        let excerpt =
+            recorded_line_excerpt(RecordedSurface::FirecrackerBootEvidence, &raw, max_lines);
+        assert!(!excerpt.contains(&FAKE_PROOF[..8]), "{excerpt:?}");
+        assert!(
+            excerpt.lines().count() <= max_lines,
+            "line cap {max_lines} not honored: {excerpt:?}"
+        );
+    }
 
-    assert!(!excerpt.contains(FAKE_PROOF), "{excerpt:?}");
-    assert!(!excerpt.contains(&FAKE_PROOF[..8]), "{excerpt:?}");
-    assert!(excerpt.starts_with("boot line"), "{excerpt:?}");
-    assert!(
-        !excerpt.contains("tail line"),
-        "line cap not honored: {excerpt:?}"
-    );
+    // Non-vacuity at the cap that keeps exactly the credential's line.
+    let two = recorded_line_excerpt(RecordedSurface::FirecrackerBootEvidence, &raw, 2);
+    assert!(two.starts_with("boot line"), "{two:?}");
+    assert!(two.contains("authorization"), "{two:?}");
+    assert!(two.contains(REDACTED_HEADER_VALUE), "{two:?}");
+    assert!(!two.contains("tail line"), "{two:?}");
 }
 
-/// The REST helper keeps #353's contract verbatim: redact, then cap at
-/// `char_limit` characters.
+/// The REST helper keeps #353's contract verbatim: the response excerpt is
+/// capped at `char_limit` characters and no prefix of the proof survives.
 #[test]
-fn recorded_http_excerpt_redacts_before_it_truncates() {
+fn the_rest_response_excerpt_records_no_proof_prefix_under_its_char_cap() {
     let raw = format!("HTTP/1.1 200 OK\r\nPAYMENT-SIGNATURE: {FAKE_PROOF}\r\n\r\nbody");
 
-    let excerpt = recorded_http_excerpt(&raw, 48);
+    let excerpt = recorded_http_excerpt(RecordedSurface::RestResponse, &raw, 48);
 
     assert_eq!(
         excerpt.chars().count(),
@@ -89,6 +119,7 @@ fn recorded_http_excerpt_redacts_before_it_truncates() {
             "a {prefix_len}-char proof prefix survived truncation: {excerpt:?}"
         );
     }
+    assert!(excerpt.contains("PAYMENT-SIGNATURE"), "{excerpt:?}");
 }
 
 /// A credential sitting beyond the excerpt limit but inside the scan window
@@ -101,11 +132,11 @@ fn nothing_outside_the_scan_window_can_be_recorded() {
 
     // Limit smaller than the offset of the credential: it must be truncated
     // away AND redacted, not one or the other.
-    let excerpt = recorded_excerpt(raw.as_bytes(), 32);
+    let excerpt = recorded_excerpt(RecordedSurface::CliOutput, raw.as_bytes(), 32);
     assert!(!excerpt.contains(&FAKE_PROOF[..8]), "{excerpt:?}");
 
     // Limit large enough to reach the credential: it must be redacted.
-    let wide = recorded_excerpt(raw.as_bytes(), 1_000_000);
+    let wide = recorded_excerpt(RecordedSurface::CliOutput, raw.as_bytes(), 1_000_000);
     assert!(!wide.contains(&FAKE_PROOF[..8]), "{wide}");
     assert!(
         wide.contains("set-cookie"),
@@ -115,7 +146,7 @@ fn nothing_outside_the_scan_window_can_be_recorded() {
 }
 
 // ---------------------------------------------------------------------------
-// Scope: an HTTP message has a header section, stdout does not
+// Scope is a property of the SURFACE, not of the call site
 // ---------------------------------------------------------------------------
 
 /// The two scopes differ in exactly one way, and it is the way that matters:
@@ -141,6 +172,48 @@ fn any_text_scope_redacts_below_a_blank_line_where_http_scope_does_not() {
     assert!(as_text.contains("authorization"), "{as_text}");
 }
 
+/// Exactly ONE recorded surface may be parsed as a raw HTTP message. Narrowing
+/// any other surface to `HttpMessage` re-opens the leak above: a process's
+/// stdout has no header section, so everything below its first blank line would
+/// stop being scanned.
+///
+/// The list is written out rather than derived from `scope()`, so a future edit
+/// that reclassifies a surface has to argue with this test instead of dragging
+/// it along.
+#[test]
+fn only_the_rest_response_surface_is_parsed_as_a_raw_http_message() {
+    // A credential below a blank line: recorded iff the surface is HTTP-scoped.
+    let text = format!("preamble\n\nx-api-key: {FAKE_PROOF}\n");
+
+    for surface in [
+        RecordedSurface::ToolOutput,
+        RecordedSurface::McpToolOutput,
+        RecordedSurface::SkillOutput,
+        RecordedSurface::MemoryValue,
+        RecordedSurface::FilesystemContent,
+        RecordedSurface::CliOutput,
+        RecordedSurface::HandlerBinaryOutput,
+        RecordedSurface::GuestWorkloadOutput,
+        RecordedSurface::FirecrackerBootEvidence,
+        RecordedSurface::GovernedWorkloadOutput,
+        RecordedSurface::Argv,
+    ] {
+        let recorded = recorded_value(surface, &text);
+        assert!(
+            !recorded.contains(&FAKE_PROOF[..8]),
+            "{surface:?} is not a raw HTTP message, so a credential below a blank line is \
+             still a credential: {recorded}"
+        );
+    }
+
+    // And the one surface that IS a raw HTTP message keeps #353's structure.
+    let rest = recorded_value(RecordedSurface::RestResponse, &text);
+    assert!(
+        rest.contains(FAKE_PROOF),
+        "the REST surface must keep treating post-separator content as body: {rest}"
+    );
+}
+
 /// Unstructured text has no status line either, so line 0 is eligible. A
 /// process whose very first stdout line is a credential is the easy case to get
 /// wrong by copying the HTTP parser wholesale.
@@ -153,6 +226,75 @@ fn the_first_line_of_unstructured_text_is_not_treated_as_a_status_line() {
     assert!(!redacted.contains(&FAKE_PROOF[..8]), "{redacted}");
     assert!(redacted.contains("x-api-key"), "{redacted}");
     assert!(redacted.contains("second line"), "{redacted}");
+}
+
+// ---------------------------------------------------------------------------
+// Argument vectors: the join is the leak
+// ---------------------------------------------------------------------------
+
+/// `recorded_argv` owns the separator because the separator is the defect.
+///
+/// The scanner classifies a line by its FIRST colon, so two argv entries sharing
+/// one line hide the credential's header name behind whatever flag preceded it:
+/// `--header authorization: Bearer …` parses as the field `--header
+/// authorization`, which is not a bearer name, and the whole credential is
+/// recorded. Giving every argument its own line is the entire fix, and this is
+/// the assertion that holds it.
+#[test]
+fn a_credential_bearing_argument_is_not_recorded_whatever_flag_precedes_it() {
+    for flag in ["--header", "-H", "--data", "--reject-with"] {
+        let argv = [
+            flag.to_string(),
+            format!("authorization: Bearer {FAKE_PROOF}"),
+        ];
+
+        let recorded = recorded_argv(&argv);
+
+        assert!(
+            !recorded.contains(&FAKE_PROOF[..8]),
+            "argument after {flag} was recorded verbatim: {recorded}"
+        );
+        // Non-vacuity: the argv really was recorded, names and all.
+        assert!(recorded.contains(flag), "{recorded}");
+        assert!(recorded.contains("authorization"), "{recorded}");
+        assert!(recorded.contains(REDACTED_HEADER_VALUE), "{recorded}");
+    }
+}
+
+/// Every credential header name FerroGate itself sends is a plausible argv
+/// value too (`curl --header "x-goog-api-key: …"`), so the argv join has to
+/// cover the same list, not just `authorization`.
+#[test]
+fn every_credential_header_ferrogate_emits_is_covered_by_the_argv_join() {
+    for (header, definition_site) in CREDENTIAL_HEADERS_FERROGATE_EMITS {
+        let argv = ["--header".to_string(), format!("{header}: {FAKE_PROOF}")];
+
+        let recorded = recorded_argv(&argv);
+
+        assert!(
+            !recorded.contains(&FAKE_PROOF[..8]),
+            "{header} (defined at {definition_site}) survived the argv join: {recorded}"
+        );
+    }
+}
+
+/// A single argument holding no credential is recorded verbatim, so the record
+/// still says what was actually run.
+#[test]
+fn a_credential_free_argv_is_recorded_verbatim() {
+    let argv = [
+        "/usr/bin/curl",
+        "--max-time",
+        "5",
+        "https://example.invalid",
+    ];
+
+    let recorded = recorded_argv(&argv);
+
+    assert_eq!(
+        recorded,
+        "/usr/bin/curl\n--max-time\n5\nhttps://example.invalid"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +365,96 @@ fn redaction_is_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
+// The deny-list, enumerated from the OTHER side (#526 rework)
+// ---------------------------------------------------------------------------
+
+/// The credential headers FERROGATE ITSELF puts on the wire, each paired with
+/// the file that defines it.
+///
+/// This table is the point of the whole section. A test that loops over
+/// `is_bearer_header`'s own array is definitionally incapable of catching an
+/// omission from that array — it asserts the list covers itself. This one is
+/// derived from a DIFFERENT source of truth: the header names the provider,
+/// secret-resolver and credential-broker crates emit. Five of these were
+/// missing from the deny-list when #526 first landed, which meant a workload
+/// that printed its own upstream call leaked in full against Azure OpenAI,
+/// Gemini, Bedrock, Cloudflare AI Gateway and Vault.
+///
+/// Adding a provider means adding its credential header here. That is the
+/// maintenance cost, and it is the correct place to pay it — a name in this
+/// table with no entry in `is_bearer_header` fails; the reverse is harmless.
+const CREDENTIAL_HEADERS_FERROGATE_EMITS: [(&str, &str); 10] = [
+    ("authorization", "ferrogate-providers/src/openai.rs"),
+    ("authorization", "ferrogate-providers/src/vertex.rs"),
+    (
+        "authorization",
+        "ferrogate-providers/src/bedrock.rs (SigV4)",
+    ),
+    ("x-api-key", "ferrogate-providers/src/anthropic.rs"),
+    ("api-key", "ferrogate-providers/src/azure.rs"),
+    ("x-goog-api-key", "ferrogate-providers/src/gemini.rs"),
+    ("x-amz-security-token", "ferrogate-providers/src/bedrock.rs"),
+    (
+        "cf-aig-authorization",
+        "ferrogate-providers/src/cloudflare.rs",
+    ),
+    ("X-Vault-Token", "ferrogate-secrets/src/lib.rs"),
+    (
+        "x-access-token",
+        "ferrogate-runtime/src/coding_agent/credential_broker.rs",
+    ),
+];
+
+/// Every credential header this repository sends must be redacted out of
+/// unstructured recorded text — that is the `curl -i` dump the `AnyText` scope
+/// exists for, and it is worthless if it only knows `authorization`.
+#[test]
+fn every_credential_header_ferrogate_emits_is_redacted_in_unstructured_text() {
+    for (header, definition_site) in CREDENTIAL_HEADERS_FERROGATE_EMITS {
+        // Mid-blob, below a blank line, exactly as a tool's `curl -i` output
+        // would land in a stdout excerpt.
+        let text = format!("$ curl -i https://upstream.invalid\n\n{header}: {FAKE_PROOF}\nok\n");
+
+        let redacted = redact_recorded_text(&text);
+
+        assert!(
+            !redacted.contains(&FAKE_PROOF[..8]),
+            "{header} (sent by FerroGate at {definition_site}) is not on the deny-list: \
+             {redacted}"
+        );
+        assert!(
+            redacted.contains(header),
+            "{header} lost its name: {redacted}"
+        );
+        assert!(redacted.contains("ok"), "{redacted}");
+    }
+}
+
+/// The generic credential names that are not tied to one provider: browser
+/// session material, proxy credentials and the x402 payment proof.
+#[test]
+fn the_generic_bearer_names_are_redacted_in_unstructured_text() {
+    for name in [
+        "Proxy-Authorization",
+        "cookie",
+        "SET-COOKIE",
+        "authentication",
+        "X-Auth-Token",
+        "PAYMENT-SIGNATURE",
+    ] {
+        let text = format!("prelude\n{name}: {FAKE_PROOF}\n");
+
+        let redacted = redact_recorded_text(&text);
+
+        assert!(
+            !redacted.contains(&FAKE_PROOF[..8]),
+            "{name} was not treated as bearer material: {redacted}"
+        );
+        assert!(redacted.contains(name), "{name} lost its name: {redacted}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The recorded-header-value policy (#526)
 // ---------------------------------------------------------------------------
 
@@ -252,28 +484,16 @@ fn non_credential_header_values_are_recorded_verbatim() {
     );
 }
 
-/// Every name on the deny-list is covered in the unstructured scope too, not
-/// just in a real HTTP header section.
+/// A deny-list entry must not swallow a NEIGHBOURING name. `cf-aig-authorization`
+/// and `authorization` are different credentials on different hops, and
+/// `x-api-key` and `api-key` are different providers' headers; matching by
+/// substring rather than by whole name would blank diagnostics that are not
+/// credentials at all (`x-request-cookie-count`).
 #[test]
-fn every_bearer_header_name_is_redacted_in_unstructured_text() {
-    for name in [
-        "authorization",
-        "Proxy-Authorization",
-        "cookie",
-        "SET-COOKIE",
-        "authentication",
-        "x-api-key",
-        "X-Auth-Token",
-        "PAYMENT-SIGNATURE",
-    ] {
-        let text = format!("prelude\n{name}: {FAKE_PROOF}\n");
+fn deny_list_matching_is_by_whole_name_not_by_substring() {
+    let text = "x-request-cookie-count: 4\nauthorization-scheme-debug: negotiate\n";
 
-        let redacted = redact_recorded_text(&text);
+    let redacted = redact_recorded_text(text);
 
-        assert!(
-            !redacted.contains(&FAKE_PROOF[..8]),
-            "{name} was not treated as bearer material: {redacted}"
-        );
-        assert!(redacted.contains(name), "{name} lost its name: {redacted}");
-    }
+    assert_eq!(redacted, text, "non-credential diagnostics must survive");
 }

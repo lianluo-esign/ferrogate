@@ -295,9 +295,19 @@ fn public_x402_protocol_evidence_survives_redaction() {
     assert!(!excerpt.contains(REDACTED_HEADER_VALUE), "{excerpt}");
 }
 
-/// Ordering matters: the excerpt is capped at 512 characters, so redacting
-/// after truncating would still ship a long usable prefix of the proof. The
-/// proof here sits first, exactly where a surviving prefix would land.
+/// The excerpt is capped at 512 characters and the proof sits FIRST, exactly
+/// where a surviving prefix would land. Not one character of it may be
+/// recorded.
+///
+/// The name is #353's and is kept for continuity, but the claim it was written
+/// with — that redaction must precede truncation or a usable prefix survives —
+/// was withdrawn in the #526 rework: this redactor is line-anchored and
+/// prefix-stable, so swapping the two steps changes only the LENGTH of the
+/// record, and this test does NOT fail under that swap. See the module docs on
+/// `recorded_evidence.rs` for the invariant that makes the order irrelevant and
+/// for what would make it load-bearing again. What this test does hold, and it
+/// is the assertion that matters, is that the recorded `response_excerpt`
+/// carries no prefix of the proof at all.
 #[test]
 fn redaction_precedes_truncation_so_no_proof_prefix_survives() {
     let proof = proof_bytes();
