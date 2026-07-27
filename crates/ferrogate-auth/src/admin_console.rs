@@ -39,6 +39,11 @@ use crate::util::{
 pub(crate) const ADMIN_SESSION_ACCESS_TOKEN_TTL_SECS: u64 = 60 * 60;
 /// Admin console refresh-token lifetime.
 const ADMIN_SESSION_REFRESH_TOKEN_TTL_SECS: u64 = 60 * 60 * 24 * 30;
+/// The `StoredApiKey::name` every console-session gateway key is minted
+/// with. It is the only marker distinguishing a session key from a virtual
+/// key an operator created deliberately through `/admin/v1/virtual-keys`,
+/// so the revocation sweeps below key off it and must never widen.
+pub(crate) const ADMIN_CONSOLE_SESSION_KEY_NAME: &str = "Admin console session";
 
 /// Durable-storage handle and JWT signing secret backing the admin-console
 /// register/login/session endpoints.
@@ -347,6 +352,7 @@ pub(crate) fn handle_admin_register(
         &workspace_id,
         &project_id,
         &tenant_id,
+        &user_id,
         MembershipRole::Owner,
     ) {
         Ok(secret) => secret,
@@ -427,11 +433,16 @@ pub(crate) fn handle_admin_login(
 
     // Mint a fresh gateway virtual key on every login rather than trying to
     // recover a prior one (secrets are never plaintext-recoverable after
-    // creation, matching the existing virtual-key create/rotate contract).
-    // Known simplification: earlier session keys are not auto-revoked here,
-    // so multiple concurrent browser sessions each keep their own working
-    // key; an operator can still revoke any of them via the existing
-    // /admin/v1/virtual-keys API.
+    // creation, matching the existing virtual-key create/rotate contract),
+    // and REVOKE the caller's prior session keys for this tenant while doing
+    // so (issue #517, inside `provision_gateway_api_key`). Without that
+    // sweep the tier ladder would only bind newly-minted keys, leaving every
+    // pre-#517 `viewer` holding an `admin.write` key indefinitely.
+    // Consequence: one browser session per user per tenant -- signing in
+    // again invalidates the previous tab's gateway key. That is the
+    // deliberate trade for a bounded credential lifetime; the refresh token
+    // is unaffected, so only the gateway key (not the console session) is
+    // displaced.
     // Derive the key's authority from the caller's tier in THIS tenant
     // (issue #517). `from_stored` resolves an unrecognised legacy value to
     // `viewer`, the least privilege, so a role string that predates the
@@ -442,6 +453,7 @@ pub(crate) fn handle_admin_login(
         &workspace.id,
         &workspace.project_id,
         &workspace.tenant_id,
+        &user.id,
         session_role,
     ) {
         Ok(secret) => secret,
@@ -622,10 +634,16 @@ pub(crate) fn handle_admin_me(console: &AdminConsoleState, token: &str) -> HttpR
                 .repositories
                 .get_tenant_account(&membership.tenant_id),
         ) {
+            // Report the RESOLVED tier, exactly as login/refresh/SSO do
+            // (issue #517). The console reads `/me` to rehydrate a stored
+            // session, so returning the raw column here would re-advertise
+            // an authority the session's key does not carry: for a legacy
+            // `"superuser"` row login answers `viewer` while `/me` answered
+            // `superuser` for the very same session.
             Ok(Some(account)) => tenant_views.push(AdminTenantView {
                 id: account.id,
                 name: account.name,
-                role: membership.role,
+                role: MembershipRole::from_stored(&membership.role).to_string(),
             }),
             Ok(None) => {}
             Err(error) => return storage_error(&error),
@@ -694,11 +712,15 @@ pub(crate) fn handle_admin_team_list(console: &AdminConsoleState, token: &str) -
     let mut members = Vec::with_capacity(memberships.len());
     for member in memberships {
         match block_on_sync_bridge(console.repositories.get_admin_user_by_id(&member.user_id)) {
+            // Resolved tier, not the raw column (issue #517): the roster is
+            // what an owner reads before deciding whether a teammate is
+            // over-privileged, so it must show the authority that teammate's
+            // session actually gets.
             Ok(Some(user)) => members.push(AdminTeamMemberView {
                 user_id: user.id,
                 email: user.email,
                 display_name: user.display_name,
-                role: member.role,
+                role: MembershipRole::from_stored(&member.role).to_string(),
             }),
             Ok(None) => {}
             Err(error) => return storage_error(&error),
@@ -832,9 +854,25 @@ pub(crate) fn handle_admin_team_change_role(
     // Store the CANONICAL string, so a padded/aliased input can never reach
     // storage as a role no reader recognises.
     target.role = role.to_string();
+    let tenant_id = target.tenant_id.clone();
     if let Err(error) =
         block_on_sync_bridge(console.repositories.upsert_admin_user_membership(target))
     {
+        return storage_error(&error);
+    }
+    // A tier is only real if DEMOTION takes effect (issue #517). The tier
+    // is otherwise enforced at mint time alone: an `admin` who logged in
+    // before this call keeps an `admin.write` gateway key indefinitely,
+    // so writing `role` and returning 200 would report a demotion that
+    // never happened. Revoking their session keys forces a re-login that
+    // remints at the new tier -- the same reasoning by which
+    // `scim::deactivate_admin_user_in_tenant` already invalidates refresh
+    // tokens on a membership change; the gateway key simply was not in
+    // that set. Refresh tokens are deliberately left alone: the refresh
+    // path re-reads the CURRENT membership, and every owner-gated route
+    // re-resolves the membership per request, so the JWT's `role` claim is
+    // not a standing grant. The gateway key is.
+    if let Err(error) = revoke_admin_console_session_keys(console, &tenant_id, target_user_id) {
         return storage_error(&error);
     }
     HttpResponse::json(
@@ -884,7 +922,22 @@ pub(crate) fn handle_admin_team_revoke(
             .repositories
             .delete_admin_user_membership(target_user_id, &membership.tenant_id),
     ) {
-        Ok(true) => HttpResponse::json(200, json!({ "object": "membership", "removed": true })),
+        Ok(true) => {
+            // Removing the membership must remove the authority it granted
+            // (issue #517). Deleting the row alone only closes the console
+            // JWT paths (`current_admin_session` 401s once the membership
+            // is gone); the gateway virtual key minted for their last
+            // session is a SEPARATE credential the gateway authenticates on
+            // its own, and it would have kept working -- an ex-teammate
+            // holding `admin.write` on a tenant they were just removed
+            // from.
+            if let Err(error) =
+                revoke_admin_console_session_keys(console, &membership.tenant_id, target_user_id)
+            {
+                return storage_error(&error);
+            }
+            HttpResponse::json(200, json!({ "object": "membership", "removed": true }))
+        }
         Ok(false) => not_found("no such teammate in this tenant"),
         Err(error) => storage_error(&error),
     }
@@ -1070,6 +1123,69 @@ pub(crate) fn resolve_default_workspace(
         .find(|workspace| workspace.tenant_id == tenant_id))
 }
 
+/// Revokes the console-session gateway keys a user holds in ONE tenant
+/// (issue #517).
+///
+/// Deriving the minted scopes from the caller's tier only fixes the *next*
+/// key. A key already in a browser's hands keeps whatever it was minted
+/// with, forever: `provision_gateway_api_key` writes
+/// `expires_at_unix: None, revoked_at_unix: None`, so on any deployment
+/// that ran the pre-#517 code every `viewer` who ever logged in still holds
+/// a full `admin.read + admin.write + assets.read + assets.write` key. That
+/// is the issue title verbatim, and it is what this sweep closes. It is
+/// also what makes a *demotion* mean something: without it, an `admin`
+/// demoted to `viewer` keeps `admin.write` until the key is found by hand.
+///
+/// Two populations are swept, and the distinction matters:
+///
+/// * **Attributed** keys -- `tenant.user_id == Some(admin_user_id)`. Minted
+///   by this code or later. Revoked whenever this user re-authenticates or
+///   their membership changes. Precise: no other user is touched.
+/// * **Unattributed** keys -- `tenant.user_id.is_none()`, i.e. every key
+///   minted before this commit stamped the owner onto the record. They
+///   cannot be attributed to a user at all, and they are exactly the
+///   over-scoped population, so they are swept tenant-wide. The cost is one
+///   forced re-login for other console users of that tenant; the sweep is
+///   self-extinguishing, since every key minted from here on carries a
+///   `user_id` and only ever matches its own owner.
+///
+/// Re-scoping in place was rejected: the secret is not plaintext-
+/// recoverable, so an unattributed row cannot be re-scoped to the right
+/// tier (we do not know whose it is), and a silently down-scoped key fails
+/// mid-request rather than at sign-in. Revoke-and-remint gives the holder a
+/// correctly-scoped key at the next login instead.
+///
+/// Deliberately does NOT touch keys with any other `name`: an operator's
+/// own `/admin/v1/virtual-keys` creations are not session artifacts.
+pub(crate) fn revoke_admin_console_session_keys(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    admin_user_id: &str,
+) -> Result<usize, ferrogate_storage::StorageError> {
+    let records = block_on_sync_bridge(console.repositories.list_api_key_records())?;
+    let now = now_unix_seconds();
+    let mut revoked = 0usize;
+    for mut key in records {
+        if key.tenant_id != tenant_id || key.name != ADMIN_CONSOLE_SESSION_KEY_NAME {
+            continue;
+        }
+        if key.revoked_at_unix.is_some() && !key.enabled {
+            continue;
+        }
+        let belongs_to_caller = key.tenant.user_id.as_deref() == Some(admin_user_id);
+        let unattributed_legacy = key.tenant.user_id.is_none();
+        if !belongs_to_caller && !unattributed_legacy {
+            continue;
+        }
+        key.enabled = false;
+        key.revoked_at_unix = Some(now);
+        key.updated_at_unix = now;
+        block_on_sync_bridge(console.repositories.upsert_api_key_record(key))?;
+        revoked += 1;
+    }
+    Ok(revoked)
+}
+
 /// Create a durable virtual API key for the gateway's own Admin API,
 /// reusing the exact secret format/hashing the gateway's existing
 /// `/admin/v1/virtual-keys` endpoint already produces and verifies
@@ -1090,13 +1206,22 @@ pub(crate) fn resolve_default_workspace(
 /// arbitrarily-scoped key. That is exactly why `admin.write` itself is now
 /// restricted to `owner`/`admin`: on a tier that lacks it, the assets
 /// scopes are the whole grant rather than a shortcut through one.
+///
+/// **Minting also revokes the caller's prior session keys for this tenant**
+/// ([`revoke_admin_console_session_keys`], issue #517), which is what makes
+/// the scope ladder retroactive rather than forward-only. The key is
+/// stamped with `tenant.user_id` so that sweep -- and the membership-change
+/// sweeps in `handle_admin_team_change_role` / `handle_admin_team_revoke` /
+/// SCIM deactivation -- can find it again.
 pub(crate) fn provision_gateway_api_key(
     console: &AdminConsoleState,
     workspace_id: &str,
     project_id: &str,
     tenant_id: &str,
+    admin_user_id: &str,
     role: MembershipRole,
 ) -> anyhow::Result<String> {
+    revoke_admin_console_session_keys(console, tenant_id, admin_user_id)?;
     let secret = generate_virtual_api_key_secret()?;
     let material = virtual_api_key_material(&secret)
         .ok_or_else(|| anyhow!("failed to derive virtual key material"))?;
@@ -1105,13 +1230,16 @@ pub(crate) fn provision_gateway_api_key(
     scope.apply_to(&mut tenant);
     let id = next_id("vk");
     tenant.api_key_id = Some(id.clone());
+    // Attribution, so a later sweep can revoke THIS user's session keys
+    // without collateral damage to their teammates'.
+    tenant.user_id = Some(admin_user_id.to_string());
     let now = now_unix_seconds();
     let key = StoredApiKey {
         id,
         workspace_id: workspace_id.to_string(),
         tenant_id: tenant_id.to_string(),
         project_id: project_id.to_string(),
-        name: "Admin console session".into(),
+        name: ADMIN_CONSOLE_SESSION_KEY_NAME.into(),
         key_prefix: material.key_prefix,
         key_hash: material.key_hash,
         last4: material.last4,

@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::admin_console::{current_admin_session, resolve_default_workspace, AdminConsoleState};
+use crate::admin_console::{
+    current_admin_session, resolve_default_workspace, revoke_admin_console_session_keys,
+    AdminConsoleState,
+};
 use crate::api_key::{
     generate_virtual_api_key_secret, virtual_api_key_material, ApiKeyAuthenticator,
     StorageApiKeyAuthenticator,
@@ -173,6 +176,15 @@ fn scim_user_resource(user: &StoredAdminUser, role: &str) -> serde_json::Value {
 /// Variant with an explicit `active` value for tenant-scoped deprovisioning
 /// responses (issue #232): a user removed from THIS tenant is inactive here
 /// even when their global account stays enabled for their other tenants.
+///
+/// `ferrogateRole` is the RESOLVED tier, never the raw stored column (issue
+/// #517) -- the single place every SCIM user representation is built, so
+/// normalising here covers list/get/create/patch at once. A legacy or
+/// D1-written value outside the four tiers resolves to `viewer`, which is
+/// the authority that user's console session and gateway key actually get;
+/// echoing the raw string would tell the IdP its user holds a tier this
+/// service does not implement, and IdP-side reconciliation would then
+/// believe a role assignment took effect that never did.
 fn scim_user_resource_with_active(
     user: &StoredAdminUser,
     role: &str,
@@ -184,7 +196,7 @@ fn scim_user_resource_with_active(
         "userName": user.email,
         "displayName": user.display_name,
         "active": active,
-        "ferrogateRole": role,
+        "ferrogateRole": MembershipRole::from_stored(role).as_str(),
         "meta": { "resourceType": "User" }
     })
 }
@@ -358,6 +370,13 @@ pub(crate) fn handle_scim_user_create(
 ///   including legacy rows with no stamped tenant) when this was their last
 ///   membership -- the membership itself is kept in that case so a SCIM
 ///   PATCH `active: true` from the same tenant can reactivate them.
+///
+/// A session's artifacts are the refresh tokens AND the gateway virtual key
+/// minted alongside them (issue #517). Only the tokens were revoked here
+/// before, which left a deprovisioned user holding a working, still
+/// `admin.write`-scoped Admin API credential for the tenant that just
+/// deprovisioned them -- the gateway authenticates that key on its own, with
+/// no reference to the membership row this function deletes.
 fn deactivate_admin_user_in_tenant(
     console: &AdminConsoleState,
     tenant_id: &str,
@@ -374,6 +393,9 @@ fn deactivate_admin_user_in_tenant(
             .repositories
             .revoke_admin_user_refresh_tokens_for_tenant(user_id, tenant_id, now),
     ) {
+        return Err(storage_error(&error));
+    }
+    if let Err(error) = revoke_admin_console_session_keys(console, tenant_id, user_id) {
         return Err(storage_error(&error));
     }
     let memberships = match block_on_sync_bridge(
@@ -520,9 +542,14 @@ pub(crate) fn handle_scim_groups_list(
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
+    // Resolved tiers, not raw columns (issue #517): a group here is a role
+    // an IdP may push users into, so advertising a legacy `"superuser"` row
+    // as a group would offer an assignable tier that `MembershipRole::parse`
+    // rejects on the way back in. Resolving first also collapses several
+    // unparseable rows into the one `viewer` group they all really are.
     let mut roles: Vec<String> = memberships
         .into_iter()
-        .map(|membership| membership.role)
+        .map(|membership| MembershipRole::from_stored(&membership.role).to_string())
         .collect();
     roles.sort();
     roles.dedup();

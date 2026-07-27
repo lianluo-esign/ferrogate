@@ -103,11 +103,95 @@ fn parse_accepts_exactly_the_four_declared_tiers() {
     assert_eq!(MembershipRole::parse("admin"), Ok(MembershipRole::Admin));
     assert_eq!(MembershipRole::parse("member"), Ok(MembershipRole::Member));
     assert_eq!(MembershipRole::parse("viewer"), Ok(MembershipRole::Viewer));
-    // The set matches the Postgres CHECK constraint exactly.
+    // Pinned separately by `the_tier_set_matches_the_sql_check_constraint`;
+    // the loop below iterates ALL, so on its own it self-adjusts to any
+    // number of variants and proves nothing about the SET.
     for role in MembershipRole::ALL {
         assert_eq!(MembershipRole::parse(role.as_str()), Ok(role));
         assert_eq!(MembershipRole::from_str(role.as_str()), Ok(role));
         assert_eq!(role.to_string(), role.as_str());
+    }
+}
+
+/// The migration files this crate's enum has to agree with. Read from disk
+/// at compile time so the coupling below cannot drift into a hand-copied
+/// literal that stops tracking the schema.
+const POSTGRES_MIGRATION_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
+const D1_MIGRATION_SQL: &str = include_str!("../../../sql/d1/001_init_d1.sql");
+
+/// Extracts the value list from
+/// `role TEXT NOT NULL CHECK (role IN ('owner', 'admin', ...))` on
+/// `admin_user_tenant_memberships`, in declaration order.
+fn membership_role_check_domain(sql: &str, dialect: &str) -> Vec<String> {
+    let table = sql
+        .split("CREATE TABLE IF NOT EXISTS admin_user_tenant_memberships")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{dialect} migration must define admin_user_tenant_memberships"))
+        .split(");")
+        .next()
+        .unwrap();
+    let list = table
+        .split("CHECK (role IN (")
+        .nth(1)
+        .unwrap_or_else(|| {
+            panic!("{dialect} admin_user_tenant_memberships.role must carry a CHECK (role IN ...)")
+        })
+        .split(')')
+        .next()
+        .unwrap();
+    list.split(',')
+        .map(|value| value.trim().trim_matches('\'').to_string())
+        .collect()
+}
+
+/// Issue #517, review finding 5. `parse_accepts_exactly_the_four_declared_
+/// tiers` used to carry the comment "the set matches the Postgres CHECK
+/// constraint exactly" while asserting nothing of the kind: it iterates
+/// `MembershipRole::ALL`, so adding a fifth variant left it green, and
+/// `parse_rejects_anything_outside_the_set` only checks a FIXED reject list
+/// (its `error.to_string().contains("owner, admin, member, viewer")` also
+/// still matches a longer joined string). A fifth variant would therefore
+/// ship silently, `parse("support")` would return `Ok`, D1 would store it,
+/// and Postgres would 500 on the INSERT.
+///
+/// This is the coupling: the enum IS the CHECK domain, in both dialects,
+/// in order, with nothing extra on either side. Adding, removing, renaming
+/// or reordering a variant now fails here until the migrations agree.
+#[test]
+fn the_tier_set_matches_the_sql_check_constraint() {
+    let declared: Vec<String> = MembershipRole::ALL
+        .iter()
+        .map(|role| role.as_str().to_string())
+        .collect();
+    // Belt and braces: the arity is asserted outright, so a fifth variant
+    // cannot hide behind a parser change either.
+    assert_eq!(
+        MembershipRole::ALL.len(),
+        4,
+        "the tier set is fixed at four; a new tier needs a migration that \
+         widens the CHECK constraint on admin_user_tenant_memberships.role \
+         in EVERY dialect first"
+    );
+    assert_eq!(declared, ["owner", "admin", "member", "viewer"]);
+
+    for (dialect, sql) in [
+        ("postgres", POSTGRES_MIGRATION_SQL),
+        ("d1", D1_MIGRATION_SQL),
+    ] {
+        let domain = membership_role_check_domain(sql, dialect);
+        assert_eq!(
+            domain, declared,
+            "MembershipRole::ALL and the {dialect} CHECK domain must be the \
+             same set in the same order; enum={declared:?} sql={domain:?}"
+        );
+        // ... and every value the schema accepts must round-trip through
+        // the strict parser, so the two can never agree as strings while
+        // disagreeing on behaviour.
+        for value in &domain {
+            let parsed = MembershipRole::parse(value)
+                .unwrap_or_else(|_| panic!("{dialect} accepts {value:?} but parse() rejects it"));
+            assert_eq!(parsed.as_str(), value);
+        }
     }
 }
 

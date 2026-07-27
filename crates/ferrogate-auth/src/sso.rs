@@ -778,11 +778,20 @@ fn complete_sso_login(
         Ok(None) => return internal_error("no workspace found for this tenant"),
         Err(error) => return storage_error(&error),
     };
+    // The tier that mints the key is `effective_role` -- the group-mapped /
+    // default_role tier resolved above, NOT a fixed grant (issue #517).
+    // `group_role_mapping` is how a real tenant assigns `viewer` at scale,
+    // so this is the mint site that decides most non-owner sessions'
+    // authority. It also revokes this user's prior session keys for the
+    // tenant, so a repeated SSO login cannot accumulate keys and an
+    // IdP-side demotion (or an owner's change-role) is not outlived by an
+    // old key.
     let gateway_api_key = match provision_gateway_api_key(
         console,
         &workspace.id,
         &workspace.project_id,
         tenant_id,
+        &user.id,
         effective_role,
     ) {
         Ok(secret) => secret,

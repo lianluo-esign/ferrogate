@@ -8,8 +8,10 @@
 // ever checked *scope* (`admin.read`/`admin.write`), never whether the
 // caller's own tenant matched the tenant the request actually targeted;
 // any tenant-scoped admin.read+admin.write key (exactly the shape the
-// admin-console auto-provisions on every login via
-// `provision_gateway_api_key`) could read AND financially mutate every
+// admin-console auto-provisions via `provision_gateway_api_key` on every
+// login by an `owner`/`admin` -- the tiers that still carry admin.write
+// after issue #517 scoped that mint to the caller's membership tier)
+// could read AND financially mutate every
 // *other* tenant's wallets, virtual keys, quota policies, RBAC bindings,
 // self-hosted workers, and tenant roster -- and, worse, could mint itself
 // a brand-new platform-operator credential via the static api-keys

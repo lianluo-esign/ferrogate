@@ -724,6 +724,318 @@ fn a_viewer_session_key_carries_no_write_scope() {
     );
 }
 
+/// Every console-session gateway key currently attributed to `user_id` in
+/// `tenant_id`, revoked or not.
+fn console_session_keys(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    user_id: &str,
+) -> Vec<StoredApiKey> {
+    block_on_sync_bridge(console.repositories.list_api_key_records())
+        .unwrap()
+        .into_iter()
+        .filter(|key| {
+            key.tenant_id == tenant_id
+                && key.name == ADMIN_CONSOLE_SESSION_KEY_NAME
+                && key.tenant.user_id.as_deref() == Some(user_id)
+        })
+        .collect()
+}
+
+fn live_console_session_keys(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    user_id: &str,
+) -> Vec<StoredApiKey> {
+    console_session_keys(console, tenant_id, user_id)
+        .into_iter()
+        .filter(|key| key.enabled && key.revoked_at_unix.is_none())
+        .collect()
+}
+
+/// Issue #517, review finding 2 -- the headline, remediated rather than only
+/// prevented. Scoping the mint by tier fixes the NEXT key; a key already
+/// issued carries `expires_at_unix: None, revoked_at_unix: None` and would
+/// otherwise keep its original grant forever. Signing in must therefore
+/// retire the caller's previous session keys for the tenant.
+#[test]
+fn login_revokes_the_callers_prior_console_session_keys() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "sweep-owner@acme.test",
+        "correct-horse-517f",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let user_id = seed_teammate(
+        &console,
+        &tenant_id,
+        "sweep-viewer@acme.test",
+        "correct-horse-517f",
+        "viewer",
+    );
+
+    login_gateway_key_scopes(&console, "sweep-viewer@acme.test", "correct-horse-517f");
+    assert_eq!(
+        live_console_session_keys(&console, &tenant_id, &user_id).len(),
+        1
+    );
+
+    login_gateway_key_scopes(&console, "sweep-viewer@acme.test", "correct-horse-517f");
+    let all = console_session_keys(&console, &tenant_id, &user_id);
+    assert_eq!(all.len(), 2, "a second login mints a second record");
+    let live = live_console_session_keys(&console, &tenant_id, &user_id);
+    assert_eq!(
+        live.len(),
+        1,
+        "exactly one session key may remain live per user per tenant, got {:?}",
+        all.iter()
+            .map(|key| (key.id.clone(), key.enabled, key.revoked_at_unix))
+            .collect::<Vec<_>>()
+    );
+    let revoked: Vec<_> = all
+        .iter()
+        .filter(|key| key.id != live[0].id)
+        .cloned()
+        .collect();
+    assert_eq!(revoked.len(), 1);
+    assert!(!revoked[0].enabled, "a superseded key must be disabled");
+    assert!(
+        revoked[0].revoked_at_unix.is_some(),
+        "a superseded key must be stamped revoked"
+    );
+}
+
+/// The actual exposure the issue names: a key minted by the PRE-#517 code.
+/// Those rows carry no `tenant.user_id` (nothing stamped one), so they are
+/// swept tenant-wide on the next console login -- otherwise a `viewer` who
+/// logged in before the upgrade keeps `admin.read + admin.write +
+/// assets.read + assets.write` indefinitely, which is the issue title
+/// verbatim.
+#[test]
+fn a_pre_517_unattributed_session_key_is_swept_on_the_next_login() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "legacy-sweep-owner@acme.test",
+        "correct-horse-517g",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    seed_teammate(
+        &console,
+        &tenant_id,
+        "legacy-sweep-viewer@acme.test",
+        "correct-horse-517g",
+        "viewer",
+    );
+    let workspace = resolve_default_workspace(&console, &tenant_id)
+        .unwrap()
+        .unwrap();
+
+    // Exactly the shape the pre-#517 code wrote: full admin grant, no
+    // owner attribution, never expiring, never revoked.
+    let now = now_unix_seconds();
+    let mut tenant = TenantContext::default();
+    ferrogate_core::WorkspaceScope::new(&tenant_id, &workspace.project_id, &workspace.id)
+        .apply_to(&mut tenant);
+    tenant.api_key_id = Some("vk_legacy_517".into());
+    let legacy = StoredApiKey {
+        id: "vk_legacy_517".into(),
+        workspace_id: workspace.id.clone(),
+        tenant_id: tenant_id.clone(),
+        project_id: workspace.project_id.clone(),
+        name: ADMIN_CONSOLE_SESSION_KEY_NAME.into(),
+        key_prefix: "fg_legacy517".into(),
+        key_hash: "sha256:legacy".into(),
+        last4: "acy1".into(),
+        enabled: true,
+        scopes: vec![
+            "admin.read".into(),
+            "admin.write".into(),
+            "assets.read".into(),
+            "assets.write".into(),
+        ],
+        allowed_models: Vec::new(),
+        allowed_providers: Vec::new(),
+        tenant,
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        created_at_unix: now,
+        updated_at_unix: now,
+        rotated_at_unix: None,
+        expires_at_unix: None,
+        revoked_at_unix: None,
+    };
+    // A deliberately-created operator key in the same tenant, which the
+    // sweep must NOT touch -- only session artifacts are swept.
+    let mut operator = legacy.clone();
+    operator.id = "vk_operator_517".into();
+    operator.name = "CI deploy key".into();
+    operator.key_prefix = "fg_operator51".into();
+    operator.tenant.api_key_id = Some(operator.id.clone());
+    block_on_sync_bridge(console.repositories.upsert_api_key_record(legacy)).unwrap();
+    block_on_sync_bridge(console.repositories.upsert_api_key_record(operator)).unwrap();
+
+    login_gateway_key_scopes(
+        &console,
+        "legacy-sweep-viewer@acme.test",
+        "correct-horse-517g",
+    );
+
+    let swept = block_on_sync_bridge(console.repositories.get_api_key_record("vk_legacy_517"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        !swept.enabled && swept.revoked_at_unix.is_some(),
+        "a pre-#517 admin.write session key must not survive the next login: {swept:?}"
+    );
+    let untouched =
+        block_on_sync_bridge(console.repositories.get_api_key_record("vk_operator_517"))
+            .unwrap()
+            .unwrap();
+    assert!(
+        untouched.enabled && untouched.revoked_at_unix.is_none(),
+        "the sweep must key off the session-key name and leave operator keys alone"
+    );
+}
+
+/// Issue #517, review finding 3: the tier was enforced at MINT time only, so
+/// a demotion returned 200 and changed nothing a held key could feel. An
+/// `admin` demoted to `viewer` kept `admin.write` indefinitely.
+#[test]
+fn demoting_a_teammate_revokes_the_key_their_old_tier_minted() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "demote-owner@acme.test",
+        "correct-horse-517h",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap().to_string();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let admin_id = seed_teammate(
+        &console,
+        &tenant_id,
+        "demote-admin@acme.test",
+        "correct-horse-517h",
+        "admin",
+    );
+
+    let scopes = login_gateway_key_scopes(&console, "demote-admin@acme.test", "correct-horse-517h");
+    assert!(scopes.iter().any(|scope| scope == "admin.write"));
+    assert_eq!(
+        live_console_session_keys(&console, &tenant_id, &admin_id).len(),
+        1
+    );
+
+    let demote = handle_admin_team_change_role(
+        &console,
+        &owner_token,
+        &admin_id,
+        AdminChangeRoleRequest {
+            role: "viewer".into(),
+        },
+    );
+    assert_eq!(demote.status, 200, "{:?}", body_json(&demote));
+
+    assert!(
+        live_console_session_keys(&console, &tenant_id, &admin_id).is_empty(),
+        "the demoted user must hold no live session key: {:?}",
+        console_session_keys(&console, &tenant_id, &admin_id)
+    );
+
+    // ... and signing in again gets them the tier they now actually have.
+    let after = login_gateway_key_scopes(&console, "demote-admin@acme.test", "correct-horse-517h");
+    assert_eq!(after, ["admin.read", "assets.read"]);
+}
+
+/// Same class for membership removal: deleting the row only closes the
+/// console JWT paths. The gateway authenticates the virtual key on its own,
+/// so an ex-teammate would keep a working Admin API credential.
+#[test]
+fn revoking_a_membership_revokes_that_users_session_key() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "kick-owner@acme.test",
+        "correct-horse-517i",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap().to_string();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let member_id = seed_teammate(
+        &console,
+        &tenant_id,
+        "kick-member@acme.test",
+        "correct-horse-517i",
+        "admin",
+    );
+    login_gateway_key_scopes(&console, "kick-member@acme.test", "correct-horse-517i");
+    assert_eq!(
+        live_console_session_keys(&console, &tenant_id, &member_id).len(),
+        1
+    );
+
+    let revoke = handle_admin_team_revoke(&console, &owner_token, &member_id);
+    assert_eq!(revoke.status, 200, "{:?}", body_json(&revoke));
+    assert!(
+        live_console_session_keys(&console, &tenant_id, &member_id).is_empty(),
+        "a removed teammate must hold no live session key: {:?}",
+        console_session_keys(&console, &tenant_id, &member_id)
+    );
+}
+
+/// Issue #517, review finding 4: `/admin/v1/me` returned the raw stored
+/// column while login/refresh/SSO returned the RESOLVED tier, so the same
+/// session was described two different ways -- and the console rehydrates
+/// from `/me`.
+#[test]
+fn me_reports_the_resolved_tier_not_the_raw_stored_role() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "me-tier-owner@acme.test",
+        "correct-horse-517j",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    seed_teammate(
+        &console,
+        &tenant_id,
+        "me-tier-legacy@acme.test",
+        "correct-horse-517j",
+        "superuser",
+    );
+
+    let login = handle_admin_login(
+        &console,
+        AdminLoginRequest {
+            email: "me-tier-legacy@acme.test".into(),
+            password: "correct-horse-517j".into(),
+        },
+    );
+    assert_eq!(login.status, 200);
+    let login_body = body_json(&login);
+    assert_eq!(login_body["tenant"]["role"], "viewer");
+
+    let me = handle_admin_me(&console, login_body["access_token"].as_str().unwrap());
+    assert_eq!(me.status, 200);
+    let me_body = body_json(&me);
+    assert_eq!(
+        me_body["memberships"][0]["role"], "viewer",
+        "/me must report the same tier login did, never the raw column"
+    );
+
+    // The roster an owner reads before judging who is over-privileged must
+    // agree too.
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let team = body_json(&handle_admin_team_list(&console, owner_token));
+    let legacy = team["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["email"] == "me-tier-legacy@acme.test")
+        .expect("the seeded teammate must appear on the roster");
+    assert_eq!(legacy["role"], "viewer");
+}
+
 /// A role value that predates the validator (or was written straight into a
 /// D1 database, which carried no CHECK) must FAIL CLOSED: least privilege,
 /// never the most privileged tier.
@@ -1307,8 +1619,9 @@ fn resolve_scim_tenant_rejects_missing_and_wrong_scope_tokens() {
     let jwt_as_scim = scim_request("GET", "/scim/v2/Users", owner_token, Vec::new());
     assert!(resolve_scim_tenant(&console, &jwt_as_scim).is_err());
 
-    // A real gateway_api_key (admin.read/admin.write scoped, not
-    // scim.provision) must also be rejected.
+    // A real gateway_api_key must also be rejected: it is scoped from the
+    // holder's membership tier (issue #517) -- here an `owner`, so
+    // admin.read/admin.write/assets.* -- and never scim.provision.
     let gateway_key = owner["gateway_api_key"].as_str().unwrap();
     let wrong_scope = scim_request("GET", "/scim/v2/Users", gateway_key, Vec::new());
     assert!(resolve_scim_tenant(&console, &wrong_scope).is_err());
@@ -2071,6 +2384,170 @@ fn sso_end_to_end_provisions_new_user_and_maps_group_to_role() {
     // The state is single-use: replaying the same callback must fail.
     let replay = handle_sso_callback(&console, "fake-authorization-code", &state);
     assert_eq!(replay.status, 401);
+
+    // The tier reported above is the tier the KEY got, not a parallel
+    // expression that merely agrees with it -- see
+    // `sso_callback_mints_a_gateway_key_scoped_to_the_mapped_tier`.
+    let material = virtual_api_key_material(session["gateway_api_key"].as_str().unwrap()).unwrap();
+    let candidates = block_on_sync_bridge(
+        console
+            .repositories
+            .find_api_key_records_by_prefix(&material.key_prefix),
+    )
+    .unwrap();
+    assert_eq!(
+        candidates[0].scopes,
+        ["admin.read", "admin.write", "assets.read", "assets.write"],
+        "the Engineering->admin mapping must mint the admin tier's scopes"
+    );
+}
+
+/// Drives one full OIDC login (fresh mock IdP, fresh SSO config, authorize,
+/// callback) and returns the scopes of the gateway virtual key the callback
+/// actually minted, resolved out of storage through the returned secret.
+fn sso_callback_gateway_key_scopes(
+    console: &AdminConsoleState,
+    owner_token: &str,
+    tenant_id: &str,
+    group_role_mapping: &[(&str, &str)],
+    default_role: &str,
+    email: &str,
+    groups: &[&str],
+) -> Vec<String> {
+    let (listener, issuer) = bind_mock_oidc_server();
+    let (key_pem, n) = generate_test_rsa_key();
+    let kid = "test-key-1";
+    let jwks_json = jwks_json_for(&n, kid);
+    let id_token = sign_test_id_token(
+        &key_pem,
+        kid,
+        &issuer,
+        "test-client-id",
+        serde_json::json!({
+            "email": email,
+            "name": "SSO User",
+            "groups": groups,
+        }),
+    );
+    run_mock_oidc_server(
+        listener,
+        MockOidcRealm {
+            jwks_json,
+            id_token,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        },
+        issuer.clone(),
+    );
+
+    let mut config = sso_config_request(&issuer);
+    config.group_role_mapping = group_role_mapping
+        .iter()
+        .map(|(group, role)| ((*group).to_string(), (*role).to_string()))
+        .collect();
+    config.default_role = default_role.to_string();
+    let config_set = handle_admin_sso_config_set(console, owner_token, config);
+    assert_eq!(config_set.status, 200, "{:?}", body_json(&config_set));
+
+    let authorize = handle_sso_authorize(console, tenant_id);
+    assert_eq!(authorize.status, 200, "{:?}", body_json(&authorize));
+    let state = body_json(&authorize)["state"].as_str().unwrap().to_string();
+
+    let callback = handle_sso_callback(console, "fake-authorization-code", &state);
+    assert_eq!(callback.status, 200, "{:?}", body_json(&callback));
+    let secret = body_json(&callback)["gateway_api_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let material = virtual_api_key_material(&secret).unwrap();
+    let candidates = block_on_sync_bridge(
+        console
+            .repositories
+            .find_api_key_records_by_prefix(&material.key_prefix),
+    )
+    .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].enabled);
+    candidates[0].scopes.clone()
+}
+
+/// Issue #517, review finding 1: the SSO callback is the THIRD
+/// `provision_gateway_api_key` call site and was the only one no test held.
+/// `sso_end_to_end_provisions_new_user_and_maps_group_to_role` reads
+/// `session["tenant"]["role"]`, which comes from a separate expression than
+/// the `effective_role` handed to the mint call -- so hand-forcing that
+/// argument to `Owner` left the whole suite green while every SSO user
+/// walked away with an `admin.write` key.
+///
+/// This pins the mint site itself, through storage, for the tier resolution
+/// that matters most: `group_role_mapping` is the only mechanism by which a
+/// real tenant assigns `viewer` at scale, and `default_role` catches every
+/// user whose groups match nothing. All three cases share one code path, so
+/// they are asserted together -- if the mint site ever ignores
+/// `effective_role`, at most one of them can stay green.
+#[test]
+fn sso_callback_mints_a_gateway_key_scoped_to_the_mapped_tier() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "sso-scope-owner@acme.test",
+        "correct-horse-517s",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap().to_string();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let mapping = [("Contractors", "viewer"), ("Engineering", "admin")];
+
+    // group_role_mapping -> viewer: read-only, no `.write` scope at all.
+    let viewer_scopes = sso_callback_gateway_key_scopes(
+        &console,
+        &owner_token,
+        &tenant_id,
+        &mapping,
+        "member",
+        "sso-viewer@acme.test",
+        &["Contractors"],
+    );
+    assert_eq!(
+        viewer_scopes,
+        ["admin.read", "assets.read"],
+        "a viewer-mapped IdP group must mint the viewer scope set"
+    );
+    assert!(
+        !viewer_scopes.iter().any(|scope| scope == "admin.write"),
+        "an SSO viewer must never receive admin.write, got {viewer_scopes:?}"
+    );
+
+    // No group matches -> the configured default_role ("member").
+    let member_scopes = sso_callback_gateway_key_scopes(
+        &console,
+        &owner_token,
+        &tenant_id,
+        &mapping,
+        "member",
+        "sso-default-member@acme.test",
+        &["Facilities"],
+    );
+    assert_eq!(
+        member_scopes,
+        ["admin.read", "assets.read", "assets.write"],
+        "an unmapped group must fall back to default_role's scope set"
+    );
+
+    // ... and the ladder is not simply flattened DOWN either: an
+    // admin-mapped group still gets the administrative set.
+    let admin_scopes = sso_callback_gateway_key_scopes(
+        &console,
+        &owner_token,
+        &tenant_id,
+        &mapping,
+        "member",
+        "sso-mapped-admin@acme.test",
+        &["Engineering"],
+    );
+    assert_eq!(
+        admin_scopes,
+        ["admin.read", "admin.write", "assets.read", "assets.write"],
+        "an admin-mapped IdP group must still mint the administrative set"
+    );
 }
 
 /// Round-13 audit: a tenant's own IdP must not be able to authenticate a

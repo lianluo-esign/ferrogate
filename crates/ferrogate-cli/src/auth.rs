@@ -209,9 +209,11 @@ pub(crate) struct AuthError {
 /// #185): `authenticate()` only ever checks *scope* (`admin.read`/
 /// `admin.write`), never whether the caller's own tenant matches the
 /// tenant the request actually targets. `provision_gateway_api_key`
-/// (`ferrogate-auth`) mints an `admin.read`+`admin.write`-scoped key tied
-/// to the logging-in user's own tenant on every admin-console login --
-/// without this check, any tenant's console user could read and mutate
+/// (`ferrogate-auth`) mints a key tied to the logging-in user's own tenant
+/// on every admin-console login -- scoped to their membership tier since
+/// issue #517, so `admin.write` only for `owner`/`admin`, but scope is not
+/// tenancy: an `owner`'s key still carries `admin.read`+`admin.write` and
+/// without this check any tenant's console owner could read and mutate
 /// every *other* tenant's wallets, virtual keys, quota policies, and RBAC
 /// bindings (confirmed live before this fix: a tenant-A-scoped key could
 /// read AND financially adjust tenant B's wallet balance via `POST
