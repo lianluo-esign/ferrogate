@@ -63,8 +63,8 @@ impl CommandGroup for RequestLogsGroup {
             "request-logs",
             "Inspect and export retained request logs",
             vec![
-                VerbDescriptor::api("list", "List retained request logs", "listAdminRequestLogs"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List retained request logs", "listAdminRequestLogs"),
+                VerbDescriptor::read(
                     "export",
                     "Export request logs as redacted JSONL",
                     "exportAdminRequestLogsJsonl",
@@ -92,7 +92,7 @@ impl CommandGroup for AuditEventsGroup {
         GroupDescriptor::new(
             "audit-events",
             "List retained Admin API audit events",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List audit events",
                 "listAdminAuditEvents",
@@ -114,7 +114,7 @@ impl CommandGroup for ObservedAgentActivityGroup {
         GroupDescriptor::new(
             "observed-agent-activity",
             "List observed agent/run activity correlations",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List observed agent activity",
                 "listAdminObservedAgentActivity",

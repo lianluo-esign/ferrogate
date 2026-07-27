@@ -19,9 +19,9 @@ impl CommandGroup for TenantsGroup {
             "tenants",
             "Manage tenants",
             vec![
-                VerbDescriptor::api("list", "List tenants", "listTenants"),
-                VerbDescriptor::api("get", "Show a tenant", "getTenant"),
-                VerbDescriptor::api("create", "Create a tenant", "createTenant"),
+                VerbDescriptor::read("list", "List tenants", "listTenants"),
+                VerbDescriptor::read("get", "Show a tenant", "getTenant"),
+                VerbDescriptor::mutating("create", "Create a tenant", "createTenant"),
             ],
         )
     }

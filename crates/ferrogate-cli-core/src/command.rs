@@ -29,6 +29,48 @@ use std::collections::BTreeSet;
 
 use crate::error::{CliError, CliResult};
 
+/// Whether a verb changes Control-Plane state, and therefore whether it owes
+/// the operator a [`MutationReceipt`](crate::receipt::MutationReceipt)
+/// (issue #505).
+///
+/// This is *registry* metadata, not a rendering hint: it is the field the
+/// render gate ([`VerbDescriptor::render_gate`]) consumes to decide which
+/// output shape is even constructible for a verb. Because every API verb must
+/// choose [`VerbDescriptor::read`] or [`VerbDescriptor::mutating`] at
+/// construction (there is no effect-less API constructor), a newly added verb
+/// that nobody classified does not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerbEffect {
+    /// A safe read of Control-Plane state (`GET`/`HEAD`). Renders the server's
+    /// body verbatim; there is nothing to attest.
+    Read,
+    /// A state-changing call (`POST`/`PUT`/`PATCH`/`DELETE`). The only
+    /// sanctioned output is a `MutationReceipt`.
+    Mutating,
+    /// Handled entirely client-side (`context use`, `context list`): no request
+    /// leaves the process and no Control-Plane object changes, so there is no
+    /// governance decision, audit row, or rollback pointer to report. Local
+    /// state (the context store) is the operator's own file, not a governed
+    /// object.
+    Local,
+}
+
+impl VerbEffect {
+    /// Stable spelling for help text, JSON receipts, and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerbEffect::Read => "read",
+            VerbEffect::Mutating => "mutating",
+            VerbEffect::Local => "local",
+        }
+    }
+
+    /// Whether this effect changes Control-Plane state.
+    pub fn is_mutating(self) -> bool {
+        matches!(self, VerbEffect::Mutating)
+    }
+}
+
 /// Metadata for one verb (operation) within a resource family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerbDescriptor {
@@ -40,11 +82,19 @@ pub struct VerbDescriptor {
     /// one operation. `None` marks a purely local verb (e.g. `context use`)
     /// that the coverage gate must not expect in the contract.
     pub operation_id: Option<String>,
+    /// Whether the verb changes state — the render gate's input (issue #505).
+    pub effect: VerbEffect,
 }
 
 impl VerbDescriptor {
-    /// A verb bound to a single Control Plane API operation.
-    pub fn api(
+    /// A **read-only** verb bound to a single Control Plane API operation.
+    ///
+    /// There is deliberately no effect-agnostic `api()` constructor: an author
+    /// adding a verb must state whether it mutates, and a misclassification is
+    /// caught by `receipt_test.rs`, which rebuilds every registered verb's
+    /// [`RequestSpec`](crate::transport::RequestSpec) and compares the declared
+    /// effect against the HTTP method the family builder actually emits.
+    pub fn read(
         name: impl Into<String>,
         about: impl Into<String>,
         operation_id: impl Into<String>,
@@ -53,6 +103,23 @@ impl VerbDescriptor {
             name: name.into(),
             about: about.into(),
             operation_id: Some(operation_id.into()),
+            effect: VerbEffect::Read,
+        }
+    }
+
+    /// A **state-changing** verb bound to a single Control Plane API operation.
+    /// Its only renderable output is a
+    /// [`MutationReceipt`](crate::receipt::MutationReceipt).
+    pub fn mutating(
+        name: impl Into<String>,
+        about: impl Into<String>,
+        operation_id: impl Into<String>,
+    ) -> VerbDescriptor {
+        VerbDescriptor {
+            name: name.into(),
+            about: about.into(),
+            operation_id: Some(operation_id.into()),
+            effect: VerbEffect::Mutating,
         }
     }
 
@@ -62,7 +129,13 @@ impl VerbDescriptor {
             name: name.into(),
             about: about.into(),
             operation_id: None,
+            effect: VerbEffect::Local,
         }
+    }
+
+    /// Whether this verb changes Control-Plane state.
+    pub fn is_mutating(&self) -> bool {
+        self.effect.is_mutating()
     }
 }
 

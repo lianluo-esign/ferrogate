@@ -110,32 +110,32 @@ impl CommandGroup for AssetsGroup {
             "assets",
             "Manage the asset registry, versions, and lifecycle",
             vec![
-                VerbDescriptor::api("list", "List all assets", "listAssets"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List all assets", "listAssets"),
+                VerbDescriptor::read(
                     "list-by-type",
                     "List assets of one type",
                     "listAssetsByType",
                 ),
-                VerbDescriptor::api("get", "Show one asset version", "getAsset"),
-                VerbDescriptor::api("put", "Publish or replace an asset version", "putAsset"),
-                VerbDescriptor::api("delete", "Delete an asset version", "deleteAsset"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("get", "Show one asset version", "getAsset"),
+                VerbDescriptor::mutating("put", "Publish or replace an asset version", "putAsset"),
+                VerbDescriptor::mutating("delete", "Delete an asset version", "deleteAsset"),
+                VerbDescriptor::read(
                     "manifest",
                     "Show an asset's resolved manifest",
                     "getAssetManifest",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "storage-summary",
                     "Show asset storage/retention summary",
                     "getAssetStorageSummary",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "withheld",
                     "List withheld (pending_scan/quarantined) assets",
                     "listWithheldAssets",
                 ),
-                VerbDescriptor::api("yank", "Yank an asset version", "yankAssetVersion"),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating("yank", "Yank an asset version", "yankAssetVersion"),
+                VerbDescriptor::mutating(
                     "unyank",
                     "Reverse a yank on an asset version",
                     "unyankAssetVersion",
@@ -195,22 +195,22 @@ impl CommandGroup for AssetTransferGroup {
             "asset-transfer",
             "Presigned asset upload and download flows",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "upload-intent",
                     "Request a presigned upload target",
                     "createAssetUploadIntent",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "commit",
                     "Commit a completed presigned upload",
                     "commitAssetUpload",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "abort",
                     "Release a presigned upload intent that will not be committed",
                     "abortAssetUpload",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "download-url",
                     "Request a presigned download URL",
                     "getAssetDownloadUrl",
@@ -257,9 +257,9 @@ impl CommandGroup for AssetChannelsGroup {
             "asset-channels",
             "Manage asset release channels and promotion",
             vec![
-                VerbDescriptor::api("list", "List an asset's channels", "listAssetChannels"),
-                VerbDescriptor::api("set", "Point a channel at a version", "putAssetChannel"),
-                VerbDescriptor::api("delete", "Delete a channel", "deleteAssetChannel"),
+                VerbDescriptor::read("list", "List an asset's channels", "listAssetChannels"),
+                VerbDescriptor::mutating("set", "Point a channel at a version", "putAssetChannel"),
+                VerbDescriptor::mutating("delete", "Delete a channel", "deleteAssetChannel"),
             ],
         )
     }
@@ -314,15 +314,19 @@ impl CommandGroup for SiteDomainsGroup {
             "site-domains",
             "Manage static-site custom domain bindings",
             vec![
-                VerbDescriptor::api("list", "List bound site domains", "listSiteDomains"),
-                VerbDescriptor::api("get", "Show a site domain binding", "getSiteDomain"),
-                VerbDescriptor::api("bind", "Bind a custom domain to a site", "bindSiteDomain"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List bound site domains", "listSiteDomains"),
+                VerbDescriptor::read("get", "Show a site domain binding", "getSiteDomain"),
+                VerbDescriptor::mutating(
+                    "bind",
+                    "Bind a custom domain to a site",
+                    "bindSiteDomain",
+                ),
+                VerbDescriptor::mutating(
                     "verify",
                     "Verify DNS ownership of a bound custom domain",
                     "verifySiteDomain",
                 ),
-                VerbDescriptor::api("unbind", "Unbind a custom domain", "unbindSiteDomain"),
+                VerbDescriptor::mutating("unbind", "Unbind a custom domain", "unbindSiteDomain"),
             ],
         )
     }

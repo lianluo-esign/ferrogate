@@ -43,19 +43,23 @@ impl CommandGroup for ToolApprovalsGroup {
             "tool-approvals",
             "Review and resolve pending tool-call approvals",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "list",
                     "List pending tool-call approvals",
                     "listAdminToolApprovals",
                 ),
-                VerbDescriptor::api("get", "Show a tool-call approval", "getAdminToolApproval"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("get", "Show a tool-call approval", "getAdminToolApproval"),
+                VerbDescriptor::mutating(
                     "approve",
                     "Approve a pending tool call (fingerprint must still match)",
                     "approveAdminToolApproval",
                 ),
-                VerbDescriptor::api("deny", "Deny a pending tool call", "denyAdminToolApproval"),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
+                    "deny",
+                    "Deny a pending tool call",
+                    "denyAdminToolApproval",
+                ),
+                VerbDescriptor::mutating(
                     "expire",
                     "Expire a pending tool call",
                     "expireAdminToolApproval",

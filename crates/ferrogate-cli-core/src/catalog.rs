@@ -78,29 +78,29 @@ impl CommandGroup for PromptTemplatesGroup {
             "prompt-templates",
             "Manage the prompt-template catalog",
             vec![
-                VerbDescriptor::api("list", "List prompt templates", "listAdminPromptTemplates"),
-                VerbDescriptor::api("get", "Show one prompt template", "getAdminPromptTemplate"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List prompt templates", "listAdminPromptTemplates"),
+                VerbDescriptor::read("get", "Show one prompt template", "getAdminPromptTemplate"),
+                VerbDescriptor::mutating(
                     "create",
                     "Create a prompt template",
                     "createAdminPromptTemplate",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "replace",
                     "Replace a prompt template",
                     "putAdminPromptTemplate",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "update",
                     "Patch a prompt template",
                     "patchAdminPromptTemplate",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "archive",
                     "Archive a prompt template",
                     "archiveAdminPromptTemplate",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "render",
                     "Render a prompt template with inputs",
                     "renderPromptTemplate",
@@ -133,16 +133,24 @@ impl CommandGroup for SkillPackagesGroup {
             "skill-packages",
             "Manage the skill-package catalog",
             vec![
-                VerbDescriptor::api("list", "List skill packages", "listAdminSkillPackages"),
-                VerbDescriptor::api("get", "Show one skill package", "getAdminSkillPackage"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List skill packages", "listAdminSkillPackages"),
+                VerbDescriptor::read("get", "Show one skill package", "getAdminSkillPackage"),
+                VerbDescriptor::mutating(
                     "create",
                     "Create a skill package",
                     "createAdminSkillPackage",
                 ),
-                VerbDescriptor::api("replace", "Replace a skill package", "putAdminSkillPackage"),
-                VerbDescriptor::api("update", "Patch a skill package", "patchAdminSkillPackage"),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
+                    "replace",
+                    "Replace a skill package",
+                    "putAdminSkillPackage",
+                ),
+                VerbDescriptor::mutating(
+                    "update",
+                    "Patch a skill package",
+                    "patchAdminSkillPackage",
+                ),
+                VerbDescriptor::mutating(
                     "delete",
                     "Delete a skill package",
                     "deleteAdminSkillPackage",
@@ -166,11 +174,11 @@ impl CommandGroup for PluginsGroup {
             "plugins",
             "Manage the plugin catalog",
             vec![
-                VerbDescriptor::api("list", "List plugins", "listAdminPlugins"),
-                VerbDescriptor::api("get", "Show one plugin", "getAdminPlugin"),
-                VerbDescriptor::api("create", "Register a plugin", "createAdminPlugin"),
-                VerbDescriptor::api("update", "Patch a plugin", "updateAdminPlugin"),
-                VerbDescriptor::api("delete", "Delete a plugin", "deleteAdminPlugin"),
+                VerbDescriptor::read("list", "List plugins", "listAdminPlugins"),
+                VerbDescriptor::read("get", "Show one plugin", "getAdminPlugin"),
+                VerbDescriptor::mutating("create", "Register a plugin", "createAdminPlugin"),
+                VerbDescriptor::mutating("update", "Patch a plugin", "updateAdminPlugin"),
+                VerbDescriptor::mutating("delete", "Delete a plugin", "deleteAdminPlugin"),
             ],
         )
     }
@@ -191,15 +199,15 @@ impl CommandGroup for CatalogGroup {
             "catalog",
             "Inspect read-only model/provider/extension catalogs",
             vec![
-                VerbDescriptor::api("models", "List resolved models", "listAdminModels"),
-                VerbDescriptor::api("providers", "List providers", "listAdminProviders"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("models", "List resolved models", "listAdminModels"),
+                VerbDescriptor::read("providers", "List providers", "listAdminProviders"),
+                VerbDescriptor::read(
                     "provider-models",
                     "List provider models",
                     "listAdminProviderModels",
                 ),
-                VerbDescriptor::api("extensions", "List extensions", "listAdminExtensions"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("extensions", "List extensions", "listAdminExtensions"),
+                VerbDescriptor::read(
                     "framework-adapters",
                     "List framework adapters",
                     "listAdminFrameworkAdapters",
@@ -236,13 +244,13 @@ impl CommandGroup for DashboardGroup {
             "dashboard",
             "Read the admin dashboard aggregate summary",
             vec![
-                VerbDescriptor::api("show", "Show the admin dashboard", "getAdminDashboard"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("show", "Show the admin dashboard", "getAdminDashboard"),
+                VerbDescriptor::read(
                     "alias",
                     "Show the admin dashboard (/admin/dashboard alias)",
                     "getAdminDashboardAlias",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "root",
                     "Show the admin dashboard (/admin/ alias)",
                     "getAdminDashboardSlash",

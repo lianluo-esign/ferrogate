@@ -109,25 +109,25 @@ impl CommandGroup for WalletsGroup {
             "wallets",
             "Manage tenant credit wallets and settlement",
             vec![
-                VerbDescriptor::api("list", "List wallets", "listWallets"),
-                VerbDescriptor::api("get", "Show a tenant's wallet", "getWallet"),
-                VerbDescriptor::api("create", "Create a tenant wallet", "createWallet"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List wallets", "listWallets"),
+                VerbDescriptor::read("get", "Show a tenant's wallet", "getWallet"),
+                VerbDescriptor::mutating("create", "Create a tenant wallet", "createWallet"),
+                VerbDescriptor::mutating(
                     "update",
                     "Update a wallet's recharge settings",
                     "updateWallet",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "adjust",
                     "Atomically adjust wallet credits (irreversible; requires confirmation)",
                     "adjustWallet",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "charge",
                     "Charge a payment method and credit a wallet (irreversible; requires confirmation)",
                     "chargeWallet",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "ledger",
                     "List a wallet's ledger entries",
                     "listWalletLedger",
@@ -165,9 +165,17 @@ impl CommandGroup for PaymentMethodsGroup {
             "payment-methods",
             "Manage stored payment methods",
             vec![
-                VerbDescriptor::api("list", "List payment methods", "listPaymentMethods"),
-                VerbDescriptor::api("create", "Register a payment method", "createPaymentMethod"),
-                VerbDescriptor::api("delete", "Delete a payment method", "deletePaymentMethod"),
+                VerbDescriptor::read("list", "List payment methods", "listPaymentMethods"),
+                VerbDescriptor::mutating(
+                    "create",
+                    "Register a payment method",
+                    "createPaymentMethod",
+                ),
+                VerbDescriptor::mutating(
+                    "delete",
+                    "Delete a payment method",
+                    "deletePaymentMethod",
+                ),
             ],
         )
     }
@@ -187,17 +195,17 @@ impl CommandGroup for BillingEventsGroup {
             "billing-events",
             "Inspect billing events and outbox dead letters",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "list",
                     "List billing events",
                     "listAdminBillingEventsCompat",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "dead-letters",
                     "List billing outbox dead letters",
                     "listBillingOutboxDeadLetters",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "replay",
                     "Replay a dead-lettered billing outbox record",
                     "replayBillingOutboxDeadLetter",
@@ -235,23 +243,23 @@ impl CommandGroup for UsageGroup {
             "usage",
             "Inspect usage aggregates, reports, metering, and agent cost-burn",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "aggregates",
                     "List usage aggregates",
                     "listAdminUsageAggregates",
                 ),
-                VerbDescriptor::api("reports", "List usage reports", "listUsageReports"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("reports", "List usage reports", "listUsageReports"),
+                VerbDescriptor::read(
                     "metering-events",
                     "List raw metering events",
                     "listAdminMeteringEvents",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "metering-export-status",
                     "Show metering exporter status",
                     "listAdminMeteringExportStatus",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "cost-burn",
                     "List per-agent runtime cost-burn for a billing period (--filter period=YYYY-MM)",
                     "listAdminAgentCostBurn",
@@ -295,12 +303,12 @@ impl CommandGroup for PaymentAttemptsGroup {
             "payment-attempts",
             "Inspect durable x402 payment attempts and their wallet holds",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "list",
                     "List a tenant's payment attempts — CURSOR-paged, so --offset and --all-pages do not apply (--filter tenant_id=… [--filter limit=…] [--filter cursor=…])",
                     "listPaymentAttempts",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "get",
                     "Show one payment attempt with its wallet reservation and settlement",
                     "getPaymentAttemptLinks",

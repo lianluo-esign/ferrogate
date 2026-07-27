@@ -126,6 +126,7 @@ fn malformed_filter_is_a_usage_error() {
         filters: vec!["missing-equals".to_string()],
         sorts: vec![],
         all_pages: false,
+        dry_run: false,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("KEY=VALUE"));
@@ -142,6 +143,7 @@ fn malformed_body_is_a_usage_error() {
         filters: vec![],
         sorts: vec![],
         all_pages: false,
+        dry_run: false,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("not valid JSON"));
@@ -238,6 +240,7 @@ fn empty_sort_key_is_a_usage_error() {
         filters: vec![],
         sorts: vec!["   ".to_string()],
         all_pages: false,
+        dry_run: false,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("--sort"));
@@ -508,4 +511,130 @@ fn render_table_keeps_list_envelope_metadata() {
     assert!(table.contains("ID") && table.contains('x'));
     assert!(table.contains("total") && table.contains("500"), "{table}");
     assert!(table.contains("offset"), "{table}");
+}
+
+/// `--dry-run` is accepted by **every** mutating verb in the generated tree,
+/// and parses into the flag the receipt echoes (issue #505).
+///
+/// This is the "accepted by every mutating verb" half of acceptance box 2. It
+/// walks the whole registry rather than sampling, so a family that somehow
+/// grew a verb outside the shared `ResourceArgs` would fail here instead of
+/// being discovered by an operator.
+#[test]
+fn dry_run_is_accepted_by_every_mutating_verb() {
+    let registry = registry();
+    let command = build_ctl_command(&registry);
+    let mut mutating = 0usize;
+    for group in registry.groups() {
+        for verb in &group.verbs {
+            if !verb.is_mutating() {
+                continue;
+            }
+            mutating += 1;
+            // Three probe segments cover every addressing shape; extra
+            // positionals are harmless to the parser, and the request builder
+            // takes only the segments it needs.
+            let matches = command
+                .clone()
+                .try_get_matches_from([
+                    "ctl",
+                    &group.name,
+                    &verb.name,
+                    "probe-0",
+                    "probe-1",
+                    "probe-2",
+                    "--data",
+                    "{}",
+                    "--dry-run",
+                ])
+                .unwrap_or_else(|error| {
+                    panic!("'{} {}' rejected --dry-run: {error}", group.name, verb.name)
+                });
+            let verb_matches = matches
+                .subcommand()
+                .unwrap()
+                .1
+                .subcommand()
+                .unwrap()
+                .1
+                .clone();
+            let resource = ResourceArgs::from_arg_matches(&verb_matches).unwrap();
+            assert!(
+                resource.dry_run,
+                "'{} {}' parsed --dry-run as false",
+                group.name, verb.name
+            );
+        }
+    }
+    assert!(
+        mutating > 90,
+        "expected 90+ mutating verbs in the tree, saw {mutating}"
+    );
+}
+
+/// The flag defaults to false, so a mutation without it is a real mutation —
+/// `dry_run` on the receipt cannot silently default to "safe".
+#[test]
+fn dry_run_defaults_to_false() {
+    let registry = registry();
+    let command = build_ctl_command(&registry);
+    let matches = command
+        .try_get_matches_from(["ctl", "projects", "create", "--data", "{}"])
+        .expect("parses");
+    let verb_matches = matches
+        .subcommand()
+        .unwrap()
+        .1
+        .subcommand()
+        .unwrap()
+        .1
+        .clone();
+    assert!(
+        !ResourceArgs::from_arg_matches(&verb_matches)
+            .unwrap()
+            .dry_run
+    );
+}
+
+/// Every registered verb resolves to a render gate whose arm agrees with the
+/// declared effect. The binary-side companion to `ferrogate-cli-core`'s
+/// registry enforcement test: it proves the *shipping tree* — not just the
+/// library registry — has no ungated mutating verb.
+#[test]
+fn every_verb_in_the_shipping_tree_is_gated() {
+    let registry = registry();
+    let ctl = build_ctl_command(&registry);
+    let mut gated = 0usize;
+    for group in registry.groups() {
+        let group_cmd = ctl
+            .get_subcommands()
+            .find(|command| command.get_name() == group.name)
+            .expect("group in tree");
+        for verb in &group.verbs {
+            assert!(
+                group_cmd
+                    .get_subcommands()
+                    .any(|command| command.get_name() == verb.name),
+                "verb '{} {}' missing from the shipping tree",
+                group.name,
+                verb.name
+            );
+            match verb.render_gate() {
+                RenderGate::Receipt(_) => assert!(
+                    verb.is_mutating(),
+                    "'{} {}' opened a receipt gate without being mutating",
+                    group.name,
+                    verb.name
+                ),
+                RenderGate::Bare(_) => assert!(
+                    !verb.is_mutating(),
+                    "'{} {}' is mutating but opened a bare render gate",
+                    group.name,
+                    verb.name
+                ),
+            }
+            gated += 1;
+        }
+    }
+    assert!(gated > 200, "expected 200+ gated verbs, saw {gated}");
 }

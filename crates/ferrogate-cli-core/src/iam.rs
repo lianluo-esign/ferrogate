@@ -60,22 +60,22 @@ impl CommandGroup for VirtualKeysGroup {
             "virtual-keys",
             "Manage virtual API keys and their lifecycle",
             vec![
-                VerbDescriptor::api("list", "List virtual keys", "listVirtualKeys"),
-                VerbDescriptor::api("get", "Show a virtual key", "getVirtualKey"),
-                VerbDescriptor::api("create", "Create a virtual key", "createVirtualKey"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List virtual keys", "listVirtualKeys"),
+                VerbDescriptor::read("get", "Show a virtual key", "getVirtualKey"),
+                VerbDescriptor::mutating("create", "Create a virtual key", "createVirtualKey"),
+                VerbDescriptor::mutating(
                     "revoke",
                     "Revoke (delete) a virtual key",
                     "revokeVirtualKey",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "rotate",
                     "Rotate a virtual key's secret",
                     "rotateVirtualKey",
                 ),
-                VerbDescriptor::api("enable", "Enable a virtual key", "enableVirtualKey"),
-                VerbDescriptor::api("disable", "Disable a virtual key", "disableVirtualKey"),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating("enable", "Enable a virtual key", "enableVirtualKey"),
+                VerbDescriptor::mutating("disable", "Disable a virtual key", "disableVirtualKey"),
+                VerbDescriptor::mutating(
                     "revoke-action",
                     "Revoke a virtual key via the revoke action",
                     "revokeVirtualKeyAction",
@@ -107,12 +107,12 @@ impl CommandGroup for ApiKeysGroup {
             "api-keys",
             "Manage gateway admin API keys",
             vec![
-                VerbDescriptor::api("list", "List admin API keys", "listAdminApiKeys"),
-                VerbDescriptor::api("get", "Show an admin API key", "getAdminApiKey"),
-                VerbDescriptor::api("create", "Create an admin API key", "createAdminApiKey"),
-                VerbDescriptor::api("replace", "Replace an admin API key", "putAdminApiKey"),
-                VerbDescriptor::api("update", "Update an admin API key", "patchAdminApiKey"),
-                VerbDescriptor::api("delete", "Delete an admin API key", "deleteAdminApiKey"),
+                VerbDescriptor::read("list", "List admin API keys", "listAdminApiKeys"),
+                VerbDescriptor::read("get", "Show an admin API key", "getAdminApiKey"),
+                VerbDescriptor::mutating("create", "Create an admin API key", "createAdminApiKey"),
+                VerbDescriptor::mutating("replace", "Replace an admin API key", "putAdminApiKey"),
+                VerbDescriptor::mutating("update", "Update an admin API key", "patchAdminApiKey"),
+                VerbDescriptor::mutating("delete", "Delete an admin API key", "deleteAdminApiKey"),
             ],
         )
     }
@@ -132,10 +132,10 @@ impl CommandGroup for RolesGroup {
             "roles",
             "Manage RBAC roles",
             vec![
-                VerbDescriptor::api("list", "List roles", "listRoles"),
-                VerbDescriptor::api("get", "Show a role", "getRole"),
-                VerbDescriptor::api("create", "Create a role", "createRole"),
-                VerbDescriptor::api("delete", "Delete a role", "deleteRole"),
+                VerbDescriptor::read("list", "List roles", "listRoles"),
+                VerbDescriptor::read("get", "Show a role", "getRole"),
+                VerbDescriptor::mutating("create", "Create a role", "createRole"),
+                VerbDescriptor::mutating("delete", "Delete a role", "deleteRole"),
             ],
         )
     }
@@ -155,10 +155,10 @@ impl CommandGroup for PermissionsGroup {
             "permissions",
             "Manage RBAC permissions",
             vec![
-                VerbDescriptor::api("list", "List permissions", "listPermissions"),
-                VerbDescriptor::api("get", "Show a permission", "getPermission"),
-                VerbDescriptor::api("create", "Create a permission", "createPermission"),
-                VerbDescriptor::api("delete", "Delete a permission", "deletePermission"),
+                VerbDescriptor::read("list", "List permissions", "listPermissions"),
+                VerbDescriptor::read("get", "Show a permission", "getPermission"),
+                VerbDescriptor::mutating("create", "Create a permission", "createPermission"),
+                VerbDescriptor::mutating("delete", "Delete a permission", "deletePermission"),
             ],
         )
     }
@@ -178,12 +178,12 @@ impl CommandGroup for AccessPoliciesGroup {
             "access-policies",
             "Manage named access policies",
             vec![
-                VerbDescriptor::api("list", "List access policies", "listAdminPolicies"),
-                VerbDescriptor::api("get", "Show an access policy", "getAdminPolicy"),
-                VerbDescriptor::api("create", "Create an access policy", "createAdminPolicy"),
-                VerbDescriptor::api("replace", "Replace an access policy", "putAdminPolicy"),
-                VerbDescriptor::api("update", "Update an access policy", "patchAdminPolicy"),
-                VerbDescriptor::api("delete", "Delete an access policy", "deleteAdminPolicy"),
+                VerbDescriptor::read("list", "List access policies", "listAdminPolicies"),
+                VerbDescriptor::read("get", "Show an access policy", "getAdminPolicy"),
+                VerbDescriptor::mutating("create", "Create an access policy", "createAdminPolicy"),
+                VerbDescriptor::mutating("replace", "Replace an access policy", "putAdminPolicy"),
+                VerbDescriptor::mutating("update", "Update an access policy", "patchAdminPolicy"),
+                VerbDescriptor::mutating("delete", "Delete an access policy", "deleteAdminPolicy"),
             ],
         )
     }
@@ -203,9 +203,13 @@ impl CommandGroup for TenantRolesGroup {
             "tenant-roles",
             "Manage tenant role bindings",
             vec![
-                VerbDescriptor::api("list", "List a tenant's role bindings", "listTenantRoles"),
-                VerbDescriptor::api("bind", "Bind a role to a tenant", "bindTenantRole"),
-                VerbDescriptor::api("unbind", "Unbind a role from a tenant", "unbindTenantRole"),
+                VerbDescriptor::read("list", "List a tenant's role bindings", "listTenantRoles"),
+                VerbDescriptor::mutating("bind", "Bind a role to a tenant", "bindTenantRole"),
+                VerbDescriptor::mutating(
+                    "unbind",
+                    "Unbind a role from a tenant",
+                    "unbindTenantRole",
+                ),
             ],
         )
     }

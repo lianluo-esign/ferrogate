@@ -15,6 +15,7 @@
 use serde::Serialize;
 
 use crate::error::{CliError, CliResult};
+use crate::receipt::VerbOutput;
 
 /// Selected output format. `Table` is the human default; `Json` is the stable
 /// machine contract.
@@ -118,6 +119,53 @@ fn push_row(out: &mut String, cells: &[String], widths: &[usize]) {
 pub fn render_json<T: Serialize>(value: &T) -> CliResult<String> {
     serde_json::to_string_pretty(value)
         .map_err(|error| CliError::transport(format!("failed to encode JSON output: {error}")))
+}
+
+/// Render a gated [`VerbOutput`] in the selected format (issue #505).
+///
+/// This is the single funnel every dispatched `ctl` verb prints through. Its
+/// parameter type is the enforcement: a [`VerbOutput`] can only be produced by
+/// the render gate, so a mutating verb reaching this function is *necessarily*
+/// carrying a [`MutationReceipt`](crate::receipt::MutationReceipt) — there is
+/// no overload that takes a bare body plus a verb name.
+///
+/// `body_table` is the caller's projection for a read verb's arbitrary
+/// response document (the generic array/object table lives in the binary,
+/// next to the pagination logic it shares); a receipt has a fixed shape, so
+/// its table is rendered here from [`MutationReceipt::table_rows`] and cannot
+/// be quietly re-projected into something that drops the nulls.
+pub fn render_output<F>(
+    format: OutputFormat,
+    output: &VerbOutput,
+    body_table: F,
+) -> CliResult<String>
+where
+    F: FnOnce(&serde_json::Value) -> CliResult<String>,
+{
+    match (output.receipt(), output.body()) {
+        (Some(receipt), _) => match format {
+            OutputFormat::Json => render_json(receipt),
+            OutputFormat::Table => {
+                let rows = receipt
+                    .table_rows()
+                    .into_iter()
+                    .map(|(field, value)| vec![field, value])
+                    .collect();
+                Ok(Table::new(vec!["FIELD".to_string(), "VALUE".to_string()], rows)?.render())
+            }
+        },
+        (None, Some(body)) => match format {
+            OutputFormat::Json => render_json(body),
+            OutputFormat::Table => body_table(body),
+        },
+        // Unreachable: `VerbOutput` is a closed two-arm payload, so exactly one
+        // of the accessors is `Some`. Kept as a typed error rather than a
+        // panic so a future third payload variant fails a command instead of
+        // aborting the process.
+        (None, None) => Err(CliError::usage(
+            "internal: rendered output carried neither a body nor a receipt",
+        )),
+    }
 }
 
 #[cfg(test)]

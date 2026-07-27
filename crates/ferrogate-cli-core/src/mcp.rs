@@ -53,12 +53,20 @@ impl CommandGroup for McpServersGroup {
             "mcp-servers",
             "Manage registered MCP servers",
             vec![
-                VerbDescriptor::api("list", "List MCP servers", "listAdminMcpServers"),
-                VerbDescriptor::api("get", "Show an MCP server", "getAdminMcpServer"),
-                VerbDescriptor::api("create", "Register an MCP server", "createAdminMcpServer"),
-                VerbDescriptor::api("replace", "Replace an MCP server", "putAdminMcpServer"),
-                VerbDescriptor::api("update", "Update an MCP server", "patchAdminMcpServer"),
-                VerbDescriptor::api("delete", "Deregister an MCP server", "deleteAdminMcpServer"),
+                VerbDescriptor::read("list", "List MCP servers", "listAdminMcpServers"),
+                VerbDescriptor::read("get", "Show an MCP server", "getAdminMcpServer"),
+                VerbDescriptor::mutating(
+                    "create",
+                    "Register an MCP server",
+                    "createAdminMcpServer",
+                ),
+                VerbDescriptor::mutating("replace", "Replace an MCP server", "putAdminMcpServer"),
+                VerbDescriptor::mutating("update", "Update an MCP server", "patchAdminMcpServer"),
+                VerbDescriptor::mutating(
+                    "delete",
+                    "Deregister an MCP server",
+                    "deleteAdminMcpServer",
+                ),
             ],
         )
     }
@@ -78,18 +86,18 @@ impl CommandGroup for McpIdentityGroup {
             "mcp-identity",
             "Manage per-server MCP identity grants",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "authorize",
                     "Authorize an MCP identity for a server",
                     "authorizeMcpIdentity",
                 ),
-                VerbDescriptor::api("get", "Show an MCP identity grant", "getMcpIdentity"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("get", "Show an MCP identity grant", "getMcpIdentity"),
+                VerbDescriptor::mutating(
                     "revoke",
                     "Revoke an MCP identity grant",
                     "revokeMcpIdentity",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "callback",
                     "Complete an MCP identity OAuth callback",
                     "completeMcpIdentityOauth",
@@ -121,7 +129,7 @@ impl CommandGroup for ToolSessionsGroup {
         GroupDescriptor::new(
             "tool-sessions",
             "Inspect tool session event streams",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "events",
                 "List a tool session's events",
                 "listAdminToolSessionEvents",
@@ -147,8 +155,8 @@ impl CommandGroup for ToolsGroup {
             "tools",
             "Inspect the admin tool catalog",
             vec![
-                VerbDescriptor::api("list", "List all tools", "listAdminTools"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List all tools", "listAdminTools"),
+                VerbDescriptor::read(
                     "plugin-tools",
                     "List a plugin's tools",
                     "listAdminPluginTools",

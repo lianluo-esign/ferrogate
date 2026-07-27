@@ -250,7 +250,7 @@ impl CommandGroup for FixtureGroup {
         GroupDescriptor::new(
             self.group,
             "fixture",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 self.verb,
                 "fixture verb",
                 self.operation_id,

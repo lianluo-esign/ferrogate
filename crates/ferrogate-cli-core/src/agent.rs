@@ -61,24 +61,24 @@ impl CommandGroup for AgentWorkflowsGroup {
             "agent-workflows",
             "Manage agent workflow definitions",
             vec![
-                VerbDescriptor::api("list", "List agent workflows", "listAdminAgentWorkflows"),
-                VerbDescriptor::api("get", "Show an agent workflow", "getAdminAgentWorkflow"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List agent workflows", "listAdminAgentWorkflows"),
+                VerbDescriptor::read("get", "Show an agent workflow", "getAdminAgentWorkflow"),
+                VerbDescriptor::mutating(
                     "create",
                     "Create an agent workflow",
                     "createAdminAgentWorkflow",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "replace",
                     "Replace an agent workflow",
                     "putAdminAgentWorkflow",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "update",
                     "Update an agent workflow",
                     "patchAdminAgentWorkflow",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "delete",
                     "Delete an agent workflow",
                     "deleteAdminAgentWorkflow",
@@ -102,34 +102,34 @@ impl CommandGroup for AgentSchedulesGroup {
             "agent-schedules",
             "Manage agent run schedules and their fire history",
             vec![
-                VerbDescriptor::api("list", "List agent schedules", "listAdminAgentSchedules"),
-                VerbDescriptor::api("get", "Show an agent schedule", "getAdminAgentSchedule"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List agent schedules", "listAdminAgentSchedules"),
+                VerbDescriptor::read("get", "Show an agent schedule", "getAdminAgentSchedule"),
+                VerbDescriptor::mutating(
                     "create",
                     "Create an agent schedule",
                     "createAdminAgentSchedule",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "replace",
                     "Replace an agent schedule",
                     "putAdminAgentSchedule",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "update",
                     "Update an agent schedule",
                     "patchAdminAgentSchedule",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "delete",
                     "Delete an agent schedule",
                     "deleteAdminAgentSchedule",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "run-now",
                     "Trigger a schedule to run immediately",
                     "runAdminAgentScheduleNow",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "fires",
                     "List a schedule's fire history",
                     "listAdminAgentScheduleFires",
@@ -161,24 +161,24 @@ impl CommandGroup for AgentUpstreamsGroup {
             "agent-upstreams",
             "Manage agent upstream bindings",
             vec![
-                VerbDescriptor::api("list", "List agent upstreams", "listAdminAgentUpstreams"),
-                VerbDescriptor::api("get", "Show an agent upstream", "getAdminAgentUpstream"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List agent upstreams", "listAdminAgentUpstreams"),
+                VerbDescriptor::read("get", "Show an agent upstream", "getAdminAgentUpstream"),
+                VerbDescriptor::mutating(
                     "create",
                     "Create an agent upstream",
                     "createAdminAgentUpstream",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "replace",
                     "Replace an agent upstream",
                     "putAdminAgentUpstream",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "update",
                     "Update an agent upstream",
                     "patchAdminAgentUpstream",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "delete",
                     "Delete an agent upstream",
                     "deleteAdminAgentUpstream",
@@ -202,13 +202,13 @@ impl CommandGroup for AgentRunsGroup {
             "agent-runs",
             "Start and inspect agent runs",
             vec![
-                VerbDescriptor::api("list", "List agent runs", "listAdminAgentRuns"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List agent runs", "listAdminAgentRuns"),
+                VerbDescriptor::read(
                     "get",
                     "Show an agent run timeline",
                     "getAdminAgentRunTimeline",
                 ),
-                VerbDescriptor::api("start", "Start an agent run", "createAgentRun"),
+                VerbDescriptor::mutating("start", "Start an agent run", "createAgentRun"),
             ],
         )
     }
@@ -239,23 +239,27 @@ impl CommandGroup for AgentJobsGroup {
             "agent-jobs",
             "Submit, observe, collect, and cancel long-running agent jobs",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "submit",
                     "Submit a long-running agent job (idempotent on the submitted idempotency_key)",
                     "submitAgentJob",
                 ),
-                VerbDescriptor::api("get", "Show an agent job's status", "getAgentJob"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("get", "Show an agent job's status", "getAgentJob"),
+                VerbDescriptor::read(
                     "events",
                     "Read an agent job's incremental timeline events",
                     "listAgentJobEvents",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "result",
                     "Collect a terminal agent job's result",
                     "getAgentJobResult",
                 ),
-                VerbDescriptor::api("cancel", "Cancel an in-flight agent job", "cancelAgentJob"),
+                VerbDescriptor::mutating(
+                    "cancel",
+                    "Cancel an in-flight agent job",
+                    "cancelAgentJob",
+                ),
             ],
         )
     }

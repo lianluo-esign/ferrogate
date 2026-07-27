@@ -37,6 +37,14 @@ pub(crate) mod ops_cmd;
 pub(crate) mod resource_cmd;
 pub(crate) mod store;
 
+/// Cross-crate pin that the CLI's `action_fingerprint` byte-matches the
+/// runtime's `CanonicalCapabilityTarget::fingerprint` (issue #505). It lives
+/// here, in the binary, because this is the only crate that depends on BOTH
+/// `ferrogate-cli-core` and `ferrogate-runtime`.
+#[cfg(test)]
+#[path = "fingerprint_parity_test.rs"]
+mod fingerprint_parity_test;
+
 pub(crate) use context_cmd::run_context;
 pub(crate) use ops_cmd::run_ops;
 pub(crate) use resource_cmd::{build_ctl_command, run_resource, CTL_COMMAND};

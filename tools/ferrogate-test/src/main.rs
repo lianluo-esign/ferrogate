@@ -13,6 +13,9 @@ mod assertions;
 mod asset_presign;
 mod asset_registry;
 mod cli;
+/// #505: the CLI mutation decision-receipt E2E (dry-run issues nothing; the
+/// receipt's own rollback pointer reverses a guardrail policy revision).
+mod cli_mutation_receipt;
 mod compliance;
 mod constants;
 mod docker;
@@ -45,6 +48,7 @@ use agent_jobs::run_agent_jobs_api;
 use api_contract::run_api_contract;
 use asset_presign::run_asset_presign_api;
 use asset_registry::run_asset_registry_api;
+use cli_mutation_receipt::run_cli_mutation_receipt;
 use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use function_egress_cloudflare::run_function_egress_cloudflare_api;
@@ -80,6 +84,7 @@ fn main() -> Result<()> {
         asset_presign: run_asset_presign_api,
         asset_registry: run_asset_registry_api,
         agent_jobs: run_agent_jobs_api,
+        cli_mutation_receipt: run_cli_mutation_receipt,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,
         supabase_live_restart: run_supabase_live_restart,
@@ -119,6 +124,13 @@ fn main() -> Result<()> {
             run_asset_presign_api(local)?;
             run_asset_registry_api(local)?;
             run_agent_jobs_api(local)?;
+            // #505: the CLI's own governed-output contract. Docker-free and
+            // deterministic (one local gateway, the shipped `ferrogate` binary
+            // as its own client), so it belongs in the always-run set — a
+            // mutating verb that stopped returning a receipt, or a `--dry-run`
+            // that started reaching the server, must fail CI rather than wait
+            // for someone to type the command.
+            run_cli_mutation_receipt(local)?;
             // The #354 cross-component paid-egress chain. Deterministic (fixed
             // clock, local origin/facilitator double, no Docker, no network),
             // so it belongs in the always-run set rather than being a command

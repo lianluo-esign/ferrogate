@@ -39,6 +39,11 @@
 //!   seam with a `reqwest` implementation.
 //! * [`output`] — stable machine JSON and human tables; stdout is data,
 //!   stderr is diagnostics.
+//! * [`receipt`] — the [`receipt::MutationReceipt`] decision envelope, the ONE
+//!   sanctioned return shape of a mutating verb (issue #505), plus the render
+//!   gate that makes "a mutating verb rendered a bare body" a type error and
+//!   the `--dry-run` plan that cannot issue a request because no transport is
+//!   in scope.
 //! * [`command`] — the extensible [`command::Registry`] / [`command::CommandGroup`]
 //!   skeleton that lets #361–#365 add resource families (and their OpenAPI
 //!   `operationId` coverage) as compile-time metadata, with no rewiring.
@@ -76,6 +81,7 @@ pub mod ops;
 pub mod organization;
 pub mod output;
 pub mod parity;
+pub mod receipt;
 pub mod registry_helpers;
 pub mod resource;
 pub mod tool_approval;

@@ -21,6 +21,13 @@ http = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Reproduces the runtime `canonical_target_sha256` action-fingerprint contract
+# (issue #505) inside the receipt module. `ferrogate-runtime` itself is NOT a
+# dependency here on purpose: it pulls in storage, TLS and a tokio runtime,
+# which is the wrong weight for a client library. Byte-equality with
+# `CanonicalCapabilityTarget::fingerprint` is proven by a test in
+# `ferrogate-cli` (which depends on both crates) instead of assumed.
+sha2 = { workspace = true }
 
 [features]
 default = []

@@ -105,7 +105,15 @@ impl PreparedRequest {
 /// Build the absolute URL from an endpoint base and an absolute API path,
 /// percent-encoding query parameters. A base path in the endpoint (e.g.
 /// `https://host/gw`) is preserved as a prefix.
-fn build_url(endpoint: &str, path: &str, query: &[(String, String)]) -> CliResult<String> {
+///
+/// `pub(crate)` so [`crate::receipt`] can derive a mutation's canonical action
+/// target from the *same* URL the transport will send, rather than re-deriving
+/// (and potentially disagreeing with) it.
+pub(crate) fn build_url(
+    endpoint: &str,
+    path: &str,
+    query: &[(String, String)],
+) -> CliResult<String> {
     if !path.starts_with('/') {
         return Err(CliError::usage(format!(
             "internal request path must be absolute, got '{path}'"

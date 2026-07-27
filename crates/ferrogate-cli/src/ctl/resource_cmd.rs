@@ -38,16 +38,20 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
 use ferrogate_cli_core::args::GlobalArgs;
-use ferrogate_cli_core::auth::resolve_credential;
+use ferrogate_cli_core::auth::{resolve_credential, Credential};
 use ferrogate_cli_core::command::Registry;
+use ferrogate_cli_core::context::EffectiveContext;
 use ferrogate_cli_core::dispatch::{build_request, redact_response, secret_fields_for};
 use ferrogate_cli_core::error::{CliError, CliResult};
-use ferrogate_cli_core::output::{render_json, OutputFormat, Table};
+use ferrogate_cli_core::output::{render_output, Table};
+use ferrogate_cli_core::receipt::{
+    BareRenderer, MutationPlan, ReceiptRenderer, RenderGate, VerbOutput,
+};
 use ferrogate_cli_core::registry_helpers::ResourceInput;
 use ferrogate_cli_core::resource::ListParams;
 use ferrogate_cli_core::transport::{
     page_cursor_state, page_envelope, ApiResponse, ControlPlaneClient, PageCursorState,
-    PageRequest, ReqwestTransport, DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
+    PageRequest, RequestSpec, ReqwestTransport, DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
 };
 use serde_json::{Map, Value};
 
@@ -106,6 +110,20 @@ struct ResourceArgs {
     /// selects one page.
     #[arg(long, conflicts_with = "offset")]
     all_pages: bool,
+
+    /// Plan a mutating verb without issuing it: print the decision receipt the
+    /// call would produce, including the exact request and its action
+    /// fingerprint, and send nothing. Accepted by every mutating verb and
+    /// echoed as `dry_run` on the receipt; refused on read verbs, which change
+    /// nothing to begin with.
+    // Deliberately a uniform property of every mutation rather than a
+    // per-resource verb: `ops config validate` and `guardrail-policies
+    // dry-run` are server-side operations that happen to be named that way,
+    // and conflating them with "the client did not send this" is exactly the
+    // ambiguity issue #505 closes. The receipt's `dry_run` field reports THIS
+    // flag, never the verb's name.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 impl ResourceArgs {
@@ -274,8 +292,10 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     })?;
     // Defense in depth: the clap tree only offers registered group/verb pairs,
     // but re-resolve against the registry so any drift is a clean usage error
-    // rather than a surprising dispatch.
-    registry.resolve(group_name, verb_name)?;
+    // rather than a surprising dispatch. The resolved descriptor is also the
+    // input to the #505 render gate below — the binary never decides for itself
+    // whether a verb mutates.
+    let descriptor = registry.resolve(group_name, verb_name)?;
 
     let global = GlobalArgs::from_arg_matches(verb_matches)
         .map_err(|error| CliError::usage(error.to_string()))?;
@@ -312,6 +332,96 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     let credential = resolve_credential(&effective.auth, &ProcessSecretResolver)?;
     let output_format = effective.output;
 
+    // The #505 render gate. This `match` is the whole enforcement: the
+    // `Receipt` arm holds a `ReceiptRenderer`, which has no `render(Value)`
+    // method, and `VerbOutput` wraps a private payload, so there is no
+    // expression in this function — or any other — that turns a mutating verb
+    // plus a raw body into printable output. Adding a resource family cannot
+    // reintroduce a bare mutation response, because the family never touches
+    // this code at all.
+    let output = match descriptor.render_gate() {
+        RenderGate::Bare(renderer) => {
+            if resource.dry_run {
+                return Err(CliError::usage(format!(
+                    "--dry-run applies to mutating verbs; '{group_name} {verb_name}' is a \
+                     {} verb and changes nothing",
+                    descriptor.effect.as_str()
+                )));
+            }
+            read_output(
+                renderer,
+                group_name,
+                &resource,
+                spec,
+                &redaction_spec,
+                effective,
+                credential,
+            )?
+        }
+        RenderGate::Receipt(renderer) => {
+            if resource.all_pages {
+                return Err(CliError::usage(format!(
+                    "--all-pages is a list-walking flag; '{group_name} {verb_name}' is a \
+                     mutating verb and returns one document"
+                )));
+            }
+            mutation_output(
+                renderer,
+                group_name,
+                &input.segments,
+                spec,
+                effective,
+                credential,
+                resource.dry_run,
+            )?
+        }
+    };
+
+    // Correlation ids are diagnostics → stderr; the payload stays clean on
+    // stdout so `--output json` is pipe-safe. A receipt carries them as
+    // attested fields too, so a piped receipt is self-contained.
+    if let Some(receipt) = output.receipt() {
+        if let Some(request_id) = &receipt.correlation.request_id.value {
+            eprintln!("request-id: {request_id}");
+        }
+        if let Some(trace_id) = &receipt.correlation.trace_id.value {
+            eprintln!("trace-id: {trace_id}");
+        }
+    }
+
+    println!("{}", render_output(output_format, &output, render_table)?);
+
+    // A single-page list must never look complete when it is not. The notice
+    // is a diagnostic → stderr, so it cannot corrupt a piped JSON payload.
+    // Only a read produces pages at all.
+    if let Some(body) = output.body() {
+        if !resource.all_pages {
+            if let Some(notice) =
+                truncation_notice(body, resource.offset.unwrap_or(0), resource.limit)
+            {
+                eprintln!("{notice}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Execute a non-mutating verb and gate its body into a [`VerbOutput`].
+///
+/// Unchanged behaviour from before #505 — pagination, one-time-secret
+/// redaction, and the cursor-offset refusal all still happen here — except
+/// that the body now leaves through the render gate's `BareRenderer` instead
+/// of being printed directly.
+#[allow(clippy::too_many_arguments)]
+fn read_output(
+    renderer: BareRenderer<'_>,
+    group_name: &str,
+    resource: &ResourceArgs,
+    spec: RequestSpec,
+    redaction_spec: &RequestSpec,
+    effective: EffectiveContext,
+    credential: Option<Credential>,
+) -> CliResult<VerbOutput> {
     let all_pages = resource.all_pages;
     let page_size = resource.limit.unwrap_or(DEFAULT_PAGE_SIZE);
     let runtime = dispatch::runtime()?;
@@ -325,8 +435,6 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         }
     })?;
 
-    // Correlation ids are diagnostics → stderr; the payload stays clean on
-    // stdout so `--output json` is pipe-safe.
     if let Some(request_id) = &response.request_id {
         eprintln!("request-id: {request_id}");
     }
@@ -334,10 +442,9 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         eprintln!("trace-id: {trace_id}");
     }
 
-    // Blank one-time secret material on reads before it can reach stdout; a
-    // mutation's response is left intact so the operator captures it once.
+    // Blank one-time secret material on reads before it can reach stdout.
     let mut body = response.body;
-    redact_response(group_name, &redaction_spec, &mut body);
+    redact_response(group_name, redaction_spec, &mut body);
 
     // A cursor endpoint ignores `--offset`, so page N is page ONE with exit 0 —
     // checked BEFORE anything is printed, so the wrong page never reaches stdout
@@ -346,20 +453,38 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         return Err(CliError::usage(refusal));
     }
 
-    match output_format {
-        OutputFormat::Json => println!("{}", render_json(&body)?),
-        OutputFormat::Table => println!("{}", render_table(&body)?),
-    }
+    Ok(renderer.render(body))
+}
 
-    // A single-page list must never look complete when it is not. The notice
-    // is a diagnostic → stderr, so it cannot corrupt a piped JSON payload.
-    if !all_pages {
-        if let Some(notice) = truncation_notice(&body, resource.offset.unwrap_or(0), resource.limit)
-        {
-            eprintln!("{notice}");
-        }
+/// Plan and (unless it is a dry run) execute a mutating verb, returning its
+/// decision receipt.
+///
+/// The dry-run branch is deliberately taken **before** the async runtime is
+/// started and before any transport is constructed: `MutationPlan::dry_run`
+/// takes no client, so on this path no `ReqwestTransport` is ever built and no
+/// socket is ever opened. That is the structural half of "a dry run issues no
+/// state-changing request"; the transport-level assertion lives in
+/// `ferrogate-cli-core`'s `receipt_test.rs`.
+#[allow(clippy::too_many_arguments)]
+fn mutation_output(
+    renderer: ReceiptRenderer<'_>,
+    group_name: &str,
+    segments: &[String],
+    spec: RequestSpec,
+    effective: EffectiveContext,
+    credential: Option<Credential>,
+    dry_run: bool,
+) -> CliResult<VerbOutput> {
+    let plan = MutationPlan::new(renderer, group_name, spec, segments, &effective, dry_run)?;
+    if plan.is_dry_run() {
+        return Ok(plan.dry_run());
     }
-    Ok(())
+    let runtime = dispatch::runtime()?;
+    runtime.block_on(async move {
+        let transport = ReqwestTransport::new(&effective)?;
+        let client = ControlPlaneClient::new(effective, credential, transport);
+        plan.send(&client).await
+    })
 }
 
 /// Refuse a `--offset` the endpoint provably did not honor.

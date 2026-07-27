@@ -514,6 +514,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -541,6 +542,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -568,6 +570,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -595,6 +598,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -622,6 +626,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -649,6 +654,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -676,6 +682,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -711,6 +718,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -751,6 +759,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -778,6 +787,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -805,6 +815,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -832,6 +843,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -859,6 +871,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -886,6 +899,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -926,6 +940,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -953,6 +968,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -980,6 +996,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1007,6 +1024,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1034,6 +1052,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1061,6 +1080,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1100,6 +1120,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1127,6 +1148,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1154,6 +1176,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1181,6 +1204,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1208,6 +1232,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1248,6 +1273,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1275,6 +1301,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1302,6 +1329,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1329,6 +1357,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1356,6 +1385,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1383,6 +1413,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1425,6 +1456,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1452,6 +1484,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1479,6 +1512,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1506,6 +1540,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1533,6 +1568,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1560,6 +1596,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1587,6 +1624,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1614,6 +1652,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1654,6 +1693,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1681,6 +1721,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1708,6 +1749,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1735,6 +1777,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1762,6 +1805,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1789,6 +1833,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1827,6 +1872,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1854,6 +1900,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1881,6 +1928,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1908,6 +1956,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1946,6 +1995,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -1973,6 +2023,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2000,6 +2051,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2027,6 +2079,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2067,6 +2120,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2094,6 +2148,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2121,6 +2176,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2148,6 +2204,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2175,6 +2232,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2202,6 +2260,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2239,6 +2298,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2266,6 +2326,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2293,6 +2354,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2333,6 +2395,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2360,6 +2423,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2387,6 +2451,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2414,6 +2479,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2441,6 +2507,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2468,6 +2535,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2510,6 +2578,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2537,6 +2606,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2564,6 +2634,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2591,6 +2662,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2618,6 +2690,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2645,6 +2718,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2672,6 +2746,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2699,6 +2774,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2739,6 +2815,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2766,6 +2843,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2793,6 +2871,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2820,6 +2899,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2847,6 +2927,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2874,6 +2955,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2911,6 +2993,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2938,6 +3021,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -2965,6 +3049,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3004,6 +3089,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3031,6 +3117,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3058,6 +3145,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3085,6 +3173,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3112,6 +3201,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3155,6 +3245,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3182,6 +3273,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3209,6 +3301,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3236,6 +3329,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3263,6 +3357,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3290,6 +3385,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3317,6 +3413,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3344,6 +3441,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3371,6 +3469,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3406,6 +3505,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3441,6 +3541,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3476,6 +3577,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3511,6 +3613,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3551,6 +3654,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3578,6 +3682,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3605,6 +3710,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3632,6 +3738,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3659,6 +3766,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3686,6 +3794,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3724,6 +3833,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3751,6 +3861,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3778,6 +3889,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3805,6 +3917,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3840,6 +3953,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3876,6 +3990,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3903,6 +4018,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3942,6 +4058,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3969,6 +4086,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -3996,6 +4114,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4023,6 +4142,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4050,6 +4170,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4094,6 +4215,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4121,6 +4243,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4148,6 +4271,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4175,6 +4299,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4202,6 +4327,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4229,6 +4355,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4256,6 +4383,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4283,6 +4411,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4310,6 +4439,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4337,6 +4467,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4372,6 +4503,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4407,6 +4539,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4451,6 +4584,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4478,6 +4612,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4505,6 +4640,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4532,6 +4668,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4559,6 +4696,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4586,6 +4724,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4613,6 +4752,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4640,6 +4780,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4667,6 +4808,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4694,6 +4836,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4732,6 +4875,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4759,6 +4903,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4786,6 +4931,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4813,6 +4959,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4850,6 +4997,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4877,6 +5025,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4904,6 +5053,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4943,6 +5093,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4970,6 +5121,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -4997,6 +5149,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5024,6 +5177,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5051,6 +5205,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5092,6 +5247,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5119,6 +5275,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5146,6 +5303,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5173,6 +5331,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5200,6 +5359,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5227,6 +5387,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5254,6 +5415,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5294,6 +5456,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5321,6 +5484,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5348,6 +5512,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5375,6 +5540,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5402,6 +5568,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5429,6 +5596,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5468,6 +5636,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5495,6 +5664,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5522,6 +5692,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5549,6 +5720,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5576,6 +5748,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5615,6 +5788,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5642,6 +5816,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5669,6 +5844,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5696,6 +5872,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5723,6 +5900,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5760,6 +5938,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5787,6 +5966,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5814,6 +5994,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5855,6 +6036,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5882,6 +6064,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5909,6 +6092,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5936,6 +6120,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5963,6 +6148,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -5990,6 +6176,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6017,6 +6204,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6054,6 +6242,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6081,6 +6270,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6108,6 +6298,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6145,6 +6336,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6172,6 +6364,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6199,6 +6392,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6238,6 +6432,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6265,6 +6460,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6292,6 +6488,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6319,6 +6516,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6346,6 +6544,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6382,6 +6581,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6409,6 +6609,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6445,6 +6646,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6472,6 +6674,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6507,6 +6710,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6542,6 +6746,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6581,6 +6786,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6608,6 +6814,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6635,6 +6842,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6662,6 +6870,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6689,6 +6898,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6724,6 +6934,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6760,6 +6971,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6787,6 +6999,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6823,6 +7036,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6850,6 +7064,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6890,6 +7105,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6917,6 +7133,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6944,6 +7161,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6971,6 +7189,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -6998,6 +7217,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
@@ -7025,6 +7245,7 @@ Options:
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
 - `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
 - `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`

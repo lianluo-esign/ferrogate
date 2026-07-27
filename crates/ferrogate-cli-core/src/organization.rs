@@ -46,21 +46,29 @@ impl CommandGroup for TenantAccountsGroup {
             "tenant-accounts",
             "Manage tenant accounts",
             vec![
-                VerbDescriptor::api("list", "List tenant accounts", "listTenantAccounts"),
-                VerbDescriptor::api("get", "Show a tenant account", "getTenantAccount"),
-                VerbDescriptor::api("create", "Create a tenant account", "createTenantAccount"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("list", "List tenant accounts", "listTenantAccounts"),
+                VerbDescriptor::read("get", "Show a tenant account", "getTenantAccount"),
+                VerbDescriptor::mutating(
+                    "create",
+                    "Create a tenant account",
+                    "createTenantAccount",
+                ),
+                VerbDescriptor::mutating(
                     "replace",
                     "Replace a tenant account",
                     "replaceTenantAccount",
                 ),
-                VerbDescriptor::api("update", "Update a tenant account", "updateTenantAccount"),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
+                    "update",
+                    "Update a tenant account",
+                    "updateTenantAccount",
+                ),
+                VerbDescriptor::read(
                     "resolved-defaults",
                     "Show a tenant's resolved defaults",
                     "getTenantResolvedDefaults",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "assign-plan",
                     "Assign a subscription plan to a tenant",
                     "assignTenantPlan",
@@ -97,7 +105,7 @@ impl CommandGroup for TenantsGroup {
         GroupDescriptor::new(
             "tenants",
             "List gateway tenants (admin view)",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List tenants",
                 "listAdminTenants",
@@ -156,11 +164,11 @@ impl CommandGroup for PlansGroup {
             "plans",
             "Manage plans",
             vec![
-                VerbDescriptor::api("list", "List plans", "listPlans"),
-                VerbDescriptor::api("get", "Show a plan", "getPlan"),
-                VerbDescriptor::api("create", "Create a plan", "createPlan"),
-                VerbDescriptor::api("replace", "Replace a plan", "replacePlan"),
-                VerbDescriptor::api("update", "Update a plan", "updatePlan"),
+                VerbDescriptor::read("list", "List plans", "listPlans"),
+                VerbDescriptor::read("get", "Show a plan", "getPlan"),
+                VerbDescriptor::mutating("create", "Create a plan", "createPlan"),
+                VerbDescriptor::mutating("replace", "Replace a plan", "replacePlan"),
+                VerbDescriptor::mutating("update", "Update a plan", "updatePlan"),
             ],
         )
     }
@@ -180,12 +188,12 @@ impl CommandGroup for QuotaPoliciesGroup {
             "quota-policies",
             "Manage quota policies",
             vec![
-                VerbDescriptor::api("list", "List quota policies", "listQuotaPolicies"),
-                VerbDescriptor::api("get", "Show a quota policy", "getQuotaPolicy"),
-                VerbDescriptor::api("create", "Create a quota policy", "createQuotaPolicy"),
-                VerbDescriptor::api("replace", "Replace a quota policy", "replaceQuotaPolicy"),
-                VerbDescriptor::api("update", "Update a quota policy", "updateQuotaPolicy"),
-                VerbDescriptor::api("delete", "Delete a quota policy", "deleteQuotaPolicy"),
+                VerbDescriptor::read("list", "List quota policies", "listQuotaPolicies"),
+                VerbDescriptor::read("get", "Show a quota policy", "getQuotaPolicy"),
+                VerbDescriptor::mutating("create", "Create a quota policy", "createQuotaPolicy"),
+                VerbDescriptor::mutating("replace", "Replace a quota policy", "replaceQuotaPolicy"),
+                VerbDescriptor::mutating("update", "Update a quota policy", "updateQuotaPolicy"),
+                VerbDescriptor::mutating("delete", "Delete a quota policy", "deleteQuotaPolicy"),
             ],
         )
     }
@@ -202,28 +210,28 @@ pub fn build_quota_policies(verb: &str, input: &ResourceInput) -> CliResult<Requ
 /// whose operation ids follow the `<Verb><Noun>` convention.
 fn crud_verbs(noun_lower: &str, noun_pascal: &str, list_op: &str) -> Vec<VerbDescriptor> {
     vec![
-        VerbDescriptor::api("list", format!("List {noun_lower}s"), list_op),
-        VerbDescriptor::api(
+        VerbDescriptor::read("list", format!("List {noun_lower}s"), list_op),
+        VerbDescriptor::read(
             "get",
             format!("Show a {noun_lower}"),
             format!("get{noun_pascal}"),
         ),
-        VerbDescriptor::api(
+        VerbDescriptor::mutating(
             "create",
             format!("Create a {noun_lower}"),
             format!("create{noun_pascal}"),
         ),
-        VerbDescriptor::api(
+        VerbDescriptor::mutating(
             "replace",
             format!("Replace a {noun_lower}"),
             format!("replace{noun_pascal}"),
         ),
-        VerbDescriptor::api(
+        VerbDescriptor::mutating(
             "update",
             format!("Update a {noun_lower}"),
             format!("update{noun_pascal}"),
         ),
-        VerbDescriptor::api(
+        VerbDescriptor::mutating(
             "delete",
             format!("Delete a {noun_lower}"),
             format!("delete{noun_pascal}"),

@@ -72,52 +72,52 @@ impl CommandGroup for GuardrailPoliciesGroup {
             "guardrail-policies",
             "Manage guardrail policies and their immutable revisions",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "list",
                     "List guardrail policies",
                     "listGuardrailPolicyRevisions",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "create",
                     "Create a guardrail policy (first revision)",
                     "createGuardrailPolicyRevision",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "get",
                     "List one policy's immutable revisions",
                     "listGuardrailPolicyRevisionsByPolicy",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "revisions",
                     "List a policy's revision history",
                     "listGuardrailPolicyRevisionHistory",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "create-revision",
                     "Append the next revision to a policy",
                     "createNextGuardrailPolicyRevision",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "get-revision",
                     "Show one immutable policy revision",
                     "getGuardrailPolicyRevision",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "archive",
                     "Archive one immutable policy revision",
                     "archiveGuardrailPolicyRevision",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "activate",
                     "Activate a policy revision (make it live)",
                     "activateGuardrailPolicyRevision",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "rollback",
                     "Roll back to an archived policy revision",
                     "rollbackGuardrailPolicyRevision",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "dry-run",
                     "Inspect a revision without dispatching detectors or actions",
                     "dryRunGuardrailPolicyRevision",
@@ -167,7 +167,7 @@ impl CommandGroup for GuardrailEvaluationsGroup {
         GroupDescriptor::new(
             "guardrail-evaluations",
             "Inspect the guardrail evaluation event stream",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List guardrail evaluations",
                 "listGuardrailEvaluations",
@@ -189,7 +189,7 @@ impl CommandGroup for InvestigationsGroup {
         GroupDescriptor::new(
             "investigations",
             "Join cross-plane evidence for one request, trace, or agent run",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "get",
                 "Join evidence for a request_id/trace_id/agent_run_id",
                 "getGuardrailInvestigation",

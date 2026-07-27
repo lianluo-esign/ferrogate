@@ -72,15 +72,15 @@ impl CommandGroup for SystemGroup {
             "system",
             "Inspect system status, readiness, and observability",
             vec![
-                VerbDescriptor::api("status", "Show admin system status", "getAdminStatus"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("status", "Show admin system status", "getAdminStatus"),
+                VerbDescriptor::read(
                     "status-alias",
                     "Show admin system status (compat alias)",
                     "getAdminStatusAlias",
                 ),
-                VerbDescriptor::api("ready", "Check readiness", "getReadyz"),
-                VerbDescriptor::api("health", "Check liveness", "getHealthz"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("ready", "Check readiness", "getReadyz"),
+                VerbDescriptor::read("health", "Check liveness", "getHealthz"),
+                VerbDescriptor::read(
                     "observability",
                     "Show the observability snapshot",
                     "listAdminObservability",
@@ -114,7 +114,7 @@ impl CommandGroup for ProviderHealthGroup {
         GroupDescriptor::new(
             "provider-health",
             "List provider health status",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List provider health",
                 "listAdminProviderHealth",
@@ -137,12 +137,12 @@ impl CommandGroup for ConfigGroup {
             "config",
             "Validate and reload gateway configuration",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "validate",
                     "Validate a candidate config without committing",
                     "validateAdminConfig",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "reload",
                     "Validate and apply a config reload (state-changing; requires confirmation)",
                     "reloadAdminConfig",
@@ -175,8 +175,8 @@ impl CommandGroup for DrainGroup {
             "drain",
             "Inspect and control node drain mode",
             vec![
-                VerbDescriptor::api("get", "Show current drain state", "getAdminDrain"),
-                VerbDescriptor::api(
+                VerbDescriptor::read("get", "Show current drain state", "getAdminDrain"),
+                VerbDescriptor::mutating(
                     "set",
                     "Set or clear node drain mode (state-changing; requires confirmation)",
                     "setAdminDrain",
@@ -207,32 +207,32 @@ impl CommandGroup for GatewayConfigsGroup {
             "gateway-configs",
             "Manage gateway config profiles",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "list",
                     "List gateway config profiles",
                     "listAdminGatewayConfigs",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "get",
                     "Show a gateway config profile",
                     "getAdminGatewayConfig",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "create",
                     "Create a gateway config profile",
                     "createAdminGatewayConfig",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "replace",
                     "Replace a gateway config profile",
                     "putAdminGatewayConfig",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "update",
                     "Update a gateway config profile",
                     "patchAdminGatewayConfig",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "delete",
                     "Delete a gateway config profile",
                     "deleteAdminGatewayConfig",

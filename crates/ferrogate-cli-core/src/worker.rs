@@ -59,47 +59,47 @@ impl CommandGroup for SelfHostedWorkersGroup {
             "self-hosted-workers",
             "Manage self-hosted workers and their lifecycle",
             vec![
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "list",
                     "List self-hosted workers",
                     "listAdminSelfHostedWorkers",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "get",
                     "Show a self-hosted worker",
                     "getAdminSelfHostedWorker",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "register",
                     "Register a self-hosted worker",
                     "registerSelfHostedWorker",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "rotate",
                     "Rotate a worker's identity/certificate",
                     "rotateAdminSelfHostedWorkerIdentity",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "heartbeat",
                     "Record a worker heartbeat",
                     "recordAdminSelfHostedWorkerHeartbeat",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::read(
                     "events",
                     "List a worker's telemetry events",
                     "listAdminSelfHostedWorkerTelemetryEvents",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "record-event",
                     "Record a worker telemetry event",
                     "recordAdminSelfHostedWorkerTelemetryEvent",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "checkpoint",
                     "Record a worker checkpoint",
                     "recordAdminSelfHostedWorkerCheckpoint",
                 ),
-                VerbDescriptor::api(
+                VerbDescriptor::mutating(
                     "artifact",
                     "Record a worker artifact",
                     "recordAdminSelfHostedWorkerArtifact",
@@ -153,7 +153,7 @@ impl CommandGroup for ManagedWorkersGroup {
         GroupDescriptor::new(
             "managed-workers",
             "List managed worker pools",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List managed workers",
                 "listAdminManagedWorkers",
@@ -175,7 +175,7 @@ impl CommandGroup for ManagedWorkerSessionsGroup {
         GroupDescriptor::new(
             "managed-worker-sessions",
             "List managed worker sessions",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List managed worker sessions",
                 "listAdminManagedWorkerSessions",
@@ -197,7 +197,7 @@ impl CommandGroup for SelfHostedWorkerRecordsGroup {
         GroupDescriptor::new(
             "self-hosted-worker-records",
             "List immutable self-hosted worker records",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "list",
                 "List self-hosted worker records",
                 "listAdminSelfHostedWorkerRecords",
@@ -222,7 +222,7 @@ impl CommandGroup for SelfHostedRunsGroup {
         GroupDescriptor::new(
             "self-hosted-runs",
             "Inspect self-hosted run timelines",
-            vec![VerbDescriptor::api(
+            vec![VerbDescriptor::read(
                 "get",
                 "Show a self-hosted run timeline",
                 "getAdminSelfHostedRunTimeline",
