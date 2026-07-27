@@ -33,6 +33,14 @@
 //!   the receipt is the output contract of a mutating verb on the failing
 //!   paths too, and "the server refused" is a different fact from "we never
 //!   found out".
+//! * [`a_gateway_timeout_is_unknown_not_an_authoritative_refusal`],
+//!   [`a_throttled_mutation_agrees_with_the_exit_class_it_returns`] and
+//!   [`the_outcome_a_status_permits_is_authority_not_success`] — an HTTP
+//!   response is not the same thing as an authoritative answer. The first two
+//!   are fixtures next to the `409` so the two readings are proven distinct;
+//!   the third sweeps the whole status space, because the defect was a missing
+//!   *distinction* and sampled fixtures only pin the statuses someone thought
+//!   to write down.
 
 use super::*;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -1289,6 +1297,214 @@ fn an_ambiguous_failure_reports_the_outcome_as_unknown_not_as_refused() {
     // The target is still fully identified, so the operator can reconcile.
     assert_eq!(receipt.target.method, "POST");
     assert!(receipt.target.path.contains("gp_1"));
+}
+
+/// A `504` **is** an HTTP response, and the earlier cut folded every non-2xx
+/// into "the server refused", so a gateway timeout after the write committed
+/// produced a receipt reading `outcome: rejected` with *"the Control Plane API
+/// refused this mutation, so no server-side artifact of the change exists"* on
+/// `rollback`, `audit_id` and `object_version`. Every one of those is false for
+/// a change that landed, on precisely the invocation an operator must
+/// reconcile.
+///
+/// Sits next to [`a_refused_mutation_still_produces_a_receipt`] so the two are
+/// proven **distinct**: same verb, same transport, same code path, one status
+/// apart in meaning.
+#[test]
+fn a_gateway_timeout_is_unknown_not_an_authoritative_refusal() {
+    let report = execute_against(
+        "guardrail-policies",
+        "activate",
+        &["gp_1".to_string()],
+        504,
+        r#"{"error":{"code":"gateway_timeout","message":"upstream did not respond in time"}}"#,
+    );
+    assert!(
+        report.failure().is_some(),
+        "a 504 is still an error the caller propagates"
+    );
+    let receipt = report.output().receipt().expect("a receipt, not nothing");
+    assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+
+    assert_eq!(
+        receipt.outcome,
+        MutationOutcome::Unknown,
+        "the server may have committed before the intermediary gave up; claiming a refusal is a \
+         fabrication"
+    );
+    // The status IS reported — this is not the answerless case — and the
+    // failure is still classed `api`, so the receipt does not pretend the
+    // response never arrived either.
+    assert_eq!(receipt.http_status.value, Some(504));
+    let recorded = receipt.failure.value.as_ref().expect("the failure");
+    assert_eq!(recorded.class, "api");
+    assert_eq!(recorded.code, "gateway_timeout");
+
+    // The three fields the wrong classification poisoned.
+    for (field, absent) in [
+        ("audit_id", receipt.audit_id.absent_code()),
+        ("rollback", receipt.rollback.absent_code()),
+        (
+            "target.object_version",
+            receipt.target.object_version.absent_code(),
+        ),
+    ] {
+        assert_eq!(
+            absent,
+            Some(absence_codes::MUTATION_OUTCOME_UNKNOWN),
+            "{field} must say the outcome is unknown, not that the mutation was not applied"
+        );
+    }
+    // ...and the prose has to say it too, or the table render still tells the
+    // operator nothing happened.
+    let detail = receipt
+        .audit_id
+        .absent_reason
+        .as_ref()
+        .expect("a stated reason")
+        .detail
+        .clone();
+    assert!(
+        detail.contains("may or may not have been applied"),
+        "the detail must leave both possibilities open: {detail}"
+    );
+    assert!(
+        !detail.contains("refused"),
+        "the detail must not claim a refusal: {detail}"
+    );
+    assert!(
+        detail.contains("504"),
+        "the ambiguous status is the thing to reconcile against, so name it: {detail}"
+    );
+}
+
+/// The retryable-timeout statuses are the second half of the same defect, and
+/// the one where the contradiction is visible inside a single invocation: this
+/// crate already exits a `429` on [`ExitClass::Transport`], documented as *"the
+/// request never produced an authoritative server answer"*. A receipt asserting
+/// the server made an authoritative decision would put two fields of one
+/// command in direct conflict — an edge throttle can reject a *retry* of a call
+/// the origin already accepted.
+#[test]
+fn a_throttled_mutation_agrees_with_the_exit_class_it_returns() {
+    for status in [408u16, 425, 429] {
+        let report = execute_against(
+            "guardrail-policies",
+            "activate",
+            &["gp_1".to_string()],
+            status,
+            r#"{"error":{"code":"rate_limited","message":"slow down"}}"#,
+        );
+        let failure = report.failure().expect("still an error");
+        assert_eq!(
+            failure.exit_class(),
+            ExitClass::Transport,
+            "HTTP {status} exits on the non-authoritative class"
+        );
+        let receipt = report.output().receipt().expect("a receipt");
+        assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+        assert_eq!(
+            receipt.outcome,
+            MutationOutcome::Unknown,
+            "HTTP {status} exits on the non-authoritative class, so the receipt may not report an \
+             authoritative decision"
+        );
+        assert_eq!(
+            receipt.audit_id.absent_code(),
+            Some(absence_codes::MUTATION_OUTCOME_UNKNOWN)
+        );
+    }
+}
+
+/// The boundary itself, stated independently of the implementation: what a
+/// status licenses the receipt to claim is **authority**, not success.
+///
+/// Swept over the whole status space rather than sampled, because the defect
+/// was a missing distinction, and a fixture-only test would only pin the
+/// statuses someone thought to write down.
+#[test]
+fn the_outcome_a_status_permits_is_authority_not_success() {
+    // The boundary cases, spelled out so the ranges below cannot drift
+    // silently.
+    for status in [200u16, 201, 202, 204] {
+        assert_eq!(
+            MutationOutcome::from_http_status(status),
+            MutationOutcome::Applied
+        );
+    }
+    for status in [400u16, 401, 402, 403, 404, 405, 409, 410, 422, 451, 499] {
+        assert_eq!(
+            MutationOutcome::from_http_status(status),
+            MutationOutcome::Rejected,
+            "HTTP {status} is the server having looked at the request and refused it"
+        );
+    }
+    for status in [408u16, 425, 429, 500, 502, 503, 504, 599] {
+        assert_eq!(
+            MutationOutcome::from_http_status(status),
+            MutationOutcome::Unknown,
+            "HTTP {status} says nothing about whether the write committed"
+        );
+    }
+
+    let mut rejected = 0usize;
+    let mut unknown = 0usize;
+    for status in 100u16..600 {
+        let outcome = MutationOutcome::from_http_status(status);
+        let class = ExitClass::from_http_status(status);
+        match outcome {
+            MutationOutcome::Rejected => {
+                rejected += 1;
+                assert!(
+                    (400..500).contains(&status),
+                    "only a client error is an authoritative refusal, not HTTP {status}"
+                );
+                assert_ne!(
+                    class,
+                    ExitClass::Transport,
+                    "HTTP {status} exits on the non-authoritative class; its receipt cannot \
+                     claim the server decided"
+                );
+                assert_ne!(
+                    class,
+                    ExitClass::Server,
+                    "HTTP {status} is the server failing after accepting the request"
+                );
+            }
+            MutationOutcome::Unknown => {
+                unknown += 1;
+                assert!(
+                    !matches!(
+                        class,
+                        ExitClass::Auth | ExitClass::NotFoundConflict | ExitClass::Validation
+                    ),
+                    "HTTP {status} exits on an authoritative class but reports unknown"
+                );
+            }
+            MutationOutcome::Applied => assert_eq!(
+                class,
+                ExitClass::Success,
+                "HTTP {status} is not a 2xx and must not report the change as applied"
+            ),
+            MutationOutcome::NotSent => {
+                panic!("HTTP {status} means a request was sent")
+            }
+        }
+        if (500..600).contains(&status) {
+            assert_eq!(
+                outcome,
+                MutationOutcome::Unknown,
+                "a 5xx may follow a committed write"
+            );
+        }
+    }
+    // Non-vacuity: both arms are populated, so neither assertion above is
+    // holding over an empty set.
+    assert!(rejected > 90, "expected the 4xx block, saw {rejected}");
+    assert!(
+        unknown > 100,
+        "expected the 5xx block plus 408/425/429, saw {unknown}"
+    );
 }
 
 /// The control: a 2xx reports `applied` and no failure, so the outcome field is

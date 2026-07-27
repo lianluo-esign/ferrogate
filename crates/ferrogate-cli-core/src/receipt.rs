@@ -95,6 +95,26 @@
 //! The test asserts on a recording [`Transport`] (zero requests seen), not on
 //! output text.
 //!
+//! # `outcome` reports authority, not success
+//!
+//! [`MutationOutcome`] is the field an audit pipeline selects on, so its
+//! boundary is *did the server decide*, not *did the call succeed*. A `4xx` is
+//! the server having read the request and refused it — `rejected`, and every
+//! server-derived field may say "no artifact exists". A `5xx`, or one of the
+//! retryable-timeout statuses `408`/`425`/`429`, is **not** a decision: the
+//! canonical case is a `guardrail-policies activate` the gateway committed and
+//! an intermediary answered `504` for. Those report `unknown`, because the only
+//! two claims available — "it landed" and "it did not" — are both unprovable
+//! from here, and the second is the one that silently loses a change.
+//!
+//! [`MutationOutcome::from_http_status`] derives this from
+//! [`ExitClass::from_http_status`] rather than from a parallel status table, so
+//! a receipt cannot assert an authoritative refusal on an invocation whose
+//! process exit code says the request never produced an authoritative answer.
+//! [`MutationReceipt::validate`] then holds the pair: an outcome that
+//! contradicts the `http_status` the same receipt reports is a validation
+//! failure.
+//!
 //! # Fingerprint contract
 //!
 //! [`CliActionTarget`] is a byte-compatible mirror of the runtime
@@ -116,7 +136,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::AuthSource;
 use crate::command::{VerbDescriptor, VerbEffect};
 use crate::context::EffectiveContext;
-use crate::error::{CliError, CliResult};
+use crate::error::{CliError, CliResult, ExitClass};
 use crate::transport::{build_url, ApiResponse, ControlPlaneClient, RequestSpec, Transport};
 
 /// `object` discriminator every receipt carries, so a mixed audit stream can
@@ -494,20 +514,29 @@ pub struct RollbackPointer {
 /// A receipt is emitted on **every** terminal path, including the failing ones,
 /// because "no output at all" is the one answer an operator cannot audit. The
 /// distinction that matters is the last two variants: a server that refused the
-/// call changed nothing, while a client that never got an answer knows nothing
-/// — the 504-after-commit case, where the mutation may well have landed.
+/// call changed nothing, while a client that got no authoritative answer knows
+/// nothing — the 504-after-commit case, where the mutation may well have
+/// landed.
+///
+/// Crucially, "got an HTTP response" is **not** the same as "got an
+/// authoritative answer". A `504` from an intermediary, or a `429` from an edge
+/// throttle, is an error envelope that says nothing about whether the write
+/// committed. See [`MutationOutcome::from_http_status`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOutcome {
     /// The Control Plane API answered 2xx: the change is applied.
     Applied,
-    /// The Control Plane API answered with an error envelope. The server made
-    /// an authoritative decision not to apply the change.
+    /// The Control Plane API answered with a **client-error** envelope (a 4xx
+    /// other than the retryable-timeout statuses). The server made an
+    /// authoritative decision not to apply the change.
     Rejected,
-    /// No authoritative answer was obtained (connect, timeout, TLS, or a
-    /// response that could not be read). The mutation **may or may not** have
-    /// been applied server-side; the client cannot tell, and neither should a
-    /// consumer of this receipt assume either way.
+    /// No authoritative answer was obtained: either no HTTP response at all
+    /// (connect, timeout, TLS, or a response that could not be read), or a
+    /// response whose status is not a decision about the write — a 5xx, or one
+    /// of the retryable-timeout statuses `408`/`425`/`429`. The mutation **may
+    /// or may not** have been applied server-side; the client cannot tell, and
+    /// neither should a consumer of this receipt assume either way.
     Unknown,
     /// Nothing left the process: a `--dry-run`, or a request the client refused
     /// to send. Nothing changed.
@@ -528,6 +557,51 @@ impl MutationOutcome {
     /// Whether the change is known to have taken effect.
     pub fn is_applied(self) -> bool {
         matches!(self, MutationOutcome::Applied)
+    }
+
+    /// What an HTTP status permits the receipt to claim about the write.
+    ///
+    /// This is derived from [`ExitClass::from_http_status`] rather than from a
+    /// second status table, and that is the point: the exit class a `429`
+    /// invocation returns is [`ExitClass::Transport`], documented as *"the
+    /// request never produced an authoritative server answer"*. If the outcome
+    /// were classified independently, one command could exit on the
+    /// non-authoritative class while its receipt asserted the server made an
+    /// authoritative decision — two fields of one invocation contradicting each
+    /// other. Sharing the table makes that unrepresentable, and a status later
+    /// moved into the `Transport` arm changes both at once.
+    ///
+    /// The boundary is *authority*, not success:
+    ///
+    /// - **2xx** → [`Applied`](MutationOutcome::Applied). The server said yes.
+    /// - **4xx except `408`/`425`/`429`** → [`Rejected`](MutationOutcome::Rejected).
+    ///   A client error is the server having looked at the request and refused
+    ///   it; nothing was applied, and the receipt may say so.
+    /// - **5xx** → [`Unknown`](MutationOutcome::Unknown). A `500` after the row
+    ///   was written, or a `504` from an intermediary that gave up while the
+    ///   gateway committed, is indistinguishable from a `504` before the write.
+    /// - **`408`/`425`/`429`** → [`Unknown`](MutationOutcome::Unknown). These
+    ///   are timeouts and throttles, and a throttle may be applied at the edge
+    ///   *after* the origin accepted the call. They are also exactly the
+    ///   statuses this crate already treats as non-authoritative.
+    /// - **anything else** (1xx, 3xx, out-of-range) → [`Unknown`](MutationOutcome::Unknown).
+    ///   The client has no idea what such a response means for the write, and
+    ///   "no idea" is what `unknown` spells.
+    pub fn from_http_status(status: u16) -> MutationOutcome {
+        match ExitClass::from_http_status(status) {
+            ExitClass::Success => MutationOutcome::Applied,
+            // The authoritative-refusal classes; every status mapping here is a
+            // 4xx the server itself decided.
+            ExitClass::Auth | ExitClass::NotFoundConflict | ExitClass::Validation => {
+                MutationOutcome::Rejected
+            }
+            // `Transport` is "no authoritative answer" by its own definition;
+            // `Server` is the server failing *after* accepting the request.
+            ExitClass::Server | ExitClass::Transport => MutationOutcome::Unknown,
+            // `from_http_status` never yields `Usage` today. If a future status
+            // is routed there, the honest default is the one that claims least.
+            ExitClass::Usage => MutationOutcome::Unknown,
+        }
     }
 }
 
@@ -704,6 +778,23 @@ impl MutationReceipt {
                 "outcome '{}' carries a response document; only an applied mutation has one",
                 self.outcome.as_str()
             ));
+        }
+        // A status the receipt itself reports is the strongest evidence about
+        // the write it holds, so the outcome may not contradict it. This is
+        // what stops the whole class the field was added for: a `504` receipt
+        // claiming `rejected` — "the server decided not to apply the change" —
+        // when the write may have committed, or the mirror-image `409`
+        // claiming `unknown` and sending an operator to reconcile a mutation
+        // the server explicitly refused.
+        if let Some(status) = self.http_status.value {
+            let implied = MutationOutcome::from_http_status(status);
+            if self.outcome != implied {
+                problems.push(format!(
+                    "outcome '{}' contradicts HTTP {status}, which permits only '{}'",
+                    self.outcome.as_str(),
+                    implied.as_str()
+                ));
+            }
         }
         problems
     }
@@ -1323,13 +1414,18 @@ impl<'a> MutationPlan<'a> {
             Executed::NotSent => MutationOutcome::NotSent,
             Executed::Applied(_) => MutationOutcome::Applied,
             Executed::Failed(error) => match error {
-                // An error envelope is the server's authoritative refusal: it
-                // decided, and it did not apply the change.
-                CliError::Api(_) => MutationOutcome::Rejected,
+                // An error envelope is NOT automatically a refusal. A 4xx is
+                // the server having looked at the request and said no; a 5xx or
+                // a 408/425/429 is the server (or an intermediary) failing to
+                // answer for the write at all - the 504-after-commit case,
+                // where the gateway committed and a proxy gave up. Folding the
+                // second into `rejected` would have the receipt state
+                // authoritatively that nothing happened on exactly the
+                // invocation where the operator most needs to reconcile.
+                CliError::Api(api) => MutationOutcome::from_http_status(api.http_status),
                 // No authoritative answer. The request may have been delivered
-                // and committed before the connection died - the 504-after-
-                // commit case - so claiming it did not happen would be a
-                // fabrication in the opposite direction.
+                // and committed before the connection died, so claiming it did
+                // not happen would be a fabrication in the opposite direction.
                 CliError::Transport(_) => MutationOutcome::Unknown,
                 // `ControlPlaneClient::send` only raises these from
                 // `prepare_request`, i.e. before the transport is touched.
@@ -1339,27 +1435,43 @@ impl<'a> MutationPlan<'a> {
         // The reason every server-derived field is null, stated once and used
         // everywhere so a failing receipt cannot claim `dry_run` semantics on
         // one field and something else on the next.
-        let (missing_code, missing_detail): (&str, &str) = match outcome {
-            MutationOutcome::Applied => ("", ""),
+        let (missing_code, missing_detail): (&str, String) = match outcome {
+            MutationOutcome::Applied => ("", String::new()),
             MutationOutcome::NotSent if self.dry_run => (
                 absence_codes::DRY_RUN_NOT_EXECUTED,
-                "this invocation was a dry run: no state-changing request was issued",
+                "this invocation was a dry run: no state-changing request was issued".to_string(),
             ),
             MutationOutcome::NotSent => (
                 absence_codes::REQUEST_NOT_SENT,
-                "the request was rejected locally and never left the process, so nothing changed",
+                "the request was rejected locally and never left the process, so nothing changed"
+                    .to_string(),
             ),
             MutationOutcome::Rejected => (
                 absence_codes::MUTATION_NOT_APPLIED,
                 "the Control Plane API refused this mutation, so no server-side artifact of the \
-                 change exists",
+                 change exists"
+                    .to_string(),
             ),
+            // The code is the stable discriminator and does not vary. The prose
+            // names *which* silence it was, because "the API answered 504" and
+            // "nothing came back at all" are reconciled differently — the first
+            // has a status and correlation ids to join on.
             MutationOutcome::Unknown => (
                 absence_codes::MUTATION_OUTCOME_UNKNOWN,
-                "no authoritative response was obtained: the mutation may or may not have been \
-                 applied server-side, and this client cannot tell which",
+                match &executed {
+                    Executed::Failed(CliError::Api(api)) => format!(
+                        "the Control Plane API answered {}, which is not an authoritative answer \
+                         about the write: the mutation may or may not have been applied \
+                         server-side, and this client cannot tell which",
+                        api.http_status
+                    ),
+                    _ => "no authoritative response was obtained: the mutation may or may not \
+                          have been applied server-side, and this client cannot tell which"
+                        .to_string(),
+                },
             ),
         };
+        let missing_detail = missing_detail.as_str();
         MutationReceipt {
             object: RECEIPT_OBJECT.to_string(),
             receipt_version: RECEIPT_VERSION,
