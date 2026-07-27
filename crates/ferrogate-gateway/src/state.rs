@@ -910,6 +910,11 @@ impl SharedAppState {
             None
         };
         let mut candidate = (*active.config).clone();
+        // #540 rework: a peer's published api-key set is durable control-plane
+        // state, not this node's config document. Refusing the whole snapshot
+        // over one pre-#515 key would wedge cluster sync (and leave the node
+        // stale) over a credential that already fails closed at authentication.
+        candidate.api_keys_are_control_plane_documents = true;
         match &verified {
             Some(verified) => {
                 candidate.api_keys = verified.payload.api_keys.clone();
@@ -1070,6 +1075,20 @@ impl SharedAppState {
                 .upsert_control_plane_api_key(key.id.clone(), serde_json::to_string(&key)?)?;
             let mut candidate = (*active.config).clone();
             active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            // #540 rework: the mint refusal, aimed at the ONE key this request
+            // produces. `validate()` below no longer refuses an undeclared key
+            // here, because the line above has just replaced `api_keys` with
+            // the durable rows and stopping on those locks the operator out of
+            // the API that repairs them -- so the refusal #540 established for
+            // `POST`/`PUT /admin/v1/api-keys` has to be asked separately, or it
+            // would be lost. It is asked of the STORED shape rather than the
+            // request body because `apply_tenant_refs_to_api_keys` (just above)
+            // re-applies an existing key's tenant binding: a PATCH that renames
+            // a key without restating `organization_id` keeps the tenant it
+            // already had, and refusing that would be a new lockout of its own.
+            if let Some(stored) = candidate.api_keys.iter().find(|stored| stored.id == key.id) {
+                candidate.ensure_api_key_declares_tenant_identity(stored)?;
+            }
             candidate.validate()?;
             let result = self.reload_process_local(candidate);
             if result.committed {
@@ -1953,6 +1972,10 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
 ) -> anyhow::Result<()> {
     let previous_skill_packages = config.skill_packages.clone();
     let snapshot = repositories.control_plane_snapshot()?;
+    // #540 rework: see `Config::api_keys_are_control_plane_documents`. This is
+    // the boot path, which does not re-validate -- but the flag has to be set
+    // here too, because every later candidate is a clone of this config.
+    config.api_keys_are_control_plane_documents = true;
     config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
     let tenant_refs: Vec<crate::responses::AdminTenantRef> =
         deserialize_control_plane_documents(snapshot.tenants)?;
@@ -4767,6 +4790,12 @@ impl AppState {
     fn apply_control_plane_snapshot_to_config(&self, config: &mut Config) -> anyhow::Result<()> {
         let previous_skill_packages = config.skill_packages.clone();
         let snapshot = self.repositories.control_plane_snapshot()?;
+        // #540 rework: `config.api_keys` no longer describes the config
+        // document -- it is the durable control plane. See
+        // `Config::api_keys_are_control_plane_documents`; without this, one
+        // pre-#515 row 400s every admin mutation, including the one that would
+        // repair it.
+        config.api_keys_are_control_plane_documents = true;
         config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
         let tenant_refs: Vec<crate::responses::AdminTenantRef> =
             deserialize_control_plane_documents(snapshot.tenants)?;
@@ -7473,3 +7502,7 @@ mod state_reload_test;
 #[cfg(test)]
 #[path = "state_workers_ai_llama_guard_test.rs"]
 mod state_workers_ai_llama_guard_test;
+
+#[cfg(test)]
+#[path = "state_tenant_identity_test.rs"]
+mod state_tenant_identity_test;

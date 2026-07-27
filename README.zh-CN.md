@@ -220,6 +220,11 @@ ferrogate run --config config/ferrogate.example.toml
             scopes models.read chat.completions responses.create admin.read
             allowed_models fast-chat
             allowed_providers openai
+            # 每个 key 都必须声明租户身份，否则网关拒绝启动（#540）——
+            # 省略字段绝不能等于平台 root。这个 key 在整个网关上持有
+            # admin.read，所以明确声明为平台运维；只属于单一租户的 key
+            # 改写 `organization_id <tenants.id>`。Caddyfile 没有部署级开关。
+            platform_operator on
         }
     }
 }

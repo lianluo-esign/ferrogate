@@ -292,6 +292,12 @@ Minimal Caddyfile-style AI gateway shape:
             scopes models.read chat.completions responses.create admin.read
             allowed_models fast-chat
             allowed_providers openai
+            # Every key states its tenant identity or the gateway refuses to
+            # start (#540) — an omitted field must never mean platform root.
+            # This one carries admin.read across the whole gateway, so it says
+            # so; a key scoped to one tenant says `organization_id <tenants.id>`
+            # instead. A Caddyfile has no deployment-wide opt-out.
+            platform_operator on
         }
     }
 }

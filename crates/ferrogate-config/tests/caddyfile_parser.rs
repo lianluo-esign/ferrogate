@@ -365,6 +365,9 @@ fn parses_ai_gateway_typed_config_subset() {
             allowed_models fast-chat
             denied_models fast-chat
             denied_providers openai
+            # #540: mirrors the shipped `Ferrogate/Caddyfile`. See the
+            # declaration scan in `tenant_identity_declaration_scan.rs`.
+            platform_operator on
         }
     }
 }

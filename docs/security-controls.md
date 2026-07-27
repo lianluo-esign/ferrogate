@@ -77,10 +77,16 @@ defaulted to `true` to preserve it. That default is now `false`:
   startup.
 
 `[tenancy] require_registered_tenant` remains `false` by default: a misspelled
-`organization_id` already fails closed (the key is scoped to an island it can
-read nothing from), so it is a data-integrity setting rather than a privilege
+`organization_id` **cannot reach another tenant** — the key is scoped to an
+island of its own — so it is a data-integrity setting rather than a privilege
 one, and whether a tenant row exists is a fact about the control-plane store
-that no load-time check can warn about first.
+that no load-time check can warn about first. Stated precisely rather than as
+"fails closed": such a key still serves the data plane, and because
+`resolve_lifecycle_chain`
+(`crates/ferrogate-gateway/src/server/lifecycle_gate.rs`) skips an id that
+names no row, it also escapes the tenant suspension gate and every
+tenant-scoped quota policy. It is unreachable *by* other tenants and ungoverned
+*by* its own, which is why the setting exists at all.
 
 Admin-console user passwords are hashed with Argon2 (`argon2` crate) before
 storage — never stored or compared in plain text

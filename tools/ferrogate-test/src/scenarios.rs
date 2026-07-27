@@ -1727,7 +1727,13 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
-    let updated_api_key = r#"{"id":"test-client","name":"Updated test client","key":"test-secret-2","scopes":["models.read","chat.completions","responses.create"],"allowed_models":["fast-chat"],"enabled":true}"#;
+    // #540: `api_key_from_mutation` is a full replace, so a PATCH that omits
+    // organization_id sends a key that declares no tenant identity. It is
+    // restated here rather than relied on: the binding SURVIVES today only
+    // because `apply_tenant_refs_to_api_keys` re-applies it from the tenants
+    // documents the create wrote, which is a re-merge two layers below the
+    // request and not something a fixture should lean on silently.
+    let updated_api_key = r#"{"id":"test-client","name":"Updated test client","key":"test-secret-2","scopes":["models.read","chat.completions","responses.create"],"allowed_models":["fast-chat"],"organization_id":"org_test","enabled":true}"#;
     case.expect_json(
         "PATCH",
         "/admin/v1/api-keys/test-client",

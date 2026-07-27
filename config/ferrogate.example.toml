@@ -72,11 +72,13 @@ export_endpoint = "https://api.token4ai.cloud/v1/metering/events"
 # When `true`, `POST`/`PUT /admin/v1/api-keys` refuses an `organization_id`
 # that names no `tenants` row (400) instead of storing the dangling reference
 # and reporting it in the log/audit trail. Off by default because a misspelled
-# tenant already fails closed -- the key is scoped to an island it can see
-# nothing from -- and whether a tenant exists is a fact about the control-plane
-# store, not the config, so there is no load-time check that could warn you
-# first. Turn it on once every tenant your keys reference is registered through
-# /admin/v1/tenant-accounts.
+# tenant cannot REACH another tenant -- the key is scoped to an island of its
+# own -- and whether a tenant exists is a fact about the control-plane store,
+# not the config, so there is no load-time check that could warn you first.
+# That is narrower than "harmless": such a key still serves traffic, and an id
+# that names no row is skipped by the lifecycle chain, so it also escapes
+# tenant suspension and every tenant-scoped quota policy. Turn it on once every
+# tenant your keys reference is registered through /admin/v1/tenant-accounts.
 require_registered_tenant = false
 
 # Authentication posture (issue #542). Authentication is REQUIRED by default:

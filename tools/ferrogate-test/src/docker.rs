@@ -932,7 +932,12 @@ fn publish_shared_client_and_policy() -> Result<()> {
             "Authorization: Bearer admin-secret",
             "Content-Type: application/json",
         ],
-        r#"{"id":"shared-client","name":"Shared client","key":"shared-secret","scopes":["chat.completions"],"allowed_models":["fast-chat"]}"#,
+        // #540: a minted key must state its tenant identity or the admin API
+        // answers 400. This one's only scope is chat.completions -- a traffic
+        // key -- so it names a tenant rather than claiming platform root, on
+        // #563's argument: giving a data-plane fixture root would rebuild
+        // inside the fixture the "root by omission" posture #540 abolished.
+        r#"{"id":"shared-client","name":"Shared client","key":"shared-secret","scopes":["chat.completions"],"allowed_models":["fast-chat"],"organization_id":"org_shared_e2e"}"#,
         201,
         |body| {
             assert_eq!(body["key"]["id"], "shared-client");

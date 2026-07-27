@@ -151,6 +151,36 @@ pub struct Config {
     /// the default requires authentication.
     #[serde(default)]
     pub auth: AuthConfig,
+    /// #540 rework: provenance of [`Self::api_keys`]. `false` (the default, and
+    /// what every parsed config carries) means they came from the config
+    /// *document* -- a TOML/YAML file, a Caddyfile, or a hand-built test
+    /// fixture. `true` means the gateway has replaced them wholesale with the
+    /// durable control-plane documents.
+    ///
+    /// It exists for exactly one decision, and it changes no authorization
+    /// answer anywhere: whether an api key with no declared tenant identity
+    /// **stops** `Config::validate` or is merely **reported** by it. Stopping
+    /// is right for a document, because the operator is holding the file the
+    /// refusal names and one edit fixes it. It is wrong for the durable store:
+    /// the runtime mutation path rebuilds every candidate config out of that
+    /// store (`apply_control_plane_snapshot_to_config`) *before* validating, so
+    /// a single pre-#515 row would answer `400` to every admin write --
+    /// including the writes that would repair it -- naming a key the request
+    /// never touched. That is the "locks someone out of their own control
+    /// plane" outcome #540 set out to avoid, moved from the data plane to the
+    /// control plane.
+    ///
+    /// A durable key that declares nothing is still not root and still cannot
+    /// authenticate: `resolve_platform_operator` reads
+    /// [`TenancyConfig::implicit_platform_operator`] for it exactly as before,
+    /// and `finalize_auth` answers `tenant_identity_required`. This flag only
+    /// decides *where the operator is told*, never *what the key may do*.
+    ///
+    /// Never deserialized and never serialized, so no config file can set it
+    /// and no snapshot can carry it across a process boundary: it is only ever
+    /// `true` because this process applied a durable snapshot in this process.
+    #[serde(skip)]
+    pub api_keys_are_control_plane_documents: bool,
 }
 
 /// Deployment-wide authentication posture (issue #542).
@@ -345,9 +375,15 @@ pub struct TenancyConfig {
     /// #540 flipped [`Self::implicit_platform_operator`] and deliberately left
     /// this one alone. They look like a pair and are not: an *undeclared* key
     /// failed OPEN (it reached every tenant), while a *misspelled*
-    /// `organization_id` already fails CLOSED -- the key is scoped to
-    /// `Tenant("typo")` and can reach nothing but an empty island. Turning this
-    /// on is a data-integrity improvement, not a privilege one, and it has no
+    /// `organization_id` **cannot reach another tenant** -- the key is scoped to
+    /// `Tenant("typo")`, an island of its own. That is narrower than "fails
+    /// closed", and the difference is worth stating (#540 rework): such a key
+    /// still serves the data plane, and because `resolve_lifecycle_chain` skips
+    /// an id that names no row, it also escapes the tenant suspension gate and
+    /// every tenant-scoped quota policy -- so it is unreachable *by* other
+    /// tenants and ungoverned *by* its own. Turning this on is therefore a
+    /// data-integrity and governance improvement, not a privilege one -- the
+    /// cross-tenant hole is the one #540 closed -- and it has no
     /// load-time signal to precede it: whether a tenant is registered lives in
     /// the control-plane store, not the config, so a default flip here would
     /// surface for the first time as a `400` from a console that could mint keys
@@ -3166,6 +3202,10 @@ impl Default for Config {
             cloudflare: None,
             tenancy: TenancyConfig::default(),
             auth: AuthConfig::default(),
+            // #540 rework: a default Config's keys are whatever the caller puts
+            // in `api_keys`, i.e. a document. The gateway sets this to `true`
+            // only after replacing them with durable control-plane documents.
+            api_keys_are_control_plane_documents: false,
         }
     }
 }

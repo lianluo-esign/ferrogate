@@ -77,6 +77,10 @@ fn parses_ai_gateway_provider_model_and_api_key_blocks() {
             denied_providers openai
             monthly_token_budget 1000000
             request_limit_per_minute 60
+            # #540: this fixture mirrors the shipped `Ferrogate/Caddyfile`, so
+            # it declares what that file declares -- a parser fixture that
+            # would not load is a bad model of the file it copies.
+            platform_operator on
         }
     }
 }
@@ -258,6 +262,7 @@ fn a_caddyfile_key_that_declares_no_tenancy_is_refused_rather_than_defaulted() {
         model fast-chat -> openai:gpt-4o-mini {
             capabilities chat
         }
+        # #540-undeclared-on-purpose: the key this refusal test is about
         api_key silent {
             key silent-secret
             scopes admin.read
@@ -303,6 +308,50 @@ fn platform_operator_directive_refuses_an_argument_it_does_not_understand() {
             "`{bad}` must be refused with the spellings that work: {error}"
         );
     }
+}
+
+/// #540 rework, review minor 8: the sibling directive was asymmetric.
+/// `platform_operator` with a bad or missing argument was refused with a span
+/// (above); `organization_id` with no argument was `args.first().cloned()` ->
+/// `None`, i.e. silently identical to writing nothing at all.
+///
+/// It fails closed either way -- the key ends up undeclared and the load
+/// refusal catches it -- but the message the operator then reads says "declare
+/// an organization_id", which is what they thought they had just done. A
+/// directive whose entire job is to BE the declaration cannot be a no-op when
+/// it is malformed.
+///
+/// Pins the `Some(value) if !value.trim().is_empty()` guard on the
+/// `organization_id` arm in `parser.rs`. Restore `args.first().cloned()` and
+/// both loop cases red -- `unwrap_err` panics, because the parse succeeds.
+#[test]
+fn organization_id_directive_refuses_a_missing_argument_instead_of_ignoring_it() {
+    for bad in ["organization_id", "organization_id \"\""] {
+        let error = parse_caddyfile(
+            &format!(
+                "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            {bad}\n        }}\n    }}\n}}\n"
+            ),
+            "Ferrogate/Caddyfile",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("organization_id <tenants.id>") && error.contains("platform_operator"),
+            "`{bad}` must be refused with the spellings that work: {error}"
+        );
+    }
+
+    // Control: the well-formed directive still parses, so the guard above is
+    // rejecting an empty argument and not the directive itself.
+    let parsed = parse_caddyfile(
+        "\n:8080 {\n    ai_gateway {\n        api_key k {\n            key s\n            organization_id tenant-a\n        }\n    }\n}\n",
+        "Ferrogate/Caddyfile",
+    )
+    .expect("a well-formed organization_id must still parse");
+    assert_eq!(
+        parsed.api_keys[0].organization_id.as_deref(),
+        Some("tenant-a")
+    );
 }
 
 #[test]

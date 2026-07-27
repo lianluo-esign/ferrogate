@@ -27,8 +27,17 @@ use std::{
 /// their posture; the one place an operator must be able to find that out is
 /// before the restart, not during it. Any non-fatal posture warning the gate
 /// produces is appended to the report for the same reason.
+///
+/// #540 rework adds the tenancy posture to the same list, on the same argument.
+/// `[tenancy] implicit_platform_operator = true` reverts #540 for every
+/// undeclared key the deployment holds, and it exists only as a temporary way
+/// past an upgrade -- but it was reported nowhere a human looks: a bare
+/// `tracing::warn!` at startup, and `ferrogate check` printing `FerroGate
+/// config OK` and exiting 0 forever after. See
+/// `Config::tenancy_posture_warnings`.
 pub fn format_validate_report(config: &Config) -> AnyResult<String> {
-    let warnings = ensure_auth_posture_is_declared(config)?;
+    let mut warnings = ensure_auth_posture_is_declared(config)?;
+    warnings.extend(config.tenancy_posture_warnings());
     let summary = ConfigSummary::from_config(config);
     let mut report = format!(
         "FerroGate config OK: listen={}, admin={}, runtime=pingora, tls={}, http2={}, snapshot={}, upstreams={}, routes={}, providers={}, models={}, api_keys={}, auth_required={}",

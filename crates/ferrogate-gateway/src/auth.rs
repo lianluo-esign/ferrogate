@@ -313,9 +313,19 @@ fn scope_set_allows(scopes: &HashSet<String>, scope: &str) -> bool {
 
 /// The tenant id handed to a credential that reached an isolation check
 /// without a classification (see [`AuthContext::caller_scope`]). Empty is
-/// unforgeable as a real tenant: `Config::validate` refuses a blank
-/// `organization_id`, and no `tenants.id` row is the empty string, so every
-/// comparison against it fails and every listing filtered by it is empty.
+/// unforgeable as a real tenant: no `tenants.id` row is the empty string, so
+/// every comparison against it fails and every listing filtered by it is empty.
+///
+/// #540 rework: this used to rest on "`Config::validate` refuses a blank
+/// `organization_id`", which covers static config keys ONLY. An external auth
+/// service answering `{"tenant":{"organization_id":""}}` produced
+/// `CallerScope::Tenant("")` -- byte-identical to this constant -- from a
+/// credential that had *not* declared a tenant. Not an escalation (the value
+/// still matches no row), but the reason the claim held was wrong. It now
+/// holds at the seam instead: [`finalize_auth`] treats a blank
+/// `organization_id` as no tenant at all and refuses the credential with
+/// `tenant_identity_required`, so nothing carrying a blank tenant ever reaches
+/// an isolation check from any source.
 const UNSCOPED_TENANT_ID: &str = "";
 
 /// Who a credential is, for tenant-isolation purposes (issue #515).
@@ -636,7 +646,36 @@ pub(crate) fn authenticate_external(
     let decision: ferrogate_auth_service::AuthDecision =
         auth_service_post_json(service, "/v1/auth/resolve-api-key", &request)
             .map_err(|error| external_auth_error(error, request_id))?;
-    let auth = AuthContext {
+    let auth = external_auth_context(decision, implicit_platform_operator);
+    if !external_scope_allows(&auth.scopes, required_scope) {
+        return Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "scope_denied",
+            message: format!("API key does not have required scope {required_scope}"),
+        });
+    }
+    Ok(auth)
+}
+
+/// The external auth service's answer, turned into an [`AuthContext`].
+///
+/// Split out of [`authenticate_external`] by the #540 rework so it can be
+/// tested at all (review minor 5). The classification line below is the same
+/// one #515 put at every other auth source, but this source's copy was reached
+/// only through a live HTTP round trip to a configured service, so **no test in
+/// the tree touched it**: mutating `platform_operator` here to `true` turned
+/// every externally-authenticated caller into an unrestricted platform operator
+/// with the whole suite green, and `finalize_auth`'s backstop cannot fire for
+/// it -- the field is already `true`. Its durable sibling was held
+/// (`durable_virtual_key_is_never_platform_root`); this one now is too.
+///
+/// No HTTP, no config: a pure function of the decision and the deployment
+/// switch, which is exactly the pair that decides the blast radius.
+fn external_auth_context(
+    decision: ferrogate_auth_service::AuthDecision,
+    implicit_platform_operator: bool,
+) -> AuthContext {
+    AuthContext {
         region_allowlist: HashSet::new(),
         api_key_id: decision.tenant.api_key_id.clone(),
         scopes: decision.scopes.into_iter().collect(),
@@ -664,15 +703,7 @@ pub(crate) fn authenticate_external(
         log_bodies: false,
         rbac_subject: Some(decision.subject),
         effective_quota: ferrogate_policy::EffectiveQuota::default(),
-    };
-    if !external_scope_allows(&auth.scopes, required_scope) {
-        return Err(AuthError {
-            status: StatusCode::FORBIDDEN,
-            code: "scope_denied",
-            message: format!("API key does not have required scope {required_scope}"),
-        });
     }
-    Ok(auth)
 }
 
 fn external_scope_allows(scopes: &HashSet<String>, required_scope: &str) -> bool {
@@ -1386,7 +1417,20 @@ async fn finalize_auth(
     // service. It never fires at a deployment that set `[tenancy]
     // implicit_platform_operator = true`, where such a credential is classified
     // as an operator exactly as before #515.
-    if !auth.platform_operator && auth.organization_id.is_none() {
+    //
+    // #540 rework: "names no tenant" includes naming a BLANK one. `is_none()`
+    // alone let an external auth service answering `organization_id: ""`
+    // through as `CallerScope::Tenant("")` -- the same value
+    // `UNSCOPED_TENANT_ID` uses for "could not be classified", reached by a
+    // credential that never declared anything. It matches no `tenants` row
+    // either way, so this is not an escalation; it is the difference between
+    // that constant being unforgeable by construction and being unforgeable by
+    // coincidence.
+    let names_a_tenant = auth
+        .organization_id
+        .as_deref()
+        .is_some_and(|organization_id| !organization_id.trim().is_empty());
+    if !auth.platform_operator && !names_a_tenant {
         return Err(AuthError {
             status: StatusCode::FORBIDDEN,
             code: "tenant_identity_required",

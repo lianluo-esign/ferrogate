@@ -334,6 +334,10 @@ impl Config {
             auth: crate::config::AuthConfig {
                 disabled: config.auth_disabled,
             },
+            // #540 rework: a bridged Caddyfile IS a config document, so its
+            // undeclared keys stop the gateway with a refusal the operator can
+            // act on, exactly like a TOML file's.
+            api_keys_are_control_plane_documents: false,
         }
     }
 

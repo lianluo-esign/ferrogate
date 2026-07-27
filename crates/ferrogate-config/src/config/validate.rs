@@ -1901,6 +1901,72 @@ impl Config {
             .collect()
     }
 
+    /// Every static key that *declares* it is not platform root and names no
+    /// tenant either (`platform_operator = false`, no `organization_id`).
+    ///
+    /// Distinct from [`Self::api_keys_without_tenant_identity`] on purpose, and
+    /// the gap between the two is the review finding this closes (#540 rework):
+    /// the validator's predicate was strictly narrower than `finalize_auth`'s.
+    /// `finalize_auth` refuses on `!platform_operator && organization_id
+    /// .is_none()` *after* resolution, so a key that spells `platform_operator
+    /// = false` with no tenant loads clean and then answers
+    /// `tenant_identity_required` to every request it is ever presented on --
+    /// the "operator finds out at load" thesis defeated in one token
+    /// (`platform_operator off` in a Caddyfile).
+    ///
+    /// It is reported, not refused, and the difference is deliberate: this key
+    /// fails CLOSED, so it is a config mistake and not a privilege defect, and
+    /// a refusal here would stop a gateway over a key that is already harmless.
+    /// [`Self::tenancy_posture_warnings`] carries it into `ferrogate check`.
+    /// The legacy opt-in does not reach it either way -- the key declared its
+    /// answer, so `implicit_platform_operator` never applies to it.
+    pub fn api_keys_that_authorize_nothing(&self) -> Vec<&str> {
+        self.api_keys
+            .iter()
+            .filter(|key| key.platform_operator == Some(false) && key.organization_id.is_none())
+            .map(|key| key.id.as_str())
+            .collect()
+    }
+
+    /// The load-time posture report for `[tenancy]`: everything an operator
+    /// should see before the restart that is not severe enough to refuse.
+    ///
+    /// Threaded into `lifecycle::format_validate_report` (#540 rework, review
+    /// minor 1). Before that, `warn_implicit_platform_operators` was a bare
+    /// `tracing::warn!` that `ferrogate check` never consulted, so a deployment
+    /// that set the legacy opt-in to get past an upgrade -- reverting the whole
+    /// of #540 for every undeclared key it holds -- printed `FerroGate config
+    /// OK` and exited 0 forever afterwards. A switch whose entire purpose is to
+    /// be temporary has to be visible in the pre-flight that operators actually
+    /// run.
+    pub fn tenancy_posture_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let implicit = self.warn_implicit_platform_operators();
+        if !implicit.is_empty() {
+            warnings.push(format!(
+                "[tenancy] implicit_platform_operator = true grants UNRESTRICTED cross-tenant \
+                 (platform-operator) access to every API key that declares neither \
+                 organization_id nor platform_operator: {}. This is the pre-#515 behaviour, kept \
+                 only so an upgrade has a one-line way back while the keys are annotated. \
+                 Declare each key (platform_operator = true, or organization_id = \
+                 \"<tenants.id>\") and then remove the switch (issues #515, #540).",
+                implicit.join(", ")
+            ));
+        }
+        let authorizes_nothing = self.api_keys_that_authorize_nothing();
+        if !authorizes_nothing.is_empty() {
+            warnings.push(format!(
+                "these API keys declare platform_operator = false and name no organization_id, \
+                 so they have no tenant identity to authorize against: every request presenting \
+                 one is refused with tenant_identity_required, whatever its scopes say: {}. Give \
+                 each an organization_id = \"<tenants.id>\", or say platform_operator = true if \
+                 it really administers every tenant.",
+                authorizes_nothing.join(", ")
+            ));
+        }
+        warnings
+    }
+
     /// #540, the flip. Refuses, at load, a config whose static keys would only
     /// be authorized by the pre-#515 "no tenant means root" rule.
     ///
@@ -1917,6 +1983,13 @@ impl Config {
     /// out -- the same fail-closed-and-name-the-switch shape as #542's
     /// `lifecycle::ensure_auth_posture_is_declared`.
     ///
+    /// **What it does NOT stop** (#540 rework): a config whose `api_keys` are
+    /// durable control-plane documents rather than a document the operator can
+    /// edit -- see [`Config::api_keys_are_control_plane_documents`] for why
+    /// stopping there locks the operator out of the very API that repairs the
+    /// rows. Those keys are named in a `tracing::warn!` instead, and are still
+    /// refused at authentication.
+    ///
     /// Credentials this cannot see -- durable/virtual keys, the external auth
     /// service -- are unaffected here and are still refused at authentication;
     /// `finalize_auth` remains the backstop, not a duplicate of this.
@@ -1928,20 +2001,43 @@ impl Config {
         if undeclared.is_empty() {
             return Ok(());
         }
-        bail!(
-            "refusing to start: these API keys declare neither organization_id nor \
-             platform_operator, so they have no tenant identity to authorize against and would \
-             be refused at authentication (tenant_identity_required): {}.\n\nBefore FerroGate \
-             #540 an omitted field meant UNRESTRICTED cross-tenant (platform-operator) access, \
-             so a key that says nothing is the one shape that must not be guessed. Say what each \
-             one is:\n\n[[api_keys]]\n# ... this key administers every tenant\nplatform_operator \
-             = true\n\n[[api_keys]]\n# ... this key belongs to one tenant\norganization_id = \
-             \"<tenants.id>\"\n\nBoth are accepted by every FerroGate version since #515. To keep \
-             the pre-#515 behaviour while you annotate them -- every key above admitted as an \
-             unrestricted platform operator -- say so by name:\n\n[tenancy]\n\
-             implicit_platform_operator = true",
-            undeclared.join(", ")
-        );
+        if self.api_keys_are_control_plane_documents {
+            tracing::warn!(
+                api_key_ids = %undeclared.join(", "),
+                "these durable control-plane API keys declare neither organization_id nor \
+                 platform_operator, so every request presenting one is refused with \
+                 tenant_identity_required (they are NOT platform operators). They are reported \
+                 rather than refused because they are rows in the control-plane store, not lines \
+                 in this config: stopping every admin write over them would block the PUT that \
+                 repairs them. Fix each with PUT /admin/v1/api-keys/<id> naming an \
+                 organization_id, or platform_operator: true (issues #515, #540)."
+            );
+            return Ok(());
+        }
+        bail!("{}", undeclared_tenant_identity_refusal(&undeclared));
+    }
+
+    /// The same refusal, aimed at one key, for the runtime mint path.
+    ///
+    /// `POST`/`PUT /admin/v1/api-keys` used to inherit this check from the
+    /// whole-config `validate()` run on the candidate. That is where the
+    /// lockout in [`Config::api_keys_are_control_plane_documents`] came from,
+    /// and it also produced the wrong error: a request creating key `X` was
+    /// refused by a message naming legacy keys `Y` and `Z`. The handler now
+    /// asks about the key in the request, before writing anything, so the `400
+    /// invalid_api_key` names what the caller sent.
+    ///
+    /// Same two escape hatches as the config-file form, and the same deference
+    /// to the legacy opt-in, so the admin API and the config file cannot
+    /// disagree about which keys are acceptable.
+    pub fn ensure_api_key_declares_tenant_identity(&self, key: &super::ApiKey) -> AnyResult<()> {
+        if self.tenancy.implicit_platform_operator {
+            return Ok(());
+        }
+        if key.platform_operator.is_some() || key.organization_id.is_some() {
+            return Ok(());
+        }
+        bail!("{}", undeclared_tenant_identity_refusal(&[key.id.as_str()]));
     }
 
     /// The legacy opt-in's running commentary (#515): while `[tenancy]
@@ -3792,6 +3888,46 @@ fn validate_builtin_plugin_shape(
         }
     }
     Ok(())
+}
+
+/// The one text for "this key has no tenant identity", shared by the
+/// config-file refusal and the admin-API refusal so the two cannot drift.
+///
+/// **It names every dialect the refusal can fire on** (#540 rework, review
+/// finding 2). The first cut was written entirely in TOML -- `[[api_keys]]`,
+/// `[tenancy] implicit_platform_operator = true` -- and fired verbatim on
+/// Caddyfile deployments, where none of the three lines is writable and the
+/// last is deliberately unreachable (`GatewayConfig::into_config` hard-codes
+/// `TenancyConfig::default()`). An operator whose gateway had just stopped was
+/// handed a remedy that produces `unsupported directive` if followed literally,
+/// and the `platform_operator on` grammar #540 added for exactly this purpose
+/// went unmentioned. The precedent is `lifecycle::ensure_auth_posture_is_
+/// declared`, which prints the TOML spelling *and* the Caddyfile spelling of
+/// `auth off`; this now does the same for the tenancy vocabulary.
+///
+/// The Caddyfile half says out loud that there is no per-deployment escape
+/// hatch in that format and that the per-key directives are the way through,
+/// rather than pointing at a `[tenancy]` section the parser would reject.
+fn undeclared_tenant_identity_refusal(undeclared: &[&str]) -> String {
+    format!(
+        "refusing to start: these API keys declare neither organization_id nor \
+         platform_operator, so they have no tenant identity to authorize against and would be \
+         refused at authentication (tenant_identity_required): {}.\n\nBefore FerroGate #540 an \
+         omitted field meant UNRESTRICTED cross-tenant (platform-operator) access, so a key that \
+         says nothing is the one shape that must not be guessed. Say what each one is.\n\nIn TOML \
+         or YAML:\n\n[[api_keys]]\n# ... this key administers every tenant\nplatform_operator = \
+         true\n\n[[api_keys]]\n# ... this key belongs to one tenant\norganization_id = \
+         \"<tenants.id>\"\n\nIn a Caddyfile, inside the api_key block that names the key:\n\n\
+         api_key <id> {{\n    # ... this key administers every tenant\n    platform_operator on\n\
+         }}\n\napi_key <id> {{\n    # ... this key belongs to one tenant\n    organization_id \
+         <tenants.id>\n}}\n\nBoth forms are accepted by every FerroGate version since #515. In \
+         TOML or YAML only, you can also keep the pre-#515 behaviour while you annotate them -- \
+         every key above admitted as an unrestricted platform operator -- by saying so by \
+         name:\n\n[tenancy]\nimplicit_platform_operator = true\n\nA Caddyfile has no [tenancy] \
+         section and cannot switch that on: keeping root-by-omission is a whole-deployment \
+         decision, and the per-key directives above say the same thing without the blanket.",
+        undeclared.join(", ")
+    )
 }
 
 trait HeaderLike {

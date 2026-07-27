@@ -630,7 +630,28 @@ impl<'a> Parser<'a> {
                 // Caddyfile at a `[[api_keys]]` TOML field its format has no
                 // grammar for. Omitting both directives still means "this key
                 // said nothing", which is exactly what gets refused.
-                "organization_id" => api_key.organization_id = args.first().cloned(),
+                // #540 rework: a bare `organization_id` with no argument used to
+                // be `args.first().cloned()` -> `None`, i.e. silently the same
+                // as writing nothing -- while the `platform_operator` arm
+                // beside it rejected a missing value with a span. It fails
+                // closed either way, but "silently ignored" is the shape that
+                // makes a typo look like a declaration, and this directive's
+                // whole job is to be the declaration.
+                "organization_id" => match args.first() {
+                    Some(value) if !value.trim().is_empty() => {
+                        api_key.organization_id = Some(value.clone());
+                    }
+                    _ => {
+                        return Err(self.unsupported(
+                            &token,
+                            directive,
+                            "expected `organization_id <tenants.id>` (this key belongs to that \
+                             one tenant); to give a key unrestricted cross-tenant access use \
+                             `platform_operator on` instead"
+                                .to_string(),
+                        ));
+                    }
+                },
                 "platform_operator" => match args.first().map(String::as_str) {
                     Some("on" | "true") => api_key.platform_operator = Some(true),
                     Some("off" | "false") => api_key.platform_operator = Some(false),

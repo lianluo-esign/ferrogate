@@ -1091,10 +1091,16 @@ organization_id = "tenant-a"
     );
 
     // #540: omitting `[tenancy]` is the fail-closed answer, not the legacy one.
-    // Deserialising an ABSENT section (rather than reading
-    // `TenancyConfig::default()` in Rust) is the point -- `#[serde(default =
-    // "default_true")]` was how the old answer got in, and putting it back would
-    // red exactly here.
+    //
+    // #540 rework, correcting this comment. It used to claim that restoring
+    // `#[serde(default = "default_true")]` on `implicit_platform_operator`
+    // "would red exactly here". It would not, and the review was right: an
+    // ABSENT `[tenancy]` section is filled by `Config.tenancy`'s own
+    // `#[serde(default)]`, which calls `TenancyConfig::default()` -- the
+    // hand-written `impl Default` -- and never consults the field attribute at
+    // all. The case that reaches the attribute is a `[tenancy]` section that is
+    // PRESENT and does not mention the field; it is the very next assertion
+    // below, and it is the one that reds on that mutation.
     let silent = Config::from_toml_str(
         r#"
 listen = "127.0.0.1:8080"
@@ -1120,12 +1126,45 @@ platform_operator = true
          that declared itself"
     );
 
+    // #540 rework: the serde attribute's own case. A `[tenancy]` section that
+    // IS present and simply does not mention `implicit_platform_operator` is
+    // the only input that routes through `#[serde(default)]` on the field, and
+    // it is a shape real deployments write -- a config that sets
+    // `require_registered_tenant` and nothing else. Restore `#[serde(default =
+    // "default_true")]` on that field and this assertion, alone in this file,
+    // goes red; every other case here either omits the section or states the
+    // field.
+    let partial_section = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[tenancy]
+require_registered_tenant = true
+
+[[api_keys]]
+id = "bootstrap"
+name = "Bootstrap"
+key = "bootstrap-secret"
+platform_operator = true
+"#,
+    )
+    .expect("a [tenancy] section that states only the other field must load");
+    assert!(
+        !partial_section.tenancy.implicit_platform_operator,
+        "a PRESENT [tenancy] section that omits this line must still fail closed -- this is the \
+         one input that reads the field's #[serde(default)], and a default of `true` here would \
+         silently restore root-by-omission for a deployment that wrote a [tenancy] block for an \
+         unrelated reason"
+    );
+    assert!(partial_section.tenancy.require_registered_tenant);
+
     // The same file with the declaration removed is refused -- so the pass
     // above is the annotation doing work, not the check being absent.
     let undeclared = Config::from_toml_str(
         r#"
 listen = "127.0.0.1:8080"
 
+# #540-undeclared-on-purpose: this is the shape the refusal exists for
 [[api_keys]]
 id = "bootstrap"
 name = "Bootstrap"
@@ -1146,6 +1185,7 @@ listen = "127.0.0.1:8080"
 [tenancy]
 implicit_platform_operator = true
 
+# #540-undeclared-on-purpose: the key the escape hatch has to keep working
 [[api_keys]]
 id = "bootstrap"
 name = "Bootstrap"
@@ -1158,6 +1198,352 @@ key = "bootstrap-secret"
         opted_in.warn_implicit_platform_operators(),
         vec!["bootstrap"],
         "...and must say out loud which key that leaves holding platform root"
+    );
+}
+
+/// #540 rework, review finding 2: the refusal is written in every dialect it
+/// can fire on, not only in TOML.
+///
+/// A Caddyfile deployment that omits the directives is stopped by this exact
+/// message, and before this commit every remedy in it was unwritable there:
+/// `[[api_keys]]`, `organization_id = "..."` and `[tenancy]
+/// implicit_platform_operator = true` are TOML, and the last is *deliberately*
+/// unreachable from a Caddyfile (`GatewayConfig::into_config` hard-codes
+/// `TenancyConfig::default()`), so an operator following it literally got an
+/// `unsupported directive` parse error on top of a gateway that would not
+/// start. `platform_operator on` -- the grammar #540 added for precisely this
+/// -- was not mentioned at all.
+///
+/// The precedent is `lifecycle::ensure_auth_posture_is_declared`, which prints
+/// "In TOML or YAML: ... In a Caddyfile, in the global options block: ...".
+///
+/// Pins the `In a Caddyfile` arm of `undeclared_tenant_identity_refusal`
+/// (`validate.rs`). Delete those lines and this test reds; it cannot be
+/// satisfied by annotating any fixture, because the input is a config that
+/// declares nothing on purpose.
+#[test]
+fn the_undeclared_key_refusal_is_written_in_the_caddyfile_grammar_too() {
+    let error = Config::from_caddyfile_str(
+        r#"
+:8080 {
+    ai_gateway {
+        provider openai {
+            base_url https://api.openai.com/v1
+            api_key {env.OPENAI_API_KEY}
+        }
+        model fast-chat -> openai:gpt-4o-mini {
+            capabilities chat
+        }
+        # #540-undeclared-on-purpose: the bridged key the refusal must name
+        api_key bridged {
+            key bridged-secret
+            scopes admin.read
+        }
+    }
+}
+"#,
+        "Ferrogate/Caddyfile",
+    )
+    .expect_err("#540: a bridged key that declares nothing must not load")
+    .to_string();
+
+    assert!(
+        error.contains("bridged"),
+        "the refusal names the key that has to change: {error}"
+    );
+    assert!(
+        error.contains("platform_operator on"),
+        "and offers the Caddyfile spelling of root, which is the ONLY spelling that file can \
+         write: {error}"
+    );
+    assert!(
+        error.contains("organization_id <tenants.id>"),
+        "and the Caddyfile spelling of a tenant, without the TOML quotes and equals sign that \
+         make it a parse error there: {error}"
+    );
+    assert!(
+        error.contains("A Caddyfile has no [tenancy] section"),
+        "and says out loud that the deployment-wide escape hatch it mentions is not reachable \
+         from this format, instead of pointing an operator at a section the parser rejects: \
+         {error}"
+    );
+    // The TOML half is still there: one message serves both, so the two can
+    // never drift into disagreeing about what the fix is.
+    assert!(
+        error.contains("[[api_keys]]") && error.contains("implicit_platform_operator = true"),
+        "{error}"
+    );
+}
+
+/// #540 rework, review minor 7: `undeclared.join(", ")` is load-bearing and
+/// nothing held it -- no test had ever put more than one undeclared key in a
+/// config, so `undeclared[0]` would have passed every assertion in the tree
+/// while turning a one-pass migration into an N-restart one.
+///
+/// Pins the `join` in `undeclared_tenant_identity_refusal`. Replace it with
+/// `undeclared[0]` (or `.first().unwrap()`) and the `second-undeclared`
+/// assertion reds.
+#[test]
+fn the_refusal_names_every_undeclared_key_not_just_the_first() {
+    let error = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+# #540-undeclared-on-purpose: two of them, which is the whole point
+[[api_keys]]
+id = "first-undeclared"
+name = "First"
+key = "first-secret"
+
+[[api_keys]]
+id = "declared"
+name = "Declared"
+key = "declared-secret"
+organization_id = "tenant-a"
+
+# #540-undeclared-on-purpose: the second one the message must also name
+[[api_keys]]
+id = "second-undeclared"
+name = "Second"
+key = "second-secret"
+"#,
+    )
+    .expect_err("#540: two undeclared keys must not load either")
+    .to_string();
+
+    assert!(
+        error.contains("first-undeclared"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("second-undeclared"),
+        "every undeclared key is named, or the operator restarts once per key: {error}"
+    );
+    assert!(
+        !error.contains("declared,") && !error.contains(", declared"),
+        "and a key that DID declare a tenant is not swept into the list: {error}"
+    );
+}
+
+/// #540 rework, review finding 3: the refusal is about a config *document*.
+/// Applied to the durable control plane it is a lockout, not a migration.
+///
+/// `apply_control_plane_snapshot_to_config` replaces `config.api_keys`
+/// wholesale with the durable documents and only then calls `validate()`, and
+/// it does so on ~20 runtime mutation paths. So one pre-#515 row answered `400
+/// invalid_api_key` to every admin write -- naming a key the request never
+/// touched, and blocking the `PUT` that would have repaired it. With two such
+/// rows there was no order in which they could be fixed at all.
+///
+/// This pins both halves of `ensure_every_key_declares_tenant_identity`'s
+/// provenance branch:
+///
+/// * flip `api_keys_are_control_plane_documents` to `true` in the document case
+///   (or delete the `bail!`) and the first assertion reds;
+/// * delete the `if self.api_keys_are_control_plane_documents { ... return
+///   Ok(()) }` arm and the second reds.
+///
+/// Neither can be satisfied by annotating a fixture: the same key, byte for
+/// byte, must be refused in one config and accepted in the other, so an
+/// annotation would red the first assertion.
+#[test]
+fn an_undeclared_key_stops_a_config_document_and_only_warns_for_a_durable_row() {
+    let mut document = Config::default();
+    document.api_keys.push(
+        // #540-undeclared-on-purpose: a pre-#515 row is exactly the input
+        serde_json::from_value(serde_json::json!({
+            "id": "legacy-durable",
+            "name": "Minted before #515",
+            "key": "legacy-secret",
+            "scopes": ["admin.read"],
+        }))
+        .expect("test api key"),
+    );
+
+    let refused = document
+        .validate()
+        .expect_err("a config document's undeclared key must still stop the gateway");
+    assert!(
+        refused.to_string().contains("legacy-durable"),
+        "unexpected error: {refused}"
+    );
+
+    let mut durable = document.clone();
+    durable.api_keys_are_control_plane_documents = true;
+    durable.validate().expect(
+        "the same key as a durable control-plane row must NOT stop an admin mutation: the \
+         operator cannot edit it out of a file, and refusing here blocks the very write that \
+         repairs it",
+    );
+
+    // The list is unchanged either way -- the key is still undeclared, still
+    // not platform root, and still refused at authentication by
+    // `finalize_auth`. Only where the operator is told has changed.
+    assert_eq!(
+        durable.api_keys_without_tenant_identity(),
+        vec!["legacy-durable"],
+        "the durable branch reports the key, it does not stop seeing it"
+    );
+    assert!(
+        !durable.tenancy.implicit_platform_operator,
+        "and it emphatically does not promote it: the resolver still answers `not root`"
+    );
+}
+
+/// #540 rework, review finding 3, the other door: the runtime mint refusal must
+/// survive the change above, or `POST /admin/v1/api-keys` would go back to
+/// minting a credential with no tenant identity.
+///
+/// Pins `Config::ensure_api_key_declares_tenant_identity`, which `state.rs`'s
+/// `upsert_api_key` calls on the one key the request produces. Delete that call
+/// (or make this function return `Ok(())` unconditionally) and the first
+/// assertion reds. The message is the same text as the config-file refusal, so
+/// the admin API and the file cannot disagree about what is acceptable.
+#[test]
+fn the_per_key_mint_refusal_asks_only_about_the_key_in_the_request() {
+    let mut config = Config::default();
+    // A legacy durable row is already present and undeclared: the exact state
+    // that used to make every mutation 400.
+    config.api_keys_are_control_plane_documents = true;
+    config.api_keys.push(
+        // #540-undeclared-on-purpose: a pre-#515 row is exactly the input
+        serde_json::from_value(serde_json::json!({
+            "id": "legacy-durable",
+            "name": "Minted before #515",
+            "key": "legacy-secret",
+            "scopes": ["admin.read"],
+        }))
+        .expect("test api key"),
+    );
+
+    // #540-undeclared-on-purpose: the mint request the admin API must refuse
+    let minted: super::ApiKey = serde_json::from_value(serde_json::json!({
+        "id": "brand-new",
+        "name": "Brand new",
+        "key": "brand-new-secret",
+        "scopes": ["admin.read"],
+    }))
+    .expect("test api key");
+    let refused = config
+        .ensure_api_key_declares_tenant_identity(&minted)
+        .expect_err("#540: the admin API must not mint a credential with no tenant identity");
+    assert!(
+        refused.to_string().contains("brand-new"),
+        "and the 400 names the key the CALLER sent, not the legacy rows it never touched: \
+         {refused}"
+    );
+    assert!(!refused.to_string().contains("legacy-durable"), "{refused}");
+
+    let declared: super::ApiKey = serde_json::from_value(serde_json::json!({
+        "id": "brand-new",
+        "name": "Brand new",
+        "key": "brand-new-secret",
+        "scopes": ["admin.read"],
+        "organization_id": "tenant-a",
+    }))
+    .expect("test api key");
+    config
+        .ensure_api_key_declares_tenant_identity(&declared)
+        .expect("declaring the tenant is the fix the refusal names, so it must be accepted");
+
+    // The legacy opt-in is deferred to here exactly as it is for a file, so an
+    // operator who took the documented way past an upgrade can still use the
+    // admin API.
+    config.tenancy.implicit_platform_operator = true;
+    config
+        .ensure_api_key_declares_tenant_identity(&minted)
+        .expect("the documented escape hatch must reach the admin API too");
+}
+
+/// #540 rework, review minors 1 and 3: two postures an operator could hold
+/// forever without `ferrogate check` ever mentioning them.
+///
+/// 1. `implicit_platform_operator = true` reverts #540 for every undeclared key
+///    the deployment holds. It was a bare `tracing::warn!` that
+///    `format_validate_report` never consulted, so the pre-flight printed
+///    `FerroGate config OK` and exited 0.
+/// 2. `platform_operator = false` with no `organization_id` loads clean and
+///    then answers `tenant_identity_required` to every request, because the
+///    validator's predicate (`is_none() && is_none()`) was strictly narrower
+///    than `finalize_auth`'s (`!platform_operator && is_none()`). It fails
+///    closed, so it is reported rather than refused -- but "the operator finds
+///    out at load" is #540's own thesis and this defeated it.
+///
+/// Pins `Config::tenancy_posture_warnings` and both lists it reads. Delete
+/// either arm and its assertion reds; a fixture annotation cannot satisfy
+/// them, because the input is the un-annotated posture itself.
+#[test]
+fn ferrogate_check_can_see_the_legacy_opt_in_and_the_key_that_authorizes_nothing() {
+    let clean = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[[api_keys]]
+id = "operator"
+name = "Operator"
+key = "operator-secret"
+platform_operator = true
+"#,
+    )
+    .expect("a fully declared config");
+    assert!(
+        clean.tenancy_posture_warnings().is_empty(),
+        "a declared config says nothing, or the warning is noise every operator learns to skip"
+    );
+
+    let opted_in = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[tenancy]
+implicit_platform_operator = true
+
+# #540-undeclared-on-purpose: the key the warning has to name
+[[api_keys]]
+id = "bootstrap"
+name = "Bootstrap"
+key = "bootstrap-secret"
+"#,
+    )
+    .expect("the escape hatch loads");
+    let warnings = opted_in.tenancy_posture_warnings().join("\n");
+    assert!(
+        warnings.contains("implicit_platform_operator = true") && warnings.contains("bootstrap"),
+        "the pre-flight has to name the switch AND every key it is promoting to platform root: \
+         {warnings}"
+    );
+
+    let authorizes_nothing = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[[api_keys]]
+id = "operator"
+name = "Operator"
+key = "operator-secret"
+platform_operator = true
+
+[[api_keys]]
+id = "refuses-root"
+name = "Explicitly not root, and no tenant"
+key = "refuses-secret"
+platform_operator = false
+"#,
+    )
+    .expect(
+        "#540 rework: this is a mistake, not a privilege defect -- it fails closed, so it is \
+         reported and NOT refused. Refusing would stop a gateway over a harmless key, and would \
+         break the declared/effective fixtures that model this shape deliberately.",
+    );
+    assert_eq!(
+        authorizes_nothing.api_keys_that_authorize_nothing(),
+        vec!["refuses-root"],
+        "the operator key is not swept in: it declared root, so it authorizes plenty"
+    );
+    let warnings = authorizes_nothing.tenancy_posture_warnings().join("\n");
+    assert!(
+        warnings.contains("refuses-root") && warnings.contains("tenant_identity_required"),
+        "and the pre-flight names it and says what will happen to it: {warnings}"
     );
 }
 

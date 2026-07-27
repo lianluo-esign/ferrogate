@@ -1008,11 +1008,78 @@ fn undeclared_platform_root_is_off_by_default_and_the_resolver_agrees() {
 
     assert!(
         !config.tenancy.require_registered_tenant,
-        "#540 deliberately did not flip this one: a misspelled organization_id already fails \
-         closed (the key is scoped to an island it can read nothing from), and whether a tenant \
-         row exists is a fact about the control-plane store that no load-time check can warn \
-         about first -- so turning it on by default would surface only as a 400 from a console \
-         that could mint keys the day before"
+        "#540 deliberately did not flip this one: a misspelled organization_id cannot REACH \
+         another tenant (the key is scoped to an island of its own -- narrower than `fails \
+         closed`, since it still serves traffic and, naming no row, escapes the lifecycle/\
+         suspension gate too), and whether a tenant row exists is a fact about the control-plane \
+         store that no load-time check can warn about first -- so turning it on by default would \
+         surface only as a 400 from a console that could mint keys the day before"
+    );
+}
+
+/// #540 rework, review minor 5: the external auth source's copy of the #515
+/// classification line had **no test anywhere**.
+///
+/// It was reachable only through a live HTTP round trip to a configured auth
+/// service, so mutating `external_auth_context`'s `platform_operator:` to
+/// `true` made every externally-authenticated caller an unrestricted platform
+/// operator with the whole suite green -- and `finalize_auth` could not catch
+/// it, because its backstop only fires when `platform_operator` is *false*.
+/// The durable sibling of this line is held by
+/// `durable_virtual_key_is_never_platform_root`; this is the missing third.
+///
+/// Pins `auth.rs`'s `platform_operator: resolve_platform_operator(
+/// implicit_platform_operator, None, decision.tenant.organization_id
+/// .as_deref())`. Replace it with `true` and the first assertion reds; replace
+/// it with `false` and the third reds; drop the `organization_id` argument and
+/// the second reds.
+#[test]
+fn an_external_auth_service_cannot_mint_a_platform_operator_by_omission() {
+    fn decision(organization_id: Option<&str>) -> ferrogate_auth_service::AuthDecision {
+        ferrogate_auth_service::AuthDecision {
+            tenant: TenantContext {
+                organization_id: organization_id.map(ToOwned::to_owned),
+                team_id: None,
+                project_id: None,
+                workspace_id: None,
+                user_id: Some("user-1".into()),
+                api_key_id: Some("external-key".into()),
+            },
+            subject: ferrogate_auth_service::PolicySubject::User {
+                user_id: "user-1".into(),
+            },
+            scopes: vec!["admin.read".into()],
+            allowed_models: Vec::new(),
+            allowed_providers: Vec::new(),
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+        }
+    }
+
+    // The contract has no way to say "platform operator", so an answer that
+    // names no tenant is UNCLASSIFIED -- and under the #540 default that is not
+    // root. This is the whole finding: nothing else in the tree said so.
+    let unclassified = crate::auth::external_auth_context(decision(None), false);
+    assert!(
+        !unclassified.platform_operator,
+        "#540: an external auth answer that names no tenant must not be a platform operator"
+    );
+
+    // A tenant-scoped answer is that tenant, never root -- so the assertion
+    // above is about the missing declaration and not about this path always
+    // answering `false`.
+    let scoped = crate::auth::external_auth_context(decision(Some("tenant-a")), false);
+    assert!(!scoped.platform_operator);
+    assert_eq!(scoped.organization_id.as_deref(), Some("tenant-a"));
+
+    // And it is governed by the SAME deployment-wide switch as every other
+    // source, not by a rule of its own: with the legacy opt-in on, the
+    // unclassified answer is root again, exactly as a durable key would be.
+    let legacy = crate::auth::external_auth_context(decision(None), true);
+    assert!(
+        legacy.platform_operator,
+        "the legacy opt-in must reach this source too, or `implicit_platform_operator = true` \
+         would silently mean something different here than everywhere else"
     );
 }
 
