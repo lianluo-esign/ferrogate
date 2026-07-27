@@ -250,21 +250,177 @@ fn full_registry() -> Registry {
     registry
 }
 
-/// Build a request for `group verb`, trying progressively shorter id-segment
-/// lists so every family's addressing shape is satisfied by one probe.
-fn probe_spec(group: &str, verb: &str) -> CliResult<(RequestSpec, Vec<String>)> {
-    let mut last = None;
-    for arity in (0..=3).rev() {
+/// The most id segments the prober will offer a family builder before it
+/// declares a verb unconstructable.
+///
+/// This is a bound on the SEARCH, not a claim about the registry: the search
+/// stops at the first arity a builder accepts, so a four-segment verb is found
+/// at four and an eight-segment one would be found at eight. The constant
+/// exists only so that an unconstructable verb terminates instead of looping.
+/// [`every_registered_verb_is_constructable_by_the_prober`] asserts the
+/// deepest verb the registry actually holds sits strictly below this number,
+/// so the ceiling cannot quietly become the thing that decides an answer —
+/// which is exactly what the old ceiling of three did.
+const MAX_PROBE_SEGMENTS: usize = 8;
+
+/// Build a request for `group verb` with the FEWEST id segments its own family
+/// builder accepts, and report the segments handed over.
+///
+/// The arity is read off the builder — the only thing in the crate that knows
+/// a verb's addressing shape — by offering it 0, 1, 2, … segments and stopping
+/// at the first shape it accepts. Every builder rejects an under-addressed verb
+/// with a usage error (`require_item_segments`, `first_segment`, or an explicit
+/// slice pattern), so "the shortest list the builder does not reject" *is* the
+/// verb's required arity, and a builder that grew a fifth required segment
+/// yesterday is followed today without anyone editing this file.
+///
+/// **Why not a table, and why not descending.** `VerbDescriptor` carries no
+/// declared arity to read (issue #569 suggests one; adding the field touches
+/// every family in the crate, so it is not this slice), and the previous shape
+/// — try 3, then 2, then 1, then 0, take the first that builds — was wrong in
+/// two ways at once. It capped the search at three, so `asset-channels set`,
+/// which has required four segments since `5837c49` (#363), became
+/// unconstructable and killed all three whole-registry sweeps for four days.
+/// And by descending it took the LONGEST arity a builder tolerates, which for
+/// the many builders that match `[a, b, ..]` means a request carrying junk
+/// trailing segments rather than the request the verb actually issues.
+///
+/// # Errors
+/// Returns a message naming `group verb` when no arity up to
+/// [`MAX_PROBE_SEGMENTS`] builds. Callers must treat that as a failure, never
+/// as a verb to skip: [`probe_spec`] is the panicking form every sweep uses.
+fn try_probe_spec(group: &str, verb: &str) -> Result<(RequestSpec, Vec<String>), String> {
+    let mut attempts: Vec<String> = Vec::new();
+    for arity in 0..=MAX_PROBE_SEGMENTS {
         let segments: Vec<String> = (0..arity).map(|index| format!("probe-{index}")).collect();
         let input = ResourceInput::new()
             .with_segments(segments.clone())
             .with_body(serde_json::json!({"probe": true}));
         match build_request(group, verb, &input) {
             Ok(spec) => return Ok((spec, segments)),
-            Err(error) => last = Some(error),
+            Err(error) => attempts.push(format!("  {arity} segment(s): {error}")),
         }
     }
-    Err(last.expect("at least one arity was attempted"))
+    Err(format!(
+        "registered verb '{group} {verb}' could not be probed: no id-segment list of 0..={} \
+         segments builds a request for it. This is a FAILURE, not a verb to skip — a verb the \
+         prober cannot construct is a verb every whole-registry sweep in this file silently stops \
+         checking. Either the builder's addressing shape is wrong, or it needs more segments than \
+         the prober offers (raise MAX_PROBE_SEGMENTS). Attempts:\n{}",
+        MAX_PROBE_SEGMENTS,
+        attempts.join("\n")
+    ))
+}
+
+/// [`try_probe_spec`], panicking with the verb's name.
+///
+/// Every call site takes this form on purpose. The sweeps used to write
+/// `.expect("probe request")`, which reported the builder's usage string
+/// (`verb 'set' requires <asset_type> …`) and left the reader to guess which of
+/// the registry's 200-plus verbs owned it.
+fn probe_spec(group: &str, verb: &str) -> (RequestSpec, Vec<String>) {
+    try_probe_spec(group, verb).unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// Every verb in the registry can be turned into a request by the prober, and
+/// the prober's ceiling is not what decided that.
+///
+/// **This is the guard whose absence made issue #569 a four-day outage.** The
+/// three whole-registry sweeps below each probe every verb, so any verb the
+/// prober cannot construct takes all three of them down — but they died on the
+/// first such verb, reporting a builder's usage string, and nothing said the
+/// failure was a *coverage* failure rather than an assertion failure. This test
+/// says exactly that, names every offending verb in one run rather than the
+/// first, and reds if the ceiling ever again becomes binding.
+///
+/// Catches, by construction: lowering `MAX_PROBE_SEGMENTS` to 3 (the pre-fix
+/// value) reds this test naming `asset-channels set`; adding a verb whose
+/// builder cannot be satisfied by positional segments reds it naming that verb.
+#[test]
+fn every_registered_verb_is_constructable_by_the_prober() {
+    let registry = full_registry();
+    let mut unconstructable: Vec<String> = Vec::new();
+    let mut deepest: (usize, String) = (0, "<none>".to_string());
+    let mut probed = 0usize;
+    for group in registry.groups() {
+        for verb in &group.verbs {
+            match try_probe_spec(&group.name, &verb.name) {
+                Ok((_, segments)) => {
+                    probed += 1;
+                    if segments.len() > deepest.0 {
+                        deepest = (segments.len(), format!("{} {}", group.name, verb.name));
+                    }
+                }
+                Err(failure) => unconstructable.push(failure),
+            }
+        }
+    }
+    assert!(
+        unconstructable.is_empty(),
+        "{} registered verb(s) cannot be probed, so the whole-registry sweeps cannot check \
+         them:\n{}",
+        unconstructable.len(),
+        unconstructable.join("\n\n")
+    );
+    assert!(
+        probed > 200,
+        "expected the full registry to expose 200+ verbs, saw {probed}"
+    );
+    // Headroom, not decoration: if the deepest verb ever sits AT the ceiling,
+    // the next verb one segment deeper is invisible again, and the sweeps go
+    // dark exactly the way they did in #569.
+    assert!(
+        deepest.0 < MAX_PROBE_SEGMENTS,
+        "the deepest registered verb ('{}') needs {} segments and MAX_PROBE_SEGMENTS is {}; the \
+         search ceiling is now the thing deciding what gets checked — raise it",
+        deepest.1,
+        deepest.0,
+        MAX_PROBE_SEGMENTS
+    );
+}
+
+/// A verb the prober cannot construct fails **by name**, and says the failure
+/// is a coverage failure.
+///
+/// Pins the `Err` arm of [`try_probe_spec`] and the panic in [`probe_spec`] —
+/// the arm that decides whether a future four-segment verb is a red naming
+/// itself or a silence. `asset-channels` is a real family whose builder
+/// rejects any verb it does not know at every arity, so this exercises the
+/// genuine exhaustion path without a stub registry.
+///
+/// Catches: returning `Ok` with a bogus spec on exhaustion, dropping the group
+/// or verb from the message, and (via the second half) any future call site
+/// that swallows the failure instead of raising it.
+#[test]
+fn a_verb_the_prober_cannot_construct_fails_by_name() {
+    let failure = try_probe_spec("asset-channels", "promote-everything")
+        .expect_err("no arity can satisfy a verb the family does not implement");
+    assert!(
+        failure.contains("asset-channels promote-everything"),
+        "the failure must name the verb that could not be built, not just the builder's usage \
+         string: {failure}"
+    );
+    assert!(
+        failure.contains("FAILURE, not a verb to skip"),
+        "the failure must say a verb the prober cannot construct is a failure, because treating \
+         it as a skip is the defect: {failure}"
+    );
+    assert!(
+        failure.contains(&format!("{MAX_PROBE_SEGMENTS} segment(s):")),
+        "the failure must show that the search really reached the ceiling: {failure}"
+    );
+
+    let panicked = std::panic::catch_unwind(|| probe_spec("asset-channels", "promote-everything"));
+    let payload = panicked.expect_err("probe_spec must panic rather than return");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("<panic payload was neither String nor &str>");
+    assert!(
+        message.contains("asset-channels promote-everything"),
+        "the panic every sweep would raise must name the verb: {message}"
+    );
 }
 
 /// **The acceptance box.** Every verb in the registry — read and mutating,
@@ -293,7 +449,7 @@ fn every_registered_verb_carries_the_action_identity_on_the_wire() {
     let mut checked = 0usize;
     for group in registry.groups() {
         for verb in &group.verbs {
-            let (spec, _) = probe_spec(&group.name, &verb.name).expect("probe request");
+            let (spec, _) = probe_spec(&group.name, &verb.name);
             let prepared = crate::transport::prepare_request(&spec, &context, None, &identity)
                 .expect("prepare the request the verb would issue");
             for header in [
@@ -357,7 +513,7 @@ fn a_receipt_reports_the_action_id_and_refuses_to_invent_a_client_sent_at() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("create must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let identity = ClientActionIdentity::fixture();
     let plan = MutationPlan::new(
         renderer,
@@ -426,7 +582,7 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("create must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let identity = ClientActionIdentity::fixture();
     let presented = identity.client_clock().unverified_unix_seconds() - 5;
     identity
@@ -550,7 +706,7 @@ fn an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("create must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let identity = ClientActionIdentity::fixture();
     assert!(
         identity.server_issued_time().is_none(),
@@ -640,7 +796,7 @@ fn the_rendered_receipt_keeps_the_two_instants_distinguishable() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("create must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let identity = ClientActionIdentity::fixture();
     let plan = MutationPlan::new(
         renderer,
@@ -708,7 +864,7 @@ fn validate_refuses_a_client_fingerprint_dressed_up_as_an_action_fingerprint() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("create must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let plan = MutationPlan::new(
         renderer,
         "projects",
@@ -868,13 +1024,7 @@ fn declared_verb_effect_matches_the_method_the_builder_emits() {
     let mut mutating = 0usize;
     for group in registry.groups() {
         for verb in &group.verbs {
-            let (spec, _) = probe_spec(&group.name, &verb.name).unwrap_or_else(|error| {
-                panic!(
-                    "registered verb '{} {}' could not build a request with any probe input: \
-                     {error}",
-                    group.name, verb.name
-                )
-            });
+            let (spec, _) = probe_spec(&group.name, &verb.name);
             let method_is_safe =
                 matches!(spec.method, Method::GET | Method::HEAD | Method::OPTIONS);
             checked += 1;
@@ -967,6 +1117,15 @@ fn every_mutating_verb_is_gated_to_a_receipt() {
 /// Every mutating verb can actually produce a receipt end to end, and every
 /// receipt it produces is well formed (no silent nulls, canonical fingerprint,
 /// stated absence reasons).
+///
+/// The one `continue` in the loop is the sweep's only way to lose a verb, so it
+/// is guarded: a read verb has no receipt to check and is skipped, but a verb
+/// **declared mutating** that opened a bare gate would otherwise drop out of
+/// this sweep without a word, and `produced > 90` is far too slack a floor to
+/// notice one missing verb. That case now reds naming the verb.
+/// [`every_mutating_verb_is_gated_to_a_receipt`] holds the same disagreement
+/// from the other side; this assertion exists so the *sweep's own* coverage
+/// cannot shrink silently.
 #[test]
 fn every_mutating_verb_produces_a_well_formed_receipt() {
     let registry = full_registry();
@@ -975,9 +1134,17 @@ fn every_mutating_verb_produces_a_well_formed_receipt() {
     for group in registry.groups() {
         for verb in &group.verbs {
             let RenderGate::Receipt(renderer) = verb.render_gate() else {
+                assert!(
+                    !verb.is_mutating(),
+                    "'{} {}' is declared mutating but opened a BARE render gate, so this sweep \
+                     would have skipped it silently — a mutating verb whose receipt nothing \
+                     checks is exactly the hole this sweep exists to close",
+                    group.name,
+                    verb.name
+                );
                 continue;
             };
-            let (spec, segments) = probe_spec(&group.name, &verb.name).expect("probe request");
+            let (spec, segments) = probe_spec(&group.name, &verb.name);
             let plan = MutationPlan::new(
                 renderer,
                 group.name.clone(),
@@ -1020,7 +1187,7 @@ fn dry_run_issues_no_request_at_the_transport() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("create-revision must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("guardrail-policies", "create-revision").expect("probe");
+    let (spec, segments) = probe_spec("guardrail-policies", "create-revision");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1072,7 +1239,7 @@ fn a_real_mutation_issues_exactly_one_request() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("guardrail-policies", "create-revision").expect("probe");
+    let (spec, segments) = probe_spec("guardrail-policies", "create-revision");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1134,7 +1301,7 @@ fn receipt_json_round_trips_and_states_every_absence() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("projects create must be gated to a receipt");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1216,7 +1383,7 @@ fn table_render_states_the_nulls() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("gated");
     };
-    let (spec, segments) = probe_spec("projects", "delete").expect("probe");
+    let (spec, segments) = probe_spec("projects", "delete");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1290,7 +1457,7 @@ fn rollback_pointer_is_a_complete_command() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("gated");
     };
-    let (spec, segments) = probe_spec("guardrail-policies", "create-revision").expect("probe");
+    let (spec, segments) = probe_spec("guardrail-policies", "create-revision");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1348,7 +1515,7 @@ fn first_revision_reversal_is_an_archive_not_a_rollback() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("gated");
     };
-    let (spec, segments) = probe_spec("guardrail-policies", "create").expect("probe");
+    let (spec, segments) = probe_spec("guardrail-policies", "create");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1508,7 +1675,7 @@ fn validate_rejects_a_null_without_a_reason() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("gated");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1552,7 +1719,7 @@ fn dry_run_is_not_inferred_from_the_verb_name() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("the dry-run verb is a POST, so it is gated to a receipt");
     };
-    let (spec, segments) = probe_spec("guardrail-policies", "dry-run").expect("probe");
+    let (spec, segments) = probe_spec("guardrail-policies", "dry-run");
     let context = test_context();
     let plan = MutationPlan::new(
         renderer,
@@ -1812,7 +1979,7 @@ fn method_effect_exceptions_are_all_live_and_needed() {
             descriptor.effect.as_str(),
             exception.effect.as_str()
         );
-        let (spec, _) = probe_spec(exception.group, exception.verb).expect("probe");
+        let (spec, _) = probe_spec(exception.group, exception.verb);
         assert_eq!(
             spec.method.as_str(),
             exception.method,
@@ -1854,7 +2021,7 @@ fn the_oauth_callback_is_a_mutating_verb_despite_being_a_get() {
         "completeMcpIdentityOauth persists an identity grant"
     );
     assert!(matches!(descriptor.render_gate(), RenderGate::Receipt(_)));
-    let (spec, _) = probe_spec("mcp-identity", "callback").expect("probe");
+    let (spec, _) = probe_spec("mcp-identity", "callback");
     assert_eq!(
         spec.method,
         Method::GET,
@@ -2292,9 +2459,12 @@ fn a_collection_verb_with_no_response_reports_no_id_was_ever_assigned() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("projects create must be gated to a receipt");
     };
-    // Explicitly NO id segments: this arm only exists for a collection verb,
-    // and `probe_spec` would hand back the longest arity the builder accepts,
-    // which would silently test the `Addressed` arm instead.
+    // Explicitly NO id segments: this arm only exists for a collection verb, so
+    // the shape is stated here rather than borrowed from `probe_spec`. (Since
+    // #569 the prober returns the SHORTEST arity a builder accepts, which for
+    // `projects create` is zero segments — but a builder that started
+    // tolerating an id would move the prober onto the `Addressed` arm and this
+    // test would quietly stop covering the arm it names.)
     let input = ResourceInput::new().with_body(serde_json::json!({"probe": true}));
     let spec = build_request("projects", "create", &input).expect("create takes no id segments");
     let context = test_context();
@@ -2434,7 +2604,7 @@ fn receipt_never_carries_the_token_it_authenticated_with() {
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
         panic!("gated");
     };
-    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let (spec, segments) = probe_spec("projects", "create");
     let mut context = test_context();
     context.auth = crate::auth::AuthSource::Inline {
         token: TOKEN.to_string(),
