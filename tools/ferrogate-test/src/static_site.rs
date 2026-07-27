@@ -220,8 +220,186 @@ pub(crate) fn run_static_site_api(args: &LocalArgs) -> Result<()> {
 
     verify_console_agreement(&gateway_addr)?;
     verify_withheld_publish_agreement(args)?;
+    verify_bind_terminals(args)?;
 
     println!("static-site-api scenario passed");
+    Ok(())
+}
+
+/// #530 gate coverage: the bind terminal the HANDLER actually answers, for more
+/// than one of its three arms.
+///
+/// #530 declared 200/201/202 on `bindSiteDomain` and sealed the status behind a
+/// `BindTerminal` newtype whose constructor the handler cannot reach. Both are
+/// real — forging `BindTerminal(StatusCode::NO_CONTENT)` in the handler is a
+/// compile error (E0423), verified. But the acceptance box asked for the
+/// gateway's *three-way return* to be pinned, and only the 202 arm was:
+/// `every_bind_terminal_is_declared_in_the_openapi_document` pins the pure
+/// selector against the spec, not the handler, and this scenario only ever bound
+/// a fresh hostname.
+///
+/// The gap that leaves, verified by mutation before this box was written:
+/// replacing the handler's `site_domain_bind_status(proven, existing.is_some())`
+/// with `site_domain_bind_status(false, false)` — so every bind answers a
+/// DECLARED-but-wrong 202 — passed `site_domains_test` (7/7), passed
+/// `static-site-api`, and compiled clean, because the value it carries is
+/// legitimately selected and nothing checked the other two arms end to end.
+///
+/// So this box drives the **200** arm: bind → prove ownership → re-bind. Proving
+/// ownership offline is what makes it docker-free — `SiteDomainResolverBackend`
+/// reads `FERROGATE_SITE_DOMAIN_RESOLVER` from the process environment, so a
+/// `zone-file` backend pointed at a temp file is a real TXT oracle with no DNS.
+///
+/// The **201** arm (`proven && !existing`) is deliberately NOT asserted here: it
+/// needs a proven verification with no binding row, and unbind deletes both
+/// (`site_domains.rs:844` then `:863`), so no admin-API sequence found reaches
+/// it. That is recorded as an open question on #530 rather than papered over
+/// with a weaker assertion.
+fn verify_bind_terminals(args: &LocalArgs) -> Result<()> {
+    const SITE: &str = "bind-terminal-site";
+    const HOSTNAME: &str = "proven.example.com";
+
+    let gateway_addr = free_addr()?;
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("bind-terminals.yaml");
+    fs::write(&config_path, scenario_config(&gateway_addr))?;
+
+    // Readable and EMPTY, not absent: an unreadable zone file is an outage the
+    // resolver reports as 503, which is a different branch than "the record is
+    // not published yet". The 202 assertion below has to be the latter.
+    let zone_path = dir.path().join("zone.txt");
+    fs::write(&zone_path, "")?;
+    let _gateway = GatewayGuard::start_with_env(
+        &args.ferrogate_bin,
+        &config_path,
+        &gateway_addr,
+        &[
+            ("FERROGATE_SITE_DOMAIN_RESOLVER", "zone-file"),
+            (
+                "FERROGATE_SITE_DOMAIN_RESOLVER_ZONE_FILE",
+                zone_path.to_str().context("zone file path is not UTF-8")?,
+            ),
+        ],
+    )?;
+
+    let plan = http_request_addr(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"site-e2e-plan","name":"Site E2E plan","slug":"site-e2e-plan","asset_hosting_enabled":true}"#,
+    )?;
+    if plan.status != 200 && plan.status != 201 {
+        bail!(
+            "failed to create hosting plan (bind terminals): {}",
+            plan.raw
+        );
+    }
+    let tenant = http_request_addr(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &format!(
+            r#"{{"id":"{TENANT}","name":"Site E2E","slug":"site-e2e","plan_id":"site-e2e-plan"}}"#
+        ),
+    )?;
+    if tenant.status != 200 && tenant.status != 201 {
+        bail!(
+            "failed to create hosting tenant (bind terminals): {}",
+            tenant.raw
+        );
+    }
+    let bundle = build_stored_zip(&[("index.html", b"<h1>bind terminals</h1>" as &[u8])]);
+    let published = crate::http::http_request_addr_bytes(
+        &gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{SITE}/v1"),
+        &[
+            CLIENT_AUTH,
+            "Content-Type: application/zip",
+            "x-site-public: true",
+        ],
+        &bundle,
+    )?;
+    if published.status != 200 && published.status != 201 {
+        bail!("bundle publish failed (bind terminals): {}", published.raw);
+    }
+
+    let bind_body =
+        format!(r#"{{"hostname":"{HOSTNAME}","tenant_id":"{TENANT}","site":"{SITE}"}}"#);
+
+    // --- 202: unproven. The record is simply not in the zone file yet. -------
+    let pending = http_request_addr(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/site-domains",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &bind_body,
+    )?;
+    if pending.status != 202 {
+        bail!(
+            "an unproven bind must answer the 202 terminal: {}",
+            pending.raw
+        );
+    }
+    let pending_json: Value = serde_json::from_str(&pending.body)
+        .with_context(|| format!("bind response is not JSON: {}", pending.raw))?;
+    let verification = &pending_json["verification"];
+    let record_name = verification["challenge_record_name"]
+        .as_str()
+        .with_context(|| {
+            format!("bind response carried no challenge record name: {pending_json}")
+        })?;
+    let record_value = verification["challenge_record_value"]
+        .as_str()
+        .with_context(|| {
+            format!("bind response carried no challenge record value: {pending_json}")
+        })?;
+
+    // --- publish the TXT the gateway asked for, and redeem it ---------------
+    // The value comes from the response, never recomputed here: a harness that
+    // derived it independently would keep passing if the gateway changed what
+    // it asks operators to publish.
+    fs::write(&zone_path, format!("{record_name} \"{record_value}\"\n"))?;
+    let verified = http_request_addr(
+        &gateway_addr,
+        "POST",
+        &format!("/admin/v1/site-domains/{HOSTNAME}/verify?tenant={TENANT}"),
+        &[ADMIN_AUTH, JSON_CONTENT],
+        "{}",
+    )?;
+    if verified.status != 200 {
+        bail!(
+            "redeeming a published challenge must succeed against the zone-file \
+             resolver: {}",
+            verified.raw
+        );
+    }
+    if !verified.body.contains("\"serves\":true") && !verified.body.contains("\"serving\":true") {
+        bail!(
+            "verification reported success without marking the hostname as serving: {}",
+            verified.raw
+        );
+    }
+
+    // --- 200: proven AND already bound. The arm nothing exercised. ----------
+    let rebound = http_request_addr(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/site-domains",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &bind_body,
+    )?;
+    if rebound.status != 200 {
+        bail!(
+            "re-binding an already-proven hostname must answer the 200 terminal, not \
+             the 202 a fresh bind gets: {}",
+            rebound.raw
+        );
+    }
+
+    println!("static-site bind-terminal coverage passed");
     Ok(())
 }
 
