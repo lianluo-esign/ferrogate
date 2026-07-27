@@ -132,6 +132,16 @@ fn wait_until(what: &str, timeout: Duration, mut probe: impl FnMut() -> bool) {
     panic!("timed out after {timeout:?} waiting for: {what}");
 }
 
+/// Mint a data-plane client key through the control plane's admin API.
+///
+/// `platform_operator` is declared because that is what the two config-declared
+/// client keys in this file declare, and this key is the ROTATION of one of
+/// them (`vpc-client-v1` -> `vpc-client-v2`): a rotation that changed the
+/// credential's tenancy would not be testing rotation. #540 made a key that
+/// declares neither `organization_id` nor `platform_operator` a hard refusal
+/// on this path too (`upsert_api_key` runs the candidate through the same
+/// `Config::validate`), and #540's own fixture sweep only rewrote `[[api_keys]]`
+/// TOML blocks -- a key minted from a JSON body at runtime was invisible to it.
 fn create_api_key(publisher_addr: &str, admin_secret: &str, id: &str, secret: &str) {
     let auth = format!("Authorization: Bearer {admin_secret}");
     let body = serde_json::json!({
@@ -139,6 +149,7 @@ fn create_api_key(publisher_addr: &str, admin_secret: &str, id: &str, secret: &s
         "name": format!("issued key {id}"),
         "key": secret,
         "scopes": ["models.read"],
+        "platform_operator": true,
     })
     .to_string();
     let response = http_request(

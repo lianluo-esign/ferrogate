@@ -130,7 +130,16 @@ fn register_tenant(gateway_addr: &str, id: &str, name: &str, slug: &str) {
     );
 }
 
-fn push_asset(gateway_addr: &str, key: &str, name: &str, content: &str) {
+/// Push an asset and pin the EXACT status the publish terminal answers.
+///
+/// #528 made the status the discriminator between a clean publish and a
+/// withheld one: a push whose screening landed `pending_scan`/`quarantined`
+/// answers `202 Accepted`, a scanned-clean one `200`/`201`. Accepting "any
+/// 2xx" here would let a regression back to a flat `200` -- the exact silence
+/// #528 removed, where the console said "Asset pushed" for an object nobody
+/// could find -- pass unnoticed, so each caller states which terminal it
+/// expects.
+fn push_asset(gateway_addr: &str, key: &str, name: &str, content: &str, expect_status: &str) {
     let push = http_request(
         gateway_addr,
         "PUT",
@@ -142,8 +151,8 @@ fn push_asset(gateway_addr: &str, key: &str, name: &str, content: &str) {
         content,
     );
     assert!(
-        push.contains("HTTP/1.1 200") || push.contains("HTTP/1.1 201"),
-        "push of {name} failed: {push}"
+        push.contains(&format!("HTTP/1.1 {expect_status}")),
+        "push of {name} should answer {expect_status}: {push}"
     );
 }
 
@@ -161,18 +170,29 @@ fn withheld_listing_surfaces_pending_and_quarantined_with_evidence_scoped_and_pa
     //  - "aaa-pending":  large   (> threshold)  -> deferred        -> pending_scan.
     //  - "zzz-quar":     large   (> threshold)  -> deferred; then promoted to
     //                    quarantined via the #378 endpoint.
-    push_asset(&gateway_addr, "asset-secret", "visible-tool", "hello");
+    // The status each push answers is itself the visibility statement (#528):
+    // the inline-scanned one is a plain publish, the two deferred ones are
+    // withheld and say so with 202.
+    push_asset(
+        &gateway_addr,
+        "asset-secret",
+        "visible-tool",
+        "hello",
+        "200",
+    );
     push_asset(
         &gateway_addr,
         "asset-secret",
         "aaa-pending",
         "a deferred pending payload well over ten bytes",
+        "202",
     );
     push_asset(
         &gateway_addr,
         "asset-secret",
         "zzz-quar",
         "another deferred payload to be quarantined",
+        "202",
     );
     // Flip zzz-quar pending_scan -> quarantined (the separate #378 action).
     let quarantine = http_request(
@@ -197,6 +217,7 @@ fn withheld_listing_surfaces_pending_and_quarantined_with_evidence_scoped_and_pa
         "other-secret",
         "not-mine",
         "other tenant deferred payload over ten bytes",
+        "202",
     );
 
     // 1. The operator withheld listing returns exactly the two withheld org_demo

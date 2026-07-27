@@ -297,19 +297,31 @@ provider_response_body_max_bytes = 32
 // natively on the async runtime. No per-stream blocking-thread shim
 // (`spawn_blocking` pump or `block_on` reader) may reappear anywhere in the
 // streaming pipeline, and the old sync `ProviderBodyReader` type stays gone.
+//
+// The paths are `ferrogate-gateway`'s, not this crate's: #553 stage 3b moved
+// the whole gateway trunk out of `ferrogate-cli/src/gateway/`, and this guard
+// -- like the three `asset_bucket.rs` allow-lists #561 repaired -- kept naming
+// the old location. It did NOT go quiet, because `source` panics on a missing
+// file rather than skipping it; it went red, and no CI job selected this
+// target, so nothing read the red. Keeping the loud panic is the point: a
+// second move must fail here rather than pass over an empty set.
 #[test]
 fn streaming_pipeline_has_no_blocking_thread_shim() {
     let source = |relative: &str| {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        // The manifest dir is `crates/ferrogate-cli`; the streaming pipeline
+        // now lives in the sibling `crates/ferrogate-gateway`.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ferrogate-gateway")
+            .join(relative);
         std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
     };
     for file in [
-        "src/gateway/dispatch.rs",
-        "src/gateway/chat.rs",
-        "src/gateway/messages.rs",
-        "src/gateway/messages_stream.rs",
-        "src/gateway/responses_stream.rs",
+        "src/server/dispatch.rs",
+        "src/server/chat.rs",
+        "src/server/messages.rs",
+        "src/messages_stream.rs",
+        "src/responses_stream.rs",
         "src/responses.rs",
     ] {
         let contents = source(file);
@@ -323,7 +335,7 @@ fn streaming_pipeline_has_no_blocking_thread_shim() {
         );
     }
     assert!(
-        !source("src/gateway/dispatch.rs").contains("ProviderBodyReader"),
+        !source("src/server/dispatch.rs").contains("ProviderBodyReader"),
         "the sync ProviderBodyReader shim is back in dispatch.rs"
     );
 }

@@ -359,8 +359,28 @@ fn tenant_scoped_admin_key_cannot_change_its_own_plan_or_status() {
     );
     assert!(self_upgrade.contains("platform_operator_required"));
 
-    // Tenant A un-suspending / changing its own status: denied too.
+    // Tenant A un-suspending / changing its own status: denied too. The token
+    // has to be a REAL lifecycle state (#514 refuses anything outside the
+    // closed vocabulary at the boundary, before this authorization runs), or
+    // the leg proves the parser works and says nothing about tenancy.
     let self_status = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-iso-a",
+        &TENANT_A,
+        r#"{"status":"suspended"}"#,
+    );
+    assert!(
+        status_line(&self_status).contains("403"),
+        "tenant must not change its own account status: {self_status}"
+    );
+    assert!(self_status.contains("platform_operator_required"));
+
+    // ...and the #514 boundary check that used to swallow this leg is stated
+    // rather than left implied: an unrecognized token is a 400 from the parser,
+    // NOT the 403 above. Keeping both makes it impossible to mistake one
+    // refusal for the other again.
+    let bogus_status = http_request(
         &gateway_addr,
         "PATCH",
         "/admin/v1/tenant-accounts/tenant-iso-a",
@@ -368,8 +388,8 @@ fn tenant_scoped_admin_key_cannot_change_its_own_plan_or_status() {
         r#"{"status":"enterprise-override"}"#,
     );
     assert!(
-        status_line(&self_status).contains("403"),
-        "tenant must not change its own account status: {self_status}"
+        status_line(&bogus_status).contains("400"),
+        "an unrecognized lifecycle token is refused by the parser: {bogus_status}"
     );
 
     // But a cosmetic self-edit (name) is still allowed for the tenant.
@@ -1277,15 +1297,35 @@ fn project_and_workspace_update_delete_are_tenant_scoped_and_reject_if_reference
     assert!(delete_workspace_referenced.contains("workspace_has_virtual_keys"));
 
     // --- Tenant A can update its own project (name/slug/status merge) ---
+    // `disabled` is the tenant's own "turn this project off" state; #514 made
+    // the status column a closed vocabulary, so the free-form `archived` this
+    // leg used to send is a 400 from the parser and never reached the merge
+    // this assertion is about.
     let updated = response_json(http_request(
         &gateway_addr,
         "PATCH",
         "/admin/v1/projects/project-crud-a",
         &TENANT_A,
-        r#"{"name":"Renamed Project A","status":"archived"}"#,
+        r#"{"name":"Renamed Project A","status":"disabled"}"#,
     ));
     assert_eq!(updated["project"]["name"], "Renamed Project A");
-    assert_eq!(updated["project"]["status"], "archived");
+    assert_eq!(updated["project"]["status"], "disabled");
+
+    // Put it back: `disabled` is a real switch (#514 walks the tenancy chain),
+    // so leaving it set would gate every leg below on a turned-off project and
+    // this test would be measuring suspension, not tenant scoping.
+    let re_enabled = response_json(http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/projects/project-crud-a",
+        &TENANT_A,
+        r#"{"status":"active"}"#,
+    ));
+    assert_eq!(re_enabled["project"]["status"], "active");
+    assert_eq!(
+        re_enabled["project"]["name"], "Renamed Project A",
+        "the status-only merge must not clear the rename"
+    );
     assert_eq!(
         updated["project"]["slug"], "project-crud-a",
         "unspecified fields must keep their existing value"

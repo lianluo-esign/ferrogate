@@ -261,6 +261,34 @@ fn content_length(head: &str) -> usize {
 
 // ----- leg assertions --------------------------------------------------------
 
+/// What `target.resource_id` must say for one leg.
+///
+/// The three arms are the three outcomes `ReceiptRenderer::attested_resource_id`
+/// can produce for a leg that got an answer, and the split between the last two
+/// is #505's box 5: a create used to leave this null with
+/// `collection_scoped_mutation` — "the server assigns the id in the response" —
+/// *after* the response carrying that id had already arrived, so an audit query
+/// keyed on `target.resource_id` could not say what had been created. The
+/// harvest is now the contract, and `response_names_no_resource_id` is reserved
+/// for a document that genuinely names none.
+#[derive(Clone, Copy)]
+enum ExpectResourceId<'a> {
+    /// An item-scoped verb: the receipt echoes the id the OPERATOR addressed,
+    /// which is in the request path.
+    Addressed(&'a str),
+    /// A collection-scoped create: the verb addressed no id, so the receipt
+    /// must have harvested the one the SERVER assigned out of the response
+    /// document. The leg also asserts the id is absent from the request path,
+    /// which is what distinguishes this from [`Self::Addressed`] — otherwise
+    /// a renderer that only ever echoed the path would satisfy both.
+    HarvestedFromResponse(&'a str),
+    /// A collection-scoped create whose response document names no id at all,
+    /// so the honest answer is the stated reason. The leg also asserts the
+    /// response really carries no `id`/`policy_id`, so this arm cannot quietly
+    /// become the place a failed harvest hides.
+    NoIdInResponse,
+}
+
 /// What a mutating leg's #505 receipt must say about the call it just made.
 struct ReceiptExpect<'a> {
     group: &'a str,
@@ -270,11 +298,30 @@ struct ReceiptExpect<'a> {
     operation_id: &'a str,
     method: &'a str,
     path: &'a str,
-    /// `Some(id)` for an item mutation; `None` for a collection-scoped create,
-    /// which must report the stated absence reason rather than a bare null.
-    resource_id: Option<&'a str>,
+    resource_id: ExpectResourceId<'a>,
     status: u16,
     request_id: &'a str,
+}
+
+/// Whether a mutation response document names an id anywhere the receipt's
+/// harvest looks: the envelope's own keys, and the single resource object it
+/// wraps. Written here rather than imported so this test states the shape it
+/// expects instead of agreeing with the code under test by construction.
+fn document_names_an_id(response: &Value) -> bool {
+    let names_id = |object: &Value| {
+        ["id", "policy_id"]
+            .iter()
+            .any(|key| object.get(key).is_some_and(|value| !value.is_null()))
+    };
+    if names_id(response) {
+        return true;
+    }
+    response
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, value)| key.as_str() != "object" && value.is_object())
+        .any(|(_, value)| names_id(value))
 }
 
 /// Assert a mutating verb rendered a well-formed `MutationReceipt` describing
@@ -306,15 +353,35 @@ fn assert_receipt(rendered: &Value, expect: ReceiptExpect<'_>, response: &Value)
     );
     assert_eq!(rendered["target"]["path"], expect.path, "{leg}: {rendered}");
     match expect.resource_id {
-        Some(id) => assert_eq!(
+        ExpectResourceId::Addressed(id) => assert_eq!(
             rendered["target"]["resource_id"]["value"], id,
             "{leg}: the receipt names the addressed item: {rendered}"
         ),
-        None => assert_eq!(
-            rendered["target"]["resource_id"]["absent_reason"]["code"],
-            "collection_scoped_mutation",
-            "{leg}: a create addresses the collection, with a stated reason: {rendered}"
-        ),
+        ExpectResourceId::HarvestedFromResponse(id) => {
+            assert!(
+                !expect.path.contains(id),
+                "{leg}: this leg is only evidence of a HARVEST if the id is absent \
+                 from the request path {:?}",
+                expect.path
+            );
+            assert_eq!(
+                rendered["target"]["resource_id"]["value"], id,
+                "{leg}: a create must name the id the server assigned, not a null \
+                 with a reason (#505 box 5): {rendered}"
+            );
+        }
+        ExpectResourceId::NoIdInResponse => {
+            assert!(
+                !document_names_an_id(response),
+                "{leg}: this arm claims the response document names no id, but it \
+                 does: {response}"
+            );
+            assert_eq!(
+                rendered["target"]["resource_id"]["absent_reason"]["code"],
+                "response_names_no_resource_id",
+                "{leg}: a create whose document names no id says so with a code: {rendered}"
+            );
+        }
     }
     assert_eq!(
         rendered["http_status"]["value"], expect.status,
@@ -456,7 +523,7 @@ fn tenant_account_crud_round_trip_pins_every_leg() {
             operation_id: "createTenantAccount",
             method: "POST",
             path: "/admin/v1/tenant-accounts",
-            resource_id: None,
+            resource_id: ExpectResourceId::HarvestedFromResponse("tn-1"),
             status: 201,
             request_id: "rid-tn-create",
         },
@@ -505,7 +572,7 @@ fn tenant_account_crud_round_trip_pins_every_leg() {
             operation_id: "updateTenantAccount",
             method: "PATCH",
             path: "/admin/v1/tenant-accounts/tn-1",
-            resource_id: Some("tn-1"),
+            resource_id: ExpectResourceId::Addressed("tn-1"),
             status: 200,
             request_id: "rid-tn-update",
         },
@@ -545,7 +612,7 @@ fn tenant_account_crud_round_trip_pins_every_leg() {
             operation_id: "replaceTenantAccount",
             method: "PUT",
             path: "/admin/v1/tenant-accounts/tn-1",
-            resource_id: Some("tn-1"),
+            resource_id: ExpectResourceId::Addressed("tn-1"),
             status: 200,
             request_id: "rid-tn-replace",
         },
@@ -635,7 +702,7 @@ fn project_crud_round_trip_pins_every_leg() {
             operation_id: "createProject",
             method: "POST",
             path: "/admin/v1/projects",
-            resource_id: None,
+            resource_id: ExpectResourceId::HarvestedFromResponse("prj-1"),
             status: 201,
             request_id: "rid-prj-create",
         },
@@ -688,7 +755,7 @@ fn project_crud_round_trip_pins_every_leg() {
             operation_id: "updateProject",
             method: "PATCH",
             path: "/admin/v1/projects/prj-1",
-            resource_id: Some("prj-1"),
+            resource_id: ExpectResourceId::Addressed("prj-1"),
             status: 200,
             request_id: "rid-prj-update",
         },
@@ -713,7 +780,7 @@ fn project_crud_round_trip_pins_every_leg() {
             operation_id: "deleteProject",
             method: "DELETE",
             path: "/admin/v1/projects/prj-1",
-            resource_id: Some("prj-1"),
+            resource_id: ExpectResourceId::Addressed("prj-1"),
             status: 200,
             request_id: "rid-prj-delete",
         },
@@ -808,7 +875,7 @@ fn workspace_crud_round_trip_pins_every_leg() {
             operation_id: "createWorkspace",
             method: "POST",
             path: "/admin/v1/workspaces",
-            resource_id: None,
+            resource_id: ExpectResourceId::HarvestedFromResponse("ws-1"),
             status: 201,
             request_id: "rid-ws-create",
         },
@@ -851,7 +918,7 @@ fn workspace_crud_round_trip_pins_every_leg() {
             operation_id: "replaceWorkspace",
             method: "PUT",
             path: "/admin/v1/workspaces/ws-1",
-            resource_id: Some("ws-1"),
+            resource_id: ExpectResourceId::Addressed("ws-1"),
             status: 200,
             request_id: "rid-ws-replace",
         },
@@ -882,7 +949,7 @@ fn workspace_crud_round_trip_pins_every_leg() {
             operation_id: "updateWorkspace",
             method: "PATCH",
             path: "/admin/v1/workspaces/ws-1",
-            resource_id: Some("ws-1"),
+            resource_id: ExpectResourceId::Addressed("ws-1"),
             status: 200,
             request_id: "rid-ws-update",
         },
@@ -906,7 +973,7 @@ fn workspace_crud_round_trip_pins_every_leg() {
             operation_id: "deleteWorkspace",
             method: "DELETE",
             path: "/admin/v1/workspaces/ws-1",
-            resource_id: Some("ws-1"),
+            resource_id: ExpectResourceId::Addressed("ws-1"),
             status: 200,
             request_id: "rid-ws-delete",
         },
@@ -979,7 +1046,14 @@ fn access_policy_crud_round_trip_pins_every_leg() {
             operation_id: "createAdminPolicy",
             method: "POST",
             path: "/admin/v1/policies",
-            resource_id: None,
+            // The one family here whose create really CANNOT be harvested: an
+            // access policy's identity is its `name`, and the contract's
+            // `PolicyRule` declares no `id` at all (the item legs below address
+            // `billing-readonly`, which is that name). So the honest receipt is
+            // a null with `response_names_no_resource_id`, and this leg is what
+            // separates "the harvest found nothing" from "the harvest was never
+            // attempted".
+            resource_id: ExpectResourceId::NoIdInResponse,
             status: 201,
             request_id: "rid-pol-create",
         },
@@ -1030,7 +1104,7 @@ fn access_policy_crud_round_trip_pins_every_leg() {
             operation_id: "patchAdminPolicy",
             method: "PATCH",
             path: "/admin/v1/policies/billing-readonly",
-            resource_id: Some("billing-readonly"),
+            resource_id: ExpectResourceId::Addressed("billing-readonly"),
             status: 200,
             request_id: "rid-pol-update",
         },
@@ -1057,7 +1131,7 @@ fn access_policy_crud_round_trip_pins_every_leg() {
             operation_id: "deleteAdminPolicy",
             method: "DELETE",
             path: "/admin/v1/policies/billing-readonly",
-            resource_id: Some("billing-readonly"),
+            resource_id: ExpectResourceId::Addressed("billing-readonly"),
             status: 200,
             request_id: "rid-pol-delete",
         },
@@ -1137,7 +1211,12 @@ fn quota_policy_crud_round_trip_pins_the_composite_key() {
             operation_id: "createQuotaPolicy",
             method: "POST",
             path: "/admin/v1/quota-policies",
-            resource_id: None,
+            // The ITEM legs below address the composite `tenant/tn-1` scope
+            // key, but the create addresses the collection and the server
+            // answers with the policy row's own id -- so the harvest names
+            // `qp-1`, not the scope pair. That difference is the point: the
+            // receipt reports what the SERVER assigned.
+            resource_id: ExpectResourceId::HarvestedFromResponse("qp-1"),
             status: 201,
             request_id: "rid-qp-create",
         },
@@ -1192,7 +1271,7 @@ fn quota_policy_crud_round_trip_pins_the_composite_key() {
             operation_id: "replaceQuotaPolicy",
             method: "PUT",
             path: "/admin/v1/quota-policies/tenant/tn-1",
-            resource_id: Some("tenant/tn-1"),
+            resource_id: ExpectResourceId::Addressed("tenant/tn-1"),
             status: 200,
             request_id: "rid-qp-replace",
         },
@@ -1227,7 +1306,7 @@ fn quota_policy_crud_round_trip_pins_the_composite_key() {
             operation_id: "updateQuotaPolicy",
             method: "PATCH",
             path: "/admin/v1/quota-policies/tenant/tn-1",
-            resource_id: Some("tenant/tn-1"),
+            resource_id: ExpectResourceId::Addressed("tenant/tn-1"),
             status: 200,
             request_id: "rid-qp-update",
         },
@@ -1254,7 +1333,7 @@ fn quota_policy_crud_round_trip_pins_the_composite_key() {
             operation_id: "deleteQuotaPolicy",
             method: "DELETE",
             path: "/admin/v1/quota-policies/tenant/tn-1",
-            resource_id: Some("tenant/tn-1"),
+            resource_id: ExpectResourceId::Addressed("tenant/tn-1"),
             status: 200,
             request_id: "rid-qp-delete",
         },

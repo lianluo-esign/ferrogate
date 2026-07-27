@@ -66,6 +66,22 @@ key = "project-only-secret"
 project_id = "proj-susp"
 scopes = ["models.read"]
 platform_operator = true
+
+# The admin-console session credential `a_tenant_can_re_enable_the_project_it
+# _disabled` needs: TENANT-scoped (so `authorize_tenant_scope` lets it edit its
+# own project) and chained to the project it will turn off (so the request-time
+# gate reaches it). It cannot be a VIRTUAL key -- since the empty-scope
+# escalation fix a virtual key is refused any privileged `admin.*` scope, so the
+# console-session shape is a static/durable credential, not a minted one. The
+# rows it names are created by that test through the admin API.
+[[api_keys]]
+id = "console-off"
+name = "Console session"
+key = "console-off-secret"
+organization_id = "tenant-off"
+project_id = "proj-off"
+workspace_id = "ws-off"
+scopes = ["admin.read", "admin.write", "models.read"]
 "#
         ),
     )
@@ -486,16 +502,31 @@ fn a_tenant_can_re_enable_the_project_it_disabled() {
         "/admin/v1/workspaces",
         r#"{"id":"ws-off","project_id":"proj-off","name":"W","slug":"ws-off"}"#,
     );
-    // A TENANT-scoped admin key, exactly the shape every admin-console login
-    // provisions -- this is what makes the lock-out reachable at all. A
-    // platform-operator key carries no tenancy chain and was never gated.
-    let created = body_json(&admin(
+    // A TENANT-scoped admin key chained to the project it is about to disable
+    // -- exactly the shape an admin-console login carries, and what makes the
+    // lock-out reachable at all. A platform-operator key carries no tenancy
+    // chain and was never gated.
+    //
+    // It is declared in the config rather than minted here: a VIRTUAL key is
+    // refused every privileged `admin.*` scope (the empty-scope escalation fix
+    // makes that a 400 `invalid_virtual_key`), so a console session that can
+    // PUT a project is a static or durable credential. Minting one was this
+    // test's original premise and it was never true.
+    let console = "console-off-secret";
+    let console_key = body_json(&admin(
         &gateway_addr,
-        "POST",
-        "/admin/v1/virtual-keys",
-        r#"{"name":"Console session","workspace_id":"ws-off","scopes":["admin.read","admin.write","models.read"]}"#,
+        "GET",
+        "/admin/v1/api-keys/console-off",
+        "",
     ));
-    let console = created["secret"].as_str().expect("secret").to_string();
+    assert_eq!(
+        console_key["key"]["organization_id"], "tenant-off",
+        "the session key must be tenant-scoped, not platform root: {console_key}"
+    );
+    assert_eq!(
+        console_key["key"]["project_id"], "proj-off",
+        "...and chained to the project it disables: {console_key}"
+    );
 
     let disabled = as_key(
         &gateway_addr,

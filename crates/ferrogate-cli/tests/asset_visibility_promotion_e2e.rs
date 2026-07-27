@@ -158,9 +158,13 @@ fn pending_scan_asset_is_promoted_visible_and_quarantined_with_audit_evidence() 
         ],
         content,
     );
+    // 202, not "any 2xx": #528 made the status the wire statement that this
+    // publish is WITHHELD pending its scan. A clean publish answers 200/201, so
+    // pinning the exact code is what makes a regression back to a flat 200 --
+    // "Asset pushed" for an object no read surface will serve -- fail here.
     assert!(
-        push.contains("HTTP/1.1 200") || push.contains("HTTP/1.1 201"),
-        "push failed: {push}"
+        push.contains("HTTP/1.1 202"),
+        "a deferred-scan push must answer 202 Accepted: {push}"
     );
 
     // 2. A pending_scan asset is withheld from every download surface (#366):
@@ -290,7 +294,12 @@ fn pending_scan_asset_is_promoted_visible_and_quarantined_with_audit_evidence() 
         ],
         "suspicious payload",
     );
-    assert!(push2.contains("HTTP/1.1 200") || push2.contains("HTTP/1.1 201"));
+    // Withheld for the same reason as the first push: this gateway's async-scan
+    // threshold is 1 byte, so every push defers. 202 exactly (#528).
+    assert!(
+        push2.contains("HTTP/1.1 202"),
+        "a deferred-scan push must answer 202 Accepted: {push2}"
+    );
     let quarantine = response_json(http_request(
         &gateway_addr,
         "POST",

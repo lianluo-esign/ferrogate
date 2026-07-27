@@ -157,6 +157,21 @@ fn worker_identity(worker_id: &str, transport_secret: &str) -> serde_json::Value
 
 /// Polls until the worker leases a dispatch for `run_id` (or the window
 /// elapses), returning the lease.
+/// Poll as `worker_id` until the runtime hands out `run_id`'s dispatch.
+///
+/// It REFUSES a lease for any other run rather than polling past it. A poll is
+/// not a query: the lease it returns is taken, held for the requested duration
+/// and (here) never acked, so a helper that discards a foreign lease silently
+/// makes that run "held by a worker" for the rest of the test. That is not
+/// theoretical -- it is what made
+/// `an_agent_job_is_submitted_idempotently_observed_collected_and_cancelled`
+/// fail from the day it was written: it had two jobs open, this loop leased
+/// and abandoned the second, and the cancel that expected to WITHDRAW an
+/// unheld dispatch found a held one. The queue is a `BTreeMap` keyed by
+/// `agent-job-start-<run_id>` and `run_id` is a hash of the idempotency key,
+/// so which of two open jobs a poll offers first is not submission order and
+/// is not guessable from the test. Failing loudly is the only way that stays
+/// visible.
 fn lease_dispatch_for(
     gateway_addr: &str,
     worker_id: &str,
@@ -185,8 +200,14 @@ fn lease_dispatch_for(
             "worker poll should be accepted: {response}"
         );
         let lease = response_json(&response);
-        if lease["run_id"].as_str() == Some(run_id) {
-            return lease;
+        match lease["run_id"].as_str() {
+            Some(leased) if leased == run_id => return lease,
+            Some(leased) => panic!(
+                "the poll leased {leased}, not {run_id}: this helper cannot give a \
+                 foreign lease back, so accepting it would silently mark that run \
+                 held by a worker. Leave only one job leasable before calling this."
+            ),
+            None => {}
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -304,24 +325,11 @@ fn an_agent_job_is_submitted_idempotently_observed_collected_and_cancelled() {
     assert_eq!(retry_json["deduplicated"], true);
     assert_eq!(retry_json["run_id"].as_str().unwrap(), run_id);
 
-    // A different key IS a different job.
-    let other_key: [&str; 3] = [
-        "Authorization: Bearer job-secret",
-        "Content-Type: application/json",
-        "Idempotency-Key: fix-flaky-test-2",
-    ];
-    let second_job = http_request(
-        &gateway_addr,
-        "POST",
-        "/v1/agent-jobs",
-        &other_key,
-        &submit_body,
-    );
-    assert!(second_job.contains("HTTP/1.1 202"));
-    assert_ne!(
-        response_json(&second_job)["run_id"].as_str().unwrap(),
-        run_id
-    );
+    // A different key IS a different job. Submitted LATER, in the cancel
+    // section: while it is open its start dispatch is leasable, and the worker
+    // below polls for whatever the runtime offers first, which is not
+    // submission order. Leaving it queued here made this test's own worker
+    // lease it by accident.
 
     // ---------------------------------------------------------------
     // Observe: the submit scope alone is enough to follow your own job,
@@ -496,10 +504,27 @@ fn an_agent_job_is_submitted_idempotently_observed_collected_and_cancelled() {
     assert_eq!(cancel_completed["cancelled"], false);
     assert_eq!(cancel_completed["status"], "completed");
 
+    // A different idempotency key IS a different job -- and this one is the
+    // live job the cancel below acts on. It is submitted here, after the worker
+    // above has finished leasing, so nothing has ever held its start dispatch.
+    let other_key: [&str; 3] = [
+        "Authorization: Bearer job-secret",
+        "Content-Type: application/json",
+        "Idempotency-Key: fix-flaky-test-2",
+    ];
+    let second_job = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-jobs",
+        &other_key,
+        &submit_body,
+    );
+    assert!(second_job.contains("HTTP/1.1 202"));
     let live_run_id = response_json(&second_job)["run_id"]
         .as_str()
         .unwrap()
         .to_string();
+    assert_ne!(live_run_id, run_id, "a different key is a different job");
     let cancel_live = http_request(
         &gateway_addr,
         "POST",
