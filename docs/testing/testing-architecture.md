@@ -251,7 +251,10 @@ while the defect the issue was filed to fix was restored.
 
 ### Named anti-patterns
 
-Each of these reads as thorough. Each survived the mutation named beside it.
+Each of these reads as thorough. Each stayed green under the mutation named
+beside it — except the last, which reds, but on a different assertion from the
+one the test is named for. Both are the same failure: the named claim is
+unproven either way.
 
 | Anti-pattern | Seen in | Assert instead |
 |---|---|---|
@@ -262,7 +265,7 @@ Each of these reads as thorough. Each survived the mutation named beside it.
 | **A vacuous fixture.** A re-sort asserted over rows that were already sorted; a truncate asserted over 2 rows with `limit = 10`. | `#460` fire-list | Input that is wrong in the direction the transform fixes. |
 | **A guard coarser than the rule it enforces.** One audit walked a single directory by filename prefix while its convention spanned three crates; another signed off on `(file, fn)`, so a *new* capture inside an already-blessed function was pre-approved. | `#495`; `#526`, fixed by keying on `(file, fn, idiom, exact count)` | Key the guard on the exact thing that must not change, and prove its reach covers the whole class it claims. |
 | **A count asserted as fact with no mechanism.** "236 transactions across 41 files", in a comment. It was 42 by the next slice. | `#480` | Compute it in the test, or assert a floor and label the bare number as a dated measurement — `async_postgres_test.rs:66-71` took the second option deliberately, because a count that had to be edited on every new query gets edited without thought. What fails is a number no assertion reads. |
-| **Red for an unrelated reason.** The schedule-count test does fail on the broken implementation — on `status === 200`, because the route 400s with `no such table`. `count` is never reached, so the assertion the test is named for is still unproven, and the entry that used to sit here predicted the opposite outcome from the same reasoning. | `#482`, corrected once the suite could actually run (`#559`) | Run the mutation and read which line reds. A test that fails for the wrong reason passes for the wrong reason too. |
+| **Red for an unrelated reason.** The schedule-count test does fail on the broken implementation — on `status === 200`, because the route 400s with `no such table`. `count` is never reached, so the assertion the test is named for is still unproven, and the entry that used to sit here predicted the opposite outcome from the same reasoning. | `#482`, corrected once the suite could actually run (`#559`) | The named observable on a path the earlier post-conditions cannot short-circuit — here, list the schedules from a *rebuilt* instance, so `count` is reached whether or not the object was evicted. Failing that, order the assertions so the named one reds first, and say in the title which line actually reds (`destroy-alarm.test.ts` took the second option). A test that fails for the wrong reason passes for the wrong reason too. |
 
 ### Where mutation reasoning is not enough
 

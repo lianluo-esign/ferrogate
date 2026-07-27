@@ -104,6 +104,16 @@ would leave a #426 schedule's alarm pending — it fires, the Durable Object is
 re-instantiated, and a run marked `cleaned_up` wakes up and bills compute. Issue
 #482; regression-tested in `test/destroy-alarm.test.ts`.
 
+One measured qualification, because it is the trap a reimplementation falls
+into: `deleteAll()` followed by a *same-turn* `ctx.abort()` also leaves no alarm,
+and the whole Worker suite stays green under it. That is a commit-timing
+artefact — the abort breaks the output gate before the alarm's survival of
+`deleteAll()` commits — not a second safe teardown. Insert one macrotask before
+the abort and the alarm is back. What `deleteAlarm()` buys is an outcome that
+does not depend on that ordering. The four runs are tabulated in
+`test/destroy-alarm.test.ts`'s header and in `docs/cloudflare-agent-gateway.md`
+§3a.
+
 The Rust side (`crates/ferrogate-runtime/src/cloudflare_gateway_control.rs`)
 maps `CloudflareControlSurface` verbs onto exactly these routes.
 

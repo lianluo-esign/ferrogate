@@ -140,9 +140,9 @@ stops assuming verbs that do not exist.
 | **destroy / delete** | `this.destroy()` — drops the DO's tables, deletes the alarm, clears storage, then aborts the object. | `POST /control/destroy` — calls `this.destroy()`. Because the abort also tears down the RPC channel the call arrived on, a completed destroy surfaces as a rejected RPC with reason `"destroyed"`, which the route maps back to the `cleaned_up` envelope. |
 
 **Why `destroy` must be the SDK call and not `ctx.storage.deleteAll()` (issue
-#482).** `deleteAll()` alone looks equivalent — it clears the synced state, so a
-following `status` still answers 404 — but it leaves the Durable Object's **alarm
-armed**: Cloudflare only made `deleteAll()` delete the alarm from compatibility
+#482).** `deleteAll()` alone looks equivalent — it wipes the object's SQLite
+database — but it leaves the Durable Object's **alarm armed**: Cloudflare only
+made `deleteAll()` delete the alarm from compatibility
 date `2026-02-24`, and this Worker deploys `compatibility_date = "2025-06-01"`
 with no `delete_all_deletes_alarm` flag. Nothing later cleans that alarm up
 either: the SDK's `_scheduleNextAlarm()` only ever calls `setAlarm()`, and with
@@ -150,6 +150,19 @@ zero schedule rows left it returns without calling `deleteAlarm()`. So a run
 destroyed while carrying a #426 schedule wakes back up after its own cleanup and
 bills compute — and in-flight work and WebSockets are never aborted
 (`ctx.abort()` is skipped).
+
+An earlier draft of this paragraph said `deleteAll()` "clears the synced state, so
+a following `status` still answers 404". **Measured, it does not.** Run the
+mutation (replace `await this.destroy()` in `destroyRun()` with
+`await this.ctx.storage.deleteAll()`) and the follow-up status answers **200
+`{"status":"cleaned_up"}`**: `status()` returns `not_found` only when the
+in-memory `this.state.runId` is `null`, and `deleteAll()` reaches storage, not the
+resident object. Without `ctx.abort()` nothing evicts that object, so it keeps
+answering out of memory. Three observables move under this mutation, not one —
+the status code, the `/schedule/list` reply (400 `no such table:
+cf_agents_schedules`, because the dropped tables are never rebuilt either), and
+the pending alarm. Only the last is the harm #482 names; the first two say the
+object never went away.
 
 The **stranded alarm is the whole of it**; the schedule rows are not a second
 problem. `AgentGateway` is registered under `new_sqlite_classes` (see
@@ -162,11 +175,28 @@ DROPs inside `destroy()` are redundant with its own `deleteAll()` here; what mak
 `destroy()` the required call is the `deleteAlarm()` and the `ctx.abort()` that
 `deleteAll()` alone does not do.
 
+**Do not reimplement the teardown as `deleteAll()` + `ctx.abort()`.** It measures
+green — the whole Worker suite stays at `109 passed` under it — and the reason is
+a commit-timing artefact, not a property you can rely on. At this compatibility
+date the alarm's *survival* of `deleteAll()` only becomes visible to a later read
+once the I/O turn commits; a `ctx.abort()` in that same turn breaks the output
+gate (`workerd/api/actor-state.c++:1178: broken.outputGateBroken`, printed on
+every destroy in this suite) and the survival never lands, so the alarm reads
+`null` for the wrong reason. (That is the inference the two runs below force —
+workerd's own source is not vendored here, so it is not read off it.) Put one macrotask
+(`await new Promise((r) => setTimeout(r, 0))`) between the two and the alarm is
+back: `1 failed | 108 passed`, the single red being the #482 guard. Add
+`deleteAlarm()` in front of that same sequence and it is green again
+(`109 passed`) — which is what `deleteAlarm()` buys: an outcome that does not
+depend on when the abort happens to land. All four runs are recorded in
+`destroy-alarm.test.ts`'s header.
+
 `workers/agent-gateway/test/destroy-alarm.test.ts` pins exactly that one
 discriminator: after a destroy the platform reports **no** pending alarm, while a
 sibling run that was not destroyed still has one. Its schedule-list test is a
-post-condition, not a second discriminator — see the file's own header for why it
-does not red under the `deleteAll()` mutation.
+post-condition, not a second discriminator: it *does* red under the `deleteAll()`
+mutation, but on `status === 200` (the route 400s with `no such table`), never on
+the count — see the file's own header.
 
 ### RPC vs. path routing (per verb)
 

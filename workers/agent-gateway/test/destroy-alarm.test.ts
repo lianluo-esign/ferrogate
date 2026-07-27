@@ -40,23 +40,44 @@
 //   `cleaned_up`, which is the harm #482 names: the alarm fires, re-instantiates the
 //   object and bills compute.
 //
-//   AND IT IS DURABLE, WHICH IS WHY IT IS THE ONE WORTH PINNING. Under the mutation the
-//   post-destroy alarm read is not a stale in-memory value: driving the route, then
-//   forcing an eviction with `ctx.abort()` from the test side, then re-reading, returns
-//   the SAME epoch-millis timestamp across two evictions. On unmutated code the same
-//   sequence reads `null, null, null`. That also confirms the compatibility premise
-//   below by experiment rather than by documentation: here `deleteAll()` does NOT clear
-//   the alarm. (Deployment `compatibility_date = "2025-06-01"` predates 2026-02-24, from
-//   which workerd's `delete_all_deletes_alarm` behaviour would clear it; vitest.config.ts
-//   feeds miniflare the date READ FROM wrangler.toml, so the harness runs under the
-//   deployed gate. The last test below is the tripwire on that.)
+//   AND IT IS DURABLE, WHICH IS WHY IT IS THE ONE WORTH PINNING. The stranded alarm is
+//   not a stale in-memory value that a real eviction would clear. Mutation M2b below
+//   proves it with an eviction the platform performs itself: `deleteAll()`, one macrotask,
+//   then `ctx.abort("destroyed")`. Under it the object provably goes away —
+//   lifecycle.test.ts's post-destroy status is 404 and the second test below lists
+//   `count: 0`, answers only a REBUILT instance can give — and the alarm STILL reads as
+//   an epoch-millis timestamp (`expected 1785171499000 to be null`). So `deleteAll()`
+//   genuinely leaves the alarm on the platform here, which also confirms the compatibility
+//   premise by experiment rather than by documentation.
+//   (Deployment `compatibility_date = "2025-06-01"` predates
+//   2026-02-24, from which workerd's `delete_all_deletes_alarm` behaviour would clear it;
+//   vitest.config.ts feeds miniflare the date READ FROM wrangler.toml, so the harness runs
+//   under the deployed gate. The last test below is the tripwire on that.)
 //
-//   WHAT THIS FILE DOES *NOT* CATCH, also measured. `deleteAll()` FOLLOWED BY
-//   `this.ctx.abort("destroyed")` — i.e. losing only the SDK's explicit `deleteAlarm()`
-//   call — leaves the whole Worker suite green (`109 passed`), because the post-destroy
-//   alarm reads `null` under it too. So the assertion below pins `destroy()` against the
-//   historical `deleteAll()`, which is the regression this issue is about; it does not
-//   pin `deleteAlarm()` in isolation, and nobody should read it as doing so.
+//   WHAT THIS FILE DOES *NOT* CATCH, and WHY — four mutations, all run over the whole
+//   Worker, `npx vitest run` in workers/agent-gateway:
+//     M1  `this.destroy()` -> `deleteAll()`                      3 failed | 106 passed
+//     M2  `deleteAll()` + same-turn `ctx.abort()`                109 passed
+//     M2b `deleteAll()` + `setTimeout(…, 0)` + `ctx.abort()`     1 failed | 108 passed
+//     M3  `deleteAlarm()` + `deleteAll()` + `setTimeout` + abort 109 passed
+//   M2 is green for a COMMIT-TIMING reason, not because the alarm was cleaned up. At this
+//   compatibility date the alarm's survival of `deleteAll()` only becomes visible to a
+//   later read once the I/O turn commits; `ctx.abort()` in that same turn breaks the
+//   output gate — workerd prints `api/actor-state.c++:1178: broken.outputGateBroken;
+//   jsg.Error: destroyed` on every destroy in this suite — and the survival never lands,
+//   so the alarm reads `null` for the wrong reason. That last sentence is INFERRED from
+//   M2/M2b, not read off workerd's source, which is not vendored here; what is measured is
+//   the flip. M2b is the control: the ONLY difference from M2 is one
+//   macrotask before the abort, and it flips the alarm back to a timestamp (a microtask,
+//   `await Promise.resolve()`, does not — so the boundary is the storage commit, not the
+//   microtask queue). M3 then shows what `deleteAlarm()` actually buys: with it in front
+//   of the same sequence the alarm is gone regardless of when the abort lands.
+//   CONSEQUENCE FOR THIS FILE'S SCOPE: the assertion below pins `destroy()` against the
+//   historical `deleteAll()` (M1), and against a `deleteAll()`-plus-eviction teardown
+//   whose abort is not same-turn (M2b, where it is the only red in 109). It does NOT
+//   separate `deleteAlarm()` from a same-turn `ctx.abort()` (M2), and nobody should read
+//   it as doing so — nor should anyone read M2's green as licence to reimplement teardown
+//   that way; see `docs/cloudflare-agent-gateway.md` §3a.
 //
 //   NON-VACUITY. The alarm is read through the SAME helper, in the SAME test, for a
 //   sibling run that was NOT destroyed; that read must be non-null. So "null" cannot be
@@ -130,11 +151,16 @@ async function scheduleFarFuture(instance: string, taskId: string): Promise<void
  * from anything the Worker reported.
  *
  * `getAgentByName` addresses instances with a plain `idFromName(name)`, so this reads
- * the same Durable Object the routes drove. Entering the object also runs the Agents SDK
- * constructor's `blockConcurrencyWhile(... this.alarm() ...)` block before the callback
- * runs — i.e. this read happens AFTER the SDK's last chance to tidy up. That is the point:
- * the SDK never takes it (`_scheduleNextAlarm()` can only `setAlarm()`), so a non-null read
- * after a destroy is a genuinely stranded alarm and not a timing artefact of the harness.
+ * the same Durable Object the routes drove.
+ *
+ * On a COLD name, entering the object first runs the Agents SDK constructor's
+ * `blockConcurrencyWhile(... this.alarm() ...)`, so the read happens after the SDK's last
+ * chance to tidy up — and the SDK never takes it (`_scheduleNextAlarm()` can only
+ * `setAlarm()`). But do not lean on that here: under the M1 mutation the object was never
+ * aborted, so it is still RESIDENT and no constructor runs at all. What rules out a harness
+ * timing artefact in that case is M2b in the header — the same `deleteAll()` followed by a
+ * real eviction still reads the timestamp back — plus the sibling read below, which shows
+ * this helper does not simply answer null (or non-null) for everything.
  */
 function pendingAlarm(runRef: string): Promise<number | null> {
   const namespace = env.AGENT_GATEWAY as DurableObjectNamespace<AgentGateway>;
@@ -161,20 +187,22 @@ describe("#482 a destroyed run leaves no pending alarm", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ runRef: destroyed, status: "cleaned_up" });
 
-    // Wake the destroyed name the way a caller (or a firing alarm) would: re-addressing
-    // re-instantiates the object and runs the SDK constructor's alarm path. That is the
-    // last opportunity anything has to notice a stale alarm and delete it, so reading
-    // AFTER it is what makes the assertion below about the platform rather than about
-    // when the test happened to look. Its status is asserted a few lines down, AFTER the
-    // guard, on purpose: both reds under the mutation, and the one that should name the
-    // failure is the alarm.
+    // Address the destroyed name the way a caller (or a firing alarm) would. On unmutated
+    // code the destroy aborted the object, so this re-instantiates it and runs the SDK
+    // constructor's alarm path — the last opportunity anything has to notice a stale alarm
+    // and delete it, which is what makes the assertion below about the platform rather than
+    // about when the test happened to look. (Under the M1 mutation there is no abort, so
+    // this hits the still-resident object instead; the header's M2b run is what covers that
+    // case.) Its status is asserted a few lines down, AFTER the guard, on purpose: both red
+    // under the mutation, and the one that should name the failure is the alarm.
     const after = await SELF.fetch(`${BASE}/control/status?runRef=${destroyed}`, authedInit());
 
     // THE ASSERTION: pinned to `await this.destroy()` in AgentGateway.destroyRun().
-    // Swap it for `ctx.storage.deleteAll()` and this reds with
-    // `expected <epoch-millis> to be null` — at this deployment's compatibility date
-    // `deleteAll()` preserves the alarm, nothing afterwards deletes it, and the
-    // timestamp survives a forced eviction (see the header).
+    // Swap it for `ctx.storage.deleteAll()` and this line reds with `AssertionError:
+    // expected 1785172324000 to be null` — sample digits from the 2026-07-27 run; the value
+    // is `now + delaySeconds: 3600` in millis and differs every run — at this compatibility
+    // date `deleteAll()` preserves the alarm and nothing afterwards deletes it. The header's
+    // M2b run shows the timestamp also survives a real eviction, so this is not a stale read.
     expect(await pendingAlarm(destroyed)).toBeNull();
 
     // A SECOND DISCRIMINATOR, not a formality: under the mutation this answers 200
@@ -197,10 +225,16 @@ describe("#482 a destroyed run leaves no pending alarm", () => {
     // `/schedule/list` answers 400 `no such table: cf_agents_schedules`. `count` is never
     // reached and never wrong. The earlier comment here predicted the opposite — a green
     // 200 with `count: 0`, from the Agent constructor rebuilding an empty table "on the
-    // next wake". Measurement says there is no next wake: without `ctx.abort()` the same
-    // instance stays resident, so the tables `deleteAll()` dropped stay dropped, the RPC
-    // comes back as a `schedule_error` and `scheduleResponse` maps it to 400. Treat this
-    // test's red as a symptom of a missing eviction, not as evidence about schedules.
+    // next wake". Measured, no wake happens in between: without `ctx.abort()` nothing
+    // forces an eviction, the same instance is still resident two requests later, so the
+    // tables `deleteAll()` dropped stay dropped, the RPC comes back as a `schedule_error`
+    // and `scheduleResponse` maps it to 400. That residency is an OBSERVATION about two
+    // back-to-back requests in one test, not a platform guarantee — hibernation between
+    // them would flip the mutated outcome back to a green 200 `count: 0`, exactly the
+    // prediction the measurement replaced. (The header's M2b run is that case made
+    // deliberate: force the eviction and this test goes green while the alarm assertion
+    // stays red.) Treat this test's red as a symptom of a missing eviction, not as
+    // evidence about schedules.
     //
     // WHAT IT IS ACTUALLY FOR: a `destroyRun` that stops tearing storage down at all —
     // drop the teardown call, or let it return the `cleaned_up` envelope without reaching
