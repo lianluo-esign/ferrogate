@@ -322,6 +322,15 @@ fn no_family_records_bearer_material_in_event_metadata() {
 /// and dispatch failure — and the failure one records an ERROR STRING built
 /// over data the callee controlled. A per-builder fix is exactly what #526
 /// exists to stop, so all three are checked.
+///
+/// What this holds and what the FIXTURE supplies, since the two are easy to
+/// confuse: the assertion is that the builder sweeps `failure_reason` at all
+/// (delete `recorded_metadata` / `redact_recorded_values` there and it reds).
+/// The `\n` before the credential is deliberate and load-bearing —
+/// `redact_scoped` classifies a line by the name that STARTS it, so a flattened
+/// one-line `format!` would leak and this test would not notice. That is the
+/// caller obligation documented on `redact_scoped`, not a property this test
+/// proves.
 #[test]
 fn the_cli_failure_and_cancellation_builders_are_swept_too() {
     let ManagedExternalAction::Cli(action) = cli_action() else {
@@ -409,6 +418,62 @@ fn report_only_authorizer() -> RuntimeGatewayExternalActionAuthorizer<SimpleCapa
         class_only_policy_mode: ClassOnlyPolicyMode::LegacyClassWide,
         ..CapabilityPolicy::default()
     }))
+}
+
+/// An ALLOWING gateway authorizer. Managed (cloud-enforced) mode returns
+/// `CapabilityDenied` before any host work on anything else, so this is the only
+/// way its recording branch is reached at all.
+fn cloud_allowing_authorizer() -> RuntimeGatewayExternalActionAuthorizer<SimpleCapabilityAuthorizer>
+{
+    RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(CapabilityPolicy {
+        allowed_actions: std::collections::BTreeSet::from([
+            ferrogate_runtime::CapabilityAction::Cli,
+        ]),
+        class_only_policy_mode: ClassOnlyPolicyMode::LegacyClassWide,
+        ..CapabilityPolicy::default()
+    }))
+}
+
+/// `run_governed_workload`'s recorded evidence for ONE worker mode, with the
+/// authorizer that mode needs in order to reach its recording branch.
+///
+/// The two modes are two separate `workload_output:` assignments in
+/// `self_hosted_execution.rs` — the Managed one at the cloud-enforced arm, the
+/// SelfHosted one at the report-only arm. Reverting either to
+/// `workload_output: workload.output` must fail, so both are driven here rather
+/// than only the one a default session happens to select.
+fn governed_workload_evidence(mode: FrameworkAdapterMode, raw_capture: &str) -> String {
+    let capture = raw_capture.to_string();
+    let allowing = cloud_allowing_authorizer();
+    let denying = report_only_authorizer();
+    let authorizer: &dyn GatewayExternalActionAuthorizer = match mode {
+        FrameworkAdapterMode::Managed => &allowing,
+        FrameworkAdapterMode::SelfHosted => &denying,
+    };
+    let execution = run_governed_workload(
+        mode,
+        &recorded_evidence_session(),
+        authorizer,
+        cli_action(),
+        false,
+        1_000,
+        move || {
+            Ok(GovernedWorkloadOutcome {
+                exit_code: Some(0),
+                output: capture,
+                backend_name: "local-process".to_string(),
+                containment_summary: "recorded-evidence-probe".to_string(),
+            })
+        },
+    )
+    .unwrap_or_else(|error| {
+        panic!("{mode:?} governed workload must reach its recording branch: {error}")
+    });
+    assert!(
+        execution.workload_ran,
+        "the {mode:?} probe workload must have run"
+    );
+    execution.evidence_json().to_string()
 }
 
 fn recorded_evidence_session() -> FrameworkAdapterSession {
@@ -522,29 +587,33 @@ fn artifact_for(surface: RecordedSurface, raw_capture: &str) -> SurfaceArtifact 
 
         // --- a governed workload's output, through the real enforcement core.
         // `workload_output` lands in `evidence_json()`, which no metadata sweep
-        // covers.
+        // covers. BOTH enforcement arms are driven: the previous version ran
+        // only `SelfHosted`, so reverting the Managed arm's `recorded_value` to
+        // `workload.output` left the cloud-enforced path recording a governed
+        // workload's raw stdout with every test green.
         RecordedSurface::GovernedWorkloadOutput => {
-            let capture = raw_capture.to_string();
-            let execution = run_governed_workload(
-                FrameworkAdapterMode::SelfHosted,
-                &recorded_evidence_session(),
-                &report_only_authorizer(),
-                cli_action(),
-                false,
-                1_000,
-                move || {
-                    Ok(GovernedWorkloadOutcome {
-                        exit_code: Some(0),
-                        output: capture,
-                        backend_name: "local-process".to_string(),
-                        containment_summary: "recorded-evidence-probe".to_string(),
-                    })
-                },
-            )
-            .expect("self-hosted report-only execution must never block");
-            assert!(execution.workload_ran, "the probe workload must have run");
+            let managed = governed_workload_evidence(FrameworkAdapterMode::Managed, raw_capture);
+            let self_hosted =
+                governed_workload_evidence(FrameworkAdapterMode::SelfHosted, raw_capture);
+            // Asserted per mode BEFORE they are concatenated: a `contains` over
+            // the joined string would be satisfied by whichever half happened to
+            // hold, which is the vacuity this whole file exists to avoid.
+            for (mode, evidence) in [("managed", &managed), ("self-hosted", &self_hosted)] {
+                assert!(
+                    !evidence.contains(&FAKE_SECRET[..12]),
+                    "{mode} governed workload evidence carries bearer material: {evidence}"
+                );
+                assert!(
+                    evidence.contains("upstream body"),
+                    "{mode} governed workload evidence did not record the capture: {evidence}"
+                );
+                assert!(
+                    evidence.contains(REDACTED_HEADER_VALUE),
+                    "{mode} governed workload evidence redacted nothing: {evidence}"
+                );
+            }
             SurfaceArtifact {
-                recorded: execution.evidence_json().to_string(),
+                recorded: format!("{managed}\n{self_hosted}"),
                 reached_marker: "upstream body",
             }
         }
@@ -641,6 +710,12 @@ fn the_guest_event_writer_sweeps_every_frame_it_emits() {
 /// built over data the UPSTREAM controlled, into a `rest.requested` event whose
 /// metadata is assembled incrementally rather than through `recorded_metadata`.
 /// Dropping its sweep re-opens #353 on the failure path.
+///
+/// Same caveat as `the_cli_failure_and_cancellation_builders_are_swept_too`: the
+/// `\n` in the fixture is what puts the credential at the start of a line, and
+/// no `failure_reason` built today embeds a raw upstream response, so this
+/// models a future error string. What it pins is the presence of the sweep on
+/// this builder, not the line rule.
 #[test]
 fn the_rest_rejection_builder_sweeps_its_upstream_derived_failure_reason() {
     let ManagedExternalAction::Rest(action) = rest_action() else {

@@ -336,31 +336,50 @@ fn process_handler_binary_event(
             "{} configured handler binary executed by agent-worker",
             session.adapter_name
         )),
-        metadata: crate::recorded_evidence::recorded_metadata([
-            ("handler_owner".to_string(), "agent-worker".to_string()),
-            ("gateway_handler_probe".to_string(), "false".to_string()),
-            ("real_binary_probe".to_string(), "true".to_string()),
-            ("adapter_name".to_string(), smoke.adapter_name.to_string()),
-            ("env_var".to_string(), smoke.env_var.to_string()),
-            (
-                "binary_path".to_string(),
-                smoke.binary_path.display().to_string(),
-            ),
-            (
-                "probe_args".to_string(),
-                crate::recorded_evidence::recorded_argv(&smoke.probe_args),
-            ),
-            (
-                "status_code".to_string(),
-                smoke
-                    .status_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_default(),
-            ),
-            ("stdout_excerpt".to_string(), smoke.stdout_excerpt),
-            ("stderr_excerpt".to_string(), smoke.stderr_excerpt),
-        ]),
+        metadata: handler_binary_probe_metadata(smoke),
     }))
+}
+
+/// The `cli.requested` metadata a configured handler binary's probe is recorded
+/// into.
+///
+/// Split out of [`process_handler_binary_event`] so a test can hand it an argv
+/// that carries a credential. Today's `probe_args` is `["--version"]` and no
+/// upstream text can reach it, which is precisely why the leak here is a FUTURE
+/// one and why the guard has to be aimed at the builder rather than at the
+/// values that happen to flow through it now: with a one-element vector, a
+/// `.join(" ")` and a `.join("\n")` are the same string, so no assertion on the
+/// live data can tell the two apart.
+#[cfg(test)]
+fn handler_binary_probe_metadata(
+    smoke: crate::handlers::HandlerBinarySmokeResult,
+) -> std::collections::BTreeMap<String, String> {
+    crate::recorded_evidence::recorded_metadata([
+        ("handler_owner".to_string(), "agent-worker".to_string()),
+        ("gateway_handler_probe".to_string(), "false".to_string()),
+        ("real_binary_probe".to_string(), "true".to_string()),
+        ("adapter_name".to_string(), smoke.adapter_name.to_string()),
+        ("env_var".to_string(), smoke.env_var.to_string()),
+        (
+            "binary_path".to_string(),
+            smoke.binary_path.display().to_string(),
+        ),
+        (
+            // Newline-joined by `recorded_argv`, NOT space-joined: see the
+            // separator rule on `recorded_evidence::redact_scoped`.
+            "probe_args".to_string(),
+            crate::recorded_evidence::recorded_argv(&smoke.probe_args),
+        ),
+        (
+            "status_code".to_string(),
+            smoke
+                .status_code
+                .map(|code| code.to_string())
+                .unwrap_or_default(),
+        ),
+        ("stdout_excerpt".to_string(), smoke.stdout_excerpt),
+        ("stderr_excerpt".to_string(), smoke.stderr_excerpt),
+    ])
 }
 
 #[cfg(test)]
@@ -426,40 +445,56 @@ fn process_handler_task_event(
             "{} configured handler task executed by agent-worker",
             session.adapter_name
         )),
-        metadata: crate::recorded_evidence::recorded_metadata([
-            ("handler_owner".to_string(), "agent-worker".to_string()),
-            ("gateway_handler_probe".to_string(), "false".to_string()),
-            ("real_binary_task_smoke".to_string(), "true".to_string()),
-            ("adapter_name".to_string(), smoke.adapter_name.to_string()),
-            ("env_var".to_string(), smoke.env_var.to_string()),
-            (
-                "binary_path".to_string(),
-                smoke.binary_path.display().to_string(),
-            ),
-            (
-                // Newline-joined by `recorded_argv`, NOT space-joined: a
-                // `--header authorization: Bearer …` pair whose two argv
-                // entries share a line hides the credential's header name
-                // behind the flag, and the scan classifies the line by the
-                // FIRST colon (#526 rework).
-                "task_args".to_string(),
-                crate::recorded_evidence::recorded_argv(&crate::handlers::redacted_args(
-                    &smoke.task_args,
-                    smoke.prompt_arg_index,
-                )),
-            ),
-            ("prompt_chars".to_string(), smoke.prompt_chars.to_string()),
-            (
-                "status_code".to_string(),
-                smoke
-                    .status_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_default(),
-            ),
-            ("stdout_excerpt".to_string(), smoke.stdout_excerpt),
-            ("stderr_excerpt".to_string(), smoke.stderr_excerpt),
-        ]),
+        metadata: handler_task_smoke_metadata(smoke),
     }))
+}
+
+/// The `run.started` metadata a configured handler task is recorded into.
+///
+/// Split out of [`process_handler_task_event`] for the same reason as
+/// [`handler_binary_probe_metadata`]: the argv this records is assembled by
+/// `handler_binary_task_target` from a fixed per-adapter template plus the
+/// prompt, and `redacted_args` masks the prompt by index, so nothing an upstream
+/// controls can reach `task_args` today. The separator is what makes that
+/// CONTINUE to be true when a template grows a `--header` pair, and the only way
+/// to hold it is to feed one in here.
+#[cfg(test)]
+fn handler_task_smoke_metadata(
+    smoke: crate::handlers::HandlerTaskSmokeResult,
+) -> std::collections::BTreeMap<String, String> {
+    crate::recorded_evidence::recorded_metadata([
+        ("handler_owner".to_string(), "agent-worker".to_string()),
+        ("gateway_handler_probe".to_string(), "false".to_string()),
+        ("real_binary_task_smoke".to_string(), "true".to_string()),
+        ("adapter_name".to_string(), smoke.adapter_name.to_string()),
+        ("env_var".to_string(), smoke.env_var.to_string()),
+        (
+            "binary_path".to_string(),
+            smoke.binary_path.display().to_string(),
+        ),
+        (
+            // Newline-joined by `recorded_argv`, NOT space-joined: a
+            // `--header authorization: Bearer …` pair whose two argv
+            // entries share a line hides the credential's header name
+            // behind the flag, and the scan classifies the line by the
+            // FIRST colon (#526 rework).
+            "task_args".to_string(),
+            crate::recorded_evidence::recorded_argv(&crate::handlers::redacted_args(
+                &smoke.task_args,
+                smoke.prompt_arg_index,
+            )),
+        ),
+        ("prompt_chars".to_string(), smoke.prompt_chars.to_string()),
+        (
+            "status_code".to_string(),
+            smoke
+                .status_code
+                .map(|code| code.to_string())
+                .unwrap_or_default(),
+        ),
+        ("stdout_excerpt".to_string(), smoke.stdout_excerpt),
+        ("stderr_excerpt".to_string(), smoke.stderr_excerpt),
+    ])
 }
 
 #[cfg(test)]
@@ -647,10 +682,25 @@ mod tests {
             .metadata
             .get("handler_owner")
             .is_some_and(|value| value == "agent-worker"));
+        // Pinned as the exact NEWLINE-joined vector, not as a `contains` pair.
+        // `contains("<prompt>")` holds under either separator, which is how
+        // `recorded_argv` could be reverted to `.join(" ")` here with the suite
+        // green (#526 rework 2). One argument per line is the whole security
+        // property — a credential-shaped argument only gets classified if it
+        // starts its own line — so a new codex flag SHOULD red this and be
+        // re-reviewed.
+        assert_eq!(
+            task_event.metadata.get("task_args").map(String::as_str),
+            Some(
+                "exec\n--sandbox\nread-only\n--skip-git-repo-check\n--ignore-rules\n--ephemeral\n\
+                 <prompt>"
+            ),
+            "task_args must be recorded one argument per line"
+        );
         assert!(task_event
             .metadata
             .get("task_args")
-            .is_some_and(|value| value.contains("<prompt>") && !value.contains("smoke-ok")));
+            .is_some_and(|value| !value.contains("smoke-ok")));
         assert_eq!(
             task_event.metadata.get("prompt_chars").map(String::as_str),
             Some("23")
@@ -673,6 +723,89 @@ mod tests {
             })
             .unwrap();
         assert!(capability_index < task_index);
+    }
+
+    /// Obviously-synthetic credential material, long enough that a surviving
+    /// prefix would still be worth failing on.
+    const ARGV_FAKE_SECRET: &str = "FAKECREDENTIALDONOTLOG0123456789abcdefghijklmnopqrstuvwxyz";
+
+    /// The argument pair that made `recorded_argv` necessary: a flag, then a
+    /// credential-shaped value. Space-joined, the first colon on the line
+    /// belongs to `--header authorization`, no bearer name starts the line, and
+    /// the secret is recorded in full.
+    const ARGV_CREDENTIAL_PAIR: [&str; 2] = [
+        "--header",
+        "authorization: Bearer FAKECREDENTIALDONOTLOG0123456789abcdefghijklmnopqrstuvwxyz",
+    ];
+
+    /// Pins `handler_binary_probe_metadata`'s `probe_args` line, which is the
+    /// `recorded_argv` call at the top of that builder.
+    ///
+    /// The mutation it catches is the review's: revert that call to
+    /// `smoke.probe_args.join(" ")`. Nothing that runs the live probe can catch
+    /// it — `probe_args` is `["--version"]` for all three adapters and a
+    /// one-element join is separator-independent — so the credential has to be
+    /// handed to the builder directly. The assertion is on the metadata map the
+    /// event carries, not on the helper's input.
+    #[test]
+    fn a_credential_shaped_probe_argument_is_not_recorded_verbatim() {
+        let metadata = handler_binary_probe_metadata(crate::handlers::HandlerBinarySmokeResult {
+            adapter_name: "codex",
+            env_var: "AGENT_WORKER_CODEX_BIN",
+            binary_path: std::path::PathBuf::from("/nonexistent/codex"),
+            probe_args: ARGV_CREDENTIAL_PAIR.to_vec(),
+            status_code: Some(0),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
+        });
+
+        let recorded = metadata.get("probe_args").expect("probe_args recorded");
+        assert!(
+            !recorded.contains(&ARGV_FAKE_SECRET[..12]),
+            "probe_args recorded bearer material: {recorded}"
+        );
+        // Non-vacuity: the vector really did reach the record, and the record
+        // still shows a credential was on the command line.
+        assert!(recorded.contains("--header"), "{recorded}");
+        assert!(recorded.contains("authorization"), "{recorded}");
+    }
+
+    /// The same pin for `handler_task_smoke_metadata`'s `task_args` line.
+    ///
+    /// `redacted_args` masks only the PROMPT, by index, so it is not what
+    /// protects a credential in any other position — reverting `recorded_argv`
+    /// to `.join(" ")` here leaks while `<prompt>` still appears, which is
+    /// exactly why the existing `contains("<prompt>")` assertions held under
+    /// the mutation.
+    #[test]
+    fn a_credential_shaped_task_argument_is_not_recorded_verbatim() {
+        let mut task_args = ARGV_CREDENTIAL_PAIR
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<String>>();
+        let prompt_arg_index = task_args.len();
+        task_args.push("summarise this repository".to_string());
+
+        let metadata = handler_task_smoke_metadata(crate::handlers::HandlerTaskSmokeResult {
+            adapter_name: "codex",
+            env_var: "AGENT_WORKER_CODEX_BIN",
+            binary_path: std::path::PathBuf::from("/nonexistent/codex"),
+            task_args,
+            prompt_arg_index,
+            prompt_chars: 25,
+            status_code: Some(0),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
+        });
+
+        let recorded = metadata.get("task_args").expect("task_args recorded");
+        assert!(
+            !recorded.contains(&ARGV_FAKE_SECRET[..12]),
+            "task_args recorded bearer material: {recorded}"
+        );
+        assert!(recorded.contains("--header"), "{recorded}");
+        assert!(recorded.contains("authorization"), "{recorded}");
+        assert!(recorded.contains("<prompt>"), "{recorded}");
     }
 
     #[test]
@@ -836,9 +969,22 @@ mod tests {
             task_event.metadata.get("status_code").map(String::as_str),
             Some("0")
         );
-        assert!(task_event.metadata.get("task_args").is_some_and(|value| {
-            value.contains("--bare") && value.contains("<prompt>") && !value.contains(MARKER)
-        }));
+        // As in the codex shim test: the exact NEWLINE-joined vector, because
+        // `contains("--bare") && contains("<prompt>")` holds under a space join
+        // too and so held while `recorded_argv` was absent (#526 rework 2). The
+        // empty line is `--tools ""`, which is a real argument.
+        assert_eq!(
+            task_event.metadata.get("task_args").map(String::as_str),
+            Some(
+                "--bare\n--print\n--permission-mode\ndontAsk\n--tools\n\n--no-session-persistence\n\
+                 <prompt>"
+            ),
+            "task_args must be recorded one argument per line"
+        );
+        assert!(task_event
+            .metadata
+            .get("task_args")
+            .is_some_and(|value| !value.contains(MARKER)));
         println!(
             "claude_code governed execution evidence: binary={} stdout_excerpt={:?} task_args={:?}",
             claude_bin,

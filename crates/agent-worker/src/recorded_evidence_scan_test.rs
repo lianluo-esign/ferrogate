@@ -40,6 +40,41 @@
 //! in every recording source must appear here with a verdict, so a site that
 //! changes shape, moves function, or appears for the first time fails until
 //! someone writes down what they concluded about it.
+//!
+//! # Exactly what the audit is keyed on, and what that leaves uncovered
+//!
+//! The first version of this table was keyed on `(file, enclosing fn)` alone,
+//! which blessed whole FUNCTIONS: a second raw capture added INSIDE
+//! `run_authorized_rest_action` — #526's own leak — matched the existing row,
+//! left `unaudited` empty, and passed. The claim above ("changes shape") was
+//! therefore false in the one direction that mattered, so the key was widened
+//! rather than the claim narrowed. A row now signs off on
+//! `(file, fn, idiom, EXACT number of occurrences)`, and
+//! [`a_capture_added_inside_an_already_audited_function_is_not_blessed_by_its_row`]
+//! runs that precise mutation against the real `external_actions.rs`.
+//!
+//! Three things the widened key still does not hold, named here because this is
+//! where the next reader looks:
+//!
+//! * **Function-name aliasing.** `enclosing_function` reports the nearest `fn`
+//!   above the site, not a path, so the two distinct `fn parse` bodies in
+//!   `backends.rs` (the guest-agent handshake and the guest RPC start response)
+//!   share ONE row and ONE verdict. The occurrence count means a third `fn parse`
+//!   that ADDS a capture fails; a third one that takes over an existing
+//!   occurrence 1:1 does not.
+//! * **Idiom blindness to paths that never decode.** All four idioms are a
+//!   decode or a `take` truncation. A recording path that receives text already
+//!   decoded — a `String` out of `serde_json`, a `read_to_string`, a slice of an
+//!   existing `String` — matches nothing. Concretely and not hypothetically:
+//!   the host-ingestion leak #526's own previous commit fixed (the host
+//!   recording guest-authored `String`s that `serde_json` had already decoded)
+//!   would NOT have been found by this scan. `RecordedSurface`'s exhaustive
+//!   match and `recorded_metadata` are the guards for that shape; this one is
+//!   not.
+//! * **Detection, not impossibility**, as the section above already says: the
+//!   table makes a new decode a reviewed act, it does not make one impossible.
+
+use std::collections::BTreeMap;
 
 use super::recorded_evidence_scan_test_support::{
     code_only, is_recording_source, scan_raw_captures, scan_redactors, scan_surface_register,
@@ -65,131 +100,177 @@ enum RawCaptureVerdict {
     NotAttackerControlled,
 }
 
+/// One audited key: a `(file, enclosing fn)` pair, the idioms found there, and
+/// HOW MANY of each a reviewer actually looked at.
+///
+/// The count is the part that makes "changes shape" true. Without it the row
+/// blesses the whole function, and the mutation that created #526 — one more
+/// raw decode added inside `run_authorized_rest_action` — matches the row and
+/// passes.
+#[derive(Debug, Clone, Copy)]
+struct AuditedCaptures {
+    file: &'static str,
+    /// The enclosing `fn`. A line number would be invalidated by any edit above
+    /// it, which would train the next reader to re-bless the table without
+    /// reading it.
+    function: &'static str,
+    /// `(idiom, the exact number of occurrences signed off)`. More than this,
+    /// or an idiom that is not listed, fails.
+    captures: &'static [(&'static str, usize)],
+    verdict: RawCaptureVerdict,
+    reason: &'static str,
+}
+
 /// EVERY raw-capture site in every recording source of this crate, with the
 /// verdict on it. This is #526's audit, in the only form that cannot rot.
 ///
-/// Keyed on `(file, enclosing fn)` rather than on a line: a line number is
-/// invalidated by any edit above it, which would train the next reader to
-/// re-bless the table without reading it.
-const RAW_CAPTURE_AUDIT: [(&str, &str, RawCaptureVerdict, &str); 17] = [
-    (
-        CHOKEPOINT,
-        "recorded_excerpt",
-        RawCaptureVerdict::Chokepoint,
-        "the decode every non-REST family used to do for itself",
-    ),
-    (
-        CHOKEPOINT,
-        "recorded_http_excerpt",
-        RawCaptureVerdict::Chokepoint,
-        "#353's `chars().take(512)`, now behind the surface tag",
-    ),
-    (
-        CHOKEPOINT,
-        "recorded_line_excerpt",
-        RawCaptureVerdict::Chokepoint,
-        "the serial-console `lines().take(n)`",
-    ),
-    (
-        "external_actions.rs",
-        "run_authorized_rest_action",
-        RawCaptureVerdict::RoutedThroughChokepoint,
-        "the original #526 leak: raw upstream HTTP response -> recorded_http_excerpt(RestResponse) \
-         -> response_excerpt. Held by recorded_rest_evidence_never_carries_bearer_material.",
-    ),
-    (
-        "docker_backend.rs",
-        "exec_or_attach",
-        RawCaptureVerdict::RoutedThroughChokepoint,
-        "the workload's own stdout/stderr -> IsolationExecOutcome.message -> \
-         GovernedWorkloadOutcome.output -> recorded_value(GovernedWorkloadOutput). Held by \
-         no_recorded_evidence_surface_emits_bearer_material's GovernedWorkloadOutput arm.",
-    ),
-    (
-        "local_process_backend.rs",
-        "run_confined",
-        RawCaptureVerdict::RoutedThroughChokepoint,
-        "same path as docker_backend::exec_or_attach, for the local-process backend. The \
-         `log_lines` copy it also keeps has no production reader; a caller added to \
-         `collect_logs` must route through recorded_value.",
-    ),
-    (
-        "firecracker_guest_exec.rs",
-        "read_bounded_line",
-        RawCaptureVerdict::RoutedThroughChokepoint,
-        "guest stream frames -> ingest_guest_frame, which deserializes and sweeps in one step. \
-         Held by the_host_sweeps_guest_supplied_frames_it_ingests.",
-    ),
-    (
-        "backends.rs",
-        "parse",
-        RawCaptureVerdict::RoutedThroughChokepoint,
-        "the guest agent handshake (no free text) and the guest RPC start response, whose \
-         message/output_excerpt/denial_reason are swept by sweep_recorded_guest_text before the \
-         host records them.",
-    ),
-    (
-        "docker_backend.rs",
-        "collect_logs",
-        RawCaptureVerdict::NotAttackerControlled,
-        "container logs ARE workload output, but nothing in the crate calls collect_logs outside \
-         tests, so no recorded artifact reaches them today. A production caller must route the \
-         lines through recorded_value; this row is the reminder.",
-    ),
-    (
-        "docker_backend.rs",
-        "checked_docker",
-        RawCaptureVerdict::NotAttackerControlled,
-        "the local `docker` CLI's own stdout (a container id, an image id) and its stderr on \
-         failure. Host control plane, not the workload.",
-    ),
-    (
-        "docker_backend.rs",
-        "docker_backend_readiness",
-        RawCaptureVerdict::NotAttackerControlled,
-        "`docker version` output from the host daemon.",
-    ),
-    (
-        "local_process_backend.rs",
-        "local_process_backend_readiness",
-        RawCaptureVerdict::NotAttackerControlled,
-        "`unshare --version` and friends from the host's own binaries.",
-    ),
-    (
-        "backends.rs",
-        "executable_version_output",
-        RawCaptureVerdict::NotAttackerControlled,
-        "the first line of a configured host binary's `--version` banner, recorded into the \
-         Firecracker preflight report.",
-    ),
-    (
-        "backends.rs",
-        "read_firecracker_http_response",
-        RawCaptureVerdict::NotAttackerControlled,
-        "the Firecracker API socket's answer to the worker's own hypervisor calls; recorded only \
-         inside boot-smoke failure text.",
-    ),
-    (
-        "management.rs",
-        "read_http_management_request",
-        RawCaptureVerdict::NotAttackerControlled,
-        "the INBOUND management request the worker is serving. It is deserialized and acted on, \
-         never recorded as evidence.",
-    ),
-    (
-        "external_actions.rs",
-        "spawn_one_shot_rest_smoke_server",
-        RawCaptureVerdict::NotAttackerControlled,
-        "a loopback smoke server reading back the request the worker itself just sent, inside one \
-         CLI smoke command. Printed as `served_request`; there is no upstream and no workload.",
-    ),
-    (
-        "external_actions.rs",
-        "spawn_one_shot_network_egress_smoke_server",
-        RawCaptureVerdict::NotAttackerControlled,
-        "same shape: the payload the worker itself wrote, read back and printed as \
-         `received_payload`.",
-    ),
+/// 17 keys, 27 occurrences. Both totals are re-derived from the tree by
+/// [`every_raw_capture_in_the_crate_has_an_audit_verdict`] in both directions,
+/// so neither number is trusted from this comment.
+const RAW_CAPTURE_AUDIT: [AuditedCaptures; 17] = [
+    AuditedCaptures {
+        file: CHOKEPOINT,
+        function: "recorded_excerpt",
+        captures: &[("from_utf8_lossy(", 1)],
+        verdict: RawCaptureVerdict::Chokepoint,
+        reason: "the decode every non-REST family used to do for itself",
+    },
+    AuditedCaptures {
+        file: CHOKEPOINT,
+        function: "recorded_http_excerpt",
+        captures: &[(".chars().take(", 1)],
+        verdict: RawCaptureVerdict::Chokepoint,
+        reason: "#353's `chars().take(512)`, now behind the surface tag",
+    },
+    AuditedCaptures {
+        file: CHOKEPOINT,
+        function: "recorded_line_excerpt",
+        captures: &[(".lines().take(", 1)],
+        verdict: RawCaptureVerdict::Chokepoint,
+        reason: "the serial-console `lines().take(n)`",
+    },
+    AuditedCaptures {
+        file: "external_actions.rs",
+        function: "run_authorized_rest_action",
+        captures: &[("from_utf8_lossy(", 1)],
+        verdict: RawCaptureVerdict::RoutedThroughChokepoint,
+        reason:
+            "the original #526 leak: raw upstream HTTP response -> recorded_http_excerpt(RestResponse) \
+             -> response_excerpt. Held by recorded_rest_evidence_never_carries_bearer_material. The \
+             ONE decode here is the response body read; a second one would be a new capture and is \
+             counted as such.",
+    },
+    AuditedCaptures {
+        file: "docker_backend.rs",
+        function: "exec_or_attach",
+        captures: &[("from_utf8_lossy(", 2)],
+        verdict: RawCaptureVerdict::RoutedThroughChokepoint,
+        reason: "stdout and stderr of the workload's own process -> IsolationExecOutcome.message \
+                 -> GovernedWorkloadOutcome.output -> recorded_value(GovernedWorkloadOutput). Held \
+                 by no_recorded_evidence_surface_emits_bearer_material's GovernedWorkloadOutput \
+                 arm.",
+    },
+    AuditedCaptures {
+        file: "local_process_backend.rs",
+        function: "run_confined",
+        captures: &[("from_utf8_lossy(", 2)],
+        verdict: RawCaptureVerdict::RoutedThroughChokepoint,
+        reason: "stdout and stderr on the same path as docker_backend::exec_or_attach, for the \
+                 local-process backend. The `log_lines` copy it also keeps has no production \
+                 reader; a caller added to `collect_logs` must route through recorded_value.",
+    },
+    AuditedCaptures {
+        file: "firecracker_guest_exec.rs",
+        function: "read_bounded_line",
+        captures: &[("from_utf8(", 1)],
+        verdict: RawCaptureVerdict::RoutedThroughChokepoint,
+        reason: "guest stream frames -> ingest_guest_frame, which deserializes and sweeps in one \
+                 step. Held by the_host_sweeps_guest_supplied_frames_it_ingests.",
+    },
+    AuditedCaptures {
+        file: "backends.rs",
+        function: "parse",
+        captures: &[("from_utf8(", 2)],
+        verdict: RawCaptureVerdict::RoutedThroughChokepoint,
+        reason: "TWO DISTINCT `fn parse` bodies share this row, one each: the guest agent \
+                 handshake (no free text) and the guest RPC start response, whose \
+                 message/output_excerpt/denial_reason are swept by sweep_recorded_guest_text \
+                 before the host records them. The count is what stops a third `fn parse` here \
+                 from inheriting the verdict.",
+    },
+    AuditedCaptures {
+        file: "docker_backend.rs",
+        function: "collect_logs",
+        captures: &[("from_utf8_lossy(", 2)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "container logs ARE workload output, but nothing in the crate calls collect_logs \
+                 outside tests, so no recorded artifact reaches them today. A production caller \
+                 must route the lines through recorded_value; this row is the reminder.",
+    },
+    AuditedCaptures {
+        file: "docker_backend.rs",
+        function: "checked_docker",
+        captures: &[("from_utf8_lossy(", 2)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "the local `docker` CLI's own stdout (a container id, an image id) and its stderr \
+                 on failure. Host control plane, not the workload.",
+    },
+    AuditedCaptures {
+        file: "docker_backend.rs",
+        function: "docker_backend_readiness",
+        captures: &[("from_utf8_lossy(", 2)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "`docker version` stdout and stderr from the host daemon.",
+    },
+    AuditedCaptures {
+        file: "local_process_backend.rs",
+        function: "local_process_backend_readiness",
+        captures: &[("from_utf8_lossy(", 3)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "the host's own binaries: `unshare --version`'s stderr on failure and its stdout \
+                 on success, plus each namespace probe's stderr. No workload has run yet.",
+    },
+    AuditedCaptures {
+        file: "backends.rs",
+        function: "executable_version_output",
+        captures: &[("from_utf8_lossy(", 2)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "stdout and stderr of a configured host binary's `--version` banner, first line \
+                 recorded into the Firecracker preflight report.",
+    },
+    AuditedCaptures {
+        file: "backends.rs",
+        function: "read_firecracker_http_response",
+        captures: &[("from_utf8_lossy(", 1)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "the Firecracker API socket's answer to the worker's own hypervisor calls; \
+                 recorded only inside boot-smoke failure text.",
+    },
+    AuditedCaptures {
+        file: "management.rs",
+        function: "read_http_management_request",
+        captures: &[("from_utf8(", 2)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "the INBOUND management request the worker is serving: its header block and its \
+                 body. It is deserialized and acted on, never recorded as evidence.",
+    },
+    AuditedCaptures {
+        file: "external_actions.rs",
+        function: "spawn_one_shot_rest_smoke_server",
+        captures: &[("from_utf8_lossy(", 1)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "a loopback smoke server reading back the request the worker itself just sent, \
+                 inside one CLI smoke command. Printed as `served_request`; there is no upstream \
+                 and no workload.",
+    },
+    AuditedCaptures {
+        file: "external_actions.rs",
+        function: "spawn_one_shot_network_egress_smoke_server",
+        captures: &[("from_utf8_lossy(", 1)],
+        verdict: RawCaptureVerdict::NotAttackerControlled,
+        reason: "same shape: the payload the worker itself wrote, read back and printed as \
+                 `received_payload`.",
+    },
 ];
 
 /// The only places outside [`CHOKEPOINT`] that a redactor marker may appear, and
@@ -250,6 +331,95 @@ fn real_tree_raw_captures() -> Vec<RawCaptureSite> {
         .collect()
 }
 
+/// `(file, fn)` → `idiom` → number of occurrences. The unit the audit signs off
+/// on, on both sides of the comparison.
+type CaptureCounts = BTreeMap<(String, String), BTreeMap<&'static str, usize>>;
+
+fn counts_of(sites: &[RawCaptureSite]) -> CaptureCounts {
+    let mut counts: CaptureCounts = BTreeMap::new();
+    for site in sites {
+        *counts
+            .entry((site.file.clone(), site.function.clone()))
+            .or_default()
+            .entry(site.idiom)
+            .or_default() += 1;
+    }
+    counts
+}
+
+fn audited_capture_counts() -> CaptureCounts {
+    let mut counts: CaptureCounts = BTreeMap::new();
+    for row in RAW_CAPTURE_AUDIT {
+        let entry = counts
+            .entry((row.file.to_string(), row.function.to_string()))
+            .or_default();
+        for (idiom, count) in row.captures {
+            *entry.entry(*idiom).or_default() += *count;
+        }
+    }
+    counts
+}
+
+/// Everything the tree does that the table does not account for: a new file, a
+/// new function, a new IDIOM inside an already-audited function, or MORE
+/// occurrences of an already-audited idiom than were signed off.
+///
+/// The last two are the finding this key widening exists for. Under the old
+/// `(file, fn)` key both were silently blessed.
+///
+/// Takes the sites rather than the counts so the failure can NAME the lines a
+/// reader has to go and look at.
+fn captures_beyond_the_audit(sites: &[RawCaptureSite], audited: &CaptureCounts) -> Vec<String> {
+    let empty = BTreeMap::new();
+    let mut beyond = Vec::new();
+    for ((file, function), idioms) in counts_of(sites) {
+        let signed_off = audited
+            .get(&(file.clone(), function.clone()))
+            .unwrap_or(&empty);
+        for (idiom, found) in idioms {
+            let allowed = signed_off.get(idiom).copied().unwrap_or(0);
+            if found > allowed {
+                let where_at = sites
+                    .iter()
+                    .filter(|site| {
+                        site.key() == (file.as_str(), function.as_str()) && site.idiom == idiom
+                    })
+                    .map(RawCaptureSite::location)
+                    .collect::<Vec<_>>();
+                beyond.push(format!(
+                    "{idiom:?} appears {found} time(s), audited for {allowed}, at: {}",
+                    where_at.join(", ")
+                ));
+            }
+        }
+    }
+    beyond
+}
+
+/// Everything the table accounts for that the tree no longer does. A stale row
+/// or a stale COUNT is a place a future capture could hide behind a verdict
+/// nobody wrote for it.
+fn audit_rows_beyond_the_tree(sites: &[RawCaptureSite], audited: &CaptureCounts) -> Vec<String> {
+    let observed = counts_of(sites);
+    let empty = BTreeMap::new();
+    let mut stale = Vec::new();
+    for ((file, function), idioms) in audited {
+        let found_here = observed
+            .get(&(file.clone(), function.clone()))
+            .unwrap_or(&empty);
+        for (idiom, allowed) in idioms {
+            let found = found_here.get(idiom).copied().unwrap_or(0);
+            if found < *allowed {
+                stale.push(format!(
+                    "{file} :: fn {function} :: {idiom:?} audited for {allowed} but appears \
+                     {found} time(s)"
+                ));
+            }
+        }
+    }
+    stale
+}
+
 // ---------------------------------------------------------------------------
 // The audit, aimed at the real tree
 // ---------------------------------------------------------------------------
@@ -258,10 +428,17 @@ fn real_tree_raw_captures() -> Vec<RawCaptureSite> {
 /// path that does not go through `recorded_evidence` fails a test.
 ///
 /// Pins nothing in particular and everything in general — it holds the ABSENCE
-/// of unreviewed raw captures across the whole crate. The mutation it catches is
-/// the one that created this issue: add
-/// `String::from_utf8_lossy(&output[..512]).to_string()` to any recording source
-/// and the site appears here with no audit row.
+/// of unreviewed raw captures across the whole crate, at
+/// `(file, fn, idiom, count)` granularity. Add
+/// `String::from_utf8_lossy(&output[..512]).to_string()` anywhere in a recording
+/// source and it fails: in a new file or a new function because no row matches,
+/// and INSIDE an already-audited function because the occurrence count for that
+/// idiom goes up. The second half is what the `(file, fn)` key could not do, and
+/// it is exercised against the real tree by
+/// [`a_capture_added_inside_an_already_audited_function_is_not_blessed_by_its_row`].
+///
+/// What it still cannot see is stated in this module's docs and not repeated
+/// here: a recording path that never decodes matches none of the four idioms.
 #[test]
 fn every_raw_capture_in_the_crate_has_an_audit_verdict() {
     /// Today's tree has 27 raw-capture sites across 17 recording sources. A
@@ -294,53 +471,71 @@ fn every_raw_capture_in_the_crate_has_an_audit_verdict() {
         );
     }
 
-    let unaudited = sites
-        .iter()
-        .filter(|site| {
-            !RAW_CAPTURE_AUDIT
-                .iter()
-                .any(|(file, function, _, _)| site.key() == (*file, *function))
-        })
-        .map(RawCaptureSite::location)
-        .collect::<Vec<_>>();
+    let unaudited = captures_beyond_the_audit(&sites, &audited_capture_counts());
     assert!(
         unaudited.is_empty(),
-        "these sites turn raw observed bytes into a string with no #526 verdict recorded:\n  {}\n\
-         Route them through crate::recorded_evidence, or add a row to RAW_CAPTURE_AUDIT saying \
-         why they are not recorded evidence.",
+        "these raw captures turn observed bytes into a string with no #526 verdict recorded:\n  \
+         {}\n\
+         Route them through crate::recorded_evidence, or add/extend a row in RAW_CAPTURE_AUDIT \
+         saying why they are not recorded evidence. A count that went UP is a new capture inside \
+         an already-reviewed function, which is exactly what the row does not cover.",
         unaudited.join("\n  ")
     );
 }
 
-/// The audit table is not allowed to accumulate rows for sites that no longer
-/// exist: a stale row is a place a future site could hide behind a verdict
-/// nobody wrote for it.
+/// The audit table is not allowed to accumulate rows — or COUNTS — for sites
+/// that no longer exist: a stale entry is a place a future capture could hide
+/// behind a verdict nobody wrote for it.
+///
+/// This is the other direction of the same comparison, kept separate so the
+/// failure message says which way the drift went.
 #[test]
 fn the_audit_table_has_no_rows_for_sites_that_no_longer_exist() {
-    let sites = real_tree_raw_captures();
-
-    let stale = RAW_CAPTURE_AUDIT
-        .iter()
-        .filter(|(file, function, _, _)| !sites.iter().any(|site| site.key() == (*file, *function)))
-        .map(|(file, function, _, _)| format!("{file} :: fn {function}"))
-        .collect::<Vec<_>>();
+    let stale = audit_rows_beyond_the_tree(&real_tree_raw_captures(), &audited_capture_counts());
 
     assert!(
         stale.is_empty(),
-        "these audit rows no longer match any raw-capture site; delete them:\n  {}",
+        "these audit entries no longer match any raw-capture site; delete them or lower the \
+         count:\n  {}",
         stale.join("\n  ")
     );
 }
 
-/// Every row must say something. A verdict with an empty reason is a rubber
+/// Every row must say something, must count something, and must count something
+/// the scanner actually searches for. A verdict with an empty reason is a rubber
 /// stamp, and box 4 asked for the reasoning, not the tick.
+///
+/// The idiom check is not decoration: a row naming an idiom that is not in
+/// [`RAW_CAPTURE_IDIOMS`] can never be matched, so it would show up as
+/// permanently "stale" rather than as the typo it is.
 #[test]
 fn every_audit_row_records_a_reason_and_a_consistent_verdict() {
-    for (file, function, verdict, reason) in RAW_CAPTURE_AUDIT {
+    for row in RAW_CAPTURE_AUDIT {
+        let AuditedCaptures {
+            file,
+            function,
+            captures,
+            verdict,
+            reason,
+        } = row;
         assert!(
             reason.len() > 30,
             "{file} :: fn {function} has no real reason recorded"
         );
+        assert!(
+            !captures.is_empty(),
+            "{file} :: fn {function} is audited for no captures at all"
+        );
+        for (idiom, count) in captures {
+            assert!(
+                RAW_CAPTURE_IDIOMS.contains(idiom),
+                "{file} :: fn {function} audits {idiom:?}, which the scanner never searches for"
+            );
+            assert!(
+                *count >= 1,
+                "{file} :: fn {function} audits {idiom:?} zero times"
+            );
+        }
         assert_eq!(
             verdict == RawCaptureVerdict::Chokepoint,
             file == CHOKEPOINT,
@@ -348,6 +543,70 @@ fn every_audit_row_records_a_reason_and_a_consistent_verdict() {
              or the chokepoint claims something else"
         );
     }
+}
+
+/// The finding this key widening exists for, run as the exact mutation the
+/// review named rather than described.
+///
+/// Splices one more `String::from_utf8_lossy(..)` into the REAL
+/// `external_actions.rs`, immediately after the capture that
+/// `run_authorized_rest_action` is already audited for — #526's original leak,
+/// in the function whose row would have blessed it. Under the previous
+/// `(file, fn)` key the mutated tree produced an EMPTY `unaudited` list and
+/// every scan test passed.
+///
+/// The insertion point is taken from the scanner's own reported line rather
+/// than from a text anchor, so this cannot drift out of the function it is
+/// aiming at. The clean tree is asserted first, so a fixture that was broken to
+/// begin with cannot be what makes the rejection true.
+#[test]
+fn a_capture_added_inside_an_already_audited_function_is_not_blessed_by_its_row() {
+    const TARGET_FILE: &str = "external_actions.rs";
+    const TARGET_FN: &str = "run_authorized_rest_action";
+    const INJECTED: &str = "    let leak = String::from_utf8_lossy(&raw_headers).to_string();";
+
+    let audited = audited_capture_counts();
+    let clean_sites = real_tree_raw_captures();
+    assert!(
+        captures_beyond_the_audit(&clean_sites, &audited).is_empty(),
+        "the clean tree must be accepted, or the rejection below proves nothing"
+    );
+
+    let existing = clean_sites
+        .iter()
+        .find(|site| site.key() == (TARGET_FILE, TARGET_FN))
+        .expect("run_authorized_rest_action is audited for exactly one raw capture");
+
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join(TARGET_FILE),
+    )
+    .expect("read external_actions.rs");
+    let mut lines = source.lines().collect::<Vec<&str>>();
+    // `existing.line` is 1-based and the scanner's line numbering is the raw
+    // source's, so inserting AT that index puts the new statement on the line
+    // after the audited one — still inside the same function body.
+    lines.insert(existing.line, INJECTED);
+    let mutated = lines.join("\n");
+
+    let reported = captures_beyond_the_audit(&scan_raw_captures(TARGET_FILE, &mutated), &audited);
+
+    assert!(
+        reported
+            .iter()
+            .any(|entry| entry.contains(TARGET_FN) && entry.contains("2 time(s)")),
+        "a second raw capture inside {TARGET_FN} must not inherit that function's audit row; \
+         reported instead: {reported:?}"
+    );
+    // The other functions in the same file are untouched, so the guard reports
+    // the mutation and nothing else — a rejection that fired on everything would
+    // be no more useful than one that fired on nothing.
+    assert_eq!(
+        reported.len(),
+        1,
+        "only the mutated function should be reported: {reported:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -478,10 +737,9 @@ fn the_scan_sees_a_new_family_that_decodes_for_itself_and_not_one_that_does_not(
     let bypassing = scan_raw_captures("brand_new_family.rs", BYPASSING_SOURCE);
     assert_eq!(bypassing.len(), 1, "{bypassing:?}");
     assert_eq!(bypassing[0].function, "brand_new_family_excerpt");
-    assert!(
-        !RAW_CAPTURE_AUDIT
-            .iter()
-            .any(|(file, function, _, _)| bypassing[0].key() == (*file, *function)),
+    assert_eq!(
+        captures_beyond_the_audit(&bypassing, &audited_capture_counts()).len(),
+        1,
         "the fixture must not be pre-blessed by the audit table"
     );
 

@@ -1,3 +1,9 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-07-27
+// description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
 //! The single place `agent-worker` turns raw bytes it observed into something
 //! it is willing to RECORD — an event metadata value, a worker-stdout evidence
 //! blob, a guest-frame field.
@@ -122,10 +128,16 @@
 //!
 //! #526's per-site audit is not prose in an issue: it is
 //! `RAW_CAPTURE_AUDIT` in `recorded_evidence_scan_test.rs`, a table the suite
-//! reads. Every place in this crate that turns raw observed bytes into a string
-//! must appear there with a verdict, including the ones found clean — so a new
-//! excerpt path that never calls a helper here fails a test instead of shipping.
-//! That guard is DETECTION, not impossibility, and says so in its own docs.
+//! reads. Every place in this crate that DECODES raw observed bytes into a
+//! string must appear there with a verdict, including the ones found clean, and
+//! the row records the exact number of occurrences — so one more decode added
+//! inside an already-reviewed function fails too, which the first version of
+//! that table did not hold. That guard is DETECTION, not impossibility, and its
+//! own docs name the two things it still cannot see: a `fn` name that aliases
+//! two bodies, and a recording path that never decodes at all (a `String` out of
+//! `serde_json`, a `read_to_string`). For that second shape the guards are
+//! [`RecordedSurface`]'s exhaustive match and [`recorded_metadata`], not the
+//! scan.
 //!
 //! Two things are recorded as accepted rather than fixed, so the next reader
 //! does not go looking:
@@ -541,10 +553,35 @@ pub(crate) fn recorded_argv<S: AsRef<str>>(args: &[S]) -> String {
 /// material.
 ///
 /// This is the net under the excerpt helpers: an excerpt built the right way is
-/// already clean and this pass is a no-op on it (redaction is idempotent), but a
+/// already clean and this pass is a no-op on it (redaction is idempotent), and a
 /// family that assembles a value some other way — a new key, a `format!` over an
-/// upstream string, a field nobody thought of as an "excerpt" — is still covered
-/// because it went into a metadata map.
+/// upstream string, a field nobody thought of as an "excerpt" — is at least
+/// LOOKED AT, because it went into a metadata map.
+///
+/// How far that goes is exactly [`redact_scoped`]'s line rule, and no further.
+/// A credential is found only where a bearer NAME starts a line, so
+/// `format!("upstream said: {response}")` is covered when `response` begins with
+/// a newline or already contains its header block on its own lines, and is NOT
+/// covered when the whole exchange is flattened onto one line
+/// (`"upstream said: authorization: Bearer …"` parses as the field
+/// `upstream said`).
+///
+/// The two tests that exercise this shape
+/// (`the_cli_failure_and_cancellation_builders_are_swept_too`,
+/// `the_rest_rejection_builder_sweeps_its_upstream_derived_failure_reason`) put a
+/// deliberate `\n` before the captured blob, and that `\n` is what makes them
+/// pass — said plainly because it would otherwise read as a property of this
+/// function. They are aimed at the BUILDER (does `failure_reason` get swept at
+/// all?), not at the line rule, and they model a future error string rather than
+/// a current one: no `failure_reason` built today embeds a raw upstream response
+/// (`payment_required_failure` and its siblings interpolate a status code, a
+/// challenge hash or a parse error).
+///
+/// So this is a net with a stated mesh size, not a catch-all. A builder that
+/// concatenates an upstream string onto the SAME line as its own prose is the
+/// hole; the obligation to join with a newline is documented on
+/// [`redact_scoped`], and [`recorded_argv`] exists because argument vectors were
+/// exactly that hole once already.
 pub(crate) fn recorded_metadata<I>(pairs: I) -> BTreeMap<String, String>
 where
     I: IntoIterator<Item = (String, String)>,
