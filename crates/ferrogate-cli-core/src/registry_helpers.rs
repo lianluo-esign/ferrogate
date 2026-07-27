@@ -96,6 +96,44 @@ pub fn first_segment<'a>(input: &'a ResourceInput, resource: &str) -> CliResult<
         .ok_or_else(|| CliError::usage(format!("this {resource} verb requires a target id")))
 }
 
+/// Reject an item verb that was given no target id (#361 review finding 1).
+///
+/// `item_path(&[])` loops zero times and returns the BARE COLLECTION path, and
+/// the clap positional `segments: Vec<String>` carries no arity requirement, so
+/// omitting the id was accepted and silently retargeted the whole collection:
+///
+/// * `ferrogate ctl projects get` issued `GET /admin/v1/projects` -- the LIST
+///   operation, from a verb whose declared operationId is `getProject`, exiting
+///   0 with the entire collection on stdout. That made the parity mapping true
+///   in metadata and false at runtime.
+/// * `ferrogate ctl projects delete` issued a collection-level
+///   `DELETE /admin/v1/projects`, with no client-side guard whatsoever.
+///
+/// Action verbs never had this hole -- they resolve their target through
+/// [`first_segment`], which errors on an absent id. This is the same guard for
+/// the item CRUD verbs, so both paths refuse identically.
+///
+/// `list` is deliberately NOT guarded: an empty segment list IS the top-level
+/// collection read, and a non-empty one is a nested list (e.g. tenant-role
+/// bindings under a tenant). `create` addresses the collection by definition.
+fn require_item_segments<'a>(
+    api: &ResourceApi,
+    verb: &str,
+    segments: &'a [&'a str],
+) -> CliResult<&'a [&'a str]> {
+    if segments
+        .first()
+        .is_none_or(|segment| segment.trim().is_empty())
+    {
+        return Err(CliError::usage(format!(
+            "verb '{verb}' requires a target id: it addresses one item under {}, \
+             and without an id it would address the whole collection",
+            api.collection_path()
+        )));
+    }
+    Ok(segments)
+}
+
 /// Map one of the six uniform CRUD verbs onto a request against `api`.
 ///
 /// Returns a usage error for an unrecognized verb; in normal dispatch the
@@ -105,11 +143,17 @@ pub fn build_crud(api: &ResourceApi, verb: &str, input: &ResourceInput) -> CliRe
     let segments = input.segment_refs();
     match verb {
         "list" => api.read(&segments, &input.list),
-        "get" => api.get(&segments),
+        "get" => api.get(require_item_segments(api, verb, &segments)?),
         "create" => api.create(input.require_body(verb)?),
-        "replace" => api.replace(&segments, input.require_body(verb)?),
-        "update" => api.update(&segments, input.require_body(verb)?),
-        "delete" => api.delete(&segments),
+        "replace" => api.replace(
+            require_item_segments(api, verb, &segments)?,
+            input.require_body(verb)?,
+        ),
+        "update" => api.update(
+            require_item_segments(api, verb, &segments)?,
+            input.require_body(verb)?,
+        ),
+        "delete" => api.delete(require_item_segments(api, verb, &segments)?),
         other => Err(CliError::usage(format!(
             "verb '{other}' is not a standard CRUD verb for {}",
             api.collection_path()

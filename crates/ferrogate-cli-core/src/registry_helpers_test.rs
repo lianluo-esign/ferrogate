@@ -94,3 +94,70 @@ fn item_action_and_delete_helpers() {
     assert_eq!(delete.method, Method::DELETE);
     assert_eq!(delete.path, "/admin/v1/virtual-keys/vk_1");
 }
+
+// --- #361 review finding 1: item verbs must not fall back to the collection ---
+//
+// `item_path(&[])` returns the BARE COLLECTION path, so before this guard an
+// omitted id silently retargeted the whole collection: `projects get` issued
+// `GET /admin/v1/projects` (the LIST operation, from a verb declaring
+// `getProject`) and `projects delete` issued a collection-level DELETE.
+//
+// These assert on the RESULT of building the request, not on the presence of a
+// guard call, so reverting `build_crud` to pass `&segments` straight through
+// reds them.
+
+#[test]
+fn item_verbs_refuse_to_address_the_collection_when_the_id_is_omitted() {
+    for verb in ["get", "delete"] {
+        let error = build_crud(&API, verb, &ResourceInput::new())
+            .expect_err("an item verb with no id must be a usage error");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("requires a target id"),
+            "{verb}: unhelpful error: {rendered}"
+        );
+        assert!(
+            rendered.contains("/admin/v1/projects"),
+            "{verb}: the error must name the collection it would have hit: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn body_bearing_item_verbs_also_refuse_the_bare_collection() {
+    // A body is supplied, so the only thing that can refuse these is the id
+    // arity check -- this is what stops `api-keys replace --data '{...}'`
+    // becoming `PUT /admin/v1/api-keys`.
+    for verb in ["replace", "update"] {
+        let input = ResourceInput::new().with_body(serde_json::json!({"name": "x"}));
+        assert!(
+            build_crud(&API, verb, &input).is_err(),
+            "{verb} with a body but no id must still be refused"
+        );
+    }
+}
+
+#[test]
+fn a_blank_id_is_refused_rather_than_collapsing_to_the_collection() {
+    let input = ResourceInput::new().with_segments(["   "]);
+    assert!(
+        build_crud(&API, "delete", &input).is_err(),
+        "a whitespace-only id must not be treated as an absent path segment"
+    );
+}
+
+#[test]
+fn list_and_create_still_address_the_collection_deliberately() {
+    // The guard must not overreach: an empty segment list IS the top-level
+    // list, and create addresses the collection by definition. If this reds,
+    // the fix broke the two verbs that are supposed to hit the collection.
+    let list = build_crud(&API, "list", &ResourceInput::new()).expect("list needs no id");
+    assert_eq!(list.path, "/admin/v1/projects");
+    let create = build_crud(
+        &API,
+        "create",
+        &ResourceInput::new().with_body(serde_json::json!({"name": "x"})),
+    )
+    .expect("create needs no id");
+    assert_eq!(create.path, "/admin/v1/projects");
+}
