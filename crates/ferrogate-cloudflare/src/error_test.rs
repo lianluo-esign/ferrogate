@@ -57,8 +57,7 @@ fn r2_rate_limit_is_classified_by_status_429_not_by_code_10058() {
     // Cloudflare's Lists/Bulk-Redirect namespace 10058 means "list items
     // incompatible with list type" (HTTP 400). So both halves below are
     // load-bearing: the status decides, the code does not.
-    let by_status =
-        CloudflareError::from_response(429, None, vec![err(10058, "TooManyRequests")]);
+    let by_status = CloudflareError::from_response(429, None, vec![err(10058, "TooManyRequests")]);
     assert!(
         matches!(by_status, CloudflareError::RateLimited { .. }),
         "429 must classify as a rate limit, got {by_status:?}"

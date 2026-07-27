@@ -334,7 +334,11 @@ fn code_10013_at_400_reaches_the_caller_as_api_after_exactly_one_request() {
     // old `code == 10013 => RateLimited` branch would change the variant
     // above but NOT this count — which is exactly why the pre-#493 rationale
     // ("retried until the backoff budget was burned") was wrong.
-    assert_eq!(*transport.calls.lock().unwrap(), 1, "400 must not be retried");
+    assert_eq!(
+        *transport.calls.lock().unwrap(),
+        1,
+        "400 must not be retried"
+    );
     assert!(
         clock.delays.lock().unwrap().is_empty(),
         "400 must not back off, got {:?}",
