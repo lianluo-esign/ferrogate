@@ -174,9 +174,14 @@ run_cli_tooling() {
   # Mirrors the `cli_all` slice. #561 measured the unfiltered run as red on
   # arrival (352 passed, 13 failed across 8 targets) and left it out rather
   # than land a check the next person would turn off; #564 fixed all 13, so it
-  # is here. 66 targets, 365 passed, 0 failed. This is the slowest line in the
-  # file -- 134s of test time, 71s of it in target_capability_e2e -- and it
-  # comes last so the filtered slices above report first.
+  # is here. 66 targets, 365 passed, 0 failed.
+  #
+  # In CI this is one more parallel matrix leg. HERE it is not: this file runs
+  # everything sequentially on purpose, so this line is 134s added to the end
+  # of the module -- 71s of it in target_capability_e2e -- over targets the
+  # four filtered lines above have already built and largely already run. That
+  # is a real duplication and it is the price of the mirror being a mirror. It
+  # comes last so the filtered slices report first.
   cargo test -p ferrogate-cli --all-features
 }
 

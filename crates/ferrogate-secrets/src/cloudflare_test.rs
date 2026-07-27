@@ -186,7 +186,11 @@ fn canonical_names_are_unambiguous_and_everything_else_is_not() {
 /// `is_ascii_alphanumeric()` -> `is_alphanumeric()` is a one-word edit that
 /// leaves every other assertion in this file green (`é` and `٣` are neither
 /// canonical nor unambiguous either way, and the aliasing pairs still alias)
-/// while emitting `FERROGATE_CF_SECRET_CAFÉ_KEY`.
+/// while emitting `FERROGATE_CF_SECRET_CAFé_KEY` -- lowercase, because
+/// `to_ascii_uppercase` is the identity on every non-ASCII character, which is
+/// the second half of the same defect and was itself mis-described here as an
+/// uppercase `É` until review re-derived it. The `is_ascii_uppercase()` arm of
+/// the assertion below is what catches it either way.
 ///
 /// The property is the whole point of the prefix convention: whatever an
 /// operator names a secret, what FerroGate asks the platform to export must be

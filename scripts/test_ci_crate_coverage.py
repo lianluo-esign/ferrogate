@@ -252,22 +252,47 @@ class CiCrateCoverageTests(unittest.TestCase):
         """The counterpart: comment stripping must not truncate a real command,
 
         which is how a "skip a comment" fix turns into a coverage hole of its
-        own."""
+        own. The `#` sits BEFORE the `-p` flag, which is the only position that
+        discriminates: with the trailing `-- --skip 'issue #563 fixture'` shape
+        this file shipped first, deleting the quote-tracking branch from
+        `strip_comment` still left `-p ferrogate-gateway` intact, the crate
+        credited and all twenty-one tests of the day green."""
         result = self.run_checker(
             members=["ferrogate-gateway"],
             ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
-            local_runner="cargo test -p ferrogate-gateway -- --skip 'issue #563 fixture'\n",
+            local_runner="cargo test --features 'unstable #563' -p ferrogate-gateway"
+            " -- --skip 'issue #563 fixture'\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_quoted_hash_before_the_command_does_not_erase_the_command(self) -> None:
+        """And the same rule where nothing but crate credit can catch it.
+
+        An environment prefix is how this repo pins `AGENT_WORKER_DOCKER_BIN`
+        for the `platform-crates` module. Put a quoted `#` in one and
+        over-stripping deletes the whole invocation -- `cargo test` included --
+        so the filter half of this gate never even looks at the line and the
+        crate is simply reported as run by nothing."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="FERROGATE_TEST_TAG='issue #563' "
+            "cargo test -p ferrogate-gateway --all-features\n",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
     # ---- a function nothing dispatches runs for nobody -----------------------
 
     def test_a_cargo_test_in_an_undispatched_function_is_not_coverage(self) -> None:
-        """Review's second dead-code hole: drop the `case` arm and the six
+        """Review's second dead-code hole: drop the `case` arm and FIVE of the
 
-        crates in `run_platform_crates` have no local invocation left, while
-        the function -- and its `cargo test` lines -- sit there looking like
-        coverage."""
+        six crates in `run_platform_crates` have no local invocation left,
+        while the function -- and its `cargo test` lines -- sit there looking
+        like coverage. Five, measured on the real script:
+        `ferrogate-gateway` survives, because `run_governed_decisions` selects
+        it as well. The crate #561 is named after is the one that does not drop
+        out, which is what "selection is not health" costs when a crate is
+        selected twice and one selector dies."""
         result = self.run_checker(
             members=["ferrogate-gateway"],
             ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
@@ -305,7 +330,203 @@ class CiCrateCoverageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_function_named_only_inside_a_string_is_not_dispatched(self) -> None:
+        """Reachability was a MENTION graph, and review broke it on the real
+
+        script in one edit: `platform-crates) echo "run_platform_crates is
+        disabled" ;;` left all twenty-two members credited and the gate green,
+        because the name still appeared inside `run_module`. A name in a string
+        is data. This differs from the positive above in exactly the two words
+        that stop it being a call.
+
+        This exact shape is caught twice over -- the quote stripping and the
+        command-position rule each suffice for it -- so the two tests below
+        exist to hold each of those mechanisms on its own."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="run_platform_crates() {\n"
+            "  cargo test -p ferrogate-gateway --all-features\n"
+            "}\n"
+            "run_module() {\n"
+            "  case \"$1\" in\n"
+            '    platform-crates) echo "run_platform_crates is disabled" ;;\n'
+            "  esac\n"
+            "}\n"
+            'run_module "$1"\n',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ferrogate-gateway", result.stderr)
+        self.assertIn("local-test-modules.sh", result.stderr)
+
+    def test_a_function_named_as_a_bare_argument_is_not_dispatched(self) -> None:
+        """Holds `command_position` alone: no quotes anywhere, so stripping
+
+        them changes nothing, and only "is this where a shell would START a
+        command?" separates `echo run_platform_crates` from running it."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="run_platform_crates() {\n"
+            "  cargo test -p ferrogate-gateway --all-features\n"
+            "}\n"
+            "run_module() {\n"
+            "  case \"$1\" in\n"
+            "    platform-crates) echo run_platform_crates is disabled ;;\n"
+            "  esac\n"
+            "}\n"
+            'run_module "$1"\n',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ferrogate-gateway", result.stderr)
+        self.assertIn("local-test-modules.sh", result.stderr)
+
+    def test_a_string_that_looks_like_a_command_list_is_not_one(self) -> None:
+        """And holds `strip_quoted` alone: the `;` inside the message puts the
+
+        name in command position by the letter of the rule, so the only thing
+        left to notice that it is a message and not a command is that it is
+        quoted."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="run_platform_crates() {\n"
+            "  cargo test -p ferrogate-gateway --all-features\n"
+            "}\n"
+            "run_module() {\n"
+            "  case \"$1\" in\n"
+            '    platform-crates) echo "disabled; run_platform_crates was retired" ;;\n'
+            "  esac\n"
+            "}\n"
+            'run_module "$1"\n',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ferrogate-gateway", result.stderr)
+        self.assertIn("local-test-modules.sh", result.stderr)
+
+    def test_a_function_named_only_in_a_heredoc_is_not_dispatched(self) -> None:
+        """The same, one construct over. This script prints its module menu
+
+        from a heredoc; the day that menu lists a function name rather than a
+        module name, a mention graph reads the help text as a dispatch."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="run_platform_crates() {\n"
+            "  cargo test -p ferrogate-gateway --all-features\n"
+            "}\n"
+            "usage() {\n"
+            "  cat <<'USAGE'\n"
+            "Modules:\n"
+            "  run_platform_crates\n"
+            "USAGE\n"
+            "}\n"
+            "usage\n",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ferrogate-gateway", result.stderr)
+        self.assertIn("local-test-modules.sh", result.stderr)
+
+    def test_the_function_keyword_spelling_is_a_definition_too(self) -> None:
+        """`function name {` is a definition, so its body needs a dispatch like
+
+        any other. Unrecognized, the body falls through to top-level code and
+        is credited unconditionally -- which is the one direction a
+        reachability model must not fail in silently."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="function run_platform_crates {\n"
+            "  cargo test -p ferrogate-gateway --all-features\n"
+            "}\n"
+            "run_quality() {\n"
+            "  cargo fmt --all -- --check\n"
+            "}\n"
+            "run_quality\n",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ferrogate-gateway", result.stderr)
+        self.assertIn("local-test-modules.sh", result.stderr)
+
+    def test_an_indented_brace_does_not_end_a_function_body(self) -> None:
+        """`SHELL_FUNCTION_END` anchors at column zero, and loosening it to
+
+        `^\\s*\\}` survived every test this file had: the `}` closing a `{ ...;
+        }` group inside a body ends the function early, and everything after it
+        -- the `cargo test` included -- becomes top-level code, credited with
+        no dispatch at all. The function below is deliberately never
+        dispatched, so the only way this passes is by ending it early."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="run_platform_crates() {\n"
+            "  if true; then\n"
+            "    {\n"
+            "      echo grouped\n"
+            "    }\n"
+            "  fi\n"
+            "  cargo test -p ferrogate-gateway --all-features\n"
+            "}\n"
+            "run_quality() {\n"
+            "  cargo fmt --all -- --check\n"
+            "}\n"
+            "run_quality\n",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ferrogate-gateway", result.stderr)
+        self.assertIn("local-test-modules.sh", result.stderr)
+
     # ---- matrix credit stays inside the job that asked for it ---------------
+
+    def test_matrix_credit_does_not_cross_from_one_job_to_the_next(self) -> None:
+        """The job scoping itself, which nothing held.
+
+        The two tests below both template `${{ matrix.args }}` while naming
+        their crate literally, so `TEMPLATED_PACKAGE_FLAG` collects no key in
+        either and `workflow_job_regions` never runs: reverting it to a single
+        file-wide region -- `return [text]` -- left all thirty tests green.
+        Here job `a` DOES interpolate `${{ matrix.package }}`, and job `b`
+        carries a different crate's `package:` key for a step that only builds.
+        File-wide, `a`'s key finds `b`'s value and marks it tested."""
+        result = self.run_checker(
+            members=["ferrogate-cli", "ferrogate-storage"],
+            ci_workflow=textwrap.dedent(
+                """
+                jobs:
+                  a:
+                    strategy:
+                      matrix:
+                        include:
+                          - package: ferrogate-cli
+                    steps:
+                      - run: cargo test -p "${{ matrix.package }}" --all-features
+                  b:
+                    strategy:
+                      matrix:
+                        include:
+                          - package: ferrogate-storage
+                    steps:
+                      - run: cargo build -p "${{ matrix.package }}" --locked
+                """
+            ),
+            local_runner="cargo test -p ferrogate-cli\ncargo test -p ferrogate-storage\n",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("ferrogate-storage", result.stderr)
+        self.assertNotIn("ferrogate-cli", result.stderr)
+
+    def test_the_long_package_spelling_is_read_too(self) -> None:
+        """`--package` is documented in `PACKAGE_FLAG` as accepted "so a future
+
+        rewrite does not slip past", and no fixture used it: dropping the
+        alternative left all thirty tests green while every `--package` slice
+        in a rewritten workflow silently stopped counting."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test --package ferrogate-gateway\n",
+            local_runner="cargo test --package=ferrogate-gateway --all-features\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_a_package_key_in_another_job_is_not_credited(self) -> None:
         """`rust-gateway-runtime.yml` templates its run line through
@@ -389,6 +610,43 @@ class CiCrateCoverageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("pass vacuously", result.stderr)
         self.assertNotIn("workspace members whose tests nothing executes", result.stderr)
+
+    def test_a_manifest_with_no_readable_members_is_an_error(self) -> None:
+        """The `if not directories:` floor, which nothing held.
+
+        Deleting it is the shortest route to a vacuous pass in this whole
+        script: no members means no missing members, so the gate prints
+        `validated 0 workspace members` and exits 0 having checked nothing.
+        Asserting the exit code alone would not hold it either -- both stdout
+        assertions below are the discriminator."""
+        result = self.run_checker(
+            members=[],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not parse [workspace] members", result.stderr)
+        self.assertNotIn("validated 0 workspace members", result.stdout)
+        self.assertNotIn("validated", result.stdout)
+
+    def test_a_runner_that_dispatches_nothing_is_an_error(self) -> None:
+        """The `if not reachable:` floor, which nothing held either.
+
+        Replacing that raise with `return text` restores exactly the flat read
+        the dispatch model was added to remove, and does it for the whole file
+        at once: every `cargo test` in every function is credited again. The
+        message is the assertion, because a stricter mutation
+        (`if False:`) also exits 1 -- by blaming the crates instead of saying
+        the script dispatches nothing."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="run_platform_crates() {\n"
+            "  cargo test -p ferrogate-gateway --all-features\n"
+            "}\n",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("calls none of them", result.stderr)
 
     def test_a_member_line_this_parser_cannot_read_is_an_error(self) -> None:
         """A dropped member is a crate that exempts itself from the gate while

@@ -68,13 +68,19 @@ jobs:
           # It is deliberately kept BESIDE the four filtered slices rather than
           # replacing them. They are the fast, independently-failing signals --
           # `cli_e2e` red tells you which surface broke without reading a
-          # 66-target log -- and matrix legs run in parallel, so the cost is
-          # one more concurrent runner, not more wall clock on the critical
-          # path. That cost is real and is the slowest leg of this workflow:
-          # 134s of test time across the 65 binaries, of which
-          # `target_capability_e2e` alone is 71s and `asset_presign_e2e` 21s,
-          # on top of a full ferrogate-cli build. If it ever needs trimming,
-          # those two targets are where the time is, not the long tail.
+          # 66-target log.
+          #
+          # What it costs, stated plainly, because the first version of this
+          # comment said "not more wall clock on the critical path" and then
+          # "the slowest leg of this workflow" two sentences later, which
+          # cannot both be true. Matrix legs run in parallel, so this slice
+          # adds nothing to any OTHER leg's wall clock -- but it is the longest
+          # leg, so it is the one that decides when this workflow finishes and
+          # therefore when `rust-ci` stops waiting. 134s of test time across
+          # the 65 binaries, of which `target_capability_e2e` alone is 71s and
+          # `asset_presign_e2e` 21s, on top of a full ferrogate-cli build. If
+          # it ever needs trimming, those two targets are where the time is,
+          # not the long tail.
           - slice: cli_all
             package: ferrogate-cli
             args: --all-features

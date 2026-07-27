@@ -190,7 +190,9 @@ the aggregate branch-protection gate. Reusable modules:
 | `rust-control-plane-tests.yml` | control plane/auth/storage/billing/observability |
 | `rust-agentic-gateway-tests.yml` | agentic gateway/MCP/provider runtime |
 | `rust-ai-proxy-tests.yml` | AI proxy/upstream proxy |
+| `governed-decision-conformance.yml` | Governed-decision conformance (#470): Runner A, the Rust authority; Runner B, the Worker shell |
 | `rust-cli-tooling-tests.yml` | CLI/tooling/test-harness |
+| `rust-platform-crate-tests.yml` | gateway trunk, agent worker, secrets/payments/cloudflare/sync-bridge (#561) |
 | `rust-gateway-runtime.yml` | gateway runtime + performance smoke |
 | `rust-e2e-harness.yml` | E2E harness (Contract, Cross-component chain, Durability, E2E) |
 | `rust-supabase-storage-tests.yml` | Supabase/Postgres storage + durability |
@@ -199,9 +201,19 @@ These workflows are release gates: the top-level orchestrators trigger only on
 `release: published`, and reusable modules are `workflow_call`-only. They do not
 replace local proof for commits between releases. Locally,
 `scripts/local-test-modules.sh <module>` mirrors these gates
-(`quality`, `core-policy`, `control-plane`, `agentic-gateway`, `ai-proxy`,
-`cli-tooling`, `gateway-runtime`, `e2e-harness`, `supabase-storage`). Run the
-narrowest module that covers your change before pushing.
+(`quality`, `core-policy`, `control-plane`, `agentic-gateway`,
+`governed-decisions`, `ai-proxy`, `cli-tooling`, `platform-crates`,
+`gateway-runtime`, `e2e-harness`, `supabase-storage`). Run the narrowest module
+that covers your change before pushing.
+
+That list and that table are both checked, not maintained by hand:
+`scripts/check-ci-crate-coverage.py` fails when a workspace member is selected
+by no workflow reachable from `ci.yml` or by no module in that script, and when
+a `cargo test` name filter on either surface selects no test. The list here had
+already drifted — `governed-decisions` and `platform-crates` are #470's and
+#561's and neither appeared above — which is the documented-surface half of
+exactly the drift that gate exists to catch, one layer out from where it can
+see.
 
 ---
 

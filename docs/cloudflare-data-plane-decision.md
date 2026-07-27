@@ -793,9 +793,17 @@ shell never claims that code without a deny list.
 
 `.github/workflows/governed-decision-conformance.yml`, wired into `ci.yml` and
 into the `rust-ci` aggregate so it blocks: `runner-a-authority` runs
-`cargo test -p ferrogate-cli --bin ferrogate governed_decision`,
+`cargo test -p ferrogate-gateway --all-features governed_decision` (18 tests),
 `runner-b-worker-shell` runs `npm ci && npm run typecheck && npm test` in
-`workers/gateway-front`. A live-network variant remains the test gate's to own,
+`workers/gateway-front`.
+
+That Runner A line read `cargo test -p ferrogate-cli --bin ferrogate
+governed_decision` until #561's rework, and had selected zero tests since #553
+stage 3b moved the seam into `ferrogate-gateway` — libtest exits 0 on a filter
+that matches nothing, so this section described a blocking gate that was running
+no test on the authority side. It is recorded here rather than quietly
+overwritten because this document is where someone goes to find the command,
+and running the old one still exits 0 today. A live-network variant remains the test gate's to own,
 as with every other live proof in this repo. `tools/ferrogate-test/` is
 untouched: the suite belongs next to the code it conforms, and the cross-host
 driver turned out to be the corpus itself rather than a third program.

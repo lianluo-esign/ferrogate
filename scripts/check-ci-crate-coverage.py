@@ -69,9 +69,23 @@ found both live in this tree:
     comment SAYING the crate was under-covered -- was what credited that crate
     as covered locally;
   * a `cargo test` inside a bash function that `run_module` never dispatches.
-    Deleting `platform-crates) run_platform_crates ;;` orphaned six crates'
-    only local invocation and the gate did not notice, because it modelled
+    Deleting `platform-crates) run_platform_crates ;;` orphans the only local
+    invocation of five of that function's six crates -- `agent-worker`,
+    `ferrogate-cloudflare`, `ferrogate-payments`, `ferrogate-secrets`,
+    `ferrogate-sync-bridge` -- and the gate did not notice, because it modelled
     workflow reachability via `uses:` and the script's reachability not at all.
+    Five, not six: `ferrogate-gateway`, the crate #561 is named after, is the
+    one that SURVIVES that deletion, because `run_governed_decisions` selects
+    it too. Selection is not health, and a crate selected twice hides the loss
+    of either selector.
+
+  * a function name that appears in a reachable line without being RUN by it.
+    `platform-crates) echo "run_platform_crates is disabled" ;;` left all
+    twenty-two members credited and the gate green, because reachability was a
+    mention graph. It is a command-position graph now: quoted strings and
+    heredoc bodies are data, and a name only counts where a shell would execute
+    it (line start, or after `;`, `&&`, `||`, `|`, a `case` arm's `)`, `(`,
+    `{`, a backtick, `!`, `then`, `else` or `do`).
 
 And one thing the filter check deliberately does not attempt, stated so its
 scope is not overread: a run line whose arguments come from a matrix
@@ -119,11 +133,24 @@ PACKAGE_NAME = re.compile(r"^\s*name\s*=\s*['\"]([^'\"]+)['\"]", re.MULTILINE)
 JOBS_BLOCK = re.compile(r"^jobs:\s*$")
 JOB_KEY = re.compile(r"^(\s+)[A-Za-z0-9_.-]+:\s*$")
 # `run_platform_crates() {` ... a matching `}` at column zero. This repo writes
-# every bash function that way; a definition indented or brace-styled otherwise
-# is not recognized as a function and its body stays top-level, which credits
-# more rather than less.
-SHELL_FUNCTION = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*$")
+# every bash function that way; `function name {` and `function name() {` are
+# accepted too, because a definition this parser does not recognize leaves its
+# body top-level, i.e. credits more rather than less, and that is the direction
+# a false credit travels in.
+SHELL_FUNCTION = re.compile(
+    r"^(?:function\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\s*\))?"
+    r"|([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\))\s*\{\s*$"
+)
+# Column zero, and only column zero. An indented `}` closes a `{ ...; }` group,
+# a `case` arm's brace or a nested block INSIDE a function body; treating it as
+# the end of the function spills the rest of that body into top-level code,
+# where it is credited without any dispatch at all.
 SHELL_FUNCTION_END = re.compile(r"^\}\s*$")
+# `cat <<'USAGE'` / `<<-EOF` / `<<EOF`, but not the `<<<` here-string. A heredoc
+# body is data handed to a command, not commands: this repo's own `usage`
+# heredoc lists module names, and the day one of those lists a function name the
+# gate must not read that as a dispatch.
+HEREDOC_OPEN = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 # --- name-filter resolution (#553) -------------------------------------------
 #
@@ -211,6 +238,74 @@ def strip_comment(line: str) -> str:
 
 def strip_comments(text: str) -> str:
     return "\n".join(strip_comment(line) for line in text.splitlines())
+
+
+def strip_heredoc_bodies(text: str) -> str:
+    """Drop every heredoc body, keeping the line that opened it.
+
+    A heredoc is an argument, not a command list. `usage()` in this repo prints
+    its module menu from one, and a `cargo test` written inside such a block
+    would be a string being echoed, not a suite being run.
+    """
+    kept: list[str] = []
+    terminator: str | None = None
+    dashed = False
+    for line in text.splitlines():
+        if terminator is not None:
+            if (line.strip() if dashed else line.rstrip()) == terminator:
+                terminator = None
+            continue
+        kept.append(line)
+        if "<<<" in line:
+            continue
+        opened = HEREDOC_OPEN.search(line)
+        if opened is not None:
+            terminator = opened.group(2)
+            dashed = "<<-" in line
+    return "\n".join(kept)
+
+
+def strip_quoted(text: str) -> str:
+    """Replace every quoted span with a space. A name in a string is data.
+
+    `echo "run_platform_crates is disabled"` mentions a function and runs
+    nothing. Substituting a space rather than deleting the span keeps two
+    tokens from being welded into a third that neither line contains.
+    """
+    stripped: list[str] = []
+    for line in text.splitlines():
+        buffer: list[str] = []
+        quote = ""
+        for character in line:
+            if quote:
+                if character == quote:
+                    quote = ""
+                    buffer.append(" ")
+                continue
+            if character in "'\"":
+                quote = character
+                continue
+            buffer.append(character)
+        if quote:
+            buffer.append(" ")
+        stripped.append("".join(buffer))
+    return "\n".join(stripped)
+
+
+def command_position(name: str) -> re.Pattern[str]:
+    """`name` where a shell would RUN it, not merely where it is written.
+
+    The separators are every place a bash command can begin: the start of a
+    line, `;` (which covers a `case` arm's `;;`), `&`/`&&`, `|`/`||`, the `)`
+    that closes a `case` pattern, `(`, `{`, a backtick, `!`, and the `then`,
+    `else` and `do` keywords.
+    """
+    return re.compile(
+        r"(?:^|[;&|(){}`!]|\bthen\b|\belse\b|\bdo\b)\s*"
+        + re.escape(name)
+        + r"(?![A-Za-z0-9_-])",
+        re.MULTILINE,
+    )
 
 
 def workspace_members(root: pathlib.Path) -> dict[str, str]:
@@ -351,16 +446,36 @@ def shell_reachable_text(text: str, label: str) -> str:
     """The part of a bash script that running it can actually reach.
 
     A `cargo test` inside a function nothing dispatches runs for nobody. Delete
-    `platform-crates) run_platform_crates ;;` from `run_module` and the six
-    crates in that function -- `ferrogate-gateway` among them -- have no local
-    invocation left, which is #561 exactly. The gate followed `uses:` through
-    the workflows and read the script as a flat pile of lines.
+    `platform-crates) run_platform_crates ;;` from `run_module` and five of the
+    six crates in that function have no local invocation left -- not
+    `ferrogate-gateway`, which `run_governed_decisions` also selects. The gate
+    followed `uses:` through the workflows and read the script as a flat pile
+    of lines.
 
-    Functions are recognized only in this repo's style (`name() {` on its own
-    line, closing `}` at column zero). Anything else stays top-level, so an
-    unrecognized definition over-credits rather than failing the script's
-    author for a formatting choice.
+    Functions are recognized in this repo's style (`name() {` on its own line,
+    closing `}` at column zero) and in the `function name {` spelling. Anything
+    else stays top-level, so an unrecognized definition over-credits rather
+    than failing the script's author for a formatting choice.
+
+    A name counts as dispatched only where a shell would run it. The first
+    version of this model asked whether the name appeared at all, which is not
+    the same question: `platform-crates) echo "run_platform_crates is
+    disabled" ;;` kept every crate in that function credited, on the real
+    script, with the gate green.
+
+    What it still over-credits, said here rather than left to be found: a
+    function DEFINED inside another function's body is not seen as a
+    definition (the closing `}` at column zero belongs to the outer one), so
+    its lines are read whenever the outer function is reachable, whether or not
+    anything calls the inner one. And a name reached through `eval`, a variable
+    (`"$module"`), or any indirection is invisible either way -- in the
+    crediting direction for the first and the failing direction for the
+    second. This is a reachability approximation, not a bash interpreter; what
+    it must never do is call something reachable that is not, and the three
+    constructs above are why "must never" is "does not, for the constructs
+    this repository writes".
     """
+    text = strip_heredoc_bodies(text)
     bodies: dict[str, list[str]] = {}
     toplevel: list[str] = []
     current: str | None = None
@@ -368,7 +483,7 @@ def shell_reachable_text(text: str, label: str) -> str:
         if current is None:
             match = SHELL_FUNCTION.match(line)
             if match is not None:
-                current = match.group(1)
+                current = match.group(1) or match.group(2)
                 bodies.setdefault(current, [])
                 continue
             toplevel.append(line)
@@ -381,13 +496,11 @@ def shell_reachable_text(text: str, label: str) -> str:
     if not bodies:
         return text
 
+    patterns = {name: command_position(name) for name in bodies}
+
     def calls(region: list[str]) -> set[str]:
-        body = "\n".join(region)
-        return {
-            name
-            for name in bodies
-            if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", body)
-        }
+        body = strip_quoted("\n".join(region))
+        return {name for name, pattern in patterns.items() if pattern.search(body)}
 
     reachable: set[str] = set()
     pending = sorted(calls(toplevel))

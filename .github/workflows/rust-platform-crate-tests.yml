@@ -18,8 +18,12 @@
 # for `agent_worker`: on this box there is no Docker daemon and on
 # `ubuntu-latest` there is, and three of that crate's tests branch on a bare
 # `docker version` probe. The `docker_bin` matrix key below is what makes the
-# claim true again rather than the claim being softened. Two counts were also
-# wrong (`payments`, `secrets`) and are corrected from a fresh run.
+# claim true again rather than the claim being softened. ONE count was also
+# wrong -- `payments`, which recorded a single target's 47 as the whole slice's
+# 82. `secrets` moved 50 -> 51 for a different reason entirely: the rework added
+# a test. A header whose job is to make the numbers below trustworthy cannot
+# file a correction and a change under the same heading, and the first version
+# of this paragraph did.
 name: Rust platform crate tests
 
 on:
