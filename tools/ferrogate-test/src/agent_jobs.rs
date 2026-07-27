@@ -360,6 +360,32 @@ pub(crate) fn run_agent_jobs_api(args: &LocalArgs) -> Result<()> {
         );
     }
 
+    // --- Box 5 (#527): a submit that OMITS `required_capabilities` is accepted,
+    // and the runtime's own default reaches the worker. ---
+    //
+    // This is the contract #527 bet the admin console on when it widened the
+    // generated type to `required_capabilities?: string[]`. Asserting the 202
+    // alone would be vacuous, and so would asserting only that a worker leases
+    // it: verified by neutralizing the handler's `is_empty() -> ["shell"]`
+    // fallback, a dispatch carrying `required_capabilities: []` is STILL offered
+    // to and leased by this worker. The requirement the omitted field must
+    // satisfy is that the dispatch reaches the runtime carrying the documented
+    // default, so the assertion has to read the leased dispatch's own list.
+    let defaulted = submit_job_omitting_capabilities(
+        &gateway_addr,
+        "harness-defaulted-capabilities",
+        "run with no declared capabilities",
+    )?;
+    let defaulted_lease =
+        lease_dispatch_for(&gateway_addr, &worker_id, &transport_secret, &defaulted)?;
+    if defaulted_lease["required_capabilities"] != serde_json::json!(["shell"]) {
+        bail!(
+            "a submit omitting required_capabilities must dispatch the runtime default \
+             [\"shell\"], got {}: {defaulted_lease}",
+            defaulted_lease["required_capabilities"]
+        );
+    }
+
     println!("agent-jobs-api scenario passed");
     Ok(())
 }
@@ -411,23 +437,63 @@ fn resubmit_job(gateway_addr: &str, idempotency_key: &str, input: &str) -> Resul
     Ok(run_id)
 }
 
+/// A first `POST /v1/agent-jobs` whose body OMITS `required_capabilities`
+/// entirely -> 202, and the runtime supplies its own default.
+///
+/// #527 made `required_capabilities` optional in the OpenAPI contract and in
+/// the generated TS client, on the strength of `#[serde(default)]` plus the
+/// `is_empty() -> ["shell"]` fallback in the submit handler. The admin console
+/// now omits the field on every submit, so that fallback is load-bearing for a
+/// real caller — and nothing exercised it: this harness and
+/// `agent_jobs_test.rs` both only ever sent `["shell"]` explicitly.
+fn submit_job_omitting_capabilities(
+    gateway_addr: &str,
+    idempotency_key: &str,
+    input: &str,
+) -> Result<String> {
+    let (run_id, deduplicated) = submit_raw_with(gateway_addr, idempotency_key, input, 202, None)?;
+    if deduplicated {
+        bail!("a first submit under {idempotency_key} must not report deduplicated=true");
+    }
+    Ok(run_id)
+}
+
 fn submit_raw(
     gateway_addr: &str,
     idempotency_key: &str,
     input: &str,
     expected_status: u16,
 ) -> Result<(String, bool)> {
+    submit_raw_with(
+        gateway_addr,
+        idempotency_key,
+        input,
+        expected_status,
+        Some(&["shell"]),
+    )
+}
+
+/// `capabilities: None` omits the `required_capabilities` key from the request
+/// body altogether — not `[]`, not `null`, absent — which is what the console
+/// and any other optional-field client actually put on the wire.
+fn submit_raw_with(
+    gateway_addr: &str,
+    idempotency_key: &str,
+    input: &str,
+    expected_status: u16,
+    capabilities: Option<&[&str]>,
+) -> Result<(String, bool)> {
     let header = format!("Idempotency-Key: {idempotency_key}");
+    let mut payload = serde_json::json!({ "input": input });
+    if let Some(capabilities) = capabilities {
+        payload["required_capabilities"] = serde_json::json!(capabilities);
+    }
     let response = http_request_addr(
         gateway_addr,
         "POST",
         "/v1/agent-jobs",
         &[CALLER_AUTH, JSON_CONTENT, header.as_str()],
-        &serde_json::json!({
-            "input": input,
-            "required_capabilities": ["shell"]
-        })
-        .to_string(),
+        &payload.to_string(),
     )?;
     if response.status != expected_status {
         bail!(
