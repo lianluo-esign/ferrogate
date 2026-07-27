@@ -21,6 +21,7 @@
 //! 6. render data to stdout (table or stable JSON) and diagnostics to stderr;
 //! 7. map any failure onto a stable [`ExitClass`](ferrogate_cli_core::ExitClass).
 
+use ferrogate_cli_core::action_identity::{ClientActionIdentity, FingerprintEnv};
 use ferrogate_cli_core::auth::{resolve_credential, Credential};
 use ferrogate_cli_core::context::EffectiveContext;
 use ferrogate_cli_core::error::CliResult;
@@ -59,10 +60,14 @@ fn status(effective: EffectiveContext, credential: Option<Credential>) -> CliRes
     let spec = ops::build_system("status", &ResourceInput::new())?;
     let output_format = effective.output;
 
+    // One identity per operator action (issue #548). `ops status` is a read,
+    // and a read is also "what this CLI did", so it carries the same attribution
+    // a mutation does.
+    let identity = ClientActionIdentity::mint(&effective, &FingerprintEnv::from_process())?;
     let runtime = dispatch::runtime()?;
     let response: ApiResponse = runtime.block_on(async move {
         let transport = ReqwestTransport::new(&effective)?;
-        let client = ControlPlaneClient::new(effective, credential, transport);
+        let client = ControlPlaneClient::new(effective, credential, transport, identity);
         client.send(&spec).await
     })?;
 

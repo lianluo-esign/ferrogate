@@ -37,6 +37,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
+use ferrogate_cli_core::action_identity::{ClientActionIdentity, FingerprintEnv};
 use ferrogate_cli_core::args::GlobalArgs;
 use ferrogate_cli_core::auth::{resolve_credential, Credential};
 use ferrogate_cli_core::command::Registry;
@@ -331,6 +332,12 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     let effective = dispatch::resolve_effective(&global)?;
     let credential = resolve_credential(&effective.auth, &ProcessSecretResolver)?;
     let output_format = effective.output;
+    // One identity per operator action (issue #548), minted before the verb is
+    // routed so a read and a mutation are attributed the same way, and so every
+    // page of an `--all-pages` walk shares one `action_id`. It is handed to the
+    // transport AND to the mutation plan; both hold clones sharing one
+    // server-time slot, so the receipt reports the action the server saw.
+    let identity = ClientActionIdentity::mint(&effective, &FingerprintEnv::from_process())?;
 
     // The #505 render gate. This `match` is the whole enforcement: the
     // `Receipt` arm holds a `ReceiptRenderer`, which has no `render(Value)`
@@ -360,6 +367,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
                     &redaction_spec,
                     effective,
                     credential,
+                    identity,
                 )?,
                 None,
             )
@@ -378,6 +386,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
                 spec,
                 effective,
                 credential,
+                identity,
                 resource.dry_run,
             )?
             .into_parts()
@@ -438,13 +447,14 @@ fn read_output(
     redaction_spec: &RequestSpec,
     effective: EffectiveContext,
     credential: Option<Credential>,
+    identity: ClientActionIdentity,
 ) -> CliResult<VerbOutput> {
     let all_pages = resource.all_pages;
     let page_size = resource.limit.unwrap_or(DEFAULT_PAGE_SIZE);
     let runtime = dispatch::runtime()?;
     let response: ApiResponse = runtime.block_on(async move {
         let transport = ReqwestTransport::new(&effective)?;
-        let client = ControlPlaneClient::new(effective, credential, transport);
+        let client = ControlPlaneClient::new(effective, credential, transport, identity);
         if all_pages {
             client.send_all_pages(&spec, page_size).await
         } else {
@@ -490,9 +500,12 @@ fn mutation_output(
     spec: RequestSpec,
     effective: EffectiveContext,
     credential: Option<Credential>,
+    identity: ClientActionIdentity,
     dry_run: bool,
 ) -> CliResult<MutationReport> {
-    let plan = MutationPlan::new(renderer, group_name, spec, segments, &effective, dry_run)?;
+    let plan = MutationPlan::new(
+        renderer, group_name, spec, segments, &effective, &identity, dry_run,
+    )?;
     if plan.is_dry_run() {
         return Ok(MutationReport::from(plan.dry_run()));
     }
@@ -504,7 +517,7 @@ fn mutation_output(
     // connection that died without an answer.
     runtime.block_on(async move {
         let transport = ReqwestTransport::new(&effective)?;
-        let client = ControlPlaneClient::new(effective, credential, transport);
+        let client = ControlPlaneClient::new(effective, credential, transport, identity);
         Ok(plan.send(&client).await)
     })
 }

@@ -10,6 +10,7 @@
 //! mapping. Pure logic and a fake transport — no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -174,7 +175,8 @@ fn approve_reaches_the_transport_with_the_absolute_url() {
     )
     .unwrap();
     let (transport, seen) = fake(200, br#"{"status":"approved"}"#);
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let response = block_on(client.send(&spec)).unwrap();
     assert_eq!(response.body["status"], "approved");
     let seen = seen.lock().unwrap().clone().unwrap();
@@ -195,7 +197,8 @@ fn stale_fingerprint_conflict_maps_to_its_exit_class() {
         409,
         br#"{"error":{"message":"fingerprint mismatch","type":"ferrogate_error","code":"conflict","request_id":"fgadm-a"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }

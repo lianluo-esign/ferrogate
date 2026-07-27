@@ -9,6 +9,7 @@
 //! fake transport — no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -235,7 +236,8 @@ fn create_virtual_key_secret_is_returned_once_then_redacted_from_reads() {
         201,
         br#"{"id":"vk_1","key":"vk_live_public","secret":"sk-live-onetime","status":"active"}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let response = block_on(client.send(&spec)).unwrap();
     // At create, the secret is present (the command layer routes it to a safe
     // sink); redaction is what a later read applies.
@@ -260,7 +262,8 @@ fn cross_tenant_access_maps_to_auth_class() {
         403,
         br#"{"error":{"message":"virtual key belongs to another tenant","type":"ferrogate_error","code":"forbidden","request_id":"fgadm-f"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
 }
@@ -276,7 +279,8 @@ fn validation_error_on_create_maps_to_validation_class() {
         422,
         br#"{"error":{"message":"name is required","type":"ferrogate_error","code":"invalid_request","request_id":"fgadm-v"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Validation);
 }

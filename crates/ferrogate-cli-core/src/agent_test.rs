@@ -10,6 +10,7 @@
 //! and a fake transport — no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -219,7 +220,8 @@ fn agent_run_start_posts_to_the_runtime_endpoint() {
     assert_eq!(spec.path, "/v1/agent-runs");
 
     let (transport, seen) = fake(202, br#"{"run_id":"run_1","status":"queued"}"#);
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let response = block_on(client.send(&spec)).unwrap();
     assert_eq!(response.body["run_id"], "run_1");
     let seen = seen.lock().unwrap().clone().unwrap();
@@ -251,7 +253,8 @@ fn already_terminal_run_now_maps_to_not_found_conflict_class() {
         409,
         br#"{"error":{"message":"schedule already firing","type":"ferrogate_error","code":"conflict","request_id":"fgadm-c"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }
@@ -267,7 +270,8 @@ fn insufficient_scope_on_workflow_create_maps_to_auth_class() {
         403,
         br#"{"error":{"message":"missing agent:write scope","type":"ferrogate_error","code":"forbidden","request_id":"fgadm-s"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
 }

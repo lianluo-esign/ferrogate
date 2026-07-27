@@ -11,6 +11,7 @@
 //! no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -249,7 +250,8 @@ fn wallet_money_body_passes_through_exactly_unrounded() {
     assert_eq!(adjust.body.as_ref().unwrap()["delta_credits"], -123456789);
 
     let (transport, seen) = fake(200, br#"{"balance_credits": 999}"#);
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     block_on(client.send(&adjust)).unwrap();
     let seen = seen.lock().unwrap().clone().unwrap();
     let sent: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
@@ -405,7 +407,8 @@ fn insufficient_balance_on_charge_maps_to_validation_class() {
         422,
         br#"{"error":{"message":"insufficient balance","type":"ferrogate_error","code":"unprocessable_entity","request_id":"fgadm-bal"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Validation);
 }
@@ -425,7 +428,8 @@ fn duplicate_idempotency_key_on_adjust_maps_to_conflict_class() {
         409,
         br#"{"error":{"message":"duplicate idempotency key","type":"ferrogate_error","code":"conflict","request_id":"fgadm-idem"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }
@@ -437,7 +441,8 @@ fn wrong_tenant_scope_on_wallet_get_maps_to_auth_class() {
         403,
         br#"{"error":{"message":"wallet not in scope","type":"ferrogate_error","code":"forbidden","request_id":"fgadm-scope"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
 }

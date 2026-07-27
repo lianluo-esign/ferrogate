@@ -9,6 +9,7 @@
 //! error/exit-class mapping. Pure logic and a fake transport — no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -366,7 +367,8 @@ fn dashboard_unknown_verb_is_a_usage_error() {
 fn catalog_list_reaches_the_transport_at_the_expected_url() {
     let spec = build_catalog("providers", &ResourceInput::new()).unwrap();
     let (transport, seen) = fake(200, br#"{"object":"list","data":[]}"#);
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     block_on(client.send(&spec)).unwrap();
     let seen = seen.lock().unwrap().clone().unwrap();
     assert!(
@@ -384,7 +386,8 @@ fn not_found_prompt_template_maps_to_not_found_conflict_class() {
         404,
         br#"{"error":{"message":"prompt template not found","type":"ferrogate_error","code":"not_found","request_id":"fgadm-nf"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }
@@ -400,7 +403,8 @@ fn validation_rejection_on_create_maps_to_validation_class() {
         422,
         br#"{"error":{"message":"skill package manifest invalid","type":"ferrogate_error","code":"unprocessable_entity","request_id":"fgadm-val"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Validation);
 }
@@ -412,7 +416,8 @@ fn forbidden_plugin_delete_maps_to_auth_class() {
         403,
         br#"{"error":{"message":"insufficient scope to delete plugin","type":"ferrogate_error","code":"forbidden","request_id":"fgadm-fb"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
 }

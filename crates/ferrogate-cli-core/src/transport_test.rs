@@ -8,6 +8,10 @@
 //! (#360). Pure logic only — no live network.
 
 use super::*;
+use crate::action_identity::{
+    ClientActionIdentity, FingerprintEnv, ACTION_ID_HEADER, CLIENT_CLOCK_HEADER,
+    CLIENT_FINGERPRINT_HEADER, TIME_TOKEN_HEADER,
+};
 use crate::auth::Credential;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
 use crate::error::ExitClass;
@@ -53,7 +57,13 @@ fn prepare_request_builds_url_headers_and_body() {
     let spec = RequestSpec::new(Method::POST, "/admin/v1/tenants")
         .with_json_body(serde_json::json!({"name": "new-tenant"}))
         .with_query("dry_run", "true");
-    let prepared = prepare_request(&spec, &context, Some(&credential)).unwrap();
+    let prepared = prepare_request(
+        &spec,
+        &context,
+        Some(&credential),
+        &ClientActionIdentity::fixture(),
+    )
+    .unwrap();
 
     assert_eq!(prepared.method, Method::POST);
     assert_eq!(
@@ -78,7 +88,8 @@ fn prepare_request_builds_url_headers_and_body() {
 fn prepare_request_without_credential_omits_authorization() {
     let context = context_with_endpoint("http://127.0.0.1:8080", None);
     let spec = RequestSpec::get("/admin/v1/status");
-    let prepared = prepare_request(&spec, &context, None).unwrap();
+    let prepared =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap();
     assert_eq!(prepared.header("authorization"), None);
     assert_eq!(prepared.header("x-ferrogate-tenant"), None);
     assert!(prepared.body.is_empty());
@@ -89,7 +100,8 @@ fn prepare_request_without_credential_omits_authorization() {
 fn prepare_request_preserves_endpoint_base_path() {
     let context = context_with_endpoint("https://host.example.com/gw/", None);
     let spec = RequestSpec::get("/admin/v1/status");
-    let prepared = prepare_request(&spec, &context, None).unwrap();
+    let prepared =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap();
     assert_eq!(prepared.url, "https://host.example.com/gw/admin/v1/status");
 }
 
@@ -97,7 +109,8 @@ fn prepare_request_preserves_endpoint_base_path() {
 fn prepare_request_percent_encodes_query() {
     let context = context_with_endpoint("http://localhost:8080", None);
     let spec = RequestSpec::get("/admin/v1/search").with_query("q", "a b&c");
-    let prepared = prepare_request(&spec, &context, None).unwrap();
+    let prepared =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap();
     assert!(prepared.url.contains("q=a+b%26c") || prepared.url.contains("q=a%20b%26c"));
 }
 
@@ -258,7 +271,12 @@ fn client_sends_prepared_request_and_classifies_success() {
         },
         seen: Mutex::new(None),
     };
-    let client = ControlPlaneClient::new(context, Some(credential), transport);
+    let client = ControlPlaneClient::new(
+        context,
+        Some(credential),
+        transport,
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/status");
     let response = block_on(client.send(&spec)).unwrap();
     assert_eq!(response.request_id.as_deref(), Some("fgadm-abc"));
@@ -276,7 +294,7 @@ fn client_maps_error_envelope_to_cli_error() {
         },
         seen: Mutex::new(None),
     };
-    let client = ControlPlaneClient::new(context, None, transport);
+    let client = ControlPlaneClient::new(context, None, transport, ClientActionIdentity::fixture());
     let spec = RequestSpec::get("/admin/v1/tenants");
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
@@ -603,7 +621,7 @@ fn all_pages_refuses_the_payment_attempt_cursor_envelope() {
         },
         seen: Mutex::new(None),
     };
-    let client = ControlPlaneClient::new(context, None, transport);
+    let client = ControlPlaneClient::new(context, None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send_all_pages(&RequestSpec::get("/admin/v1/payment-attempts"), 2))
         .unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Usage);
@@ -806,6 +824,26 @@ impl ScriptedTransport {
         }
     }
 
+    /// Responses that carry headers, for the time-token piggy-back tests.
+    fn with_headers(script: Vec<(&str, Vec<(&str, &str)>)>) -> ScriptedTransport {
+        ScriptedTransport {
+            responses: Mutex::new(
+                script
+                    .into_iter()
+                    .map(|(body, headers)| RawResponse {
+                        status: 200,
+                        headers: headers
+                            .into_iter()
+                            .map(|(name, value)| (name.to_string(), value.to_string()))
+                            .collect(),
+                        body: body.as_bytes().to_vec(),
+                    })
+                    .collect(),
+            ),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
     fn urls(&self) -> Vec<String> {
         self.seen
             .lock()
@@ -843,6 +881,157 @@ impl Transport for std::sync::Arc<ScriptedTransport> {
     }
 }
 
+/// Pins: `headers.extend(identity.headers())` in `prepare_request`, and the
+/// three header names it emits (issue #548).
+///
+/// Catches: deleting that one line — every assertion below reds. Also catches
+/// emitting the identity only for mutating requests, since this fixture is a
+/// `GET`: a read is also "what this CLI did".
+#[test]
+fn prepare_request_carries_the_action_identity_on_a_read() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let identity = ClientActionIdentity::mint(&context, &FingerprintEnv::default()).unwrap();
+    let spec = RequestSpec::get("/admin/v1/tenants");
+    let prepared = prepare_request(&spec, &context, None, &identity).unwrap();
+
+    assert_eq!(
+        prepared.header(ACTION_ID_HEADER),
+        Some(identity.action_id().as_str())
+    );
+    assert_eq!(
+        prepared.header(CLIENT_FINGERPRINT_HEADER),
+        Some(identity.fingerprint().render().as_str())
+    );
+    assert_eq!(
+        prepared.header(CLIENT_CLOCK_HEADER),
+        Some(
+            identity
+                .client_clock()
+                .unverified_unix_seconds()
+                .to_string()
+                .as_str()
+        )
+    );
+    // No token has been issued yet, so the authoritative instant is ABSENT
+    // rather than backfilled from the reading above. That absence is the design.
+    assert_eq!(prepared.header(TIME_TOKEN_HEADER), None);
+}
+
+/// Pins: `ControlPlaneClient` holding its identity by value (`identity` field),
+/// so every request of one invocation shares one `action_id`.
+///
+/// Catches: minting the identity inside `send` (or inside `prepare_request`).
+/// Ten thousand pages of an `--all-pages` walk would then be ten thousand
+/// "actions" in the audit trail, which is precisely the correlation the issue
+/// exists to provide. The uniqueness assertion at the end stops the mirror
+/// mutation — a hard-coded constant id would satisfy the equality check alone.
+#[test]
+fn every_page_of_an_all_pages_walk_carries_one_action_id() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let identity = ClientActionIdentity::mint(&context, &FingerprintEnv::default()).unwrap();
+    let expected = identity.action_id().as_str().to_string();
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
+        r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":3,"offset":0,"limit":2}"#,
+        r#"{"object":"list","data":[{"id":"c"}],"total":3,"offset":2,"limit":2}"#,
+    ]));
+    let client =
+        ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport), identity);
+    block_on(client.send_all_pages(&RequestSpec::get("/admin/v1/tenants"), 2)).unwrap();
+
+    let seen = transport.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "the fixture walks two pages");
+    for request in seen.iter() {
+        assert_eq!(
+            request.header(ACTION_ID_HEADER),
+            Some(expected.as_str()),
+            "every page of ONE operator action carries ONE action id"
+        );
+    }
+    let other = ClientActionIdentity::mint(
+        &context_with_endpoint("https://x.example.com", None),
+        &FingerprintEnv::default(),
+    )
+    .unwrap();
+    assert_ne!(
+        other.action_id().as_str(),
+        expected.as_str(),
+        "a different invocation is a different action; a constant id would make the equality \
+         above vacuous"
+    );
+}
+
+/// Pins: `ControlPlaneClient::harvest_time_token` and the piggy-back design.
+///
+/// Catches: deleting the harvest call (the second request would carry no token,
+/// so the echo assertion reds); and any preflight implementation, since the
+/// request count is asserted to equal the number of logical calls — a
+/// `POST /v1/audit/time-token` before each action would make it three, not two.
+#[test]
+fn a_time_token_is_harvested_from_one_response_and_echoed_on_the_next_request() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let identity = ClientActionIdentity::mint(&context, &FingerprintEnv::default()).unwrap();
+    let issued_at = identity.client_clock().unverified_unix_seconds();
+    let token = format!(
+        "v1;issued_at={issued_at};ttl=300;action_id={};sig=deadbeef",
+        identity.action_id()
+    );
+    let transport = std::sync::Arc::new(ScriptedTransport::with_headers(vec![
+        (r#"{"ok":true}"#, vec![(TIME_TOKEN_HEADER, token.as_str())]),
+        (r#"{"ok":true}"#, vec![]),
+    ]));
+    let client =
+        ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport), identity);
+    let spec = RequestSpec::get("/admin/v1/status");
+    block_on(client.send(&spec)).unwrap();
+    block_on(client.send(&spec)).unwrap();
+
+    let seen = transport.seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        2,
+        "two logical calls must cost two requests: the token is piggy-backed, never preflighted"
+    );
+    assert_eq!(
+        seen[0].header(TIME_TOKEN_HEADER),
+        None,
+        "the first request of an invocation has nothing to echo yet"
+    );
+    assert_eq!(
+        seen[1].header(TIME_TOKEN_HEADER),
+        Some(token.as_str()),
+        "the harvested token is echoed verbatim on the next request of the same action"
+    );
+}
+
+/// Pins: `accept_server_time`'s refusal path being reached from the transport,
+/// i.e. that `harvest_time_token` validates instead of storing blindly.
+///
+/// Catches: `*held = Some(parsed)` without `accept_for` — the foreign token
+/// would then be echoed on the next request, putting an instant bound to
+/// someone else's action into this action's audit record.
+#[test]
+fn a_time_token_bound_to_another_action_is_never_echoed() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let identity = ClientActionIdentity::mint(&context, &FingerprintEnv::default()).unwrap();
+    let issued_at = identity.client_clock().unverified_unix_seconds();
+    let foreign = format!("v1;issued_at={issued_at};ttl=300;action_id=fgact_other;sig=deadbeef");
+    let transport = std::sync::Arc::new(ScriptedTransport::with_headers(vec![
+        (
+            r#"{"ok":true}"#,
+            vec![(TIME_TOKEN_HEADER, foreign.as_str())],
+        ),
+        (r#"{"ok":true}"#, vec![]),
+    ]));
+    let client =
+        ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport), identity);
+    let spec = RequestSpec::get("/admin/v1/status");
+    block_on(client.send(&spec)).unwrap();
+    block_on(client.send(&spec)).unwrap();
+
+    let seen = transport.seen.lock().unwrap();
+    assert_eq!(seen[1].header(TIME_TOKEN_HEADER), None);
+}
+
 /// The walk visits every page and loses no row. This is the caller `next_page`
 /// and `plan_all_pages` previously lacked: the arithmetic is now executed, not
 /// merely described.
@@ -854,7 +1043,12 @@ fn send_all_pages_walks_every_page_and_loses_no_rows() {
         r#"{"object":"list","data":[{"id":"c"},{"id":"d"}],"total":5,"offset":2,"limit":2}"#,
         r#"{"object":"list","data":[{"id":"e"}],"total":5,"offset":4,"limit":2}"#,
     ]));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
     let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
 
@@ -895,7 +1089,12 @@ fn send_all_pages_stops_on_a_short_page_when_total_is_unknown() {
         // it would exhaust nothing, so the assertion below is the real guard.
         r#"{"object":"list","data":[{"id":"never"}],"offset":4,"limit":2}"#,
     ]));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
     let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
 
@@ -915,7 +1114,7 @@ fn send_all_pages_stops_on_a_short_page_when_total_is_unknown() {
 fn send_all_pages_rejects_a_non_list_response() {
     let context = context_with_endpoint("https://prod.example.com", None);
     let transport = ScriptedTransport::new(vec![r#"{"service":"ferrogate"}"#]);
-    let client = ControlPlaneClient::new(context, None, transport);
+    let client = ControlPlaneClient::new(context, None, transport, ClientActionIdentity::fixture());
     let spec = RequestSpec::get("/admin/v1/status");
     let error = block_on(client.send_all_pages(&spec, 50)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Usage);
@@ -942,7 +1141,12 @@ fn send_all_pages_fails_on_an_empty_page_inside_a_known_total() {
         r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":5,"offset":0,"limit":2}"#,
         r#"{"object":"list","data":[],"total":5,"offset":2,"limit":2}"#,
     ]));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
     let error = block_on(client.send_all_pages(&spec, 2)).unwrap_err();
 
@@ -973,7 +1177,7 @@ fn send_all_pages_accepts_a_walk_that_reaches_the_reported_total() {
         r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":3,"offset":0,"limit":2}"#,
         r#"{"object":"list","data":[{"id":"c"}],"total":3,"offset":2,"limit":2}"#,
     ]);
-    let client = ControlPlaneClient::new(context, None, transport);
+    let client = ControlPlaneClient::new(context, None, transport, ClientActionIdentity::fixture());
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
     let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
     assert_eq!(response.body["data"].as_array().unwrap().len(), 3);
@@ -990,7 +1194,7 @@ fn send_all_pages_honors_the_freshest_reported_total() {
         // Two rows were deleted between pages; the server now says 3.
         r#"{"object":"list","data":[{"id":"c"}],"total":3,"offset":2,"limit":2}"#,
     ]);
-    let client = ControlPlaneClient::new(context, None, transport);
+    let client = ControlPlaneClient::new(context, None, transport, ClientActionIdentity::fixture());
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
     let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
     assert_eq!(response.body["data"].as_array().unwrap().len(), 3);
@@ -1008,7 +1212,12 @@ fn send_all_pages_honors_the_freshest_reported_total() {
 fn send_all_pages_rejects_a_mutating_verb_before_sending_it() {
     let context = context_with_endpoint("https://prod.example.com", None);
     let transport = std::sync::Arc::new(ScriptedTransport::new(vec![r#"{"deleted":true}"#]));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::new(http::Method::DELETE, "/admin/v1/projects/proj-1");
 
     let error = block_on(client.send_all_pages(&spec, 50)).unwrap_err();
@@ -1039,7 +1248,12 @@ fn send_all_pages_refuses_a_cursor_paginated_endpoint() {
     let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
         r#"{"object":"list","data":[{"id":"e1"}],"limit":1,"has_more":true,"next_after_event_id":"e1"}"#,
     ]));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/agent-jobs/job-1/events");
 
     let error = block_on(client.send_all_pages(&spec, 1)).unwrap_err();
@@ -1071,7 +1285,12 @@ fn send_all_pages_refuses_an_endpoint_that_echoes_no_page_window() {
     // The same full page every time — the server ignored offset entirely.
     let page = r#"{"object":"list","data":[{"id":"vk-1"},{"id":"vk-2"}]}"#;
     let transport = std::sync::Arc::new(ScriptedTransport::new(vec![page, page, page]));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/virtual-keys");
 
     let error = block_on(client.send_all_pages(&spec, 2)).unwrap_err();
@@ -1099,7 +1318,12 @@ fn send_all_pages_completes_when_a_windowless_endpoint_returns_a_short_page() {
     let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
         r#"{"object":"list","data":[{"id":"vk-1"}]}"#,
     ]));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/virtual-keys");
 
     let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
@@ -1167,7 +1391,12 @@ fn send_all_pages_gives_up_at_the_page_cap_when_the_server_never_advances() {
     let transport = std::sync::Arc::new(EndlessTransport::new(
         r#"{"object":"list","data":[{"id":"stuck"}],"offset":0,"limit":1}"#,
     ));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
 
     let error = block_on(client.send_all_pages(&spec, 1)).unwrap_err();

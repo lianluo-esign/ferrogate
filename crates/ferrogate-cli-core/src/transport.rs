@@ -27,6 +27,7 @@ use std::pin::Pin;
 
 use http::Method;
 
+use crate::action_identity::{ClientActionIdentity, TIME_TOKEN_HEADER};
 use crate::auth::Credential;
 use crate::context::EffectiveContext;
 use crate::error::{ApiError, CliError, CliResult, ExitClass};
@@ -84,12 +85,32 @@ impl RequestSpec {
 
 /// A fully materialized HTTP request: absolute URL, headers, and body bytes.
 /// This is what a [`Transport`] executes.
+///
+/// # Why the fields are `pub(crate)` (issue #548)
+///
+/// They were public. Making them crate-private is the load-bearing half of "a
+/// new verb cannot issue an unattributable request": with a private field, a
+/// struct literal outside `ferrogate-cli-core` does not compile, so the **only**
+/// way any consumer can obtain a `PreparedRequest` is [`prepare_request`] — and
+/// [`prepare_request`] takes a [`ClientActionIdentity`] as a required argument.
+/// Since [`Transport::execute`] accepts nothing else, every byte this stack puts
+/// on the wire came out of a call that had an identity in hand.
+///
+/// The alternative — leaving the fields public and adding a lint, a review rule
+/// or a test that enumerates today's verbs — fails the bar the issue sets: a
+/// verb written tomorrow would pass all three. This is a type error instead, the
+/// same shape as [`crate::receipt::RenderGate`].
+///
+/// Read access for consumers (a custom [`Transport`], an assertion) is
+/// unchanged in substance: [`PreparedRequest::method`], [`PreparedRequest::url`],
+/// [`PreparedRequest::headers`], [`PreparedRequest::body`] and
+/// [`PreparedRequest::header`] expose everything the public fields did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRequest {
-    pub method: Method,
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    pub(crate) method: Method,
+    pub(crate) url: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl PreparedRequest {
@@ -99,6 +120,26 @@ impl PreparedRequest {
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
+    }
+
+    /// The HTTP method this request will be sent with.
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
+
+    /// The absolute URL, query string included.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Every header, in the order the transport will send them.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// The encoded body; empty for a body-less request.
+    pub fn body(&self) -> &[u8] {
+        &self.body
     }
 }
 
@@ -132,17 +173,34 @@ pub(crate) fn build_url(
     Ok(url.to_string())
 }
 
-/// Turn a [`RequestSpec`] plus resolved connection context and optional
-/// credential into a [`PreparedRequest`]. Pure: no network, no clock.
+/// Turn a [`RequestSpec`] plus resolved connection context, optional credential
+/// and the invocation's [`ClientActionIdentity`] into a [`PreparedRequest`].
+/// Pure: no network, **no clock**.
 ///
 /// Injects `Accept: application/json`, a `User-Agent` carrying the client
 /// version, `Content-Type` when a body is present, and `Authorization: Bearer`
 /// when a credential was resolved. An anonymous context simply omits the
 /// authorization header.
+///
+/// # The audit-identity chokepoint (issue #548)
+///
+/// `identity` is a **required** argument, and this is the single function that
+/// materializes a request. Every request the CLI issues — reads included, and
+/// every page of an `--all-pages` walk — therefore carries the action id, the
+/// client fingerprint and the client's own unverified clock reading, plus the
+/// server-issued time token when one has been harvested. A new verb cannot omit
+/// them because it cannot build a request at all without an identity to pass,
+/// and it cannot forge an identity because [`ClientActionIdentity`] has no
+/// public constructor other than `mint`.
+///
+/// Still no clock here: the audit timestamp is the server-issued token this
+/// identity holds, and the client's own reading was taken once at mint time and
+/// travels in a header whose name ends in `-unverified`.
 pub fn prepare_request(
     spec: &RequestSpec,
     context: &EffectiveContext,
     credential: Option<&Credential>,
+    identity: &ClientActionIdentity,
 ) -> CliResult<PreparedRequest> {
     let url = build_url(&context.endpoint, &spec.path, &spec.query)?;
 
@@ -150,6 +208,7 @@ pub fn prepare_request(
         ("accept".to_string(), JSON_MEDIA_TYPE.to_string()),
         ("user-agent".to_string(), crate::version::user_agent()),
     ];
+    headers.extend(identity.headers());
     if let Some(tenant) = &context.tenant {
         // Tenant selection is an explicit, inspectable header rather than a
         // hidden default, so a proxy or audit log can attribute the request.
@@ -750,24 +809,78 @@ pub struct ControlPlaneClient<T: Transport> {
     context: EffectiveContext,
     credential: Option<Credential>,
     transport: T,
+    /// The identity of the operator action this client serves. Held by value so
+    /// every request it issues carries the same `action_id`; cloned from (and
+    /// sharing a server-time slot with) the identity the caller minted, so the
+    /// receipt reports the action that was actually sent.
+    identity: ClientActionIdentity,
 }
 
 impl<T: Transport> ControlPlaneClient<T> {
-    /// Assemble a client from resolved context, optional credential, and a
-    /// transport.
-    pub fn new(context: EffectiveContext, credential: Option<Credential>, transport: T) -> Self {
+    /// Assemble a client from resolved context, optional credential, a
+    /// transport, and the invocation's action identity.
+    ///
+    /// `identity` is required rather than minted here so the caller can hand
+    /// the *same* identity to [`crate::receipt::MutationPlan`]: a receipt that
+    /// minted its own id would report an `action_id` the server never saw.
+    pub fn new(
+        context: EffectiveContext,
+        credential: Option<Credential>,
+        transport: T,
+        identity: ClientActionIdentity,
+    ) -> Self {
         ControlPlaneClient {
             context,
             credential,
             transport,
+            identity,
         }
     }
 
+    /// The identity every request from this client carries.
+    pub fn identity(&self) -> &ClientActionIdentity {
+        &self.identity
+    }
+
     /// Prepare, send, and classify one request.
+    ///
+    /// After the response is read, any [`TIME_TOKEN_HEADER`] it carries is
+    /// harvested into the identity, so the *next* request of this action echoes
+    /// a server-issued instant. That is the piggy-back design: no preflight
+    /// request is ever issued, so the extra round-trip cost is zero and only the
+    /// first request of an invocation goes without a server time. A token that
+    /// is malformed, bound to another action, or outside its TTL is refused and
+    /// reported on stderr rather than stored — carrying a token that is not this
+    /// action's would put a false instant in the audit trail.
     pub async fn send(&self, spec: &RequestSpec) -> CliResult<ApiResponse> {
-        let prepared = prepare_request(spec, &self.context, self.credential.as_ref())?;
+        let prepared = prepare_request(
+            spec,
+            &self.context,
+            self.credential.as_ref(),
+            &self.identity,
+        )?;
         let raw = self.transport.execute(prepared).await?;
+        self.harvest_time_token(&raw);
         classify(&raw).map_err(CliError::from)
+    }
+
+    /// Take a server-issued time token off a response, if it carried one.
+    ///
+    /// Deliberately infallible from the caller's point of view: a control plane
+    /// that issues no token (every deployment today — the issuing endpoint is
+    /// server-side work this issue defers) must not make requests fail, and a
+    /// refused token is a diagnostic, not an error. The receipt records the
+    /// absence with a reason either way.
+    fn harvest_time_token(&self, raw: &RawResponse) {
+        let Some(token) = raw.header(TIME_TOKEN_HEADER) else {
+            return;
+        };
+        if let Err(refusal) = self.identity.accept_server_time(token) {
+            eprintln!(
+                "warning: ignoring the server time token on this response ({}): {refusal}",
+                refusal.code()
+            );
+        }
     }
 
     /// Walk every page of a list request and return one merged response.

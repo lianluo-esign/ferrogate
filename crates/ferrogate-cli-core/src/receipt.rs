@@ -115,6 +115,28 @@
 //! contradicts the `http_status` the same receipt reports is a validation
 //! failure.
 //!
+//! # Client action identity (issue #548)
+//!
+//! [`MutationReceipt::client_identity`] closes the other half of the
+//! correlation. #505 could only report `audit_id: null` because no operation
+//! returns one; [`crate::action_identity`] mints an `action_id` client-side and
+//! sends it on every request, and the receipt echoes back the identity the
+//! transport actually used — the same value, from the same
+//! [`crate::action_identity::ClientActionIdentity`], not a second one minted
+//! here. So an operator can now join what they sent to what came back without
+//! waiting for the server-side audit-write path.
+//!
+//! Three things about that field are load-bearing and easy to get wrong:
+//!
+//! * **`client_sent_at` is server-issued or null.** It is never filled from the
+//!   local clock; a request that presented no token reports
+//!   [`absence_codes::NO_SERVER_TIME_TOKEN`], which is a finding, not a silence.
+//! * **`client_clock_unverified_unix` is a different fact.** It is the client's
+//!   own reading, carried beside the server's so an auditor can measure skew.
+//!   The two are never merged, and nothing may order or authorize on the second.
+//! * **`action_id` is not `idempotency_key`.** Both are on the receipt, and the
+//!   `idempotency_key` field documents why.
+//!
 //! # Fingerprint contract
 //!
 //! [`CliActionTarget`] is a byte-compatible mirror of the runtime
@@ -133,6 +155,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::action_identity::{ClientActionIdentity, ServerIssuedTime};
 use crate::auth::AuthSource;
 use crate::command::{VerbDescriptor, VerbEffect};
 use crate::context::EffectiveContext;
@@ -213,6 +236,17 @@ pub mod absence_codes {
     pub const NO_HTTP_RESPONSE: &str = "no_authoritative_http_response";
     /// The call succeeded, so there is no failure to report.
     pub const MUTATION_SUCCEEDED: &str = "mutation_succeeded";
+    /// No server-issued time token was held when this request was prepared, so
+    /// `client_sent_at` has no authoritative value (issue #548).
+    ///
+    /// This is the ordinary case for the first request of an invocation, and it
+    /// is reported as an absence **on purpose**: the local clock is not used to
+    /// fill the field. The server's own receive time still bounds the action.
+    pub const NO_SERVER_TIME_TOKEN: &str = "no_server_issued_time_token";
+    /// The operator disclosed no client-side address
+    /// ([`crate::action_identity::REPORTED_IP_ENV`]). The authoritative address
+    /// is the one the *server* observes; this field is opt-in extra evidence.
+    pub const NO_CLIENT_REPORTED_IP: &str = "client_reported_no_ip";
 }
 
 /// Why a receipt field is `null`. `code` is the stable discriminator; `detail`
@@ -626,6 +660,67 @@ pub struct ReceiptCorrelation {
     pub trace_id: Attested<String>,
 }
 
+/// The authoritative `client_sent_at`: a time the **server** issued and the
+/// client echoed (issue #548).
+///
+/// Every field states where it came from, so a consumer never has to assume.
+/// There is no path from a local clock into this struct: it is built only from
+/// a parsed [`crate::action_identity::ServerIssuedTime`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerIssuedClientSentAt {
+    /// Seconds since the Unix epoch, as the server stated them.
+    pub issued_at_unix: u64,
+    /// The window the server declared the token valid for. Short by design: a
+    /// long TTL lets an attacker pre-fetch tokens and replay them later to
+    /// backdate an action.
+    pub ttl_seconds: u64,
+    /// The action the token was issued for. A token presented with any other
+    /// action id is refused before it can reach this struct.
+    pub bound_action_id: String,
+    /// Always [`crate::action_identity::SERVER_TIME_AUTHORITY`]. Present so the
+    /// serialized record names its own authority rather than leaving a reader to
+    /// infer it from the field name.
+    pub authority: String,
+}
+
+/// What the CLI asserted about itself when it issued this action (issue #548).
+///
+/// Read the authority column of every field before using one:
+///
+/// | field | authority |
+/// |---|---|
+/// | `action_id` | client-minted — an identifier, not a claim |
+/// | `client_sent_at` | **server**-issued, client-echoed |
+/// | `client_clock_unverified_unix` | client-asserted; evidence about the client, never the event time |
+/// | `client_fingerprint` | client-asserted |
+/// | `client_reported_ip` | client-asserted; the authoritative source IP is the one the **server** observes and is not in this receipt at all |
+///
+/// `client_sent_at` and `client_clock_unverified_unix` are both carried on
+/// purpose. One field cannot express clock skew: their difference is the finding
+/// — a host running hours behind, a suspended VM, a backdated workstation — and
+/// it is invisible if only one of the two is recorded. They are never merged,
+/// the same rule as the two IPs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptClientIdentity {
+    /// The id of the operator action, sent on every request this invocation
+    /// issued. Distinct from `idempotency_key`: see the field's own docs.
+    pub action_id: String,
+    /// The server-issued instant this action echoed, when it held one.
+    pub client_sent_at: Attested<ServerIssuedClientSentAt>,
+    /// The client's own clock, in seconds since the Unix epoch, read once at
+    /// mint time. **Unverified and untrusted.** No authorization or ordering
+    /// path may read it; it exists so an auditor can measure the client's skew
+    /// against the server-issued instant beside it.
+    pub client_clock_unverified_unix: u64,
+    /// The rendered client fingerprint. **Not** the `canonical_target_sha256`
+    /// action fingerprint on [`ReceiptTarget`] — that digests the *target* of
+    /// the call; this describes the *client*, and is not a digest.
+    pub client_fingerprint: String,
+    /// An address the operator chose to disclose. Client-asserted, opt-in, and
+    /// never to be merged with the address the server observes.
+    pub client_reported_ip: Attested<String>,
+}
+
 /// The decision receipt for one mutating CLI verb — the **only** sanctioned
 /// return shape of a mutating command, in both `table` and `json` output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -656,7 +751,20 @@ pub struct MutationReceipt {
     /// The immutable audit id. Null-with-reason on every endpoint today.
     pub audit_id: Attested<String>,
     pub rollback: Attested<RollbackPointer>,
+    /// The idempotency key the *request document* carried, when it carried one.
+    ///
+    /// **Not the same thing as [`ReceiptClientIdentity::action_id`]**, and
+    /// merging them would lose information in both directions. An idempotency
+    /// key says "do not apply this effect twice"; an action id says "this is the
+    /// same operator action, here is its thread". Only `billing` and `agent
+    /// submit` thread a key today; every verb carries an action id. A shell loop
+    /// re-running one `billing` POST is two actions with one idempotency key,
+    /// and an `--all-pages` walk is one action with none at all — an audit trail
+    /// that could not tell those apart would misreport both.
     pub idempotency_key: Attested<String>,
+    /// When and where this action was issued from, as the client asserted it and
+    /// as the server timed it (issue #548).
+    pub client_identity: ReceiptClientIdentity,
     pub correlation: ReceiptCorrelation,
     pub http_status: Attested<u16>,
     /// The server's response document verbatim, nested under the envelope.
@@ -739,6 +847,14 @@ impl MutationReceipt {
             self.correlation.trace_id.is_well_formed(),
         );
         check("http_status", self.http_status.is_well_formed());
+        check(
+            "client_identity.client_sent_at",
+            self.client_identity.client_sent_at.is_well_formed(),
+        );
+        check(
+            "client_identity.client_reported_ip",
+            self.client_identity.client_reported_ip.is_well_formed(),
+        );
         if let Some(pointer) = &self.rollback.value {
             check(
                 "rollback.created_revision",
@@ -748,6 +864,36 @@ impl MutationReceipt {
                 "rollback.restores_revision",
                 pointer.restores_revision.is_well_formed(),
             );
+        }
+        // The action id is what the whole correlation rests on, so a receipt
+        // carrying a malformed one is malformed: an id that is not the minted
+        // shape is either fabricated or truncated, and either way it will not
+        // join to the request the server saw.
+        if !crate::action_identity::is_well_formed_action_id(&self.client_identity.action_id) {
+            problems.push(format!(
+                "client_identity.action_id '{}' is not {}<32 lowercase hex>",
+                self.client_identity.action_id,
+                crate::action_identity::ACTION_ID_PREFIX
+            ));
+        }
+        // A `client_sent_at` bound to a different action than the receipt
+        // reports would be a token moved off another action - exactly what the
+        // binding exists to prevent, restated here so a hand-built or
+        // round-tripped receipt cannot assert it either.
+        if let Some(sent_at) = &self.client_identity.client_sent_at.value {
+            if sent_at.bound_action_id != self.client_identity.action_id {
+                problems.push(format!(
+                    "client_sent_at is bound to action '{}' but this receipt reports action '{}'",
+                    sent_at.bound_action_id, self.client_identity.action_id
+                ));
+            }
+            if sent_at.authority != crate::action_identity::SERVER_TIME_AUTHORITY {
+                problems.push(format!(
+                    "client_sent_at.authority must be '{}', got '{}'",
+                    crate::action_identity::SERVER_TIME_AUTHORITY,
+                    sent_at.authority
+                ));
+            }
         }
         // Cross-field invariants. Without these the outcome field could
         // disagree with the rest of the receipt and still validate — an
@@ -877,6 +1023,41 @@ impl MutationReceipt {
             ("approval_id".to_string(), cell(&self.approval_id)),
             ("audit_id".to_string(), cell(&self.audit_id)),
             ("idempotency_key".to_string(), cell(&self.idempotency_key)),
+            (
+                "client.action_id".to_string(),
+                self.client_identity.action_id.clone(),
+            ),
+            (
+                // Named for its authority in the human rendering too: an
+                // operator reading a table must not have to remember which of
+                // the two instants the server stood behind.
+                "client.client_sent_at (server-issued)".to_string(),
+                match (
+                    &self.client_identity.client_sent_at.value,
+                    &self.client_identity.client_sent_at.absent_reason,
+                ) {
+                    (Some(sent_at), _) => format!(
+                        "{} (ttl {}s, bound to {})",
+                        sent_at.issued_at_unix, sent_at.ttl_seconds, sent_at.bound_action_id
+                    ),
+                    (None, Some(reason)) => format!("null ({})", reason.code),
+                    (None, None) => "null (UNATTESTED)".to_string(),
+                },
+            ),
+            (
+                "client.clock (unverified, client-asserted)".to_string(),
+                self.client_identity
+                    .client_clock_unverified_unix
+                    .to_string(),
+            ),
+            (
+                "client.fingerprint".to_string(),
+                self.client_identity.client_fingerprint.clone(),
+            ),
+            (
+                "client.reported_ip (client-asserted)".to_string(),
+                cell(&self.client_identity.client_reported_ip),
+            ),
             ("request_id".to_string(), cell(&self.correlation.request_id)),
             ("trace_id".to_string(), cell(&self.correlation.trace_id)),
             ("http_status".to_string(), cell(&self.http_status)),
@@ -1201,6 +1382,10 @@ pub struct MutationPlan<'a> {
     /// for a collection-scoped verb.
     resource_id: Option<String>,
     idempotency_key: Attested<String>,
+    /// The identity the transport will send. A clone of the caller's, sharing
+    /// its server-time slot, so the receipt reports the action that was
+    /// actually issued rather than a second one minted here.
+    identity: ClientActionIdentity,
 }
 
 /// What the client learned about the mutation, and the only input
@@ -1287,6 +1472,7 @@ impl<'a> MutationPlan<'a> {
         spec: RequestSpec,
         segments: &[String],
         context: &EffectiveContext,
+        identity: &ClientActionIdentity,
         dry_run: bool,
     ) -> CliResult<MutationPlan<'a>> {
         let group = group.into();
@@ -1345,6 +1531,7 @@ impl<'a> MutationPlan<'a> {
             actor,
             resource_id,
             idempotency_key,
+            identity: identity.clone(),
         })
     }
 
@@ -1368,7 +1555,7 @@ impl<'a> MutationPlan<'a> {
     /// `null` with [`absence_codes::DRY_RUN_NOT_EXECUTED`].
     pub fn dry_run(self) -> VerbOutput {
         let verb = self.renderer.verb().clone();
-        let receipt = self.build_receipt(&verb, Executed::NotSent);
+        let receipt = self.build_receipt(&verb, Executed::NotSent, None);
         self.renderer.render(receipt)
     }
 
@@ -1377,13 +1564,18 @@ impl<'a> MutationPlan<'a> {
     /// See [`MutationReport`].
     pub async fn send<T: Transport>(self, client: &ControlPlaneClient<T>) -> MutationReport {
         let verb = self.renderer.verb().clone();
+        // Read the server-issued time the identity holds BEFORE the call. The
+        // client harvests a fresh token off the response, and reading afterwards
+        // would have the receipt claim the request carried an instant that in
+        // fact arrived with the answer to it.
+        let presented = self.identity.server_issued_time();
         let (receipt, failure) = match client.send(&self.spec).await {
             Ok(response) => (
-                self.build_receipt(&verb, Executed::Applied(&response)),
+                self.build_receipt(&verb, Executed::Applied(&response), presented),
                 None,
             ),
             Err(error) => (
-                self.build_receipt(&verb, Executed::Failed(&error)),
+                self.build_receipt(&verb, Executed::Failed(&error), presented),
                 Some(error),
             ),
         };
@@ -1404,7 +1596,12 @@ impl<'a> MutationPlan<'a> {
         self.send(client).await
     }
 
-    fn build_receipt(&self, verb: &VerbDescriptor, executed: Executed<'_>) -> MutationReceipt {
+    fn build_receipt(
+        &self,
+        verb: &VerbDescriptor,
+        executed: Executed<'_>,
+        presented_time: Option<ServerIssuedTime>,
+    ) -> MutationReceipt {
         let response = match executed {
             Executed::Applied(response) => Some(response),
             Executed::NotSent | Executed::Failed(_) => None,
@@ -1548,6 +1745,7 @@ impl<'a> MutationPlan<'a> {
             // at the body.
             rollback: self.rollback_pointer(body, missing_code, missing_detail),
             idempotency_key: self.idempotency_key.clone(),
+            client_identity: self.client_identity(&executed, presented_time),
             correlation: ReceiptCorrelation {
                 request_id: match (response, &executed) {
                     (Some(response), _) => Attested::or_absent(
@@ -1589,6 +1787,66 @@ impl<'a> MutationPlan<'a> {
                 _ => Attested::absent(missing_code, missing_detail),
             },
             response: body.cloned(),
+        }
+    }
+
+    /// Project the invocation's [`ClientActionIdentity`] onto the receipt
+    /// (issue #548).
+    ///
+    /// `presented_time` is the server-issued instant the request **carried**,
+    /// read before the call. Three things are deliberate here:
+    ///
+    /// 1. **A dry run reports no `client_sent_at`.** Nothing was sent, so no
+    ///    instant was presented, and the absence code says exactly that rather
+    ///    than reusing a token the identity happens to hold.
+    /// 2. **A sent request with no token also reports an absence**, coded
+    ///    [`absence_codes::NO_SERVER_TIME_TOKEN`], not a local clock reading.
+    ///    That is the whole point of the design: the audit instant is the
+    ///    server's or it is null.
+    /// 3. **`client_clock_unverified_unix` is always present**, because it is
+    ///    always knowable and it is the only evidence of client skew. It is a
+    ///    plain `u64` rather than an [`Attested`] for that reason — it is never
+    ///    absent, and dressing it as attested would put it on the same footing
+    ///    as the server-issued field beside it.
+    fn client_identity(
+        &self,
+        executed: &Executed<'_>,
+        presented_time: Option<ServerIssuedTime>,
+    ) -> ReceiptClientIdentity {
+        let sent = !matches!(executed, Executed::NotSent);
+        let client_sent_at = match (sent, presented_time) {
+            (true, Some(time)) => Attested::present(ServerIssuedClientSentAt {
+                issued_at_unix: time.issued_at_unix(),
+                ttl_seconds: time.ttl_seconds(),
+                bound_action_id: time.bound_action_id().to_string(),
+                authority: crate::action_identity::SERVER_TIME_AUTHORITY.to_string(),
+            }),
+            (true, None) => Attested::absent(
+                absence_codes::NO_SERVER_TIME_TOKEN,
+                "no server-issued time token was held when this request was prepared (the \
+                 control plane issues none today, and the first request of an invocation has \
+                 nothing to echo yet); the client clock is deliberately NOT used to fill this \
+                 field, and the server's own receive time still bounds the action",
+            ),
+            (false, _) => Attested::absent(
+                absence_codes::REQUEST_NOT_SENT,
+                "no request left the process, so no server-issued instant was presented",
+            ),
+        };
+        ReceiptClientIdentity {
+            action_id: self.identity.action_id().to_string(),
+            client_sent_at,
+            client_clock_unverified_unix: self.identity.client_clock().unverified_unix_seconds(),
+            client_fingerprint: self.identity.fingerprint().render(),
+            client_reported_ip: Attested::or_absent(
+                self.identity
+                    .fingerprint()
+                    .reported_ip()
+                    .map(str::to_string),
+                absence_codes::NO_CLIENT_REPORTED_IP,
+                "the operator disclosed no client-side address; the authoritative source IP is \
+                 the one the server observes, which this client cannot see and must not guess",
+            ),
         }
     }
 
@@ -1736,13 +1994,13 @@ fn receipt_failure(error: &CliError) -> ReceiptFailure {
 /// material — is the whole contract;
 /// `receipt_never_carries_the_token_it_authenticated_with` pins it by asserting
 /// on the rendered JSON and table, not on this function's return value.
+///
+/// Since #548 the rule has one definition, [`AuthSource::audit_source`], shared
+/// with the client fingerprint. Two copies of "what is safe to print about a
+/// credential" is one copy too many: the second would be the one nobody
+/// remembered to update.
 fn credential_source(auth: &AuthSource) -> String {
-    match auth {
-        AuthSource::None => "none".to_string(),
-        AuthSource::Env { var } => format!("env:{var}"),
-        AuthSource::Stdin => "stdin".to_string(),
-        AuthSource::Inline { .. } => "inline".to_string(),
-    }
+    auth.audit_source()
 }
 
 /// A scalar the receipt is willing to attest: a non-empty string or a number.

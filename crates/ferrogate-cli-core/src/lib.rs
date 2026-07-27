@@ -32,6 +32,11 @@
 //! * [`auth`] — pluggable, typed credential sources ([`auth::AuthSource`]) and
 //!   a self-redacting [`auth::Credential`]; tokens are never persisted in a
 //!   context, only *how to obtain* them.
+//! * [`action_identity`] — the per-invocation [`action_identity::ClientActionIdentity`]
+//!   (`action_id`, client fingerprint, the client's own unverified clock
+//!   reading, and the server-issued time token it echoes), which
+//!   [`transport::prepare_request`] takes as a **required** argument so a new
+//!   verb cannot issue an unattributable request (issue #548).
 //! * [`transport`] — one typed Control Plane API transport: pure request
 //!   building ([`transport::prepare_request`]), response classification
 //!   ([`transport::classify`]) preserving status/error-code/request-id/
@@ -102,6 +107,7 @@
 //! composes". That is a naming argument, and the answer to it is a rename, not
 //! a fold that costs a real test.
 
+pub mod action_identity;
 pub mod agent;
 pub mod args;
 pub mod asset;

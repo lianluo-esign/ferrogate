@@ -9,6 +9,7 @@
 //! live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -246,7 +247,12 @@ fn create_tenant_account_round_trips_through_the_transport() {
         vec![("x-request-id".to_string(), "fgadm-42".to_string())],
         br#"{"id":"t_1","version":7,"name":"acme"}"#,
     );
-    let client = ControlPlaneClient::new(context(Some("acme")), None, transport);
+    let client = ControlPlaneClient::new(
+        context(Some("acme")),
+        None,
+        transport,
+        ClientActionIdentity::fixture(),
+    );
     let response = block_on(client.send(&spec)).unwrap();
     assert_eq!(response.status, 201);
     assert_eq!(response.request_id.as_deref(), Some("fgadm-42"));
@@ -264,7 +270,12 @@ fn create_tenant_account_round_trips_through_the_transport() {
 fn tenant_scope_is_carried_as_an_explicit_header() {
     let spec = build_projects("list", &ResourceInput::new()).unwrap();
     let (transport, seen) = fake(200, vec![], br#"{"items":[]}"#);
-    let client = ControlPlaneClient::new(context(Some("acme")), None, transport);
+    let client = ControlPlaneClient::new(
+        context(Some("acme")),
+        None,
+        transport,
+        ClientActionIdentity::fixture(),
+    );
     let _ = block_on(client.send(&spec)).unwrap();
     let seen = seen.lock().unwrap().clone().unwrap();
     assert_eq!(seen.header("x-ferrogate-tenant"), Some("acme"));
@@ -280,7 +291,12 @@ fn delete_not_found_maps_to_not_found_conflict_class() {
         vec![],
         br#"{"error":{"message":"no such project","type":"ferrogate_error","code":"project_not_found","request_id":"fgadm-x"}}"#,
     );
-    let client = ControlPlaneClient::new(context(Some("acme")), None, transport);
+    let client = ControlPlaneClient::new(
+        context(Some("acme")),
+        None,
+        transport,
+        ClientActionIdentity::fixture(),
+    );
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }
@@ -299,7 +315,12 @@ fn conflict_on_update_is_surfaced_not_swallowed() {
         vec![],
         br#"{"error":{"message":"version mismatch","type":"ferrogate_error","code":"conflict","request_id":"fgadm-c","expected_version":3}}"#,
     );
-    let client = ControlPlaneClient::new(context(Some("acme")), None, transport);
+    let client = ControlPlaneClient::new(
+        context(Some("acme")),
+        None,
+        transport,
+        ClientActionIdentity::fixture(),
+    );
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
     // The optimistic-concurrency detail is preserved, not overwritten silently.

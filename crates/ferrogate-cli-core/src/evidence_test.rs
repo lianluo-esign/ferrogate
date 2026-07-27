@@ -10,6 +10,7 @@
 //! logic plus a fake transport — no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -223,7 +224,8 @@ fn export_preserves_correlation_ids_from_the_response() {
         },
         seen: seen.clone(),
     };
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let response = block_on(client.send(&export)).unwrap();
     assert_eq!(response.request_id.as_deref(), Some("req-evidence-1"));
     assert_eq!(response.trace_id.as_deref(), Some("trace-evidence-1"));
@@ -236,7 +238,8 @@ fn scope_denial_on_audit_read_maps_to_auth_class() {
         403,
         br#"{"error":{"message":"audit scope denied","type":"ferrogate_error","code":"forbidden","request_id":"fgadm-audit"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
 }
@@ -248,7 +251,8 @@ fn export_timeout_maps_to_transport_class_without_false_success() {
         408,
         br#"{"error":{"message":"export timed out","type":"ferrogate_error","code":"request_timeout","request_id":"fgadm-to"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Transport);
 }

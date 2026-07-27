@@ -11,6 +11,7 @@
 //! no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -262,7 +263,8 @@ fn reload_generation_token_passes_through_exactly() {
     )
     .unwrap();
     let (transport, seen) = fake(200, br#"{"generation": 43, "committed": true}"#);
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     block_on(client.send(&reload)).unwrap();
     let seen = seen.lock().unwrap().clone().unwrap();
     let sent: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
@@ -316,7 +318,8 @@ fn stale_generation_on_reload_maps_to_conflict_class() {
         409,
         br#"{"error":{"message":"stale config generation","type":"ferrogate_error","code":"conflict","request_id":"fgadm-gen"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }
@@ -332,7 +335,8 @@ fn invalid_candidate_on_validate_maps_to_validation_class() {
         422,
         br#"{"error":{"message":"invalid config","type":"ferrogate_error","code":"unprocessable_entity","request_id":"fgadm-cfg"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Validation);
 }
@@ -344,7 +348,8 @@ fn reload_server_failure_maps_to_server_class_without_false_success() {
         500,
         br#"{"error":{"message":"reload failed mid-apply","type":"ferrogate_error","code":"server_error","request_id":"fgadm-500"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Server);
 }

@@ -43,6 +43,7 @@
 //!   to write down.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
 use crate::dispatch::build_request;
 use crate::output::{render_output, OutputFormat};
@@ -208,8 +209,17 @@ fn run_plan(
         .with_body(serde_json::json!({"probe": true}));
     let spec = build_request(group, verb, &input).expect("the family builder accepts this shape");
     let context = test_context();
-    let plan = MutationPlan::new(renderer, group, spec, segments, &context, false).expect("plan");
-    let client = ControlPlaneClient::new(context, None, transport);
+    let plan = MutationPlan::new(
+        renderer,
+        group,
+        spec,
+        segments,
+        &context,
+        &ClientActionIdentity::fixture(),
+        false,
+    )
+    .expect("plan");
+    let client = ControlPlaneClient::new(context, None, transport, ClientActionIdentity::fixture());
     block_on(plan.execute(&client))
 }
 
@@ -234,6 +244,248 @@ fn probe_spec(group: &str, verb: &str) -> CliResult<(RequestSpec, Vec<String>)> 
         }
     }
     Err(last.expect("at least one arity was attempted"))
+}
+
+/// **The acceptance box.** Every verb in the registry — read and mutating,
+/// every one of them — carries `action_id`, the client fingerprint and the
+/// client's own unverified clock reading, because there is no other way for it
+/// to reach the wire (issue #548).
+///
+/// Pins: `headers.extend(identity.headers())` in `transport::prepare_request`.
+///
+/// Catches: deleting that line (every verb reds), and emitting the identity for
+/// only some verbs — this enumerates the whole registry rather than a fixture,
+/// so a family added tomorrow is covered the day it is registered.
+///
+/// It is necessary and **not sufficient**, which is why it is not the whole
+/// enforcement: a test enumerating today's verbs cannot speak for a verb written
+/// tomorrow. That guarantee is structural and lives in the types —
+/// `prepare_request` takes `&ClientActionIdentity` as a required argument, and
+/// `PreparedRequest`'s fields are `pub(crate)`, so a consumer crate cannot build
+/// a request at all without one. This test covers the residual runtime question:
+/// that the chokepoint is really on the path every registered verb takes.
+#[test]
+fn every_registered_verb_carries_the_action_identity_on_the_wire() {
+    let registry = full_registry();
+    let context = test_context();
+    let identity = ClientActionIdentity::fixture();
+    let mut checked = 0usize;
+    for group in registry.groups() {
+        for verb in &group.verbs {
+            let (spec, _) = probe_spec(&group.name, &verb.name).expect("probe request");
+            let prepared = crate::transport::prepare_request(&spec, &context, None, &identity)
+                .expect("prepare the request the verb would issue");
+            for header in [
+                crate::action_identity::ACTION_ID_HEADER,
+                crate::action_identity::CLIENT_FINGERPRINT_HEADER,
+                crate::action_identity::CLIENT_CLOCK_HEADER,
+            ] {
+                assert!(
+                    prepared
+                        .header(header)
+                        .is_some_and(|value| !value.is_empty()),
+                    "'{} {}' would issue a request carrying no {header}; the audit identity is \
+                     enforced at the transport chokepoint, so this can only mean the chokepoint \
+                     was bypassed",
+                    group.name,
+                    verb.name
+                );
+            }
+            assert_eq!(
+                prepared.header(crate::action_identity::ACTION_ID_HEADER),
+                Some(identity.action_id().as_str()),
+                "'{} {}' must carry THIS invocation's action id, not one of its own",
+                group.name,
+                verb.name
+            );
+            checked += 1;
+        }
+    }
+    // A floor, not a census: it exists so an empty or half-registered registry
+    // cannot make the loop above vacuous. The exact mutating count is pinned by
+    // `every_mutating_verb_produces_a_well_formed_receipt`, and total >= that.
+    assert!(
+        checked > 100,
+        "expected the full registry, saw only {checked} verbs"
+    );
+}
+
+/// A dry run reports the action identity it *would* have used, and reports
+/// `client_sent_at` as absent-with-a-reason rather than as a clock reading.
+///
+/// Pins: the `(false, _)` arm of `MutationPlan::client_identity`, and the
+/// `client_clock_unverified_unix` field being filled from the identity.
+///
+/// Catches: filling `client_sent_at` from `client_clock_unverified_unix` when no
+/// token is held — the single mutation the whole timestamp design exists to
+/// prevent. It produces a plausible instant, so only an assertion on the
+/// *absence code* can see it.
+#[test]
+fn a_receipt_reports_the_action_id_and_refuses_to_invent_a_client_sent_at() {
+    let registry = full_registry();
+    let verb = registry
+        .resolve("projects", "create")
+        .expect("projects create is registered");
+    let RenderGate::Receipt(renderer) = verb.render_gate() else {
+        panic!("create must be gated to a receipt");
+    };
+    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let identity = ClientActionIdentity::fixture();
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &test_context(),
+        &identity,
+        true,
+    )
+    .expect("plan");
+    let output = plan.dry_run();
+    let receipt = output.receipt().expect("a mutating verb returns a receipt");
+
+    assert_eq!(
+        receipt.client_identity.action_id,
+        identity.action_id().as_str(),
+        "the receipt reports the action the transport would have sent, not a second one"
+    );
+    assert!(receipt.client_identity.client_sent_at.value.is_none());
+    assert_eq!(
+        receipt
+            .client_identity
+            .client_sent_at
+            .absent_reason
+            .as_ref()
+            .map(|reason| reason.code.as_str()),
+        Some(absence_codes::REQUEST_NOT_SENT),
+        "a dry run presented no server instant, and the local clock must NOT stand in for one"
+    );
+    assert_eq!(
+        receipt.client_identity.client_clock_unverified_unix,
+        identity.client_clock().unverified_unix_seconds(),
+        "the client's own reading is always present — it is the only evidence of clock skew"
+    );
+    assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+}
+
+/// An executed mutation with a held token reports the SERVER's instant, and the
+/// two instants stay in two fields.
+///
+/// Pins: the `(true, Some(time))` arm of `MutationPlan::client_identity`, and
+/// `MutationPlan::send` reading the held token *before* the call.
+///
+/// Catches: reading the token after `client.send` (this fixture's response
+/// carries a *different* token, so the receipt would report the instant that
+/// arrived WITH the answer rather than the one the request carried); and merging
+/// the two instants into one field, which the inequality assertion reds.
+#[test]
+fn an_executed_mutation_reports_the_server_instant_it_presented() {
+    let registry = full_registry();
+    let verb = registry.resolve("projects", "create").expect("registered");
+    let RenderGate::Receipt(renderer) = verb.render_gate() else {
+        panic!("create must be gated to a receipt");
+    };
+    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let identity = ClientActionIdentity::fixture();
+    let presented = identity.client_clock().unverified_unix_seconds() - 5;
+    identity
+        .accept_server_time(&format!(
+            "v1;issued_at={presented};ttl=300;action_id={};sig=abc",
+            identity.action_id()
+        ))
+        .expect("the fixture token is bound to this action and inside its TTL");
+
+    let transport = std::sync::Arc::new(RecordingTransport::with_body(r#"{"id":"proj_1"}"#));
+    let client = ControlPlaneClient::new(
+        test_context(),
+        None,
+        std::sync::Arc::clone(&transport),
+        identity.clone(),
+    );
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &test_context(),
+        &identity,
+        false,
+    )
+    .expect("plan");
+    let report = block_on(plan.execute(&client));
+    let receipt = report
+        .output()
+        .receipt()
+        .expect("a mutating verb returns a receipt");
+
+    let sent_at = receipt
+        .client_identity
+        .client_sent_at
+        .value
+        .as_ref()
+        .expect("a held token is reported as the authoritative client_sent_at");
+    assert_eq!(sent_at.issued_at_unix, presented);
+    assert_eq!(sent_at.bound_action_id, receipt.client_identity.action_id);
+    assert_eq!(
+        sent_at.authority,
+        crate::action_identity::SERVER_TIME_AUTHORITY,
+        "the serialized record names its own authority instead of leaving it to be inferred"
+    );
+    assert_ne!(
+        sent_at.issued_at_unix, receipt.client_identity.client_clock_unverified_unix,
+        "the server-issued instant and the client's own reading are two authorities in two \
+         fields; a fixture where they coincide would prove nothing"
+    );
+    assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+}
+
+/// The client identity survives the JSON rendering an audit pipeline consumes,
+/// and the two instants stay distinguishable there.
+///
+/// Pins: the `client_identity` field of `MutationReceipt` and its serde names.
+///
+/// Catches: renaming `client_clock_unverified_unix` to `timestamp` — the
+/// rename the issue explicitly forbids, because a downstream sink would then
+/// read an attacker-controlled reading as the event time.
+#[test]
+fn the_rendered_receipt_keeps_the_two_instants_distinguishable() {
+    let registry = full_registry();
+    let verb = registry.resolve("projects", "create").expect("registered");
+    let RenderGate::Receipt(renderer) = verb.render_gate() else {
+        panic!("create must be gated to a receipt");
+    };
+    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let identity = ClientActionIdentity::fixture();
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &test_context(),
+        &identity,
+        true,
+    )
+    .expect("plan");
+    let output = plan.dry_run();
+    let json = render_output(OutputFormat::Json, &output, |_| unreachable!()).expect("json");
+    let table = render_output(OutputFormat::Table, &output, |_| {
+        panic!("a receipt must never route through the bare-body table projection")
+    })
+    .expect("table");
+
+    assert!(json.contains("\"client_identity\""));
+    assert!(json.contains("\"client_clock_unverified_unix\""));
+    assert!(json.contains("\"client_sent_at\""));
+    assert!(json.contains(identity.action_id().as_str()));
+    assert!(
+        !json.contains("\"timestamp\""),
+        "a bare 'timestamp' is exactly the name issue #548 forbids: {json}"
+    );
+    assert!(
+        table.contains("client.clock (unverified, client-asserted)"),
+        "the human rendering must say which instant is which too: {table}"
+    );
+    assert!(table.contains("client.client_sent_at (server-issued)"));
 }
 
 /// Every registered verb's DECLARED effect agrees with the HTTP method its
@@ -378,6 +630,7 @@ fn every_mutating_verb_produces_a_well_formed_receipt() {
                 spec,
                 &segments,
                 &context,
+                &ClientActionIdentity::fixture(),
                 true,
             )
             .expect("plan the mutation");
@@ -421,13 +674,19 @@ fn dry_run_issues_no_request_at_the_transport() {
         spec,
         &segments,
         &context,
+        &ClientActionIdentity::fixture(),
         true,
     )
     .expect("plan");
 
     let transport = RecordingTransport::with_body(r#"{"object":"guardrail_policy_revision"}"#);
     let transport = std::sync::Arc::new(transport);
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
 
     let output = block_on(plan.execute(&client))
         .into_result()
@@ -467,6 +726,7 @@ fn a_real_mutation_issues_exactly_one_request() {
         spec,
         &segments,
         &context,
+        &ClientActionIdentity::fixture(),
         false,
     )
     .expect("plan");
@@ -474,7 +734,12 @@ fn a_real_mutation_issues_exactly_one_request() {
     let transport = std::sync::Arc::new(RecordingTransport::with_body(
         r#"{"object":"guardrail_policy_revision","policy":{"policy_id":"gp_1","revision":4}}"#,
     ));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
 
     let output = block_on(plan.execute(&client))
         .into_result()
@@ -517,12 +782,25 @@ fn receipt_json_round_trips_and_states_every_absence() {
     };
     let (spec, segments) = probe_spec("projects", "create").expect("probe");
     let context = test_context();
-    let plan =
-        MutationPlan::new(renderer, "projects", spec, &segments, &context, false).expect("plan");
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &context,
+        &ClientActionIdentity::fixture(),
+        false,
+    )
+    .expect("plan");
     let transport = std::sync::Arc::new(RecordingTransport::with_body(
         r#"{"object":"project","project":{"id":"proj_1","name":"n","status":"active"}}"#,
     ));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let output = block_on(plan.execute(&client))
         .into_result()
         .expect("mutation");
@@ -586,8 +864,16 @@ fn table_render_states_the_nulls() {
     };
     let (spec, segments) = probe_spec("projects", "delete").expect("probe");
     let context = test_context();
-    let plan =
-        MutationPlan::new(renderer, "projects", spec, &segments, &context, true).expect("plan");
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &context,
+        &ClientActionIdentity::fixture(),
+        true,
+    )
+    .expect("plan");
     let output = plan.dry_run();
     let rendered = render_output(OutputFormat::Table, &output, |_| {
         panic!("a receipt must never route through the bare-body table projection")
@@ -658,13 +944,19 @@ fn rollback_pointer_is_a_complete_command() {
         spec,
         &segments,
         &context,
+        &ClientActionIdentity::fixture(),
         false,
     )
     .expect("plan");
     let transport = std::sync::Arc::new(RecordingTransport::with_body(
         r#"{"object":"guardrail_policy_revision","policy":{"policy_id":"gp_42","revision":7,"status":"active"}}"#,
     ));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let output = block_on(plan.execute(&client))
         .into_result()
         .expect("mutation");
@@ -710,13 +1002,19 @@ fn first_revision_reversal_is_an_archive_not_a_rollback() {
         spec,
         &segments,
         &context,
+        &ClientActionIdentity::fixture(),
         false,
     )
     .expect("plan");
     let transport = std::sync::Arc::new(RecordingTransport::with_body(
         r#"{"object":"guardrail_policy_revision","policy":{"policy_id":"gp_new","revision":1}}"#,
     ));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let output = block_on(plan.execute(&client))
         .into_result()
         .expect("mutation");
@@ -858,8 +1156,16 @@ fn validate_rejects_a_null_without_a_reason() {
     };
     let (spec, segments) = probe_spec("projects", "create").expect("probe");
     let context = test_context();
-    let plan =
-        MutationPlan::new(renderer, "projects", spec, &segments, &context, true).expect("plan");
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &context,
+        &ClientActionIdentity::fixture(),
+        true,
+    )
+    .expect("plan");
     let output = plan.dry_run();
     let mut receipt = output.receipt().expect("receipt").clone();
     assert!(receipt.validate().is_empty());
@@ -900,11 +1206,17 @@ fn dry_run_is_not_inferred_from_the_verb_name() {
         spec,
         &segments,
         &context,
+        &ClientActionIdentity::fixture(),
         false,
     )
     .expect("plan");
     let transport = std::sync::Arc::new(RecordingTransport::with_body(r#"{"object":"ok"}"#));
-    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let client = ControlPlaneClient::new(
+        context,
+        None,
+        std::sync::Arc::clone(&transport),
+        ClientActionIdentity::fixture(),
+    );
     let output = block_on(plan.execute(&client))
         .into_result()
         .expect("mutation");
@@ -1706,8 +2018,16 @@ fn receipt_never_carries_the_token_it_authenticated_with() {
     context.auth = crate::auth::AuthSource::Inline {
         token: TOKEN.to_string(),
     };
-    let plan =
-        MutationPlan::new(renderer, "projects", spec, &segments, &context, true).expect("plan");
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &context,
+        &ClientActionIdentity::fixture(),
+        true,
+    )
+    .expect("plan");
     let output = plan.dry_run();
     let receipt = output.receipt().expect("receipt");
 

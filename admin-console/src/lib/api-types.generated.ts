@@ -7486,6 +7486,16 @@ export interface components {
         SkillPackageHeader: string;
         /** @description Optional skill package version. Requires x-ferrogate-skill-package and must match the registered package version. */
         SkillPackageVersionHeader: string;
+        /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+        ClientActionIdHeader: string;
+        /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of cli, os, arch, context and cred fields. Optional operator-disclosed fields are omitted when not set. Never carries credential material, and is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client. */
+        ClientFingerprintHeader: string;
+        /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+        ClientClockUnverifiedHeader: string;
+        /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+        ClientTimeTokenHeader: string;
+        /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+        ClientReportedIpHeader: string;
     };
     requestBodies: {
         AdminApiKeyMutation: {

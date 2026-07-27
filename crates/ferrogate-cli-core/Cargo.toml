@@ -17,6 +17,11 @@ authors.workspace = true
 
 [dependencies]
 clap = { workspace = true }
+# OS CSPRNG for minting the per-invocation `action_id` (issue #548). A
+# predictable action id is worse than an absent one — it can be claimed by
+# someone else's log line — so the id comes from the OS random source and a
+# failure to read it fails the command.
+getrandom = { workspace = true }
 http = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

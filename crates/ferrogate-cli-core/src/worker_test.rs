@@ -10,6 +10,7 @@
 //! mapping. Pure logic and a fake transport — no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -240,7 +241,8 @@ fn rotate_reaches_the_transport_with_the_absolute_url() {
     let spec =
         build_self_hosted_workers("rotate", &ResourceInput::new().with_segments(["wk_1"])).unwrap();
     let (transport, seen) = fake(200, br#"{"worker_id":"wk_1","certificate_serial":"c9"}"#);
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let response = block_on(client.send(&spec)).unwrap();
     assert_eq!(response.body["certificate_serial"], "c9");
     let seen = seen.lock().unwrap().clone().unwrap();
@@ -259,7 +261,8 @@ fn revoking_unknown_worker_maps_to_not_found_conflict_class() {
         404,
         br#"{"error":{"message":"worker not found","type":"ferrogate_error","code":"not_found","request_id":"fgadm-n"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }

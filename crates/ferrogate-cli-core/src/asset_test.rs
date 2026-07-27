@@ -10,6 +10,7 @@
 //! error/exit-class mapping. Pure logic and a fake transport — no live network.
 
 use super::*;
+use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
@@ -350,7 +351,8 @@ fn channel_set_puts_with_version_query_and_no_body() {
     // The target version rides the contract's ?version= query parameter, so it
     // reaches the server as the URL query, not a request body.
     let (transport, seen) = fake(200, br#"{"channel":"stable","version":"1.2.3"}"#);
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     block_on(client.send(&spec)).unwrap();
     let seen = seen.lock().unwrap().clone().unwrap();
     assert!(
@@ -452,7 +454,8 @@ fn signature_rejection_on_put_maps_to_validation_class() {
         422,
         br#"{"error":{"message":"asset signature verification failed","type":"ferrogate_error","code":"unprocessable_entity","request_id":"fgadm-sig"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Validation);
 }
@@ -470,7 +473,8 @@ fn expired_presigned_transfer_maps_to_not_found_conflict_class() {
         409,
         br#"{"error":{"message":"presigned upload expired","type":"ferrogate_error","code":"conflict","request_id":"fgadm-exp"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::NotFoundConflict);
 }
@@ -490,7 +494,8 @@ fn quota_denial_on_upload_intent_maps_to_its_class() {
         403,
         br#"{"error":{"message":"asset storage quota exceeded","type":"ferrogate_error","code":"forbidden","request_id":"fgadm-q"}}"#,
     );
-    let client = ControlPlaneClient::new(context(), None, transport);
+    let client =
+        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
 }
