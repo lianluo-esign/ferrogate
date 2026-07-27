@@ -1097,6 +1097,34 @@ impl InMemorySelfHostedRunQueue {
         self.runs.remove(dispatch_id).is_some()
     }
 
+    /// Remove `dispatch_id` ONLY while no worker has ever been assigned it,
+    /// reporting whether it was withdrawn.
+    ///
+    /// #551: the cancel path used to decide "nobody holds it" with one lock
+    /// acquisition and then withdraw with a second. [`Self::poll_run`] takes the
+    /// same lock, so a worker could lease the start dispatch in between and be
+    /// left holding a dispatch that had just been deleted out from under it --
+    /// no `cancel_run` would ever be minted for it (the cancel had already
+    /// decided none was needed), so the holder would run the cancelled work to
+    /// completion and its ack would fail with "unknown dispatch". Testing the
+    /// assignment and doing the removal under ONE `&mut self` closes that
+    /// window: the withdrawal either wins outright or reports `false`, and its
+    /// caller falls through to the `cancel_run` that reaches the new holder.
+    ///
+    /// "Unleased" is `assigned_worker_id.is_none()`, i.e. never handed out --
+    /// deliberately NOT "no unexpired lease". A worker whose lease has expired
+    /// may still be executing the run and may still ack it, so its dispatch is
+    /// not withdrawable either; [`QueuedSelfHostedRun::can_lease_to`] is what
+    /// stops that expired lease being handed to a SECOND worker, via the
+    /// superseded set the caller's `cancel_run` populates.
+    pub fn withdraw_unleased_run(&mut self, dispatch_id: &str) -> bool {
+        let unleased = self
+            .runs
+            .get(dispatch_id)
+            .is_some_and(|queued| queued.assigned_worker_id.is_none());
+        unleased && self.runs.remove(dispatch_id).is_some()
+    }
+
     pub fn enqueue_run(
         &mut self,
         dispatch: SelfHostedRunDispatch,
@@ -2330,6 +2358,71 @@ mod tests {
 
         assert!(matches!(error, SelfHostedWorkerError::InvalidTelemetry(_)));
         assert!(error.to_string().contains("artifact exceeds maximum size"));
+    }
+
+    /// #551: the withdrawal arm of the agent-job cancel path. Removing a
+    /// dispatch a worker has ALREADY been handed is the reading-2 defect --
+    /// the holder keeps executing work the caller paid to stop, no
+    /// `cancel_run` is ever minted for it (the cancel decided none was
+    /// needed), and its ack fails with "unknown dispatch". The test and the
+    /// removal are one `&mut self` call precisely so that decision cannot be
+    /// taken against stale information.
+    #[test]
+    fn a_dispatch_a_worker_already_holds_is_not_withdrawable() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        queue.enqueue_run(dispatch()).unwrap();
+
+        // Never handed out: withdrawable, and actually withdrawn.
+        assert!(
+            queue.withdraw_unleased_run("dispatch-1"),
+            "a dispatch no worker has been assigned must be withdrawable"
+        );
+        assert!(
+            queue.dispatch_ids_for_run("run-1").is_empty(),
+            "a withdrawn dispatch must be gone from the queue, not merely reported gone"
+        );
+        // ...and a second withdrawal of the same id reports false, so a caller
+        // cannot read "true" as anything but "I removed it just now".
+        assert!(!queue.withdraw_unleased_run("dispatch-1"));
+        assert!(!queue.withdraw_unleased_run("dispatch-never-enqueued"));
+
+        // Handed out: NOT withdrawable, and the row survives so the holder's
+        // ack still resolves and the caller falls through to `cancel_run`.
+        let mut held = InMemorySelfHostedRunQueue::default();
+        held.enqueue_run(dispatch()).unwrap();
+        let lease = held
+            .poll_run(
+                &registry,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity,
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("the worker leases the dispatch");
+        assert_eq!(lease.dispatch_id, "dispatch-1");
+        assert!(
+            !held.withdraw_unleased_run("dispatch-1"),
+            "a dispatch a worker holds must never be yanked out from under it"
+        );
+        assert_eq!(
+            held.dispatch_ids_for_run("run-1"),
+            vec!["dispatch-1".to_string()],
+            "...and refusing must leave the row where the holder's ack can still find it"
+        );
+
+        // The expired lease is the same answer: the holder may still be
+        // running, and may still ack. `can_lease_to` -- not a withdrawal -- is
+        // what stops a SECOND worker taking it.
+        assert!(
+            !held.withdraw_unleased_run("dispatch-1"),
+            "an EXPIRED lease is still a lease; assignment, not expiry, is the test"
+        );
     }
 
     #[test]

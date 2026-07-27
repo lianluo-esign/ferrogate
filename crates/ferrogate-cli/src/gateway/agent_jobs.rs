@@ -21,7 +21,7 @@
 //! | status | `GET /v1/agent-jobs/{run_id}` | `AppState::agent_run_timeline` + `AppState::self_hosted_run_timeline` |
 //! | events | `GET /v1/agent-jobs/{run_id}/events` | the existing agent-run timeline (`agent_run_events`) |
 //! | result | `GET /v1/agent-jobs/{run_id}/result` | the same timeline + worker-reported artifact events, including #472 coding-agent work products |
-//! | cancel | `POST /v1/agent-jobs/{run_id}/cancel` | a `cancel_run` dispatch (#414) + run terminalization |
+//! | cancel | `POST /v1/agent-jobs/{run_id}/cancel` | run terminalization + either withdrawal of the start dispatch or a `cancel_run` (#414) -- see [`cancel_agent_job_in_runtime`] |
 //!
 //! **Durability.** Submission writes the `agent_runs` row through the same
 //! durable seam the synchronous create path uses and enqueues a
@@ -996,15 +996,30 @@ impl FerroGateway {
 
 /// Stop `run` in the runtime, and reclaim what it leaves behind.
 ///
+/// **The contract, stated once (#551).** A cancel guarantees that the work
+/// STOPS, not that a `cancel_run` dispatch exists. Those were the same thing
+/// only while every job had a holder to deliver a `cancel_run` to. They are
+/// not the same thing for a job no worker ever leased, and there the message
+/// is strictly the weaker remedy: it is addressed at nobody, it leaves the
+/// start dispatch in the queue for a worker to pick up and START, and it costs
+/// two permanent rows. So the guarantee is discharged by whichever of the two
+/// shapes below actually makes the work unreachable, and
+/// `runtime_cancel_dispatched` reports WHICH -- it is not a success flag.
+///
 /// Two shapes, chosen by whether WITHDRAWING the start dispatch on this node
 /// is by itself enough to stop the work (#502 rework):
 ///
 /// * WITHDRAWABLE -- this process's own lease queue holds the start dispatch
-///   and no worker has leased it, so nothing is executing the job and this node
-///   owns the only runnable copy. The dispatch is removed from the lease queue
-///   and deleted from `self_hosted_run_dispatches`. A submit/cancel loop
-///   therefore leaves no permanent row behind, where before #502 it left two
-///   per iteration in a table nothing ever deleted.
+///   and no worker has ever been assigned it, so nothing is executing the job
+///   and this node owns the only runnable copy. The dispatch is removed from
+///   the lease queue and then deleted from `self_hosted_run_dispatches`. The
+///   test ("is it unleased?") and the removal happen under ONE acquisition of
+///   the queue lock (#551) -- the poll seam takes the same lock, so splitting
+///   them let a worker lease the dispatch in the gap and be left holding a row
+///   that had just been deleted, with no `cancel_run` minted because the
+///   cancel had already decided none was needed. A submit/cancel loop leaves
+///   no permanent row behind, where before #502 it left two per iteration in a
+///   table nothing ever deleted.
 /// * NOT WITHDRAWABLE -- either a worker holds the lease, or the dispatch
 ///   resolved only out of the durable table because a PEER replica is the one
 ///   holding it in memory. Both get a `cancel_run` (#414) enqueued, addressing
@@ -1025,21 +1040,28 @@ impl FerroGateway {
 /// the worker kept running" -- so a cancel that cannot withdraw locally always
 /// leaves durable `cancel_run` evidence instead.
 ///
-/// Residue, stated rather than left implied (the same discipline the budget's
-/// over-permissive N x cap gets): the `cancel_run` this path enqueues is
-/// durable immediately, but a node's superseded set is built from its OWN
-/// in-process queue, so a peer only starts refusing to re-lease the start
-/// dispatch once it next rebuilds that queue from `self_hosted_run_dispatches`
-/// (startup, worker registration, rotation). Until then the peer can still
-/// hand the start dispatch to a worker. That is strictly better than the
-/// alternative -- deleting the durable row leaves the peer's copy leasable AND
-/// destroys the evidence that would ever supersede it -- but it is not a
-/// closed window, and the cross-replica cancel is not instantaneous.
+/// Neither shape is node-local enough to stand alone, which is why the poll
+/// seam carries the backstop (#551). Withdrawal empties THIS node's queue and
+/// the durable table, but a peer that rebuilt its queue after the submit still
+/// holds an in-memory copy nothing here can reach; supersession is computed
+/// from THIS node's queue, so a peer that has not rebuilt since the
+/// `cancel_run` was written has an empty superseded set. In both leftovers the
+/// peer would hand a cancelled job's `start_run` to a worker. The predicate
+/// that closes them is not in this function at all: it is
+/// [`AppState::poll_self_hosted_worker_run`], which refuses to hand out a
+/// `start_run` whose `agent_runs` row has already SETTLED, read durably --
+/// the one record every replica shares, and the one this handler writes
+/// immediately after this call returns.
 ///
-/// Returns whether a `cancel_run` was enqueued. `false` covers both "there was
-/// nothing to cancel" and "the queued work was withdrawn without needing to
-/// tell anyone"; neither is an error, and the run is terminalized by the caller
-/// either way.
+/// Residue, stated rather than left implied: a worker that is ALREADY
+/// executing the run is stopped only by collecting its `cancel_run`, so the
+/// cancel is as prompt as that worker's next poll and no prompter. Nothing
+/// here reaches into a process that is mid-run.
+///
+/// Returns which shape ran, NOT whether the cancel succeeded -- the cancel
+/// succeeded in both, and the caller terminalizes the run either way. `true`
+/// is "a `cancel_run` was enqueued for a holder"; `false` is "there was
+/// nothing to hold it, and the queued work was withdrawn".
 fn cancel_agent_job_in_runtime(
     state: &AppState,
     run: &StoredAgentRun,
@@ -1051,18 +1073,17 @@ fn cancel_agent_job_in_runtime(
         return Ok(false);
     };
     let start_dispatch_id = start.dispatch_id.clone();
-    // Node-local on purpose: `self_hosted_dispatch_for_run` above may have
-    // resolved `start` out of the durable table, and a durable row is evidence
-    // that SOME node holds the dispatch, not that this one does.
-    let held_in_this_process = state
-        .self_hosted_dispatch_ids_for_run(&run.id)
-        .iter()
-        .any(|dispatch_id| dispatch_id == &start_dispatch_id);
-    let leased = state
-        .self_hosted_dispatch_lease_owner(&run.id, SelfHostedRunAction::StartRun)
-        .is_some();
-    if held_in_this_process && !leased {
-        state.discard_self_hosted_dispatch(&start_dispatch_id);
+    // Node-local AND atomic on purpose (#551). Node-local because
+    // `self_hosted_dispatch_for_run` above may have resolved `start` out of the
+    // durable table, and a durable row is evidence that SOME node holds the
+    // dispatch, not that this one does. Atomic because the poll seam shares
+    // this lock: asking "is it unleased?" and then withdrawing under a second
+    // acquisition let a worker lease it in between and be left holding a row
+    // that had just been deleted, with no `cancel_run` ever minted for it --
+    // the exact "a cancelled job's runtime is never told" defect, narrowed to a
+    // race. A lost race reports `false` and falls through to the `cancel_run`
+    // below, which is the right remedy for the holder that won it.
+    if state.withdraw_unleased_self_hosted_dispatch(&start_dispatch_id) {
         return Ok(false);
     }
     let cancel = SelfHostedRunDispatch {

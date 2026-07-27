@@ -16,7 +16,14 @@
 //!    collect it.
 //! 2. idempotent submission: a retried submit under the same `Idempotency-Key`
 //!    returns the ORIGINAL `run_id` and spawns no second run.
-//! 3. cancellation reaches the runtime and terminalizes the run.
+//! 3. cancellation STOPS THE WORK in the runtime and terminalizes the run.
+//!    #551 pinned which mechanism discharges that, because it is not one
+//!    mechanism: a job no worker has leased has its start dispatch WITHDRAWN
+//!    (nothing is left to offer, and a `cancel_run` would be addressed at
+//!    nobody), while a job a worker HOLDS gets a `cancel_run` its holder can
+//!    lease. Both arms are driven, and the withdrawal is asserted positively
+//!    -- against a control job submitted right after the cancelled one -- so
+//!    the unleased arm cannot pass by asserting nothing.
 //! 4. tenant isolation: another tenant's key can never observe or collect the
 //!    run, by id.
 //! 5. the job survives a restart of the serving component (a config reload
@@ -270,36 +277,146 @@ pub(crate) fn run_agent_jobs_api(args: &LocalArgs) -> Result<()> {
         );
     }
 
-    // --- Box 3: cancellation reaches the runtime and terminalizes the run. ---
-    let cancel_run_id = submit_job(&gateway_addr, "harness-cancel-job", "a job to abandon")?;
+    // --- Box 3: cancellation stops the work in the RUNTIME and terminalizes
+    // the run. #551 settled which mechanism discharges "stops the work": it
+    // depends on whether a worker holds the job, so BOTH arms are driven here.
+    //
+    // Asserting only the leased arm would leave the far more common unleased
+    // one unheld; asserting the unleased arm as "no cancel_run appears" would
+    // be satisfied by a cancel path that had been deleted outright. So the
+    // unleased arm asserts the WITHDRAWAL positively (nothing for that run is
+    // ever offered again, while an un-cancelled control job submitted right
+    // after it still is), and the leased arm asserts the `cancel_run` reaches
+    // the transport for real. ---
+
+    // 3a. NOBODY has leased it: the queued work is withdrawn, and the flag says
+    // so rather than claiming a dispatch that would have been addressed at no
+    // one.
+    let abandoned = submit_job(&gateway_addr, "harness-cancel-job", "a job to abandon")?;
+    // Submitted AFTER the job being cancelled, and deliberately never
+    // cancelled. It is the control that stops "the worker was offered nothing
+    // for the cancelled run" from being satisfied by a poll seam that offers
+    // nothing to anybody.
+    let control = submit_job(
+        &gateway_addr,
+        "harness-cancel-control-job",
+        "a job nobody cancels",
+    )?;
     let cancelled = http_request_addr(
         &gateway_addr,
         "POST",
-        &format!("/v1/agent-jobs/{cancel_run_id}/cancel"),
+        &format!("/v1/agent-jobs/{abandoned}/cancel"),
         &[CALLER_AUTH, JSON_CONTENT],
         "{}",
     )?;
     expect_status(&cancelled, 200, "POST /v1/agent-jobs/{id}/cancel")?;
+    let cancelled_receipt = json_body(&cancelled)?;
+    if cancelled_receipt["cancelled"] != Value::Bool(true) {
+        bail!(
+            "cancelling a live job must report cancelled=true: {}",
+            cancelled.body
+        );
+    }
+    if cancelled_receipt["runtime_cancel_dispatched"] != Value::Bool(false) {
+        bail!(
+            "no worker had leased this job, so there was no holder to hand a cancel_run to; \
+             the receipt must report runtime_cancel_dispatched=false: {}",
+            cancelled.body
+        );
+    }
     let cancelled_status = get_json(
         &gateway_addr,
-        &format!("/v1/agent-jobs/{cancel_run_id}"),
+        &format!("/v1/agent-jobs/{abandoned}"),
         CALLER_AUTH,
     )?;
     let cancelled_body = json_body(&cancelled_status)?;
     if cancelled_body["status"] != "cancelled" || cancelled_body["terminal"] != Value::Bool(true) {
         bail!("cancel must terminalize the run: {}", cancelled_status.body);
     }
-    // ...and it must have reached the RUNTIME, i.e. a cancel_run dispatch is
-    // now leasable by the worker for that run.
+    // ...and the work must be GONE from the runtime queue. Drain everything the
+    // worker can still be offered: the cancelled job must not appear in it at
+    // all -- not as a `start_run` (which a worker would execute) and not as a
+    // `cancel_run` (which would mean the cancel had left the start dispatch
+    // runnable and papered over it with a message addressed at nobody).
+    let offered = drain_offered_dispatches(&gateway_addr, &worker_id, &transport_secret)?;
+    if let Some((run_id, action)) = offered
+        .iter()
+        .find(|(offered_run, _)| offered_run == &abandoned)
+    {
+        bail!(
+            "cancelling a job no worker had leased must WITHDRAW its work from the runtime \
+             queue, but the worker was still offered `{action}` for {run_id}; the whole drain \
+             was {offered:?}"
+        );
+    }
+    if !offered
+        .iter()
+        .any(|(run, action)| run == &control && action == "start_run")
+    {
+        bail!(
+            "the drain never offered the un-cancelled control job {control}, so \"nothing was \
+             offered for the cancelled job\" proves nothing about the withdrawal; the drain was \
+             {offered:?}"
+        );
+    }
+
+    // 3b. A worker HOLDS it: withdrawing the start dispatch would yank a row
+    // its holder still has to ack, so the holder is TOLD instead -- and this is
+    // the half that must keep real coverage. Suppressing the `cancel_run`
+    // enqueue in `cancel_agent_job_in_runtime` reddens the lease below.
+    let held = submit_job(
+        &gateway_addr,
+        "harness-cancel-leased-job",
+        "a job a worker picks up first",
+    )?;
+    let held_lease = lease_dispatch_for(&gateway_addr, &worker_id, &transport_secret, &held)?;
+    if held_lease["action"] != "start_run" {
+        bail!("the worker must hold the job's start dispatch before it is cancelled: {held_lease}");
+    }
+    let held_cancel = http_request_addr(
+        &gateway_addr,
+        "POST",
+        &format!("/v1/agent-jobs/{held}/cancel"),
+        &[CALLER_AUTH, JSON_CONTENT],
+        "{}",
+    )?;
+    expect_status(
+        &held_cancel,
+        200,
+        "POST /v1/agent-jobs/{id}/cancel (leased)",
+    )?;
+    let held_receipt = json_body(&held_cancel)?;
+    if held_receipt["runtime_cancel_dispatched"] != Value::Bool(true) {
+        bail!(
+            "a worker held this job, so the cancel had to be dispatched to the runtime: {}",
+            held_cancel.body
+        );
+    }
+    // The receipt is the gateway's own claim about itself; this is the
+    // independent one. The cancel is only real if the RUNTIME transport hands
+    // it to the worker over the same poll protocol that handed out the start.
     let cancel_lease = lease_action_for(
         &gateway_addr,
         &worker_id,
         &transport_secret,
-        &cancel_run_id,
+        &held,
         "cancel_run",
     )?;
-    if cancel_lease["action"] != "cancel_run" {
+    if cancel_lease["action"] != "cancel_run"
+        || cancel_lease["run_id"].as_str() != Some(held.as_str())
+    {
         bail!("cancel did not reach the runtime transport: {cancel_lease}");
+    }
+    let held_status = get_json(
+        &gateway_addr,
+        &format!("/v1/agent-jobs/{held}"),
+        CALLER_AUTH,
+    )?;
+    if json_body(&held_status)?["status"] != "cancelled" {
+        bail!(
+            "cancelling a leased job must terminalize it too: {}",
+            held_status.body
+        );
     }
 
     // --- Box 5: the job survives a restart of the serving component. ---
@@ -335,7 +452,21 @@ pub(crate) fn run_agent_jobs_api(args: &LocalArgs) -> Result<()> {
     }
     // The dispatch must come back out of durable storage: the worker can still
     // lease the surviving job's work on the rebuilt state.
-    let resumed = lease_dispatch_for(&gateway_addr, &worker_id, &transport_secret, &survivor)?;
+    //
+    // The reload replaces the whole lease queue with whatever
+    // `self_hosted_run_dispatches` still holds, which is the one moment a
+    // dispatch that was only removed from memory would come back. The cancelled
+    // job must not be offered on the far side of it (#551). Deliberately does
+    // NOT claim to identify WHICH guard delivered that -- the withdrawal's
+    // durable delete and the poll's settled-run refusal both hold here, and
+    // holding twice is the point.
+    let resumed = lease_dispatch_rejecting(
+        &gateway_addr,
+        &worker_id,
+        &transport_secret,
+        &survivor,
+        &[abandoned.as_str()],
+    )?;
     if resumed["run_id"].as_str() != Some(survivor.as_str()) {
         bail!("the restarted node did not re-offer the job's start dispatch: {resumed}");
     }
@@ -580,6 +711,25 @@ fn lease_dispatch_for(
     )
 }
 
+/// [`lease_dispatch_for`], additionally failing if the queue ever offers this
+/// worker anything at all for a run in `withdrawn` (#551).
+fn lease_dispatch_rejecting(
+    gateway_addr: &str,
+    worker_id: &str,
+    transport_secret: &str,
+    run_id: &str,
+    withdrawn: &[&str],
+) -> Result<Value> {
+    lease_action_rejecting(
+        gateway_addr,
+        worker_id,
+        transport_secret,
+        run_id,
+        "start_run",
+        withdrawn,
+    )
+}
+
 /// Polls the real worker lease protocol until it is offered `action` for
 /// `run_id`.
 fn lease_action_for(
@@ -589,40 +739,123 @@ fn lease_action_for(
     run_id: &str,
     action: &str,
 ) -> Result<Value> {
+    lease_action_rejecting(
+        gateway_addr,
+        worker_id,
+        transport_secret,
+        run_id,
+        action,
+        &[],
+    )
+}
+
+/// Polls the real worker lease protocol until it is offered `action` for
+/// `run_id`, and fails outright if it is ever offered ANY dispatch for a run in
+/// `withdrawn`.
+///
+/// The rejection is on the run, not on the action: a cancelled job whose work
+/// was withdrawn has no dispatch of any kind left to offer, and a `cancel_run`
+/// surfacing for it would mean the start dispatch had been left runnable
+/// (#551).
+fn lease_action_rejecting(
+    gateway_addr: &str,
+    worker_id: &str,
+    transport_secret: &str,
+    run_id: &str,
+    action: &str,
+    withdrawn: &[&str],
+) -> Result<Value> {
     let started = Instant::now();
     let mut last = String::new();
     while started.elapsed() < Duration::from_secs(20) {
-        let body = serde_json::json!({
-            "protocol_version": 1,
-            "identity": worker_identity(worker_id, transport_secret),
-            "supported_capabilities": ["shell"],
-            "now_unix": now_unix(),
-            "lease_duration_secs": 60
-        })
-        .to_string();
-        let response = http_request_addr(
-            gateway_addr,
-            "POST",
-            "/v1/self-hosted-workers/runs/poll",
-            &[JSON_CONTENT, TRANSPORT_SECURITY],
-            &body,
-        )?;
+        let response = poll_for_dispatch(gateway_addr, worker_id, transport_secret)?;
         if response.status == 204 {
             last = "204 (no dispatch offered)".to_string();
             thread::sleep(Duration::from_millis(100));
             continue;
         }
-        if response.status != 200 {
-            bail!("worker poll was rejected: {}", response.raw);
-        }
         let lease = json_body(&response)?;
-        if lease["run_id"].as_str() == Some(run_id) && lease["action"] == action {
+        let leased_run = lease["run_id"].as_str().unwrap_or_default();
+        if withdrawn.contains(&leased_run) {
+            bail!(
+                "a cancelled job's work must stay withdrawn from the runtime queue, but the \
+                 worker was offered `{}` for {leased_run}: {lease}",
+                lease["action"]
+            );
+        }
+        if leased_run == run_id && lease["action"] == action {
             return Ok(lease);
         }
         last = response.body.clone();
         thread::sleep(Duration::from_millis(100));
     }
     bail!("worker never leased a {action} dispatch for {run_id}; last poll: {last}")
+}
+
+/// How many dispatches [`drain_offered_dispatches`] will take before it treats
+/// the queue as one that never empties.
+///
+/// Each drained dispatch is leased to this worker for 60s and so cannot be
+/// offered again, which is what makes the drain terminate; the bound only
+/// exists so a poll seam that never answers 204 fails the scenario instead of
+/// hanging it.
+const DRAIN_MAX_DISPATCHES: usize = 16;
+
+/// Leases everything the queue will currently offer this worker, until it
+/// answers 204, and reports the `(run_id, action)` of each.
+///
+/// #551: this is how the harness observes a WITHDRAWAL. "The cancelled job was
+/// not offered" is only evidence if the poll that failed to offer it was
+/// offering other things, so the caller checks both directions against one
+/// drain.
+fn drain_offered_dispatches(
+    gateway_addr: &str,
+    worker_id: &str,
+    transport_secret: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut offered: Vec<(String, String)> = Vec::new();
+    for _ in 0..DRAIN_MAX_DISPATCHES {
+        let response = poll_for_dispatch(gateway_addr, worker_id, transport_secret)?;
+        if response.status == 204 {
+            return Ok(offered);
+        }
+        let lease = json_body(&response)?;
+        offered.push((
+            lease["run_id"].as_str().unwrap_or_default().to_string(),
+            lease["action"].as_str().unwrap_or_default().to_string(),
+        ));
+    }
+    bail!(
+        "the worker lease queue never went empty after {DRAIN_MAX_DISPATCHES} dispatches: \
+         {offered:?}"
+    )
+}
+
+/// One trip through the real worker poll protocol: 200 + a lease, or 204.
+fn poll_for_dispatch(
+    gateway_addr: &str,
+    worker_id: &str,
+    transport_secret: &str,
+) -> Result<HttpResponse> {
+    let body = serde_json::json!({
+        "protocol_version": 1,
+        "identity": worker_identity(worker_id, transport_secret),
+        "supported_capabilities": ["shell"],
+        "now_unix": now_unix(),
+        "lease_duration_secs": 60
+    })
+    .to_string();
+    let response = http_request_addr(
+        gateway_addr,
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, TRANSPORT_SECURITY],
+        &body,
+    )?;
+    if response.status != 200 && response.status != 204 {
+        bail!("worker poll was rejected: {}", response.raw);
+    }
+    Ok(response)
 }
 
 fn report_run_state(

@@ -6,8 +6,15 @@
 
 //! Proves the four properties the async job protocol is judged on, without a
 //! live HTTP session: idempotent submission (a retry addresses the ORIGINAL
-//! run), tenant isolation on every read, cancellation that reaches the runtime
-//! transport AND terminalizes the run, and a stable incremental event cursor.
+//! run), tenant isolation on every read, cancellation that STOPS THE WORK in
+//! the runtime AND terminalizes the run, and a stable incremental event cursor.
+//!
+//! #551 settled what "stops the work" means, and it is not "a `cancel_run`
+//! dispatch exists": a job no worker has leased is stopped by WITHDRAWING its
+//! start dispatch, and a job a worker holds is stopped by handing that holder
+//! a `cancel_run`. Both arms are asserted here, and so are the two places the
+//! withdrawal alone does not reach -- a worker racing the cancel for the same
+//! dispatch, and a peer replica whose rebuilt queue holds its own copy.
 
 use super::*;
 use crate::config::Config;
@@ -1515,6 +1522,110 @@ fn a_cancelled_job_can_no_longer_be_leased_and_started() {
             lease.dispatch_id
         );
     }
+}
+
+#[test]
+fn a_peer_still_holding_a_cancelled_jobs_start_dispatch_refuses_to_lease_it() {
+    // The hole the WITHDRAWAL arm leaves open, and the reason #551 could not be
+    // settled by rewriting the harness alone. `restore_runs` replaces a node's
+    // lease queue with the WHOLE `self_hosted_run_dispatches` table, unfiltered
+    // by node, so any replica that rebuilds after a submit is holding every
+    // other replica's dispatches in its own memory. Node A then cancels a job
+    // nobody leased: it withdraws its own copy, deletes the durable row, and
+    // correctly mints no `cancel_run` -- there was no holder to address. Node B
+    // is left sitting on a perfectly leasable `start_run` for work the caller
+    // paid to stop, with no durable evidence left anywhere that could ever
+    // supersede it. That is reading 2's harm surviving inside reading 1's
+    // contract, and it is why the contract needed a predicate that crosses
+    // replicas.
+    //
+    // The only such predicate is the run row itself, which the cancel writes.
+    // Deleting `start_run_lease_is_settled` from
+    // `AppState::poll_self_hosted_worker_run` reddens this test.
+    let submitter = AppState::new(Config::default());
+    let cancelled_id =
+        try_submit_job(&submitter, "tenant-a", "cancel-then-a-peer-polls").expect("submitted");
+    // Submitted alongside it and never cancelled. Without it, "the peer offered
+    // nothing for the cancelled run" would also be satisfied by a peer whose
+    // queue was empty or whose poll seam was broken -- which is precisely the
+    // shape of vacuous assertion #500 exists about.
+    let live_id =
+        try_submit_job(&submitter, "tenant-a", "the-peer-may-still-run-this").expect("submitted");
+    let cancelled_dispatch_id = agent_job_start_dispatch_id(&cancelled_id);
+
+    // The peer replica: it rebuilt its lease queue from the shared table AFTER
+    // the submits, so it holds its own in-memory copy of both start dispatches.
+    let peer = AppState::new(Config::default());
+    let (_worker_id, identity) = register_job_worker(&peer, "tenant-a");
+    for record in crate::gateway::block_on_sync_bridge(
+        submitter.repositories_arc().self_hosted_run_dispatches(),
+    ) {
+        crate::gateway::block_on_sync_bridge(
+            peer.repositories_arc()
+                .upsert_self_hosted_run_dispatch(record),
+        )
+        .expect("the peer reads the same durable table");
+    }
+    peer.rebuild_self_hosted_worker_dispatch_runtime()
+        .expect("the peer rebuilds its lease queue from the durable rows");
+    assert!(
+        peer.self_hosted_dispatch_unacked(&cancelled_dispatch_id),
+        "the peer must genuinely hold a leasable copy before the cancel, or this proves nothing"
+    );
+
+    // The cancel is served by the OTHER node, the way a load balancer would.
+    cancel_open_job(&submitter, &cancelled_id);
+    // The run row is the one record every replica shares; the cancel handler
+    // writes it immediately after stopping the work in the runtime.
+    for run_id in [&cancelled_id, &live_id] {
+        let row = submitter.agent_run_record(run_id).expect("run row");
+        crate::gateway::block_on_sync_bridge(peer.repositories_arc().upsert_agent_run(row))
+            .expect("the peer reads the same run table");
+    }
+    // Nothing reached the peer's own state: no `cancel_run` was minted at all,
+    // and its queue still holds the cancelled job's start dispatch.
+    assert!(
+        peer.self_hosted_dispatch_ids_for_run(&cancelled_id)
+            .contains(&cancelled_dispatch_id),
+        "the peer's in-memory copy is exactly what a cancel on another node cannot reach"
+    );
+    assert!(
+        peer.self_hosted_dispatch_for_run(&cancelled_id, SelfHostedRunAction::CancelRun)
+            .is_none(),
+        "an unleased job mints no cancel_run, so supersession cannot be what saves the peer"
+    );
+
+    // ...and yet the peer must not hand that work to a worker, while the job
+    // nobody cancelled is still handed out normally.
+    let mut offered_live = false;
+    for attempt in 0..8 {
+        let Some(lease) = poll_for_lease(&peer, &identity, 9_000 + attempt) else {
+            break;
+        };
+        assert_ne!(
+            lease.run_id, cancelled_id,
+            "a peer must never START a job another node already cancelled: {}",
+            lease.dispatch_id
+        );
+        if lease.run_id == live_id && lease.action == SelfHostedRunAction::StartRun {
+            offered_live = true;
+        }
+    }
+    assert!(
+        offered_live,
+        "the peer never offered the un-cancelled job either, so refusing the cancelled one is \
+         not evidence of anything"
+    );
+
+    // The refusal also RECLAIMS: the row a settled run leaves in a peer's queue
+    // is dropped as it is skipped, so a cancelled job does not cost a permanent
+    // scan on every future poll of every replica that rebuilt after its submit.
+    assert!(
+        !peer
+            .self_hosted_dispatch_ids_for_run(&cancelled_id)
+            .contains(&cancelled_dispatch_id),
+        "the skipped start dispatch must be dropped, not re-scanned on every poll forever"
+    );
 }
 
 #[test]

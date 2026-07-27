@@ -634,8 +634,31 @@ impl AppState {
         // is client-supplied; stamp the server clock so an expired identity cannot
         // report a past observed_at to pass validation.
         request.identity.observed_at_unix = now_unix_seconds();
-        // #474 (rework): a poll leases exactly one dispatch, so only that
-        // record is written through -- see `storage_records_for`.
+        // #551: at most this many settled `start_run` dispatches are dropped
+        // and re-polled past in one call. Bounded so a queue full of stale rows
+        // cannot turn one poll into an unbounded scan; the rest are dropped by
+        // the next polls, and each iteration removes a row permanently.
+        for _ in 0..SETTLED_DISPATCH_SKIP_LIMIT {
+            let Some(lease) = self.lease_one_self_hosted_dispatch(request.clone())? else {
+                return Ok(None);
+            };
+            if !self.start_run_lease_is_settled(&lease) {
+                return Ok(Some(lease));
+            }
+            self.discard_self_hosted_dispatch(&lease.dispatch_id);
+        }
+        Ok(None)
+    }
+
+    /// One trip through the in-process lease queue, writing through only the
+    /// record the poll actually leased.
+    ///
+    /// #474 (rework): a poll leases exactly one dispatch, so only that record is
+    /// written through -- see `storage_records_for`.
+    fn lease_one_self_hosted_dispatch(
+        &self,
+        request: SelfHostedRunPollRequest,
+    ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
         let (result, records) = match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => {
                 let result = dispatch.poll_run(request);
@@ -661,6 +684,44 @@ impl AppState {
             persist_self_hosted_dispatch_records(&self.repositories, records)?;
         }
         result
+    }
+
+    /// Whether `lease` would START work whose run has already SETTLED --
+    /// cancelled by its caller, or reported terminal by some worker.
+    ///
+    /// #551: the last line of defence, and the only one that is cluster-wide.
+    /// Every other thing that stops a cancelled job from being started is
+    /// node-local: [`AppState::withdraw_unleased_self_hosted_dispatch`] empties
+    /// one node's queue, and `poll_run`'s superseded set is built from one
+    /// node's queue too. Neither reaches a PEER, and a peer holds the work:
+    /// `restore_runs` replaces a node's queue with the WHOLE
+    /// `self_hosted_run_dispatches` table, unfiltered by node, at startup, on
+    /// worker registration, on identity rotation and on config reload -- so any
+    /// replica that rebuilds after a submit holds every other replica's unacked
+    /// dispatches. Without this check a cancel served by node A leaves node B
+    /// offering the same `start_run` to the next worker that polls it, which is
+    /// #474's original defect verbatim.
+    ///
+    /// The run row is the one record every replica shares, and cancel writes it
+    /// before anything else, so it is the only sound predicate. Read durably
+    /// (`settled_agent_run_ids`) for the same reason. A run with NO row is not
+    /// settled -- absence of evidence never stops work, exactly as it never
+    /// releases a submit slot -- so dispatches created through non-job paths
+    /// lease unchanged.
+    ///
+    /// `CancelRun` is deliberately exempt: its run is terminal BY CONSTRUCTION
+    /// (that is what the cancel wrote), and refusing to hand it out would
+    /// suppress the very message that stops the holder.
+    ///
+    /// Cost: one batched durable read per dispatch actually OFFERED, not per
+    /// poll. An idle worker polling an empty queue pays nothing.
+    fn start_run_lease_is_settled(&self, lease: &SelfHostedRunLease) -> bool {
+        if lease.action != SelfHostedRunAction::StartRun {
+            return false;
+        }
+        !self
+            .settled_agent_run_ids(&[lease.run_id.clone()])
+            .is_empty()
     }
 
     pub(crate) fn ack_self_hosted_worker_run(
@@ -1639,6 +1700,57 @@ impl AppState {
         }
     }
 
+    /// Withdraw ONE never-leased dispatch from this process's lease queue and,
+    /// only if that succeeded, from the durable `self_hosted_run_dispatches`
+    /// table.
+    ///
+    /// The cancel path's withdrawable arm (#502, made atomic by #551). It
+    /// answers a question no pair of separate reads can answer without a race:
+    /// "is the only runnable copy of this work mine, unclaimed, and now gone?"
+    /// A `false` means some other node holds the runnable copy, or a worker on
+    /// this one leased it -- in both cases the remedy is a durable `cancel_run`
+    /// the holder can read, not a delete, so the caller falls through to that.
+    ///
+    /// Distinct from [`AppState::discard_self_hosted_dispatch`], which is the
+    /// RECLAIM of a dispatch whose run has already settled: that one deletes
+    /// unconditionally and cluster-wide, because a settled run's rows have no
+    /// remaining reader whoever holds them. This one is a withdrawal of work
+    /// that is still live, so it must not touch a row another reader still
+    /// needs.
+    pub(crate) fn withdraw_unleased_self_hosted_dispatch(&self, dispatch_id: &str) -> bool {
+        let withdrawn = match self.self_hosted_dispatch.lock() {
+            Ok(mut runtime) => runtime.queue.withdraw_unleased_run(dispatch_id),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .queue
+                .withdraw_unleased_run(dispatch_id),
+        };
+        if !withdrawn {
+            return false;
+        }
+        if let Err(error) = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .delete_self_hosted_run_dispatch(dispatch_id),
+        ) {
+            // A retention leak, not a correctness hole. The row is out of this
+            // node's queue and the caller terminalizes the run immediately
+            // after, so a rebuild that reads the row back cannot lease it out:
+            // `start_run_lease_is_settled` drops it at the poll that would have
+            // offered it, which is also what eventually deletes it. A retried
+            // cancel on the now-terminal run reclaims it sooner. Surfaced
+            // rather than swallowed, because "the delete failed" and "the row
+            // is fine" must not look the same in a log.
+            warn!(
+                dispatch_id,
+                error = %error,
+                "withdrew a cancelled job's start dispatch from the lease queue but could not \
+                 delete its durable row; a rebuild of this node may re-offer it until the \
+                 settled-run reclaim removes it"
+            );
+        }
+        true
+    }
+
     /// Dispatch ids THIS PROCESS's lease queue holds for `run_id`, whatever
     /// their action or ack state.
     ///
@@ -2283,6 +2395,16 @@ pub(crate) const AGENT_RUN_SUMMARY_SCAN_LIMIT: usize = 1_000;
 /// a multi-megabyte diff belongs on the artifact channel, which
 /// `GET /v1/agent-jobs/{run_id}/result` already surfaces as `artifacts`.
 pub(crate) const WORKER_REPORTED_OUTPUT_MAX_CHARS: usize = 64_000;
+
+/// How many SETTLED `start_run` dispatches one poll may drop and look past
+/// before answering "no work" (#551).
+///
+/// A settled dispatch is deleted as it is skipped, so this bounds the work of a
+/// single poll, not the number that can ever be cleared: whatever is left is
+/// cleared by the following polls. The common case skips zero -- a settled run
+/// is normally reclaimed the moment it settles, and this only catches the rows
+/// a PEER node's reclaim could not reach into this node's queue.
+const SETTLED_DISPATCH_SKIP_LIMIT: usize = 8;
 
 /// A worker's report about a run, normalized onto the control plane's own
 /// vocabulary. Every field is optional evidence; nothing is invented.
