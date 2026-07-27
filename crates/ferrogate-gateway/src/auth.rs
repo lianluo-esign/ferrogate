@@ -992,8 +992,17 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 /// resolved tenant differs from their own AND when resolution fails
 /// entirely (the referenced project/workspace/key doesn't exist) --
 /// "nonexistent means safe to touch" is explicitly the wrong default here.
+///
+/// Issue #543: "resolution fails entirely" covers two different events that
+/// the `.ok().flatten()` below deliberately collapses into one -- the row is
+/// ABSENT, and the control plane is UNAVAILABLE. Both land on `None`, and
+/// `None` can never equal the caller's tenant, so a storage blip denies rather
+/// than granting. That was untested until #543 (a real `AppState`'s in-memory
+/// storage cannot be made to fail), which is why this takes
+/// `&impl TenantScopeReads`: `auth_test.rs` drives all three scope kinds
+/// against a store armed to fail the lookup.
 pub(crate) async fn authorize_scoped_resource(
-    state: &AppState,
+    state: &impl crate::tenant_scope_reads::TenantScopeReads,
     auth: &AuthContext,
     scope_type: ferrogate_storage::QuotaScopeKind,
     scope_id: &str,

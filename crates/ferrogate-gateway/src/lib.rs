@@ -226,5 +226,14 @@ pub mod state;
 /// the spans/metrics they ship.
 mod telemetry;
 
+/// The control-plane read seam the tenant-scope resolvers go through (#543):
+/// the reads `rbac_catalog_scope` and `authorize_scoped_resource` make to
+/// decide how much of a catalog a caller may see, implemented once for
+/// [`state::AppState`] and once, under `#[cfg(test)]`, by a store whose
+/// individual reads can be armed to FAIL. Without it, the failure branch of a
+/// scope decision -- the branch that must never degrade to an unfiltered
+/// catalog -- is unreachable from any test.
+mod tenant_scope_reads;
+
 /// Token counting for usage accounting and budget enforcement.
 mod tokenizer;

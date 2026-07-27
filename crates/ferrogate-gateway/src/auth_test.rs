@@ -5,7 +5,10 @@
 // description: Unit tests for the authorization vocabulary, the credential
 // primitives and the external auth-service scope check -- the cases that need
 // nothing but a credential. The ones that build a real `AppState` are the
-// sibling `auth_admission_test.rs`, under the same `auth` module.
+// sibling `auth_admission_test.rs`, under the same `auth` module. The #543
+// block at the end adds one more thing to a credential: a `TenantScopeReads`
+// store whose individual reads can be armed to FAIL, which a real `AppState`
+// cannot be.
 
 use super::*;
 
@@ -398,4 +401,193 @@ fn forced_tenant_filter_reads_the_declared_identity_not_a_missing_field() {
         Some(UNSCOPED_TENANT_ID.to_string()),
         "and cannot fall back to the unfiltered, every-tenant listing"
     );
+}
+
+// --- issue #543: the storage-FAILURE branch of `authorize_scoped_resource` ---
+//
+// #516 pinned both of this function's DECISION branches (resolved tenant
+// matches / differs). Neither could reach its third input: a control plane
+// that does not answer at all. `.ok().flatten()` collapses "row absent" and
+// "storage unavailable" into the same `None`, which denies -- fail-closed, and
+// until now fail-closed by accident, because nothing in the tree could make a
+// storage read fail. The #543 seam can, so the property is now held rather
+// than argued.
+
+use crate::tenant_scope_reads::fault::{
+    block_on, platform_operator_auth, tenant_auth, FaultyTenantScopeReads, TenantScopeRead,
+};
+use ferrogate_storage::QuotaScopeKind;
+
+/// A control plane that owns one project, one workspace and one virtual key,
+/// all belonging to `tenant-a`. Every failure case below starts here and arms
+/// exactly one read, so a deny cannot be explained by the row simply being
+/// missing.
+fn owned_by_tenant_a() -> FaultyTenantScopeReads {
+    FaultyTenantScopeReads::healthy()
+        .with_project("project-a", "tenant-a")
+        .with_workspace("workspace-a", "tenant-a")
+        .with_virtual_api_key("key-a", "tenant-a")
+}
+
+/// The non-vacuity guard for the three failure cases: with healthy storage
+/// each of the three scope kinds RESOLVES and the owner is allowed, so a later
+/// `is_err()` is testing the storage-failure branch and not a store that
+/// denies everything.
+///
+/// Pins: the `resolved_tenant_id.as_deref() == Some(caller_tenant_id)` allow
+/// branch of `authorize_scoped_resource`, on all three storage-backed kinds.
+/// Catches: denying the legitimate owner (the surface would be unusable), and
+/// any scope kind silently losing its resolver.
+#[test]
+fn owner_is_allowed_on_every_storage_backed_scope_kind() {
+    let store = owned_by_tenant_a();
+    let auth = tenant_auth("tenant-a");
+    for (kind, id) in [
+        (QuotaScopeKind::Project, "project-a"),
+        (QuotaScopeKind::Workspace, "workspace-a"),
+        (QuotaScopeKind::Key, "key-a"),
+    ] {
+        assert!(
+            block_on(authorize_scoped_resource(&store, &auth, kind, id)).is_ok(),
+            "{kind:?} {id} is owned by the caller and must be authorized"
+        );
+    }
+    assert_eq!(
+        store.reads(),
+        vec![
+            TenantScopeRead::GetProject,
+            TenantScopeRead::GetWorkspace,
+            TenantScopeRead::GetVirtualApiKey
+        ],
+        "each scope kind must resolve through its own storage read"
+    );
+}
+
+/// A storage failure while resolving a scope must DENY, never allow -- for
+/// each of the three kinds independently, because each is its own
+/// `.ok().flatten()`.
+///
+/// Pins: the three `state.get_*(scope_id).await.ok().flatten()` arms of
+/// `authorize_scoped_resource`.
+/// Catches: any rewrite that turns an unresolvable scope into an allow --
+/// `.unwrap_or(Some(caller_tenant_id.to_string()))`, or the "nonexistent means
+/// safe to touch" shortcut the doc comment rejects
+/// (`if resolved_tenant_id.is_none() { return Ok(()) }`). Both would make a
+/// storage blip authorize another tenant's quota policy or usage report.
+#[test]
+fn storage_failure_denies_on_every_storage_backed_scope_kind() {
+    let auth = tenant_auth("tenant-a");
+    for (kind, id, read) in [
+        (
+            QuotaScopeKind::Project,
+            "project-a",
+            TenantScopeRead::GetProject,
+        ),
+        (
+            QuotaScopeKind::Workspace,
+            "workspace-a",
+            TenantScopeRead::GetWorkspace,
+        ),
+        (
+            QuotaScopeKind::Key,
+            "key-a",
+            TenantScopeRead::GetVirtualApiKey,
+        ),
+    ] {
+        let store = owned_by_tenant_a().failing(read);
+        let error = block_on(authorize_scoped_resource(&store, &auth, kind, id)).expect_err(
+            "an unavailable control plane must not authorize a scope it could not resolve",
+        );
+        assert_eq!(error.status, StatusCode::FORBIDDEN, "{kind:?}");
+        assert_eq!(error.code, "tenant_scope_denied", "{kind:?}");
+        assert!(
+            store.reads().contains(&read),
+            "{kind:?}: the deny must follow an attempted read, not a skipped one"
+        );
+    }
+}
+
+/// The `QuotaScopeKind::Tenant` arm reads no storage at all -- it compares the
+/// bare id -- so a dead control plane must not change its answer either way.
+///
+/// Pins: `QuotaScopeKind::Tenant => Some(scope_id.to_string())`.
+/// Catches: routing the bare-tenant case through a storage lookup, which would
+/// make every quota-policy read on the tenant scope fail closed during a blip;
+/// and any widening that lets tenant-a name tenant-b.
+#[test]
+fn bare_tenant_scope_needs_no_storage_and_still_refuses_another_tenant() {
+    let store = owned_by_tenant_a()
+        .failing(TenantScopeRead::GetProject)
+        .failing(TenantScopeRead::GetWorkspace)
+        .failing(TenantScopeRead::GetVirtualApiKey);
+    let auth = tenant_auth("tenant-a");
+
+    assert!(block_on(authorize_scoped_resource(
+        &store,
+        &auth,
+        QuotaScopeKind::Tenant,
+        "tenant-a"
+    ))
+    .is_ok());
+    assert!(block_on(authorize_scoped_resource(
+        &store,
+        &auth,
+        QuotaScopeKind::Tenant,
+        "tenant-b"
+    ))
+    .is_err());
+    assert!(
+        store.reads().is_empty(),
+        "the bare-tenant comparison must not touch storage: {:?}",
+        store.reads()
+    );
+}
+
+/// A declared platform operator is authorized before any lookup, so the
+/// operator surfaces stay usable while the control plane is unavailable.
+///
+/// Pins: `let CallerScope::Tenant(caller_tenant_id) = auth.caller_scope()
+/// else { return Ok(()) };`.
+/// Catches: routing operators through the resolver -- the read is armed to
+/// fail, so the operator would be denied.
+#[test]
+fn platform_operator_is_authorized_without_a_storage_read() {
+    let store = owned_by_tenant_a().failing(TenantScopeRead::GetProject);
+
+    assert!(block_on(authorize_scoped_resource(
+        &store,
+        &platform_operator_auth(),
+        QuotaScopeKind::Project,
+        "project-a"
+    ))
+    .is_ok());
+    assert!(
+        store.reads().is_empty(),
+        "platform root is decided from the credential, not from storage: {:?}",
+        store.reads()
+    );
+}
+
+/// An ABSENT row and an UNAVAILABLE control plane must reach the same deny --
+/// the collapse `.ok().flatten()` performs is deliberate, so both halves of it
+/// are pinned rather than only the one the fault harness can produce.
+///
+/// Pins: the same three `.ok().flatten()` arms, on their `Ok(None)` input.
+/// Catches: "nonexistent means safe to touch" -- a rewrite that allows when
+/// the referenced project/workspace/key does not exist, which would let a
+/// tenant pre-authorize an id it intends to create.
+#[test]
+fn absent_row_denies_exactly_as_a_failed_read_does() {
+    let store = FaultyTenantScopeReads::healthy();
+    let auth = tenant_auth("tenant-a");
+
+    let error = block_on(authorize_scoped_resource(
+        &store,
+        &auth,
+        QuotaScopeKind::Project,
+        "project-that-does-not-exist",
+    ))
+    .expect_err("an unresolvable scope must be denied, not treated as free to touch");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "tenant_scope_denied");
 }

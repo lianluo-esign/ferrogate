@@ -46,6 +46,21 @@ through the admin API but the runtime only ever read the tenant scope.
   it rather than leaving it to a slow E2E run.
 - **Required for:** any pure-logic change (config parsing, policy evaluation,
   cost math, encoders).
+- **Making a storage read FAIL (#543):** a tenant-scope decision that reads the
+  control plane has a failure branch, and that branch is a security decision:
+  `rbac_catalog_scope` must propagate (the four RBAC catalog GETs answer
+  `503 storage_unavailable`) and must never degrade to an empty or — far worse
+  — unfiltered scope. No storage double in the tree could produce that input: a
+  real `AppState` runs on `RuntimeStorageRepositories`, whose in-memory backend
+  swallows even a poisoned lock into `unwrap_or_default()`, so every read it
+  serves succeeds. `crates/ferrogate-gateway/src/tenant_scope_reads.rs` is the
+  seam that fixes this — the resolvers take `&impl TenantScopeReads` instead of
+  `&AppState`, and its `#[cfg(test)]` `fault::FaultyTenantScopeReads` answers
+  from canned rows, records the reads attempted, and returns `Err` for any read
+  armed with `.failing(..)`. **A new scope resolver that reads storage adds its
+  read to that trait rather than building a second harness**: one method, one
+  `TenantScopeRead` variant, and its failure branch becomes testable. Used by
+  `server/rbac_test.rs` and the `#543` block of `auth_test.rs`.
 
 ### 3. Property
 

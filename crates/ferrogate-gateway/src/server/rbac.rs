@@ -20,6 +20,7 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::auth::{AuthContext, CallerScope};
+use crate::tenant_scope_reads::TenantScopeReads;
 use crate::{
     auth::authenticate,
     responses::{
@@ -112,14 +113,9 @@ impl FerroGateway {
                 let scope = match rbac_catalog_scope(&state, &auth).await {
                     Ok(scope) => scope,
                     Err(error) => {
-                        return write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await;
+                        let (status, code, message) = rbac_scope_storage_error(&error);
+                        return write_json_error(session, status, code, message, &ctx.request_id)
+                            .await;
                     }
                 };
                 match state.get_permission(id).await {
@@ -269,14 +265,8 @@ impl FerroGateway {
         let scope = match rbac_catalog_scope(&state, &auth).await {
             Ok(scope) => scope,
             Err(error) => {
-                return write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "storage_unavailable",
-                    error.to_string(),
-                    &ctx.request_id,
-                )
-                .await;
+                let (status, code, message) = rbac_scope_storage_error(&error);
+                return write_json_error(session, status, code, message, &ctx.request_id).await;
             }
         };
         match state.list_permissions().await {
@@ -490,14 +480,9 @@ impl FerroGateway {
                 let scope = match rbac_catalog_scope(&state, &auth).await {
                     Ok(scope) => scope,
                     Err(error) => {
-                        return write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await;
+                        let (status, code, message) = rbac_scope_storage_error(&error);
+                        return write_json_error(session, status, code, message, &ctx.request_id)
+                            .await;
                     }
                 };
                 match state.get_role(id).await {
@@ -644,14 +629,8 @@ impl FerroGateway {
         let scope = match rbac_catalog_scope(&state, &auth).await {
             Ok(scope) => scope,
             Err(error) => {
-                return write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "storage_unavailable",
-                    error.to_string(),
-                    &ctx.request_id,
-                )
-                .await;
+                let (status, code, message) = rbac_scope_storage_error(&error);
+                return write_json_error(session, status, code, message, &ctx.request_id).await;
             }
         };
         match state.list_roles().await {
@@ -1107,9 +1086,19 @@ impl RbacCatalogScope {
 ///
 /// Storage failures propagate rather than degrading to an empty (or, far
 /// worse, unfiltered) scope: the callers turn them into the same
-/// `503 storage_unavailable` they already return for a failed list.
+/// `503 storage_unavailable` they already return for a failed list, via
+/// [`rbac_scope_storage_error`].
+///
+/// That last paragraph was an untested claim until #543. It is now held by
+/// `rbac_test.rs`, which drives this function against a
+/// `tenant_scope_reads::fault::FaultyTenantScopeReads` armed to fail
+/// each of the two reads in turn -- which is why the parameter is
+/// `&impl TenantScopeReads` rather than `&AppState`: a real `AppState`'s
+/// storage cannot be made to fail, so before the seam existed the `?`s below
+/// could have been replaced by `unwrap_or_default()` (empty scope) or, far
+/// worse, by `RbacCatalogScope::Full` with every suite still green.
 async fn rbac_catalog_scope(
-    state: &AppState,
+    state: &impl TenantScopeReads,
     auth: &AuthContext,
 ) -> anyhow::Result<RbacCatalogScope> {
     // #535: read the classification through `caller_scope()`, not through
@@ -1137,6 +1126,26 @@ async fn rbac_catalog_scope(
         role_ids,
         permission_keys,
     })
+}
+
+/// The response a failed [`rbac_catalog_scope`] becomes, in one place for all
+/// four `/admin/v1/permissions*`/`/admin/v1/roles*` GETs (issue #543).
+///
+/// This is the other half of the propagate-don't-degrade property: the
+/// resolver refusing to answer is only safe because the caller turns the
+/// refusal into a REFUSAL -- `503 storage_unavailable`, the same code these
+/// handlers already return when the list read itself fails -- rather than into
+/// a permissive default. Extracted from the four identical `Err(error) =>`
+/// arms so the mapping is reachable from a test without a live `Session`
+/// (the same reason `visible_declared_policies` was split out in
+/// `x402_spend_policy.rs`): an access control nobody can call in a test is an
+/// access control nobody can prove.
+fn rbac_scope_storage_error(error: &anyhow::Error) -> (StatusCode, &'static str, String) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "storage_unavailable",
+        error.to_string(),
+    )
 }
 
 /// The single-object counterpart to the list filters (issue #518). A
@@ -1601,3 +1610,7 @@ fn now_unix_seconds() -> i64 {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "rbac_test.rs"]
+mod rbac_test;
