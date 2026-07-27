@@ -8251,7 +8251,41 @@ impl FerroGateway {
         // scopes against a hierarchy that does not exist. Validate the triple
         // authoritatively here, the same way the workspaces and virtual-keys
         // upserts already validate theirs (gateway/virtual_keys.rs).
+        // #514, the attach-time seam. A key is a credential: minting one that
+        // points at a suspended/disabled/soft-deleted tenant, project or
+        // workspace is exactly how an operator's suspension gets undone (the
+        // live probe minted a working key under a fully suspended chain and got
+        // a 201 with a live secret). One shared validation, so this holds for
+        // every storage backend; the row's OWN lifecycle transitions are
+        // untouched, so un-suspending still works.
         let refs = ApiKeyTenancyRefs::from_key(&key);
+        if let Err(error) = state
+            .require_usable_tenancy(
+                crate::lifecycle_gate::LifecycleSeam::Attach,
+                refs.organization_id,
+                refs.project_id,
+                refs.workspace_id,
+            )
+            .await
+        {
+            let message = error.message();
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "api_key.upsert",
+                &key.id,
+                "rejected",
+                message.clone(),
+            ));
+            return write_json_error(
+                session,
+                error.status(),
+                error.code(),
+                message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         if refs.needs_lookup() {
             let project = match refs.project_id {
                 Some(project_id) => match state.get_project(project_id).await {

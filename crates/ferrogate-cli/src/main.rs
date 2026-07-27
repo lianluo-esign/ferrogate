@@ -22,6 +22,7 @@ mod dashboard;
 mod extensions;
 mod gateway;
 mod lifecycle;
+mod lifecycle_gate;
 mod metering;
 mod network_access;
 mod plans_cli;

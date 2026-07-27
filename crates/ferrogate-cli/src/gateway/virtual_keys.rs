@@ -872,6 +872,27 @@ impl FerroGateway {
                     )
                     .await;
                 }
+                // #514 attach-time seam: a suspended tenant may not grow new
+                // projects (and therefore, transitively, no new workspaces or
+                // keys under them).
+                if let Err(error) = state
+                    .require_usable_tenancy(
+                        crate::lifecycle_gate::LifecycleSeam::Attach,
+                        Some(&tenant_id),
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    return write_json_error(
+                        session,
+                        error.status(),
+                        error.code(),
+                        error.message(),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 let name = match payload.name.filter(|name| !name.trim().is_empty()) {
                     Some(name) => name,
                     None => {
@@ -1427,6 +1448,27 @@ impl FerroGateway {
                         error.status,
                         error.code,
                         error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                // #514 attach-time seam: no new workspace under a suspended
+                // project, nor under an active project whose TENANT is
+                // suspended -- the chain is checked whole, shallowest first.
+                if let Err(error) = state
+                    .require_usable_tenancy(
+                        crate::lifecycle_gate::LifecycleSeam::Attach,
+                        Some(&project.tenant_id),
+                        Some(&project_id),
+                        None,
+                    )
+                    .await
+                {
+                    return write_json_error(
+                        session,
+                        error.status(),
+                        error.code(),
+                        error.message(),
                         &ctx.request_id,
                     )
                     .await;
@@ -2112,6 +2154,28 @@ impl FerroGateway {
                 error.status,
                 error.code,
                 error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
+        // #514 attach-time seam, the exact hole the live probe walked through:
+        // "mint a NEW virtual key under the suspended chain -> 201 + live
+        // secret". The whole resolved chain is checked, so suspending at ANY
+        // level (tenant, project or workspace) stops fresh credentials.
+        if let Err(error) = state
+            .require_usable_tenancy(
+                crate::lifecycle_gate::LifecycleSeam::Attach,
+                Some(&scope.tenant_id),
+                Some(&scope.project_id),
+                Some(&scope.workspace_id),
+            )
+            .await
+        {
+            return write_json_error(
+                session,
+                error.status(),
+                error.code(),
+                error.message(),
                 &ctx.request_id,
             )
             .await;

@@ -1073,3 +1073,168 @@ fn revoke_supersedes_refresh_lease_and_pending_flow() {
             .expect("late refresh completion")
     );
 }
+
+// --- #514: `McpIdentityAccessOutcome::WorkspaceInactive` had ZERO test
+// references. It was the ONE outcome in the codebase that honoured the
+// lifecycle `status` column, and nothing held it: the variant could have been
+// deleted, or the status predicate inverted, without a single test going red.
+// These pin it on the in-memory backend; the Postgres path enforces the same
+// rule with `AND status='active'` inside
+// `postgres_mcp_identity_authorization_query`, pinned by the SQL-shape test at
+// the bottom.
+
+/// Seeds the RBAC + membership prerequisites so the ONLY thing left to decide
+/// is the workspace's lifecycle status. Without them the fixture would
+/// short-circuit on `PermissionDenied`/`MembershipRevoked` and the workspace
+/// branch would never be reached -- the classic vacuous-assertion shape.
+fn identity_store_with_workspace_status(status: &str) -> RuntimeControlPlaneState {
+    let mut store = RuntimeControlPlaneState::new();
+    store.permissions.insert(
+        "perm",
+        crate::StoredPermission {
+            id: "perm".into(),
+            key: "mcp.identity.use".into(),
+            name: "Use MCP identity".into(),
+            description: String::new(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        },
+    );
+    store.roles.insert(
+        "role",
+        crate::StoredRole {
+            id: "role".into(),
+            name: "MCP user".into(),
+            slug: "mcp-user".into(),
+            description: String::new(),
+            permission_keys: vec!["mcp.identity.use".into()],
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        },
+    );
+    store.tenant_role_bindings.insert(
+        "binding",
+        crate::StoredTenantRoleBinding {
+            id: "binding".into(),
+            tenant_id: "tenant".into(),
+            role_id: "role".into(),
+            created_at_unix: 1,
+        },
+    );
+    store.admin_users.insert(
+        "user",
+        crate::StoredAdminUser {
+            id: "user".into(),
+            email: "user@example.invalid".into(),
+            password_hash: "hash".into(),
+            display_name: "User".into(),
+            superadmin: false,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            last_login_at_unix: None,
+            disabled_at_unix: None,
+        },
+    );
+    store.admin_user_memberships.insert(
+        "membership",
+        crate::StoredAdminUserMembership {
+            id: "membership".into(),
+            user_id: "user".into(),
+            tenant_id: "tenant".into(),
+            role: "admin".into(),
+            created_at_unix: 1,
+        },
+    );
+    store.workspaces.insert(
+        "workspace",
+        crate::StoredWorkspace {
+            id: "workspace".into(),
+            project_id: "project".into(),
+            tenant_id: "tenant".into(),
+            name: "Workspace".into(),
+            slug: "workspace".into(),
+            environment: "prod".into(),
+            status: status.into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        },
+    );
+    store
+}
+
+fn identity_access_request() -> McpIdentityAccessRequest {
+    McpIdentityAccessRequest {
+        tenant_id: "tenant".into(),
+        workspace_id: "workspace".into(),
+        user_id: "user".into(),
+        server_name: "server".into(),
+        permission_key: "mcp.identity.use".into(),
+    }
+}
+
+/// Control: the fixture really does reach the workspace branch, so the
+/// `WorkspaceInactive` assertions below are about the status column and nothing
+/// else.
+#[test]
+fn an_active_workspace_authorizes_the_mcp_identity_actor() {
+    let store = identity_store_with_workspace_status("active");
+    assert!(matches!(
+        memory_authorize_mcp_actor(&store, &identity_access_request()),
+        McpIdentityAccessOutcome::Allowed(_)
+    ));
+}
+
+#[test]
+fn an_inactive_workspace_yields_workspace_inactive() {
+    for status in ["suspended", "disabled", "deleted"] {
+        let store = identity_store_with_workspace_status(status);
+        assert_eq!(
+            memory_authorize_mcp_actor(&store, &identity_access_request()),
+            McpIdentityAccessOutcome::WorkspaceInactive,
+            "workspace status {status} must deny MCP identity access"
+        );
+    }
+}
+
+/// A workspace owned by another tenant is `WorkspaceInactive` too -- the status
+/// branch must not be reachable by pointing at someone else's active workspace.
+#[test]
+fn a_cross_tenant_workspace_yields_workspace_inactive() {
+    let mut store = identity_store_with_workspace_status("active");
+    let mut foreign = store.workspaces.get("workspace").expect("workspace");
+    foreign.tenant_id = "other-tenant".into();
+    store.workspaces.insert("workspace", foreign);
+    assert_eq!(
+        memory_authorize_mcp_actor(&store, &identity_access_request()),
+        McpIdentityAccessOutcome::WorkspaceInactive
+    );
+}
+
+/// The dangerous default (#514): a legacy workspace row whose `status` was
+/// never written must stay usable, not be locked out.
+#[test]
+fn a_legacy_blank_workspace_status_still_authorizes() {
+    for status in ["", "   ", "ACTIVE"] {
+        let store = identity_store_with_workspace_status(status);
+        assert!(
+            matches!(
+                memory_authorize_mcp_actor(&store, &identity_access_request()),
+                McpIdentityAccessOutcome::Allowed(_)
+            ),
+            "legacy status {status:?} must not lock the workspace out"
+        );
+    }
+}
+
+/// The Postgres half of the same invariant: the authorization read must still
+/// carry the workspace lifecycle predicate. Deleting `AND status='active'` from
+/// the query turns this red.
+#[test]
+fn postgres_identity_authorization_filters_inactive_workspaces() {
+    let query = postgres_mcp_identity_authorization_query();
+    let normalized = query.to_ascii_uppercase().replace(' ', "");
+    assert!(
+        normalized.contains("FROMWORKSPACESWHEREID=$2ANDTENANT_ID=$1ANDSTATUS='ACTIVE'"),
+        "authorization read lost its workspace lifecycle filter: {query}"
+    );
+}

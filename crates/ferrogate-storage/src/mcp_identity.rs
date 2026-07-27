@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{future::Future, time::Duration};
 
 use super::{
-    AppendRepository, PostgresControlPlaneStore, PostgresRow, Repository,
+    AppendRepository, LifecycleStatus, PostgresControlPlaneStore, PostgresRow, Repository,
     RuntimeControlPlaneBackend, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
     StorageOperation, StoredAuditEvent,
 };
@@ -2175,11 +2175,18 @@ fn memory_authorize_mcp_actor(
     {
         return McpIdentityAccessOutcome::MembershipRevoked;
     }
+    // #514: `status` is interpreted through the one shared vocabulary rather
+    // than a bare `== "active"` string test, so a legacy row whose status was
+    // never written (empty/NULL) stays usable while an explicitly
+    // suspended/disabled/deleted workspace is refused -- the same verdict the
+    // Postgres path's `status='active'` filter reaches for the tokens that
+    // actually occur.
     if !store
         .workspaces
         .get(&request.workspace_id)
         .is_some_and(|workspace| {
-            workspace.tenant_id == request.tenant_id && workspace.status == "active"
+            workspace.tenant_id == request.tenant_id
+                && LifecycleStatus::parse(&workspace.status).is_active()
         })
     {
         return McpIdentityAccessOutcome::WorkspaceInactive;

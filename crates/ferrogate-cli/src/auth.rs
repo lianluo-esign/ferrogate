@@ -662,6 +662,25 @@ async fn finalize_auth(
     mut auth: AuthContext,
     request_id: &str,
 ) -> std::result::Result<AuthContext, AuthError> {
+    // #514, the request-time seam. This is the ONE place it lives: every auth
+    // source (durable/virtual, YAML config, external auth service) funnels
+    // through `finalize_auth`, so a suspended tenant's pre-existing keys stop
+    // serving traffic no matter which credential path identified them and no
+    // matter which handler is being called. Running it FIRST is deliberate: a
+    // suspended tenant must not even reach quota/wallet resolution, which is
+    // where spend is authorized.
+    //
+    // Platform-operator keys carry no `organization_id`/`project_id`/
+    // `workspace_id`, so the chain is empty and this is a no-op for them --
+    // which is exactly what keeps un-suspending a tenant possible.
+    state
+        .require_usable_tenancy(
+            crate::lifecycle_gate::LifecycleSeam::Request,
+            auth.organization_id.as_deref(),
+            auth.project_id.as_deref(),
+            auth.workspace_id.as_deref(),
+        )
+        .await?;
     let quota = state
         .resolve_effective_quota(&auth.tenant_context())
         .await

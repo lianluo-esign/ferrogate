@@ -47,6 +47,9 @@ pub(crate) use postgres_row_mappers::*;
 mod rbac;
 pub use rbac::{tenant_role_binding_id, StoredPermission, StoredRole, StoredTenantRoleBinding};
 
+mod lifecycle_status;
+pub use lifecycle_status::LifecycleStatus;
+
 mod mcp_identity;
 pub use mcp_identity::{
     McpCredentialRepository, McpIdentityAccessOutcome, McpIdentityAccessRequest,
