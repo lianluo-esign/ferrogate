@@ -7,10 +7,30 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+# Bash-native, so a stripped PATH is reported by the tool preflight below
+# instead of by a confusing "dirname: command not found" from this line.
+SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+[[ "$SCRIPT_DIR" == "${BASH_SOURCE[0]}" ]] && SCRIPT_DIR="."
+cd "$SCRIPT_DIR/.."
+ROOT_DIR="$PWD"
 
 require_supply_chain_tools="${FERROGATE_SECURITY_REQUIRE_TOOLS:-0}"
+
+# Tool preflight (#525): resolve every non-optional tool up front and name what
+# is missing. Without this the script died mid-way with a bare
+# "cargo: command not found" style error that reads like an unrelated failure,
+# so a gate that never ran looked like noise instead of a red gate.
+# cargo deny / cargo audit stay optional and keep their own explicit skip
+# notices, gated by FERROGATE_SECURITY_REQUIRE_TOOLS.
+missing_tools=()
+for required_tool in cargo python3 git; do
+  command -v "$required_tool" >/dev/null 2>&1 || missing_tools+=("$required_tool")
+done
+if [[ "${#missing_tools[@]}" -ne 0 ]]; then
+  echo "security check cannot run: missing required tool(s): ${missing_tools[*]}" >&2
+  echo "a gate that cannot run must fail loudly instead of skipping itself (#525)" >&2
+  exit 1
+fi
 
 echo "==> cargo fmt"
 cargo fmt --check
@@ -27,54 +47,9 @@ python3 scripts/check-pingora-vendor.py
 echo "==> protobuf advisory floor"
 python3 scripts/check-protobuf-advisory.py
 
-scan_file="$(mktemp)"
-trap 'rm -f "$scan_file"' EXIT
-
-rg_common=(
-  --line-number
-  --no-heading
-)
-
-mapfile -d '' tracked_secret_scan_files < <(git ls-files -z -- ':!:Cargo.lock')
-if [[ "${#tracked_secret_scan_files[@]}" -eq 0 ]]; then
-  echo "secret scan found no tracked files" >&2
-  exit 1
-fi
-
-scan_secret_pattern() {
-  local label="$1"
-  local pattern="$2"
-  set +e
-  rg "${rg_common[@]}" -- "$pattern" "${tracked_secret_scan_files[@]}" >>"$scan_file"
-  local status=$?
-  set -e
-
-  if [[ "$status" -eq 0 ]]; then
-    echo "secret scan matched: $label" >&2
-    return 1
-  fi
-  if [[ "$status" -eq 1 ]]; then
-    return 0
-  fi
-
-  echo "secret scan failed while checking: $label" >&2
-  return 1
-}
-
-echo "==> high-confidence secret scan"
-scan_failed=0
-scan_secret_pattern "private key material" '-----BEGIN (RSA |EC |OPENSSH |DSA |)?PRIVATE KEY-----' || scan_failed=1
-scan_secret_pattern "AWS access key id" '(AKIA|ASIA)[0-9A-Z]{16}' || scan_failed=1
-scan_secret_pattern "GitHub token" 'gh[pousr]_[A-Za-z0-9_]{20,}' || scan_failed=1
-scan_secret_pattern "OpenAI-style API key" 'sk-[A-Za-z0-9]{32,}' || scan_failed=1
-scan_secret_pattern "Anthropic API key" 'sk-ant-[A-Za-z0-9_-]{20,}' || scan_failed=1
-scan_secret_pattern "Google API key" 'AIza[0-9A-Za-z_-]{35}' || scan_failed=1
-
-if [[ "$scan_failed" -ne 0 ]]; then
-  echo "Potential secrets found:" >&2
-  sed -n '1,120p' "$scan_file" >&2
-  exit 1
-fi
+# Secret scan lives in its own script so it is drivable (and testable) without
+# a full cargo build; see scripts/test-check-secret-scan.sh.
+bash scripts/check-secret-scan.sh
 
 echo "==> cargo-audit exception policy"
 python3 scripts/check-audit-exceptions.py

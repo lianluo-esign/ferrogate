@@ -68,6 +68,10 @@ run_quality() {
   # file as binary and skip it silently, so every repo-wide sweep (secret scan,
   # literal audits, dead-code greps) quietly loses coverage.
   python3 scripts/check-binary-source-files.py
+  # Secret scan + its own tests (#525): the scan used to hard-code ripgrep, so
+  # on a box without it the gate died instead of running. Both are sub-second.
+  scripts/check-secret-scan.sh
+  scripts/test-check-secret-scan.sh
   scripts/check-kubernetes-examples.sh
 }
 

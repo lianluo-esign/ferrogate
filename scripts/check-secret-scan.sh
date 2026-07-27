@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-27
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+#
+# High-confidence secret scan over every tracked file (#525).
+#
+# Extracted from scripts/security-check.sh, which hard-coded `rg` (ripgrep).
+# ripgrep is not part of any baseline install, so on a box without it the scan
+# section died with a bare `rg: command not found` and the script reported
+# "Potential secrets found:" over an empty list -- a gate everyone believed was
+# running, that was not. Silence is the failure mode #499, #506, #508, #513 and
+# #533 all shared; this script refuses it.
+#
+#   rg present   -> ripgrep, unchanged behaviour.
+#   rg absent    -> `git grep -I`, which ships wherever the repo does.
+#   neither      -> exit non-zero naming both tools. Never a silent skip.
+#
+#   scripts/check-secret-scan.sh                 # scan this checkout
+#   scripts/check-secret-scan.sh --root DIR      # scan another git checkout
+#   scripts/check-secret-scan.sh --list-files    # print the resolved scan list
+#
+# Engine equivalence: rg is invoked with --line-number --no-heading and no
+# other regex flags, so every pattern below is plain (non-PCRE) regex matched
+# per line, and only *whether a line matches* can affect the output -- the
+# whole line is printed either way. All six patterns are POSIX-ERE clean, so
+# `git grep -E` is a faithful translation; scripts/test-check-secret-scan.sh
+# diffs both engines over a corpus (UTF-8, CRLF, no-trailing-newline, 200 KB
+# lines, pathspec-magic filenames) and asserts byte equality after sorting.
+#
+# Known engine differences, both handled here rather than left implicit:
+#   * Files git calls binary are skipped outright by `git grep -I`, while rg
+#     prints "binary file matches" without the line. Neither line-scans them,
+#     so the coverage report below names them out loud (#487 keeps source files
+#     out of that set; see scripts/check-binary-source-files.py).
+#   * `git grep` ignores a tracked path missing from the worktree and still
+#     exits 0, where rg fails loudly. The readability guard below closes that.
+#   * rg emits matches in nondeterministic (parallel) order; git grep follows
+#     the file list. Nothing downstream depends on order.
+set -euo pipefail
+
+root_dir=""
+list_files_only=0
+scanning_this_repo=1
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --root)
+      [[ "$#" -ge 2 ]] || { echo "--root requires a directory" >&2; exit 2; }
+      root_dir="$2"
+      scanning_this_repo=0
+      shift 2
+      ;;
+    --list-files)
+      list_files_only=1
+      shift
+      ;;
+    -h | --help)
+      sed -n '8,30p' "${BASH_SOURCE[0]}"
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$root_dir" ]]; then
+  # Bash-native, so the tool preflight below is what reports a stripped PATH
+  # rather than a confusing "dirname: command not found" from this line.
+  script_dir="${BASH_SOURCE[0]%/*}"
+  [[ "$script_dir" == "${BASH_SOURCE[0]}" ]] && script_dir="."
+  root_dir="$script_dir/.."
+fi
+cd "$root_dir"
+root_dir="$PWD"
+
+# --- tool preflight -----------------------------------------------------
+# Resolve the search engine before any work happens, and name what is missing.
+secret_scan_engine=""
+if command -v rg >/dev/null 2>&1; then
+  secret_scan_engine="rg"
+elif command -v git >/dev/null 2>&1; then
+  secret_scan_engine="git-grep"
+else
+  echo "secret scan cannot run: neither 'rg' (ripgrep) nor 'git' (for the 'git grep -I' fallback) is on PATH" >&2
+  echo "a gate that cannot run must fail loudly instead of skipping itself (#525)" >&2
+  exit 1
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "secret scan cannot run: missing required tool: git (the tracked-file list comes from 'git ls-files')" >&2
+  exit 1
+fi
+
+if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+  echo "secret scan cannot run: $root_dir is not a git checkout" >&2
+  exit 1
+fi
+
+# --- file list ----------------------------------------------------------
+mapfile -d '' tracked_secret_scan_files < <(git ls-files -z -- ':!:Cargo.lock')
+if [[ "${#tracked_secret_scan_files[@]}" -eq 0 ]]; then
+  echo "secret scan found no tracked files" >&2
+  exit 1
+fi
+
+if [[ "$list_files_only" -eq 1 ]]; then
+  printf '%s\n' "${tracked_secret_scan_files[@]}"
+  exit 0
+fi
+
+# A tracked path missing from the worktree is skipped by `git grep` with exit
+# status 0 -- coverage silently lost. Refuse to scan a list we cannot read.
+unreadable_scan_files=()
+for scan_path in "${tracked_secret_scan_files[@]}"; do
+  [[ -r "$scan_path" ]] || unreadable_scan_files+=("$scan_path")
+done
+if [[ "${#unreadable_scan_files[@]}" -ne 0 ]]; then
+  echo "secret scan cannot read ${#unreadable_scan_files[@]} tracked file(s); the scan would skip them silently:" >&2
+  printf '  %s\n' "${unreadable_scan_files[@]:0:20}" >&2
+  exit 1
+fi
+
+# Files git classifies as binary are not line-scanned by either engine. Name
+# them instead of letting the coverage hole go unmentioned (#344, #487).
+binary_scan_files=()
+mapfile -t scannable_scan_files < <(
+  git --literal-pathspecs grep -I -l -e '' -- "${tracked_secret_scan_files[@]}" || true
+)
+if [[ "${#scannable_scan_files[@]}" -ne "${#tracked_secret_scan_files[@]}" ]]; then
+  mapfile -t binary_scan_files < <(
+    comm -23 \
+      <(printf '%s\n' "${tracked_secret_scan_files[@]}" | LC_ALL=C sort) \
+      <(printf '%s\n' "${scannable_scan_files[@]}" | LC_ALL=C sort)
+  )
+fi
+
+echo "==> high-confidence secret scan (engine: $secret_scan_engine)"
+echo "secret scan coverage: ${#scannable_scan_files[@]}/${#tracked_secret_scan_files[@]} tracked files are line-scannable"
+if [[ "${#binary_scan_files[@]}" -ne 0 ]]; then
+  echo "secret scan skips ${#binary_scan_files[@]} tracked file(s) git classifies as binary:" >&2
+  printf '  %s\n' "${binary_scan_files[@]:0:20}" >&2
+fi
+
+# --- scan ---------------------------------------------------------------
+scan_file="$(mktemp)"
+match_file="$(mktemp)"
+trap 'rm -f "$scan_file" "$match_file"' EXIT
+
+rg_common=(
+  --line-number
+  --no-heading
+  --with-filename
+)
+
+git_grep_common=(
+  --literal-pathspecs
+  grep
+  -I
+  --no-color
+  --full-name
+  --line-number
+  --extended-regexp
+)
+
+# Both engines exit 1 when nothing matched -- the success case here -- so the
+# call must never run under `set -e`.
+run_secret_scan_engine() {
+  local pattern="$1"
+  local status=0
+  set +e
+  case "$secret_scan_engine" in
+    rg)
+      rg "${rg_common[@]}" -e "$pattern" -- "${tracked_secret_scan_files[@]}" >"$match_file"
+      status=$?
+      ;;
+    git-grep)
+      git "${git_grep_common[@]}" -e "$pattern" -- "${tracked_secret_scan_files[@]}" >"$match_file"
+      status=$?
+      ;;
+  esac
+  set -e
+  return "$status"
+}
+
+# Reviewed non-secret matches: "<label>\t<path>\t<reason>". An entry that
+# matches nothing is itself a failure, so the table cannot rot into a silent
+# permanent exemption (same discipline as REVIEWED_BINARY_FILES in
+# scripts/check-binary-source-files.py). Never put the literal value here --
+# the allowlist file is itself scanned.
+secret_scan_allowlist=(
+  $'GitHub token\tcrates/ferrogate-runtime/src/coding_agent/materialize_test.rs\tsynthetic bare-token literal asserting CredentialReference::parse rejects inline credentials'
+  $'GitHub token\tworkers/agent-gateway/test/git-credential-leak.test.ts\tsynthetic token the leak test asserts never reaches an upstream request'
+  $'private key material\tworkers/agent-gateway/vitest.config.ts\tPEM header of the test-only signing key whose body reads "not-a-real-key-tests-never-sign"'
+)
+allowlist_hits=()
+for _ in "${secret_scan_allowlist[@]}"; do allowlist_hits+=(0); done
+
+secret_scan_allowlisted() {
+  local label="$1"
+  local path="$2"
+  local index=0
+  local entry entry_label entry_path
+  for entry in "${secret_scan_allowlist[@]}"; do
+    entry_label="${entry%%$'\t'*}"
+    entry_path="${entry#*$'\t'}"
+    entry_path="${entry_path%%$'\t'*}"
+    if [[ "$label" == "$entry_label" && "$path" == "$entry_path" ]]; then
+      allowlist_hits[index]=1
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  return 1
+}
+
+scan_secret_pattern() {
+  local label="$1"
+  local pattern="$2"
+  local status=0
+  run_secret_scan_engine "$pattern" || status=$?
+
+  if [[ "$status" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ "$status" -ne 0 ]]; then
+    echo "secret scan failed while checking: $label (engine $secret_scan_engine exited $status)" >&2
+    return 1
+  fi
+
+  local line path kept=0
+  while IFS= read -r line; do
+    path="${line%%:*}"
+    if [[ "$scanning_this_repo" -eq 1 ]] && secret_scan_allowlisted "$label" "$path"; then
+      continue
+    fi
+    printf '%s\n' "$line" >>"$scan_file"
+    kept=1
+  done <"$match_file"
+
+  if [[ "$kept" -eq 1 ]]; then
+    echo "secret scan matched: $label" >&2
+    return 1
+  fi
+  return 0
+}
+
+scan_failed=0
+scan_secret_pattern "private key material" '-----BEGIN (RSA |EC |OPENSSH |DSA |)?PRIVATE KEY-----' || scan_failed=1
+scan_secret_pattern "AWS access key id" '(AKIA|ASIA)[0-9A-Z]{16}' || scan_failed=1
+scan_secret_pattern "GitHub token" 'gh[pousr]_[A-Za-z0-9_]{20,}' || scan_failed=1
+scan_secret_pattern "OpenAI-style API key" 'sk-[A-Za-z0-9]{32,}' || scan_failed=1
+scan_secret_pattern "Anthropic API key" 'sk-ant-[A-Za-z0-9_-]{20,}' || scan_failed=1
+scan_secret_pattern "Google API key" 'AIza[0-9A-Za-z_-]{35}' || scan_failed=1
+
+if [[ "$scan_failed" -ne 0 ]]; then
+  # Only claim a finding when there is one: a broken engine used to print
+  # "Potential secrets found:" over an empty list, which reads like noise.
+  if [[ -s "$scan_file" ]]; then
+    echo "Potential secrets found:" >&2
+    sed -n '1,120p' "$scan_file" >&2
+  else
+    echo "secret scan did not complete; treat this repository as unscanned" >&2
+  fi
+  exit 1
+fi
+
+if [[ "$scanning_this_repo" -eq 1 ]]; then
+  stale_allowlist=()
+  index=0
+  for entry in "${secret_scan_allowlist[@]}"; do
+    if [[ "${allowlist_hits[index]}" -eq 0 ]]; then
+      stale_allowlist+=("${entry//$'\t'/ | }")
+    fi
+    index=$((index + 1))
+  done
+  if [[ "${#stale_allowlist[@]}" -ne 0 ]]; then
+    echo "secret scan allowlist entries no longer match anything; delete them:" >&2
+    printf '  %s\n' "${stale_allowlist[@]}" >&2
+    exit 1
+  fi
+fi
+
+echo "secret scan passed"

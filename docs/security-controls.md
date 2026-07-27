@@ -176,6 +176,17 @@ licenses bans sources`, and `cargo audit`. CI runs this gate in strict mode
 fails the build rather than silently skipping —
 see [`.github/workflows/rust-quality.yml`](../.github/workflows/rust-quality.yml).
 
+The secret scan lives in
+[`scripts/check-secret-scan.sh`](../scripts/check-secret-scan.sh). It prefers
+ripgrep and falls back to `git grep -I`, which ships wherever the repository
+does; if neither is available it exits non-zero naming both tools rather than
+skipping (#525 — the scan previously hard-coded `rg` and died on any box
+without it, so the gate looked green while never running). It also reports how
+many tracked files are line-scannable, because a NUL byte makes both engines
+skip a file silently (#344, #487). `scripts/test-check-secret-scan.sh` drives
+the script with each tool shadowed out of `PATH` and diffs both engines over a
+planted-credential corpus.
+
 Published release images (`.github/workflows/ci-image.yml` and
 `.github/workflows/package.yml`, both reached only from a published release)
 are additionally covered by a shared `.github/actions/image-supply-chain`
