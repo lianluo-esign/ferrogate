@@ -113,8 +113,7 @@
 use ferrogate_payments::{
     parse_payment_required, select_requirement, validate_solana_address, PaymentError,
     PaymentIntent, PaymentIntentDraft, PaymentIntentIdentity, RequestBodyHash, RequirementFilter,
-    SelectedPayment, SvmTransferIntent, SvmTransferSigner, HEADER_PAYMENT_SIGNATURE, SCHEME_EXACT,
-    X402_VERSION,
+    SelectedPayment, SvmTransferIntent, SvmTransferSigner, SCHEME_EXACT, X402_VERSION,
 };
 use ferrogate_policy::{PaymentAuthorization, PaymentAuthorizationRequest, PaymentDecision};
 use serde::Serialize;
@@ -728,114 +727,26 @@ pub(crate) fn detect_payment_required(
 }
 
 // ---------------------------------------------------------------------------
-// Bearer-material redaction for recorded evidence (#353)
+// Bearer-material redaction for recorded evidence (#353, generalized in #526)
 // ---------------------------------------------------------------------------
 
-/// Replacement written in place of a bearer header value.
-pub(crate) const REDACTED_HEADER_VALUE: &str = "<redacted>";
-
-/// Header names whose VALUE is bearer material: possession of the value alone
-/// is enough to spend money or impersonate the caller, so it must never reach
-/// an event, a log line, or a worker's stdout.
+/// The redaction #353 introduced here now lives in [`crate::recorded_evidence`]
+/// and is re-exported, not re-implemented.
 ///
-/// `PAYMENT-SIGNATURE` leads the list because it is the worst case: it carries
-/// the base64 **signed SVM transaction**. Anyone who captures it can submit that
-/// transaction. It is not merely sensitive, it is spendable.
-///
-/// `PAYMENT-REQUIRED` and `PAYMENT-RESPONSE` are deliberately NOT here. The
-/// first is the merchant's public challenge and the second is public settlement
-/// evidence (an on-chain transaction signature); both are exactly the audit
-/// trail #354 needs in order to answer "why was this payment made and what
-/// happened to it?". Redacting them would destroy evidence without protecting
-/// anything.
-fn is_bearer_header(name: &str) -> bool {
-    const BEARER_HEADERS: [&str; 7] = [
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
-        // Not IANA-registered, but every one of these is a value whose mere
-        // possession authenticates the holder — which is the whole criterion.
-        "authentication",
-        "x-api-key",
-        "x-auth-token",
-    ];
-    name.eq_ignore_ascii_case(HEADER_PAYMENT_SIGNATURE)
-        || BEARER_HEADERS
-            .iter()
-            .any(|bearer| name.eq_ignore_ascii_case(bearer))
-}
-
-/// Strip bearer header VALUES out of a raw HTTP message before any of it is
-/// recorded as worker evidence.
-///
-/// Header NAMES are preserved, so the record still shows that a credential or a
-/// payment proof was present — an operator can see the shape of the exchange
-/// without the record itself becoming a way to spend the money.
-///
-/// Fail-safe by construction:
-///
-/// * Redaction happens BEFORE truncation at the call site, so a truncated
-///   excerpt can never carry a surviving prefix of a proof.
-/// * A message with no header/body separator (a truncated or malformed
-///   response) is treated as ALL headers, which over-redacts rather than
-///   under-redacts.
-/// * An `obs-fold` continuation line (RFC 7230 §3.2.4 — deprecated, but still
-///   emitted by real servers) has no colon of its own, so matching per line
-///   would let the tail of a folded credential through untouched. A
-///   continuation of a bearer header is redacted with it.
-///
-/// Scope limit, stated honestly: this redacts the header section only. A body
-/// that echoes a credential back is not covered — guessing at secrets inside
-/// arbitrary payloads is a different problem with a different failure mode.
-pub(crate) fn redact_bearer_headers(raw_http_message: &str) -> String {
-    let mut redacted = String::with_capacity(raw_http_message.len());
-    let mut in_header_section = true;
-    // Whether the field this line may be continuing is bearer material.
-    let mut folding_bearer_header = false;
-    for (index, line) in raw_http_message.split_inclusive('\n').enumerate() {
-        // Index 0 is the status/request line, which is never a header even if
-        // it happens to contain a colon.
-        if !in_header_section || index == 0 {
-            redacted.push_str(line);
-            continue;
-        }
-        let content = line.trim_end_matches(['\r', '\n']);
-        if content.is_empty() {
-            in_header_section = false;
-            folding_bearer_header = false;
-            redacted.push_str(line);
-            continue;
-        }
-        // A leading space/tab means this line continues the PREVIOUS field's
-        // value, so it inherits that field's classification instead of being
-        // parsed as a header in its own right.
-        if content.starts_with([' ', '\t']) {
-            if folding_bearer_header {
-                redacted.push(' ');
-                redacted.push_str(REDACTED_HEADER_VALUE);
-                redacted.push_str(&line[content.len()..]);
-            } else {
-                redacted.push_str(line);
-            }
-            continue;
-        }
-        match content.split_once(':') {
-            Some((name, _)) if is_bearer_header(name.trim()) => {
-                folding_bearer_header = true;
-                redacted.push_str(name);
-                redacted.push_str(": ");
-                redacted.push_str(REDACTED_HEADER_VALUE);
-                redacted.push_str(&line[content.len()..]);
-            }
-            _ => {
-                folding_bearer_header = false;
-                redacted.push_str(line);
-            }
-        }
-    }
-    redacted
-}
+/// It was moved because a redactor with one caller only protects one caller:
+/// #526 found the same raw-capture pattern in the `output_excerpt`,
+/// `value_excerpt`, `content_excerpt`, `stdout_excerpt` and `serial_excerpt`
+/// builders of every other family, none of which had any reason to reach into
+/// the x402 client for it. The behaviour this module's tests pin — header names
+/// survive, bearer values do not, `PAYMENT-REQUIRED`/`PAYMENT-RESPONSE` are
+/// deliberately kept as the public evidence #354 needs — is unchanged; those
+/// tests now exercise the shared implementation through this path.
+/// Re-exported for this module's own tests (`x402_client_test.rs`) and for
+/// `external_actions_x402_test.rs`, which pin the #353 behaviour and now do so
+/// against the shared implementation. Production code imports it from
+/// `crate::recorded_evidence` directly — there is no second copy to drift.
+#[cfg(test)]
+pub(crate) use crate::recorded_evidence::{redact_bearer_headers, REDACTED_HEADER_VALUE};
 
 // ---------------------------------------------------------------------------
 // Wire stage → hold disposition (#353's half of the cancellation contract)

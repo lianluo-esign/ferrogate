@@ -47,12 +47,14 @@ use ferrogate_runtime::{
 
 use ferrogate_payments::HEADER_PAYMENT_REQUIRED;
 
+use crate::recorded_evidence::{
+    recorded_excerpt, recorded_http_excerpt, recorded_metadata, redact_recorded_values,
+};
 use crate::self_hosted_execution::{
     run_governed_workload, GovernedWorkloadExecution, GovernedWorkloadOutcome,
 };
 use crate::x402_client::{
-    detect_payment_required, redact_bearer_headers, AuthorizedRequest, HoldDisposition,
-    RequestWireStage,
+    detect_payment_required, AuthorizedRequest, HoldDisposition, RequestWireStage,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -1940,7 +1942,7 @@ fn governed_cli_failure_metadata(
     action: &ManagedCliAction,
     error: &FrameworkAdapterError,
 ) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    recorded_metadata([
         ("external_action".to_string(), "cli".to_string()),
         ("external_target".to_string(), action.command.clone()),
         ("command".to_string(), action.command.clone()),
@@ -1976,7 +1978,7 @@ struct GovernedCliCancellation {
 
 impl GovernedCliCancellation {
     fn metadata(self, action: &ManagedCliAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "cli".to_string()),
             ("external_target".to_string(), action.command.clone()),
             ("command".to_string(), action.command.clone()),
@@ -2156,7 +2158,7 @@ struct GovernedToolExecution {
 
 impl GovernedToolExecution {
     fn metadata(self, action: &ManagedToolAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "tool".to_string()),
             (
                 "external_target".to_string(),
@@ -2187,7 +2189,7 @@ fn run_authorized_tool_action(
     }
     let message = smoke_literal_argument(&action.arguments_policy)?;
     Ok(GovernedToolExecution {
-        output_excerpt: bounded_utf8_excerpt(message.as_bytes(), 512),
+        output_excerpt: recorded_excerpt(message.as_bytes(), 512),
     })
 }
 
@@ -2197,7 +2199,7 @@ struct GovernedMcpToolExecution {
 
 impl GovernedMcpToolExecution {
     fn metadata(self, action: &ManagedMcpToolAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "mcp.tool".to_string()),
             (
                 "external_target".to_string(),
@@ -2238,7 +2240,7 @@ fn run_authorized_mcp_tool_action(
             )
         })?;
     Ok(GovernedMcpToolExecution {
-        output_excerpt: bounded_utf8_excerpt(message.as_bytes(), 512),
+        output_excerpt: recorded_excerpt(message.as_bytes(), 512),
     })
 }
 
@@ -2259,7 +2261,7 @@ struct GovernedSkillExecution {
 
 impl GovernedSkillExecution {
     fn metadata(self, action: &ManagedSkillAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "skill".to_string()),
             (
                 "external_target".to_string(),
@@ -2289,10 +2291,7 @@ fn run_authorized_skill_action(
         )));
     }
     Ok(GovernedSkillExecution {
-        output_excerpt: bounded_utf8_excerpt(
-            action.declared_capabilities.join(",").as_bytes(),
-            512,
-        ),
+        output_excerpt: recorded_excerpt(action.declared_capabilities.join(",").as_bytes(), 512),
     })
 }
 
@@ -2302,7 +2301,7 @@ struct GovernedMemoryExecution {
 
 impl GovernedMemoryExecution {
     fn metadata(self, action: &ManagedMemoryAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             (
                 "external_action".to_string(),
                 format!("memory.{}", action.access.as_str()),
@@ -2346,7 +2345,7 @@ fn run_authorized_memory_action(
             let value = "ferrogate governed memory smoke".to_string();
             store.insert(store_key, value.clone());
             Ok(GovernedMemoryExecution {
-                value_excerpt: bounded_utf8_excerpt(value.as_bytes(), 512),
+                value_excerpt: recorded_excerpt(value.as_bytes(), 512),
             })
         }
         ManagedMemoryAccess::Read => {
@@ -2356,7 +2355,7 @@ fn run_authorized_memory_action(
                 )
             })?;
             Ok(GovernedMemoryExecution {
-                value_excerpt: bounded_utf8_excerpt(value.as_bytes(), 512),
+                value_excerpt: recorded_excerpt(value.as_bytes(), 512),
             })
         }
     }
@@ -2368,7 +2367,7 @@ struct GovernedSecretExecution {
 
 impl GovernedSecretExecution {
     fn metadata(self, action: &ManagedSecretAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "secret".to_string()),
             (
                 "external_target".to_string(),
@@ -2409,7 +2408,7 @@ struct GovernedNetworkEgressExecution {
 
 impl GovernedNetworkEgressExecution {
     fn metadata(self, action: &ManagedNetworkEgressAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "network.egress".to_string()),
             (
                 "external_target".to_string(),
@@ -2481,7 +2480,7 @@ struct GovernedBrowserExecution {
 
 impl GovernedBrowserExecution {
     fn metadata(self, action: &ManagedBrowserAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "browser".to_string()),
             (
                 "external_target".to_string(),
@@ -2531,7 +2530,7 @@ struct GovernedFilesystemExecution {
 
 impl GovernedFilesystemExecution {
     fn metadata(self, action: &ManagedFilesystemAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "filesystem".to_string()),
             (
                 "external_target".to_string(),
@@ -2613,7 +2612,7 @@ fn run_authorized_filesystem_action(
     Ok(GovernedFilesystemExecution {
         resolved_path,
         byte_len: bytes.len(),
-        content_excerpt: bounded_utf8_excerpt(&bytes, 512),
+        content_excerpt: recorded_excerpt(&bytes, 512),
     })
 }
 
@@ -3121,7 +3120,7 @@ struct GovernedCliExecution {
 
 impl GovernedCliExecution {
     fn metadata(self, action: &ManagedCliAction) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        recorded_metadata([
             ("external_action".to_string(), "cli".to_string()),
             ("external_target".to_string(), action.command.clone()),
             ("command".to_string(), action.command.clone()),
@@ -3191,8 +3190,8 @@ fn run_authorized_cli_action(
     }
     Ok(GovernedCliExecution {
         status_code: output.status.code(),
-        stdout_excerpt: bounded_utf8_excerpt(&output.stdout, action.stdout_limit_bytes),
-        stderr_excerpt: bounded_utf8_excerpt(&output.stderr, action.stderr_limit_bytes),
+        stdout_excerpt: recorded_excerpt(&output.stdout, action.stdout_limit_bytes),
+        stderr_excerpt: recorded_excerpt(&output.stderr, action.stderr_limit_bytes),
     })
 }
 
@@ -3698,11 +3697,6 @@ fn spawn_cli_with_executable_busy_retry(command: &mut Command) -> io::Result<std
     Err(last_error.expect("ExecutableFileBusy retry loop records the last error"))
 }
 
-fn bounded_utf8_excerpt(bytes: &[u8], limit: u64) -> String {
-    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-    String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]).to_string()
-}
-
 #[derive(Debug)]
 struct GovernedRestExecution {
     status_code: u16,
@@ -3713,7 +3707,7 @@ struct GovernedRestExecution {
 /// success and the dispatch-failure events so a consumer sees the same shape
 /// either way.
 fn rest_action_metadata(action: &ManagedRestAction) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    recorded_metadata([
         ("external_action".to_string(), "rest".to_string()),
         (
             "external_target".to_string(),
@@ -3749,6 +3743,10 @@ impl GovernedRestExecution {
         // producer predates the key" — and if it ever did, the absent case reads
         // as retain anyway.
         RequestWireStage::SentOrUnknown.write_event_metadata(&mut metadata);
+        // This map is assembled by `extend` rather than from one literal list,
+        // so it does not go through `recorded_metadata`; sweep it here instead
+        // of trusting that every future key was excerpted correctly.
+        redact_recorded_values(metadata.values_mut());
         metadata
     }
 }
@@ -3903,6 +3901,9 @@ impl GovernedRestRejection {
         // The typed discriminant + its derived hold disposition. Written last so
         // it cannot be shadowed by an action-derived key.
         wire_stage.write_event_metadata(&mut metadata);
+        // `failure_reason` is an error string built over data the upstream
+        // controlled; sweep it like every other recorded value.
+        redact_recorded_values(metadata.values_mut());
         Self {
             wire_stage,
             event: Box::new(NormalizedFrameworkEvent {
@@ -4048,7 +4049,7 @@ fn run_authorized_rest_action(
         status_code,
         // Redact BEFORE truncating: a 512-char prefix of an unredacted response
         // would otherwise carry a usable prefix of a bearer credential.
-        response_excerpt: redact_bearer_headers(&response).chars().take(512).collect(),
+        response_excerpt: recorded_http_excerpt(&response, 512),
     })
 }
 
@@ -6522,3 +6523,7 @@ mod external_actions_target_test;
 #[cfg(test)]
 #[path = "external_actions_x402_test.rs"]
 mod external_actions_x402_test;
+
+#[cfg(test)]
+#[path = "external_actions_recorded_evidence_test.rs"]
+mod external_actions_recorded_evidence_test;

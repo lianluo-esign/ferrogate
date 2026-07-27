@@ -325,12 +325,7 @@ pub(crate) fn serve_guest_session_with_config<S: Read + Write>(
         event
             .metadata
             .insert("capability_denial_enforced".to_string(), "true".to_string());
-        write_json_line(
-            stream,
-            &GuestStreamFrame::Event {
-                event: Box::new(event),
-            },
-        )?;
+        write_guest_event(stream, event)?;
         let response = FirecrackerGuestRpcStartResponse::for_guest_request(
             &request,
             "capability_denied",
@@ -364,19 +359,9 @@ pub(crate) fn serve_guest_session_with_config<S: Read + Write>(
     allowed_event
         .metadata
         .insert("envelope_id".to_string(), envelope.envelope_id.clone());
-    write_json_line(
-        stream,
-        &GuestStreamFrame::Event {
-            event: Box::new(allowed_event),
-        },
-    )?;
+    write_guest_event(stream, allowed_event)?;
     let started_event = guest_event(&request, "run.started", "guest workload started");
-    write_json_line(
-        stream,
-        &GuestStreamFrame::Event {
-            event: Box::new(started_event),
-        },
-    )?;
+    write_guest_event(stream, started_event)?;
 
     let result = execute_guest_workload(&workload, &config.workspace);
     let (status, kind, message) = match (&result.executed, &result.exit_code) {
@@ -410,12 +395,7 @@ pub(crate) fn serve_guest_session_with_config<S: Read + Write>(
     finished_event
         .metadata
         .insert("output_excerpt".to_string(), result.output_excerpt.clone());
-    write_json_line(
-        stream,
-        &GuestStreamFrame::Event {
-            event: Box::new(finished_event),
-        },
-    )?;
+    write_guest_event(stream, finished_event)?;
 
     let proves_handler_execution = result.executed;
     let response = FirecrackerGuestRpcStartResponse::for_guest_request(
@@ -511,7 +491,13 @@ fn execute_guest_workload(
     FirecrackerGuestWorkloadResult {
         executed: true,
         exit_code,
-        output_excerpt: String::from_utf8_lossy(&output).trim().to_string(),
+        // The guest workload's own stdout/stderr. It is arbitrary attacker-
+        // reachable output — a workload that curls an upstream and prints the
+        // exchange used to put every credential header it saw into the
+        // `output_excerpt` of the `run.completed` frame the host records (#526).
+        output_excerpt: crate::recorded_evidence::recorded_excerpt(&output, limit as u64)
+            .trim()
+            .to_string(),
         capability_denial_enforced: false,
         denial_reason: None,
     }
@@ -869,6 +855,25 @@ fn validate_vsock_response_status(
 // ---------------------------------------------------------------------------
 // Shared line framing
 // ---------------------------------------------------------------------------
+
+/// The ONE place a guest-side event frame leaves the microVM.
+///
+/// Every guest event the host records comes through here, so its metadata is
+/// swept for bearer material once, centrally, instead of at each of the four
+/// call sites that build one (#526). A new guest event added tomorrow inherits
+/// the sweep by virtue of being written at all.
+fn write_guest_event<S: Write>(
+    stream: &mut S,
+    mut event: AgentWorkerFrameworkEventResult,
+) -> Result<(), String> {
+    crate::recorded_evidence::redact_recorded_values(event.metadata.values_mut());
+    write_json_line(
+        stream,
+        &GuestStreamFrame::Event {
+            event: Box::new(event),
+        },
+    )
+}
 
 fn write_json_line<S: Write, T: Serialize>(stream: &mut S, value: &T) -> Result<(), String> {
     let json =

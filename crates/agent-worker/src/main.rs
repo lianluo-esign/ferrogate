@@ -21,6 +21,7 @@ mod handlers;
 mod lifecycle;
 mod local_process_backend;
 mod management;
+mod recorded_evidence;
 mod self_hosted_execution;
 mod state;
 mod x402_client;

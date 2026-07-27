@@ -454,10 +454,17 @@ pub(crate) fn redacted_args(args: &[String], prompt_arg_index: usize) -> Vec<Str
         .collect()
 }
 
+/// A handler binary's stdout/stderr, excerpted for the record.
+///
+/// This used to slice-and-lossy-decode the bytes itself, which is exactly the
+/// raw-capture #526 swept out: a configured handler binary that prints an HTTP
+/// exchange (a `curl -i`, a debug dump of its own upstream call) put every
+/// credential header it saw into `stdout_excerpt` on a `cli.requested` event.
+/// It now goes through the crate's one recorded-evidence chokepoint, which
+/// redacts before it truncates.
 fn output_excerpt(output: &[u8]) -> String {
-    const MAX_EXCERPT_BYTES: usize = 512;
-    let length = output.len().min(MAX_EXCERPT_BYTES);
-    String::from_utf8_lossy(&output[..length])
+    const MAX_EXCERPT_BYTES: u64 = 512;
+    crate::recorded_evidence::recorded_excerpt(output, MAX_EXCERPT_BYTES)
         .trim()
         .to_string()
 }

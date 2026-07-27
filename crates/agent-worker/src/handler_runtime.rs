@@ -10,9 +10,6 @@
 //! API may ask for lifecycle actions, but framework handler execution and event
 //! normalization stay on the worker side.
 
-#[cfg(test)]
-use std::collections::BTreeMap;
-
 use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
     AgentWorkerManagementErrorCode, AgentWorkerManagementResult, FrameworkAdapter,
@@ -339,7 +336,7 @@ fn process_handler_binary_event(
             "{} configured handler binary executed by agent-worker",
             session.adapter_name
         )),
-        metadata: BTreeMap::from([
+        metadata: crate::recorded_evidence::recorded_metadata([
             ("handler_owner".to_string(), "agent-worker".to_string()),
             ("gateway_handler_probe".to_string(), "false".to_string()),
             ("real_binary_probe".to_string(), "true".to_string()),
@@ -399,7 +396,7 @@ fn process_handler_task_event(
                         "{} configured handler task failed after gateway authorization",
                         session.adapter_name
                     )),
-                    metadata: BTreeMap::from([
+                    metadata: crate::recorded_evidence::recorded_metadata([
                         ("handler_owner".to_string(), "agent-worker".to_string()),
                         ("gateway_handler_probe".to_string(), "false".to_string()),
                         ("real_binary_task_smoke".to_string(), "true".to_string()),
@@ -426,7 +423,7 @@ fn process_handler_task_event(
             "{} configured handler task executed by agent-worker",
             session.adapter_name
         )),
-        metadata: BTreeMap::from([
+        metadata: crate::recorded_evidence::recorded_metadata([
             ("handler_owner".to_string(), "agent-worker".to_string()),
             ("gateway_handler_probe".to_string(), "false".to_string()),
             ("real_binary_task_smoke".to_string(), "true".to_string()),

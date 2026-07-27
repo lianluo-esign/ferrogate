@@ -3423,8 +3423,14 @@ fn serial_has_microvm_userspace_evidence(markers: &[&str]) -> bool {
             || markers.contains(&"root_shell_prompt"))
 }
 
+/// The first `max_lines` of a microVM serial console / hypervisor log, recorded
+/// as boot evidence.
+///
+/// A serial console carries whatever the guest printed to it, so it is a
+/// recorded-evidence surface like any other and goes through the crate's one
+/// redaction chokepoint before it is cut down (#526).
 fn excerpt(text: &str, max_lines: usize) -> String {
-    text.lines().take(max_lines).collect::<Vec<_>>().join("\n")
+    crate::recorded_evidence::recorded_line_excerpt(text, max_lines)
 }
 
 fn first_non_empty_line(text: &str) -> String {

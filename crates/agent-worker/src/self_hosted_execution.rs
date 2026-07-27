@@ -92,6 +92,15 @@ pub(crate) struct GovernedWorkloadExecution {
     pub(crate) identity_expiry_unix_millis: u64,
     pub(crate) workload_ran: bool,
     pub(crate) workload_exit_code: Option<i32>,
+    /// What the workload produced, as printed in the worker's stdout evidence
+    /// (`evidence_json`) and shipped upward.
+    ///
+    /// This is the SECOND surface #526 covers and the one that is not an event:
+    /// the REST family interpolates its response excerpt into it, and the CLI
+    /// family fills it with a child process's raw output. It is redacted where
+    /// it is assigned in `run_governed_workload`, so every family — including
+    /// one added later — is covered at the single assignment point rather than
+    /// per family.
     pub(crate) workload_output: String,
     pub(crate) backend_name: String,
     pub(crate) containment_summary: String,
@@ -353,7 +362,7 @@ where
                 identity_expiry_unix_millis: 0,
                 workload_ran: true,
                 workload_exit_code: workload.exit_code,
-                workload_output: workload.output,
+                workload_output: crate::recorded_evidence::recorded_value(&workload.output),
                 backend_name: workload.backend_name,
                 containment_summary: workload.containment_summary,
                 lease_correlation: SelfHostedRunEvidenceCorrelation::default(),
@@ -376,7 +385,7 @@ where
                 identity_expiry_unix_millis: self_hosted_identity_expiry(server_clock_unix_millis),
                 workload_ran: true,
                 workload_exit_code: workload.exit_code,
-                workload_output: workload.output,
+                workload_output: crate::recorded_evidence::recorded_value(&workload.output),
                 backend_name: workload.backend_name,
                 containment_summary: workload.containment_summary,
                 lease_correlation: SelfHostedRunEvidenceCorrelation::default(),
