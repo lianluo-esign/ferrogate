@@ -1563,10 +1563,13 @@ mod tests {
             trace_id: Some("trace-1".to_string()),
             actor_api_key_id: Some("key".to_string()),
             tenant: TenantContext {
-                workspace_id: None,
                 organization_id: Some("tenant-1".to_string()),
                 team_id: None,
-                project_id: Some("workspace-1".to_string()),
+                // #519: a project id, not a workspace id -- production fills
+                // this from `AuthContext::tenant_context()`, whose project_id
+                // comes off the resolved key's project.
+                project_id: Some("project-1".to_string()),
+                workspace_id: Some("workspace-1".to_string()),
                 user_id: None,
                 api_key_id: Some("key".to_string()),
             },
@@ -1613,7 +1616,8 @@ mod tests {
         assert_eq!(stored.request_id, "fg-1");
         assert_eq!(stored.trace_id.as_deref(), Some("trace-1"));
         assert_eq!(stored.tenant.organization_id.as_deref(), Some("tenant-1"));
-        assert_eq!(stored.tenant.project_id.as_deref(), Some("workspace-1"));
+        assert_eq!(stored.tenant.project_id.as_deref(), Some("project-1"));
+        assert_eq!(stored.tenant.workspace_id.as_deref(), Some("workspace-1"));
         assert_eq!(stored.kind, "capability.denied");
         assert_eq!(stored.target, "bash");
         assert_eq!(stored.outcome, "denied");

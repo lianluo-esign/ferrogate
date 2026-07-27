@@ -146,6 +146,58 @@ impl AppState {
             .await?)
     }
 
+    /// Build the attribution [`ferrogate_core::TenantContext`] for a runtime
+    /// record that only carries the `(tenant_id, workspace_id)` pair -- managed
+    /// worker lifecycle records and framework-adapter sessions both do.
+    ///
+    /// Issue #519: these call sites used to write the workspace id into the
+    /// `project_id` slot, which is a different entity in the
+    /// `tenant -> project -> workspace` hierarchy. Everything that keys on
+    /// `TenantContext::project_id` -- the `QuotaScopeKind::Project` lookup in
+    /// [`AppState::resolve_effective_quota`], billing attribution, and the
+    /// project column of every persisted audit/evidence row -- was therefore
+    /// keyed on a scope id that does not name a project at all.
+    ///
+    /// The project is never guessed: it is read back off the workspace row,
+    /// the same #514 "backfill ancestors from resolved rows, do not trust a
+    /// declared triple" rule the lifecycle gate uses. `project_id` stays
+    /// `None` -- meaning "no project scope", which every consumer already
+    /// handles -- when the workspace is unknown, when the control-plane read
+    /// fails, or when the resolved chain roots in a *different* tenant than
+    /// the record declares (a mismatch must never leak one tenant's project id
+    /// onto another tenant's row).
+    pub(crate) fn workspace_attribution_context(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> ferrogate_core::TenantContext {
+        // Both callers are synchronous (the external-action authorizer runs on
+        // a plain std::thread worker with no tokio runtime); bridge with the
+        // same helper `managed_worker_capability_policy_for_tenant` uses.
+        let resolved = match crate::gateway::block_on_sync_bridge(
+            self.repositories.resolve_workspace_scope(workspace_id),
+        ) {
+            Ok(scope) => scope,
+            Err(error) => {
+                warn!(
+                    "failed to resolve project attribution for workspace {workspace_id}: {error}"
+                );
+                None
+            }
+        };
+        let project_id = resolved
+            .filter(|scope| scope.tenant_id == tenant_id)
+            .map(|scope| scope.project_id);
+        ferrogate_core::TenantContext {
+            organization_id: Some(tenant_id.to_string()),
+            team_id: None,
+            project_id,
+            workspace_id: Some(workspace_id.to_string()),
+            user_id: None,
+            api_key_id: None,
+        }
+    }
+
     /// The gateway's entry into the shared #514 lifecycle gate.
     ///
     /// Everything of substance -- the hierarchy walk that backfills ancestors

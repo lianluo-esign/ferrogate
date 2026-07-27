@@ -2031,11 +2031,11 @@ impl AppState {
             isolation_instance_id: &'a Option<String>,
         }
 
-        let tenant = ferrogate_core::TenantContext {
-            organization_id: Some(record.tenant_id.clone()),
-            project_id: Some(record.workspace_id.clone()),
-            ..ferrogate_core::TenantContext::default()
-        };
+        // #519: a lifecycle record declares only `(tenant_id, workspace_id)`.
+        // The project is resolved off the workspace row rather than filled with
+        // the workspace id, and `workspace_id` is populated (it was dropped
+        // entirely here) so the workspace scope is attributable at all.
+        let tenant = self.workspace_attribution_context(&record.tenant_id, &record.workspace_id);
         let occurred_at_unix = now_unix_seconds();
         let status = status(record.status);
         let action = action(record.action);
@@ -2150,7 +2150,7 @@ impl AppState {
             id: lifecycle_event_id.clone(),
             session_id: record.session_id.clone(),
             run_id: record.run_id.clone(),
-            tenant,
+            tenant: tenant.clone(),
             workspace_id: record.workspace_id.clone(),
             agent_worker_instance_id: Some(record.agent_worker_id.clone()),
             status: status.to_string(),
@@ -2180,11 +2180,10 @@ impl AppState {
             session_id: record.session_id.clone(),
             lifecycle_event_id,
             run_id: record.run_id.clone(),
-            tenant: ferrogate_core::TenantContext {
-                organization_id: Some(record.tenant_id.clone()),
-                project_id: Some(record.workspace_id.clone()),
-                ..ferrogate_core::TenantContext::default()
-            },
+            // #519: the same resolved chain the lifecycle event carries -- the
+            // evidence row used to rebuild it from the record and land the
+            // workspace id in the project slot a second time.
+            tenant,
             workspace_id: record.workspace_id.clone(),
             agent_worker_instance_id: Some(record.agent_worker_id.clone()),
             isolation_instance_id: record.isolation_instance_id.clone(),
@@ -2699,6 +2698,11 @@ mod tests {
     #[test]
     fn records_managed_worker_lifecycle_records_into_storage() {
         let state = AppState::new(Config::default());
+        // #519: the workspace this record names rolls up to `project-1`, which
+        // is what the persisted rows must be attributed to -- not to
+        // `workspace-1`, which is not a project id at all.
+        block_on(state.upsert_workspace(stored_workspace("workspace-1", "project-1", "tenant-1")))
+            .expect("workspace upsert should succeed");
         let record = ferrogate_runtime::ManagedWorkerLifecycleRecord {
             session_id: "session-1".into(),
             run_id: "run-1".into(),
@@ -2735,8 +2739,9 @@ mod tests {
             sessions[0].tenant.organization_id.as_deref(),
             Some("tenant-1")
         );
+        assert_eq!(sessions[0].tenant.project_id.as_deref(), Some("project-1"));
         assert_eq!(
-            sessions[0].tenant.project_id.as_deref(),
+            sessions[0].tenant.workspace_id.as_deref(),
             Some("workspace-1")
         );
         assert_eq!(sessions[0].workspace_id, "workspace-1");
@@ -2806,9 +2811,92 @@ mod tests {
             Some("microvm-1")
         );
         assert_eq!(isolation_evidence[0].outcome, "cleaned_up");
+        // #519: the evidence row is attributed to the same resolved chain, not
+        // to a project slot holding the workspace id.
+        assert_eq!(
+            isolation_evidence[0].tenant.project_id.as_deref(),
+            Some("project-1")
+        );
+        assert_eq!(
+            isolation_evidence[0].tenant.workspace_id.as_deref(),
+            Some("workspace-1")
+        );
         assert!(isolation_evidence[0]
             .evidence_json
             .contains("\"gateway_controls_backend\":false"));
+    }
+
+    /// #519: attribution is resolved, never guessed. When the workspace the
+    /// record names is unknown to the control plane, or belongs to a different
+    /// tenant than the record declares, `project_id` must stay `None` -- the
+    /// old code would have written the workspace id there, silently creating a
+    /// project scope that does not exist (and, in the mismatch case, one owned
+    /// by another tenant).
+    #[test]
+    fn managed_worker_lifecycle_project_attribution_is_never_fabricated() {
+        let record = |workspace_id: &str| ferrogate_runtime::ManagedWorkerLifecycleRecord {
+            session_id: "session-1".into(),
+            run_id: "run-1".into(),
+            tenant_id: "tenant-1".into(),
+            workspace_id: workspace_id.into(),
+            worker_template_id: "template-codex".into(),
+            agent_worker_id: "agent-worker-1".into(),
+            isolation_backend_kind: ferrogate_runtime::IsolationBackendKind::FirecrackerMicroVm,
+            isolation_backend_version: "external_bundle".into(),
+            isolation_instance_id: Some("microvm-1".into()),
+            capability_envelope_id: "capability-1".into(),
+            status: ferrogate_runtime::ManagedWorkerSessionStatus::CleanedUp,
+            action: ferrogate_runtime::ManagedWorkerLifecycleAction::Cleanup,
+            outcome: "cleaned_up".into(),
+            failure_reason: None,
+        };
+
+        // Unknown workspace.
+        let state = AppState::new(Config::default());
+        state.record_managed_worker_lifecycle(&record("workspace-missing"));
+        let sessions = block_on(state.repositories.managed_worker_sessions());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].tenant.project_id, None);
+        assert_eq!(
+            sessions[0].tenant.workspace_id.as_deref(),
+            Some("workspace-missing")
+        );
+
+        // Workspace exists but rolls up to a different tenant: its project id
+        // must not be borrowed onto this tenant's row.
+        let state = AppState::new(Config::default());
+        block_on(state.upsert_workspace(stored_workspace(
+            "workspace-other",
+            "project-other",
+            "tenant-2",
+        )))
+        .expect("workspace upsert should succeed");
+        state.record_managed_worker_lifecycle(&record("workspace-other"));
+        let sessions = block_on(state.repositories.managed_worker_sessions());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].tenant.organization_id.as_deref(),
+            Some("tenant-1")
+        );
+        assert_eq!(sessions[0].tenant.project_id, None);
+    }
+
+    fn stored_workspace(
+        id: &str,
+        project_id: &str,
+        tenant_id: &str,
+    ) -> ferrogate_storage::StoredWorkspace {
+        ferrogate_storage::StoredWorkspace {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            name: id.to_string(),
+            slug: id.to_string(),
+            environment: "dev".to_string(),
+            status: "active".to_string(),
+            created_at_unix: 0,
+            updated_at_unix: 0,
+        }
     }
 
     #[test]

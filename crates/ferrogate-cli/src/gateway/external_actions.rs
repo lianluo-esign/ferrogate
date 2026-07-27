@@ -107,7 +107,6 @@ impl GatewayExternalActionAuthorizerService {
             Ok(request) => request,
             Err(error) => return ExternalActionAuthorizationResponse::rejected(error),
         };
-        let timeline_tenant = tenant_context_from_external_action(&managed_request.session);
         let (state, policy) = match &self.state {
             GatewayExternalActionAuthorizerState::Dynamic(shared) => {
                 let state = shared.current();
@@ -131,6 +130,10 @@ impl GatewayExternalActionAuthorizerService {
                 (state.as_ref().clone(), policy.as_ref().clone())
             }
         };
+        // #519: resolved after `state` because the project this workspace rolls
+        // up to is read back off the control plane, never inferred from the
+        // session (a `FrameworkAdapterSession` carries no project id at all).
+        let timeline_tenant = tenant_context_from_external_action(&state, &managed_request.session);
         // #200: bind the action to the guardrail model before it is consumed by
         // capability authorization, so a managed-action guardrail policy can be
         // evaluated on the allow path below.
@@ -891,17 +894,16 @@ fn read_external_action_authorizer_stream<R: Read>(
     Ok(())
 }
 
+/// #519: the session declares only `(tenant_id, workspace_id)`; the project the
+/// workspace belongs to is resolved from the control plane. Writing the
+/// workspace id into `project_id` -- what this did before -- pointed
+/// project-scoped quota, billing attribution and every audit row at an id that
+/// names no project.
 fn tenant_context_from_external_action(
+    state: &AppState,
     session: &ferrogate_runtime::FrameworkAdapterSession,
 ) -> TenantContext {
-    TenantContext {
-        organization_id: Some(session.tenant_id.clone()),
-        team_id: None,
-        project_id: Some(session.workspace_id.clone()),
-        workspace_id: Some(session.workspace_id.clone()),
-        user_id: None,
-        api_key_id: None,
-    }
+    state.workspace_attribution_context(&session.tenant_id, &session.workspace_id)
 }
 
 fn now_unix_seconds() -> u64 {
@@ -934,6 +936,9 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_allows_and_records_timeline_event() {
         let state = AppState::new(crate::config::Config::default());
+        // #519: `workspace-1` belongs to `project-1`; the timeline row must be
+        // attributed to that project, not to the workspace id.
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
@@ -963,7 +968,8 @@ mod tests {
         assert_eq!(event.target, "tool:native.echo");
         assert_eq!(event.outcome, "allowed");
         assert_eq!(event.tenant.organization_id.as_deref(), Some("tenant-1"));
-        assert_eq!(event.tenant.project_id.as_deref(), Some("workspace-1"));
+        assert_eq!(event.tenant.project_id.as_deref(), Some("project-1"));
+        assert_eq!(event.tenant.workspace_id.as_deref(), Some("workspace-1"));
         assert!(event
             .message
             .as_deref()
@@ -977,6 +983,109 @@ mod tests {
             Some(ferrogate_runtime::decision_codes::CAPABILITY_ALLOWED)
         );
         assert_eq!(event.action_fingerprint, None);
+    }
+
+    fn register_workspace(state: &AppState, id: &str, project_id: &str, tenant_id: &str) {
+        crate::gateway::block_on_sync_bridge(state.upsert_workspace(
+            ferrogate_storage::StoredWorkspace {
+                id: id.to_string(),
+                project_id: project_id.to_string(),
+                tenant_id: tenant_id.to_string(),
+                name: id.to_string(),
+                slug: id.to_string(),
+                environment: "dev".to_string(),
+                status: "active".to_string(),
+                created_at_unix: 0,
+                updated_at_unix: 0,
+            },
+        ))
+        .expect("workspace upsert should succeed");
+    }
+
+    fn project_budget_policy(
+        scope_id: &str,
+        monthly_budget_usd: f64,
+    ) -> ferrogate_storage::StoredQuotaPolicy {
+        ferrogate_storage::StoredQuotaPolicy {
+            id: ferrogate_storage::quota_policy_id(
+                ferrogate_storage::QuotaScopeKind::Project,
+                scope_id,
+            ),
+            scope_type: ferrogate_storage::QuotaScopeKind::Project,
+            scope_id: scope_id.to_string(),
+            model_allowlist: vec![],
+            rpm_limit: None,
+            tpm_limit: None,
+            monthly_budget_usd: Some(monthly_budget_usd),
+            asset_storage_quota_bytes: None,
+            asset_max_object_bytes: None,
+            agent_cost_budget_usd: None,
+            alert_threshold_pcts: vec![],
+            monthly_egress_bytes_budget: None,
+            download_rpm_limit: None,
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }
+    }
+
+    /// #519 acceptance: the scope an external-action run's spend lands on.
+    ///
+    /// The authorizer's tenant context is fed to `resolve_effective_quota`, the
+    /// same resolver `auth::finalize_auth` uses. A project-scoped quota policy
+    /// written against the run's REAL project must bind; a policy written
+    /// against the workspace id under `QuotaScopeKind::Project` -- the scope the
+    /// pre-#519 code would have looked up -- must not.
+    #[test]
+    fn external_action_spend_binds_to_the_real_project_scope() {
+        let state = AppState::new(crate::config::Config::default());
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
+        // A decoy at (Project, "workspace-1"): the id the old code put in the
+        // project slot. It is tighter, so if it ever bound it would win the
+        // `min`-across-the-chain merge and be unmissable here.
+        for (scope_id, budget) in [("project-1", 500.0_f64), ("workspace-1", 1.0_f64)] {
+            crate::gateway::block_on_sync_bridge(
+                state.upsert_quota_policy(project_budget_policy(scope_id, budget)),
+            )
+            .expect("quota policy upsert should succeed");
+        }
+
+        let session = managed_tool_request().session;
+        let tenant = tenant_context_from_external_action(&state, &session);
+        assert_eq!(tenant.project_id.as_deref(), Some("project-1"));
+
+        let quota = crate::gateway::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
+            .expect("quota resolution should succeed");
+        assert_eq!(
+            quota.monthly_budget_scope,
+            Some(ferrogate_policy::QuotaScopeSelector {
+                kind: ferrogate_storage::QuotaScopeKind::Project,
+                id: "project-1".to_string(),
+            })
+        );
+        assert_eq!(quota.monthly_budget_usd, Some(500.0));
+    }
+
+    /// #519: an unknown workspace yields no project scope at all rather than a
+    /// fabricated one. The pre-fix code would have bound spend to
+    /// `(Project, "workspace-1")`.
+    #[test]
+    fn external_action_spend_has_no_project_scope_when_workspace_is_unknown() {
+        let state = AppState::new(crate::config::Config::default());
+        crate::gateway::block_on_sync_bridge(
+            state.upsert_quota_policy(project_budget_policy("workspace-1", 1.0)),
+        )
+        .expect("quota policy upsert should succeed");
+
+        let session = managed_tool_request().session;
+        let tenant = tenant_context_from_external_action(&state, &session);
+        assert_eq!(tenant.project_id, None);
+        assert_eq!(tenant.workspace_id.as_deref(), Some("workspace-1"));
+
+        let quota = crate::gateway::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
+            .expect("quota resolution should succeed");
+        assert_eq!(quota.monthly_budget_scope, None);
+        assert_eq!(quota.monthly_budget_usd, None);
     }
 
     /// #304 acceptance: capability-authorizer evidence survives persistence
