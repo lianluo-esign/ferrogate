@@ -31,22 +31,16 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 
 #[test]
 fn schema_contract_includes_latest_asset_egress_migration() {
-    // The head must be the LAST migration `001_init_postgres.sql` actually
-    // contains. It drifted (pinned at 50 while the file reached 58), which made
-    // `supabase-restart` bail on a stale literal before reaching any real check.
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 59);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "059_payment_attempt_amount_domains");
+    // The head itself is NOT pinned here any more (#511): it is derived from
+    // this same file by `schema_migrations`, and `schema_migrations_test.rs`
+    // holds that derivation. A literal head here pinned 50 while the file
+    // reached 58 and killed `supabase-restart`; re-adding one would only restore
+    // the obligation to hand-edit this file on every migration, which is what
+    // let it rot. What stays below is the HISTORICAL record -- migrations that
+    // already shipped and can therefore never legitimately disappear.
     assert!(POSTGRES_SCHEMA_SQL.contains(&format!(
         "VALUES ({POSTGRES_SCHEMA_VERSION}, '{POSTGRES_SCHEMA_NAME}')"
     )));
-    // ... and nothing NEWER exists in the file, i.e. the constant is the head
-    // rather than merely a version that happens to be present.
-    for version in (POSTGRES_SCHEMA_VERSION + 1)..(POSTGRES_SCHEMA_VERSION + 10) {
-        assert!(
-            !POSTGRES_SCHEMA_SQL.contains(&format!("VALUES ({version}, '")),
-            "migration {version} exists but POSTGRES_SCHEMA_VERSION is still {POSTGRES_SCHEMA_VERSION}"
-        );
-    }
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));

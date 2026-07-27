@@ -1195,6 +1195,23 @@ fn wait_for_postgres_query_named(container_name: &str) -> Result<()> {
     bail!("timed out waiting for local PostgreSQL query readiness; logs: {logs}");
 }
 
+/// The `<version>:<name>` marker the control-plane migration ledger's newest row
+/// must produce.
+///
+/// This is a projection of `sql/001_init_postgres.sql`, never a copy of it: the
+/// storage crate derives its head constants from that file at compile time and
+/// the harness reads them. The literal this replaced sat eight migrations behind
+/// the SQL, which made `supabase-restart` fail on its own bookkeeping rather
+/// than on anything it exists to prove (#511) -- and only a hand-copied literal
+/// could have. `storage_test.rs` keeps one from coming back.
+pub(crate) fn expected_head_migration() -> String {
+    format!(
+        "{}:{}",
+        ferrogate_storage::POSTGRES_SCHEMA_VERSION,
+        ferrogate_storage::POSTGRES_SCHEMA_NAME
+    )
+}
+
 fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
     let expected_tables = [
         "control_plane_resources",
@@ -1429,20 +1446,34 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
          WHERE version = (SELECT MAX(version) FROM {schema}.storage_schema_migrations)",
         schema = quote_ident(schema),
     ))?;
-    // Derived from the runtime authority, never a hardcoded copy: the literal
-    // this used to carry stayed pinned at 50 while `001_init_postgres.sql`
-    // reached 58, so `supabase-restart` bailed here before reaching anything
-    // else. Reading the constant means the next migration cannot re-break it.
-    let expected_migration = format!(
-        "{}:{}",
-        ferrogate_storage::POSTGRES_SCHEMA_VERSION,
-        ferrogate_storage::POSTGRES_SCHEMA_NAME
-    );
+    let expected_migration = expected_head_migration();
+    // EXACT equality, not ">=", and deliberately so (#511). The database under
+    // test was created from the very `001_init_postgres.sql` this binary embeds,
+    // so a head that differs in EITHER direction is a real finding: behind means
+    // the schema did not fully apply, ahead means the database was migrated by
+    // some other build than the one being tested -- a live-Supabase-project
+    // hazard that ">=" would wave through. The reason exactness used to be
+    // untenable is gone: `expected_head_migration` reads the SQL-derived head
+    // instead of a literal, so it moves with the file on its own.
     if migration_version.trim() != expected_migration {
         bail!(
             "unexpected latest Supabase migration: {migration_version}, expected \
              {expected_migration}"
         );
+    }
+
+    // The head alone does not prove the migrations UNDER it landed: the ledger
+    // numbers run contiguously from 1 to the head (held by
+    // `ferrogate-storage/src/schema_migrations_test.rs`), so a distinct-version
+    // count below the head means a partially applied schema wearing a correct
+    // head row.
+    let applied_migrations = postgres_scalar(&format!(
+        "SELECT count(DISTINCT version)::text FROM {schema}.storage_schema_migrations",
+        schema = quote_ident(schema),
+    ))?;
+    let expected_applied = ferrogate_storage::POSTGRES_SCHEMA_VERSION.to_string();
+    if applied_migrations.trim() != expected_applied {
+        bail!("expected {expected_applied} applied Supabase migrations, got {applied_migrations}");
     }
 
     let asset_size_constraint = postgres_scalar(&format!(

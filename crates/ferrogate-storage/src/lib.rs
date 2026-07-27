@@ -582,7 +582,14 @@ impl StorageSchemaEvidence {
     }
 }
 
-const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
+// #511: the schema SQL and the head migration it declares. The head used to be
+// two hand-written literals here (and a third copy in the E2E harness); they
+// drifted eight migrations behind the file and killed the `supabase-restart`
+// scenario. `schema_migrations` derives them from the SQL during const
+// evaluation, so there is nothing left to keep in sync.
+mod schema_migrations;
+pub(crate) use schema_migrations::POSTGRES_SCHEMA_SQL;
+pub use schema_migrations::{POSTGRES_SCHEMA_NAME, POSTGRES_SCHEMA_VERSION};
 
 /// Global in-memory cap for `agent_run_events`, as a multiple of the per-run
 /// cap (issue #231). Generous so eviction pressure on runs other than the
@@ -594,10 +601,6 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-/// Current schema migration version; exported so the E2E harness asserts
-/// against the runtime authority instead of a hardcoded copy.
-pub const POSTGRES_SCHEMA_VERSION: u64 = 59;
-pub const POSTGRES_SCHEMA_NAME: &str = "059_payment_attempt_amount_domains";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
