@@ -141,14 +141,50 @@ impl std::fmt::Debug for AdminLoginRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Debug` is hand-written for the same reason as [`AdminLoginRequest`]:
+/// `refresh_token` is a **live credential**, and a longer-lived one than the
+/// access token it redeems -- presenting it to `POST /v1/admin/refresh` mints
+/// a fresh session. This type is built by `serde_json::from_slice` in that
+/// route exactly the way the login payload is, so a derived `Debug` put the
+/// token one `{:?}` away from a log line, an `anyhow` chain, an `unwrap()`
+/// panic or a failing `assert_eq!` (issue #537).
+///
+/// The token is the only field, so -- following [`AdminScimTokenResponse`]
+/// (issue #492) -- the length survives redaction: an empty or truncated
+/// `refresh_token` is a real client bug, and the length is the only signal
+/// left to triage it with.
+///
+/// [`AdminScimTokenResponse`]: crate::AdminScimTokenResponse
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminRefreshRequest {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminRefreshRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminRefreshRequest")
+            .field("refresh_token", &"<redacted>")
+            .field("refresh_token_len", &self.refresh_token.len())
+            .finish()
+    }
+}
+
+/// `Debug` is hand-written for the same reason as [`AdminRefreshRequest`]
+/// above: `refresh_token` is a live credential parsed straight out of the
+/// `POST /v1/admin/logout` request body, and must never reach a rendered
+/// string (issue #537). Length survives for the same triage reason.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminLogoutRequest {
     pub refresh_token: String,
+}
+
+impl std::fmt::Debug for AdminLogoutRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminLogoutRequest")
+            .field("refresh_token", &"<redacted>")
+            .field("refresh_token_len", &self.refresh_token.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,7 +201,29 @@ pub struct AdminTenantView {
     pub role: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The reply to register / login / refresh / SSO-callback -- and the densest
+/// concentration of plaintext credential material in the crate: **three live
+/// secrets in one struct**. `Debug` is hand-written so none of them can be
+/// rendered (issue #537).
+///
+/// - `access_token` authenticates every admin-console call until it expires.
+/// - `refresh_token` outlives it and mints replacements.
+/// - `gateway_api_key` is the **once-shown** minted key from #517: this
+///   response is the only moment it exists in plaintext anywhere, exactly like
+///   the minted R2 credential #489 removed a derive for.
+///
+/// A derived `Debug` here was the worst case of the class, because this value
+/// is constructed on the success path of four routes and returned upward: any
+/// `tracing::debug!(?session)`, `anyhow` context, `unwrap()` panic or failing
+/// `assert_eq!` (which formats **both** sides) would have printed all three at
+/// once. `expires_in`, `user` and `tenant` carry no secret and survive, so the
+/// rendering stays diagnosable; `gateway_api_key_len` survives too, following
+/// [`AdminScimTokenResponse`] -- that key is unrecoverable after this response,
+/// so a truncated mint could otherwise never be diagnosed. The access and
+/// refresh tokens need no length: a bad one is fixed by logging in again.
+///
+/// [`AdminScimTokenResponse`]: crate::AdminScimTokenResponse
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminSessionResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -178,6 +236,20 @@ pub struct AdminSessionResponse {
     /// once (never recoverable after this response, matching the existing
     /// virtual-key create/rotate contract).
     pub gateway_api_key: String,
+}
+
+impl std::fmt::Debug for AdminSessionResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminSessionResponse")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .field("user", &self.user)
+            .field("tenant", &self.tenant)
+            .field("gateway_api_key", &"<redacted>")
+            .field("gateway_api_key_len", &self.gateway_api_key.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

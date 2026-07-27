@@ -52,7 +52,26 @@ pub struct TenantRecord {
     pub context: TenantContext,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A statically configured API key. `Debug` is hand-written because `secret`
+/// is the **plaintext API key** a caller presents on every request -- it is
+/// compared against the presented value by [`constant_time_eq`] in
+/// `<RbacAuthService as ApiKeyAuthenticator>::authenticate`, so it lives here
+/// in the clear rather than as a hash.
+///
+/// The blast radius is what makes this one worth the hand-written impl:
+/// [`AuthServiceData`] derives `Debug` over `Vec<AuthApiKey>` and
+/// [`RbacAuthService`] derives it over an `Arc<RwLock<AuthServiceData>>`, so a
+/// single `{:?}` on the service -- a `tracing::debug!(?rbac)`, an `anyhow`
+/// chain, an `unwrap()` panic, a failing assertion -- used to print every
+/// configured key in the deployment at once (issue #537).
+///
+/// `secret` renders as `Some("<redacted>")` or `None`, never flattened to a
+/// bare `<redacted>`: "this key authenticates by shared secret" versus "this
+/// key has no secret configured and can never authenticate" is a real
+/// misconfiguration signal, and it is not itself secret. Every other field --
+/// id, name, enabled, tenant, scopes -- is configuration, not credential, and
+/// survives untouched.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthApiKey {
     pub id: String,
     #[serde(default)]
@@ -65,6 +84,21 @@ pub struct AuthApiKey {
     pub tenant: TenantContext,
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for AuthApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthApiKey")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            // `Option::map` preserves the Some/None distinction while
+            // discarding the value: `Some("<redacted>")` vs `None`.
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("enabled", &self.enabled)
+            .field("tenant", &self.tenant)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
