@@ -28,9 +28,13 @@ if [ "${SKIP_WORKERS_CHECK:-}" = "1" ]; then
   exit 0
 fi
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-command -v npm >/dev/null || { echo "ERROR: npm not found (need Node 22+; see workers/*/README.md)" >&2; exit 1; }
+# Locate Node ourselves and refuse loudly when we cannot (#508): on the dev
+# boxes Node lives under $HOME and is not always on a non-login shell's PATH.
+# shellcheck source=scripts/node-env.sh
+. "$ROOT/scripts/node-env.sh"
+ferrogate_require_node "workers gate" || exit 1
 
 WORKERS=(agent-gateway mcp-server d1-proxy telemetry-collector)
 

@@ -48,6 +48,12 @@ jobs:
           ./scripts/test-check-secret-scan.sh
           python3 -m unittest scripts/test_audit_exceptions.py scripts/test_pingora_vendor.py scripts/test_protobuf_advisory.py scripts/test_workflow_action_pins.py
 
+      # #508: the admin-console gate must fail loudly and by name when the Node
+      # toolchain is unreachable, never silently skip. Runs against stub
+      # binaries in a scrubbed PATH; no npm/vitest/build work is triggered.
+      - name: Test admin-console gate toolchain contract
+        run: ./scripts/test-check-admin-console.sh
+
       - name: Run config validation tests
         run: |
           cargo test -p ferrogate-cli --all-features config::tests

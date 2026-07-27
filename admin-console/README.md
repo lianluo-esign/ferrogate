@@ -15,10 +15,33 @@ service, and talks to both over HTTP:
 - The gateway's Admin API (`/admin/v1/*`) for everything else, authenticated
   with a virtual API key minted by the auth service on register/login.
 
+## Toolchain (#508)
+
+Node 22+ (see [`Dockerfile`](./Dockerfile)). On the dev boxes Node is installed
+under `$HOME` and is **not** always on a non-login shell's `PATH`:
+
+```bash
+command -v node || ls -d "$HOME"/.local/share/node/*/bin "$HOME"/toolchain/node/*/bin
+export PATH="<that bin dir>:$PATH"
+```
+
+`npm`/`npx` are `#!/usr/bin/env node` shebang scripts, so calling them by
+absolute path from a shell without `node` on `PATH` fails with
+`env: 'node': No such file or directory`. That means *node is off `PATH`*, not
+*node is missing* — do not conclude the toolchain is broken.
+
+`node_modules` is **not** checked in (gitignored, ~500MB, platform-specific), so
+`npm ci` from the committed `package-lock.json` is the required first step on a
+fresh checkout. `scripts/check-admin-console.sh` runs it for you when
+`node_modules` is absent, finds Node itself via `scripts/node-env.sh` (override
+with `FERROGATE_NODE_BIN=<bin dir>`), and exits non-zero with
+`admin-console gate did NOT run: node not found on PATH` rather than skipping
+when it cannot. `scripts/test-check-admin-console.sh` holds that contract.
+
 ## Local development
 
 ```bash
-npm install
+npm ci                       # required first step on a fresh checkout
 cp .env.example .env.local   # point at your local auth service + gateway
 npm run dev
 ```
@@ -33,7 +56,8 @@ browser is allowed to call `/admin/v1/*` cross-origin.
 ## Build
 
 ```bash
-npm run build   # tsc -b && vite build, output in dist/
+npm run typecheck   # tsc -b on its own, for a fast type-only signal
+npm run build       # tsc -b && vite build && check:bundle, output in dist/
 ```
 
 ## OpenAPI client types (drift guard, #392)

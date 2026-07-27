@@ -10,6 +10,7 @@
     "check:api-types": "node scripts/check-api-types-drift.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
+    "typecheck": "tsc -b",
     "test": "vitest",
     "test:e2e": "npm run typecheck:e2e && playwright test",
     "test:e2e:install": "playwright install --with-deps chromium",

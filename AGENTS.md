@@ -487,6 +487,53 @@ cargo +1.88.0 test --workspace --all-features
 cargo +1.88.0 test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- --nocapture
 ```
 
+### Node toolchain (admin-console, workers/, tools/) — READ BEFORE CONCLUDING "NODE IS MISSING"
+
+Node **is** installed on the dev boxes, but it is installed under `$HOME` and is
+not guaranteed to be on a non-login shell's `PATH`. Locate it before deciding
+anything:
+
+```bash
+command -v node || ls -d "$HOME"/.local/share/node/*/bin "$HOME"/toolchain/node/*/bin
+export PATH="<that bin dir>:$PATH"     # e.g. $HOME/toolchain/node/node-v22.17.0-linux-x64/bin
+```
+
+**The failure mode lies to you.** `npm` and `npx` are `#!/usr/bin/env node`
+shebang scripts, so running them by absolute path from a shell without `node` on
+`PATH` fails with:
+
+```
+env: 'node': No such file or directory
+```
+
+That means *node is off `PATH`*, not *node is not installed*. Do not file or act
+on "there is no Node toolchain" — put the `bin/` directory on `PATH` and retry.
+This exact misreading cost a shipped regression: believing the admin-console gate
+could not run, #351 landed without it and broke the #313 admin-API coverage guard
+(#508).
+
+Repo tooling does not depend on you getting this right. `scripts/node-env.sh` is
+sourced by `scripts/check-admin-console.sh` and `scripts/check-workers.sh`; it
+finds Node in the usual `$HOME` locations, honours `FERROGATE_NODE_BIN=<bin dir>`
+as an authoritative override, and when it genuinely cannot find Node the gate
+exits **non-zero** with `<gate> did NOT run: node not found on PATH`. These gates
+never silently skip. `scripts/test-check-admin-console.sh` holds that contract.
+
+`admin-console/node_modules` and `workers/*/node_modules` are **not** checked in.
+`npm ci` from the committed lockfile is the required first step and the gate
+scripts run it for you when `node_modules` is missing. Playwright browsers are a
+separate download plus a set of OS shared libraries; the admin-console gate runs
+the (idempotent) `npx playwright install chromium` itself and fails by name —
+naming `sudo npx playwright install-deps chromium` — when chromium is present but
+cannot launch. `playwright install` only *warns* about missing host libraries and
+exits 0; the gate treats that as a failure, because an unlaunchable browser means
+the #331 browser contract is unproven, and unproven must not read as OK.
+
+```bash
+scripts/check-admin-console.sh   # lint + vitest + api-types drift + build + Playwright
+scripts/check-workers.sh         # tsc --noEmit for every Cloudflare Worker
+```
+
 For runtime changes, prefer this order:
 
 1. Build the local FerroGate and `ferrogate-test` binaries.

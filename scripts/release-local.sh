@@ -98,20 +98,19 @@ else
     echo "   (cargo-audit absent: dependency vuln gate skipped)"
   fi
   # Admin-console gate (#314): lint + Vitest + build for the SPA that ships in
-  # the image. Soft-skips only when Node/npm isn't installed on this host.
-  if command -v node >/dev/null && command -v npm >/dev/null; then
-    "$ROOT/scripts/check-admin-console.sh"
-  else
-    echo "   (node/npm absent: admin-console gate skipped — run scripts/check-admin-console.sh on a Node 22+ host)"
-  fi
+  # the image.
   # Cloudflare Workers gate (#465): tsc --noEmit for workers/{agent-gateway,
-  # mcp-server,d1-proxy}, which are deployed straight to Cloudflare. Soft-skips
-  # only when Node/npm isn't installed on this host.
-  if command -v node >/dev/null && command -v npm >/dev/null; then
-    "$ROOT/scripts/check-workers.sh"
-  else
-    echo "   (node/npm absent: workers gate skipped — run scripts/check-workers.sh on a Node 22+ host)"
-  fi
+  # mcp-server,d1-proxy}, which are deployed straight to Cloudflare.
+  #
+  # These used to soft-skip on `command -v node` — which is exactly how a
+  # release could be cut with the SPA and the Workers unchecked and nothing but
+  # a one-line note to show for it (#508). Both gates now find Node themselves
+  # (scripts/node-env.sh) and fail loudly and by name when they cannot, so a
+  # release that cannot run them STOPS. Set SKIP_ADMIN_CONSOLE_CHECK=1 /
+  # SKIP_WORKERS_CHECK=1 to opt out on purpose, or FERROGATE_NODE_BIN=<dir> to
+  # point at an off-PATH toolchain.
+  "$ROOT/scripts/check-admin-console.sh"
+  "$ROOT/scripts/check-workers.sh"
 fi
 
 if [ "$ENGINE" = "crane" ]; then
