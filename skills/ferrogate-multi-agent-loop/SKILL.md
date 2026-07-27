@@ -16,7 +16,7 @@ neighbouring roles will do with your output. Each role also has a focused skill:
 
 | | Development driver | Code-review agent | Test gate |
 | --- | --- | --- | --- |
-| Watches | Backlog / **Ready** (incl. bounced items) / In progress | **In review** only | **Testing** only |
+| Watches | **In progress → Ready → Backlog**, in that order (user, 2026-07-27) | **In review** only | **Testing** only |
 | Produces | code on `main`; slices parked in "In review" | Testing (pass) or Ready + findings (fail) | Done (pass) or Ready + `gate-rejected` (fail) |
 | Proof it owns | **`cargo check --all-targets` and nothing else** (see Speed mode) | acceptance-box audit + defect read of the landed diff | full `ferrogate-test` **end-to-end** coverage |
 | Never does | self-review; E2E; the Testing/Done transitions | writes product code; E2E; moves cards past Testing | writes product code; moves cards left past Ready |

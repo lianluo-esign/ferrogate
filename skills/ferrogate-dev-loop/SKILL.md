@@ -11,6 +11,25 @@ at a glance: `ferrogate-multi-agent-loop`. Downstream roles that consume this
 loop's output: `ferrogate-code-review` (In review) and `ferrogate-test`
 (Testing). This skill is the quick operational checklist for the dev role.
 
+## Candidate order: In progress → Ready → Backlog (user directive, 2026-07-27)
+
+Read the lanes in that order and take the first actionable item, rather than
+starting from Backlog:
+
+1. **`In progress`** — slices already opened, often mid-epic. This lane
+   silently accumulates: 14 items sat here while the loop pulled fresh work
+   from Backlog. Its items carry the most context and the least duplication
+   risk.
+2. **`Ready`** — the rework inbox (review/gate bounces carry findings in the
+   comments) plus groomed work.
+3. **`Backlog`** — fresh work, last.
+
+**Caveat that makes this safe:** In-progress items skew *stale-done* — a later
+slice landed after the last comment. Before scoping one, `git grep` `origin/main`
+for the feature's symbols to confirm the gap is real; if the surface already
+exists and its gate is green, say so on the issue and move it on, do not rebuild
+it. `dev-lane --cached "In progress"` lists the lane without a board fetch.
+
 ## The invariants (do not violate)
 
 1. **This role is code generation only (只负责代码生成).** Write the code, then
