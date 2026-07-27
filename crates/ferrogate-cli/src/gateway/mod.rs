@@ -219,6 +219,11 @@ pub(crate) struct FerroGateway {
 }
 
 pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool) -> AnyResult<()> {
+    // #542: settle the deployment's authentication posture before anything is
+    // opened, bound or written. A config that would run open without saying so
+    // stops here with an error that names the switch, rather than binding a
+    // listener that admits every unauthenticated request as platform root.
+    crate::lifecycle::ensure_auth_posture_is_declared(&config)?;
     let listen = config.listen.clone();
     let mut tls = config.tls.clone();
     crate::responses::set_cors_allowed_origin(config.admin.cors_allowed_origin.clone());

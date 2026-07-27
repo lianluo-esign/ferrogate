@@ -586,11 +586,18 @@ async fn authenticate_with_admission(
     request_id: &str,
     admission: LifecycleAdmission,
 ) -> std::result::Result<AuthContext, AuthError> {
+    // #542: this branch grants platform root to a caller who presented nothing,
+    // so what opens it matters more than what it does. It is now reached only
+    // when the operator wrote `[auth] disabled = true` -- a named, deliberate
+    // "this gateway is open" -- and never again because a section was left out.
+    // `auth_required()` no longer counts credentials, so a deployment whose keys
+    // live in the control plane rather than in `[[api_keys]]` does not fall in
+    // here, and the durable authenticator below actually runs.
     if !state.auth_required() {
         return Ok(AuthContext {
             region_allowlist: HashSet::new(),
             api_key_id: None,
-            // Auth disabled (zero-config): unrestricted access, carried as an
+            // Auth disabled by name: unrestricted access, carried as an
             // explicit wildcard so it survives the empty-set-is-not-admin rule.
             scopes: HashSet::from([WILDCARD_SCOPE.to_string()]),
             allowed_models: HashSet::new(),

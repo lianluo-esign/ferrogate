@@ -34,7 +34,7 @@ pub(crate) use self::types::{
     AgentUpstreamCapability, AgentUpstreamConfig, AgentUpstreamProtocol, AgentWorkflowEdge,
     AgentWorkflowNode, AgentWorkflowNodeKind, AgentWorkflowPolicy, AnalyticsConfig,
     AnalyticsProvider, ApiKey, AssetBucketBackend, AssetBucketConfig, AssetLifecycleConfig,
-    AuthServiceConfig, BillingAlertsConfig, BillingServiceConfig, CacheConfig, CacheMode,
+    AuthConfig, AuthServiceConfig, BillingAlertsConfig, BillingServiceConfig, CacheConfig, CacheMode,
     CanaryRoute, CloudflareConfig, ClusterConfig, ClusterSnapshotKey, Config, ExtensionConfig,
     ExtensionKind, ExtensionPermissions, GatewayConfigProfile, GuardrailEffect,
     GuardrailProviderErrorMode, GuardrailProviderKind, GuardrailProviderRuntimeConfig,

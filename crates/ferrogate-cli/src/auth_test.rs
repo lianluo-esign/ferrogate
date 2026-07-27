@@ -1607,67 +1607,142 @@ fn tenant_scoped_static_key_is_never_platform_root() {
     }
 }
 
-/// A durable/virtual key is minted under a tenant, so it is tenant-scoped no
-/// matter what the compatibility switch says: the storage path can never
-/// produce a platform-root credential.
-/// #542, pinned as the HOLE it is rather than left invisible.
+/// #542, the contract: a deployment whose credentials all live in the control
+/// plane -- no `[[api_keys]]`, no external auth service -- refuses a request
+/// that presents nothing.
 ///
-/// `auth_required()` is `auth_service.enabled || !api_keys.is_empty()` -- it
-/// counts STATIC config keys only. So a deployment whose credentials live in
-/// storage, with an empty `api_keys` section, has authentication switched off
-/// entirely: `authenticate()` takes the zero-config early return, admits a
-/// request that presented NO credential at all, and hands back the wildcard
-/// scope plus `platform_operator: true`. The seeded durable key is never read.
+/// This is the inverted form of the test that pinned the hole. `auth_required()`
+/// used to be `auth_service.enabled || !api_keys.is_empty()`, counting STATIC
+/// config keys only, so exactly this deployment had authentication switched off:
+/// `authenticate()` took the "auth disabled" early return, admitted a request
+/// with NO credential, handed back the wildcard scope plus
+/// `platform_operator: true`, and never consulted the durable authenticator at
+/// all. The seeded virtual key below is what such a deployment's tenants
+/// actually use, and it made no difference to whether anyone had to present one.
 ///
-/// This asserts the CURRENT, WRONG behaviour on purpose. Before #538 the
-/// suite exercised this posture only by accident, in
-/// `durable_virtual_key_is_never_platform_root`, which omitted the decoy key
-/// that every other durable test carries and so never reached the durable
-/// branch at all. Adding the decoy was the right fix for that test, but it
-/// removed the file's only exercise of the zero-config path and would have
-/// left #542 landable with nothing going red in either direction.
-///
-/// WHEN #542 IS FIXED THIS TEST MUST FAIL. That is the point. Invert it to the
-/// contract -- no credential, no admission -- and delete this comment.
+/// Restore either half of the old predicate and this goes red: the empty
+/// `[[api_keys]]` section would switch authentication off and the empty header
+/// map would be admitted instead of refused.
 #[test]
-fn zero_config_admits_an_unauthenticated_request_as_platform_root_issue_542() {
+fn a_storage_only_deployment_refuses_an_unauthenticated_request_issue_542() {
     let secret = "fg_live_e2e_0123456789abcdef";
-    // No static api_keys and no auth service: auth_required() is false.
+    // No static api_keys and no auth service: under the pre-#542 predicate
+    // this is the "auth is off" config.
     let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-542", secret, |_| {});
 
-    // Note the headers: EMPTY. Nothing is presented, and it is admitted.
-    let auth = authenticate(&state, &HeaderMap::new(), "chat.completions", "req-542")
-        .expect("#542: zero-config admits an unauthenticated request today");
+    // Note the headers: EMPTY. Nothing is presented.
+    let error = authenticate(&state, &HeaderMap::new(), "chat.completions", "req-542")
+        .expect_err("#542: an empty [[api_keys]] section must not switch authentication off");
 
+    assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error.code, "missing_api_key");
+}
+
+/// #542: the same deployment, with the virtual key actually presented. It
+/// authenticates through the durable path, is attributed to the key, and is
+/// tenant-scoped -- none of which happened before, because the durable
+/// authenticator was never reached.
+///
+/// Restore the old predicate and this goes red on every assertion at once: the
+/// early return produces `api_key_id: None`, `organization_id: None` and
+/// `platform_operator: true`.
+#[test]
+fn a_storage_only_deployment_authenticates_and_attributes_its_virtual_key_issue_542() {
+    let secret = "fg_live_e2e_0123456789abcdef";
+    let state = AppState::new(Config::default());
+    seed_durable_virtual_key(&state, "vk-542", secret, |_| {});
+
+    let auth = authenticate(
+        &state,
+        &bearer_headers(secret),
+        "chat.completions",
+        "req-542",
+    )
+    .expect("#542: the durable key is the deployment's credential and must authenticate");
+
+    assert_eq!(auth.api_key_id.as_deref(), Some("vk-542"));
+    assert_eq!(auth.organization_id.as_deref(), Some("tenant-1"));
+    assert_eq!(auth.caller_scope(), CallerScope::Tenant("tenant-1"));
     assert!(
-        auth.is_platform_operator(),
-        "#542: the zero-config context is platform root today -- if this now \
-         fails, #542 has been fixed and this test must be inverted to the \
-         contract rather than deleted"
+        !auth.is_platform_operator(),
+        "#542: a virtual key is minted under a tenant and can never be platform root"
     );
+}
+
+/// #542 ask 2: the open posture is still available -- but only to an operator
+/// who wrote it down. `[auth] disabled = true` is the one thing that reaches the
+/// wildcard/platform-root early return, and an omitted section is not it.
+///
+/// Delete the `disabled` read from `Config::auth_required` (make it return `true`
+/// unconditionally) and this goes red; make it return `!auth.disabled ||
+/// api_keys.is_empty()` -- i.e. let the omission back in -- and the two tests
+/// above go red.
+#[test]
+fn auth_disabled_by_name_is_the_only_way_to_the_open_posture_issue_542() {
+    let mut config = Config::default();
+    config.auth.disabled = true;
+    let state = AppState::new(config);
+    seed_durable_virtual_key(&state, "vk-542", "fg_live_e2e_0123456789abcdef", |_| {});
+
+    let auth = authenticate(&state, &HeaderMap::new(), "chat.completions", "req-542")
+        .expect("[auth] disabled = true means every request is admitted");
+
+    assert!(auth.is_platform_operator());
+    assert!(auth.has_scope("anything.at.all"));
+    assert!(auth.api_key_id.is_none());
+}
+
+/// #542: the predicate itself, stated once. Authentication is required by
+/// default and is NOT a function of where -- or whether -- credentials happen to
+/// be configured. Only the named switch turns it off, and it turns it off even
+/// when static keys exist (that combination is refused at startup by
+/// `lifecycle::ensure_auth_posture_is_declared`, precisely because it would
+/// otherwise be silently open).
+#[test]
+fn auth_required_is_stated_not_inferred_from_configured_credentials_issue_542() {
     assert!(
-        auth.api_key_id.is_none(),
-        "#542: no credential was consulted, so nothing is attributed"
+        Config::default().auth_required(),
+        "an empty config must require authentication, not switch it off"
+    );
+
+    let with_static_key = Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    };
+    assert!(with_static_key.auth_required());
+
+    let mut with_auth_service = Config::default();
+    with_auth_service.auth_service.enabled = true;
+    assert!(with_auth_service.auth_service.enabled && with_auth_service.auth_required());
+
+    let mut disabled = Config::default();
+    disabled.auth.disabled = true;
+    assert!(!disabled.auth_required());
+
+    let mut disabled_with_keys = Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    };
+    disabled_with_keys.auth.disabled = true;
+    assert!(
+        !disabled_with_keys.auth_required(),
+        "the named switch is the answer; a configured key does not quietly override it"
     );
 }
 
 #[test]
 fn durable_virtual_key_is_never_platform_root() {
     let secret = "fg_live_e2e_0123456789abcdef";
-    // The decoy YAML key is what every other durable-key test in this file
-    // carries, and it is load-bearing rather than decorative: `auth_required()`
-    // is `auth_service.enabled || !api_keys.is_empty()`, so a config with NO
-    // static keys switches authentication off entirely and `authenticate()`
-    // returns the zero-config wildcard context before it ever consults the
-    // durable authenticator. Without this the test asserts against a context
-    // no durable key produced -- see #542: a deployment whose
-    // only credentials are durable keys has auth off, which is what the
-    // omission accidentally surfaced.
-    let mut config = Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    };
+    // #542: this test carried `api_keys: vec![decoy_yaml_key()]` for one reason
+    // -- `auth_required()` was `auth_service.enabled || !api_keys.is_empty()`,
+    // so without a static key authentication was off and `authenticate()`
+    // returned the wildcard context before ever consulting the durable
+    // authenticator. The decoy was compensating for the gap, not testing
+    // anything, and its removal is what surfaced #542 in the first place. With
+    // the predicate no longer counting credentials the decoy is gone, and this
+    // test now fails if it ever comes back.
+    let mut config = Config::default();
     config.tenancy.implicit_platform_operator = true;
     let state = AppState::new(config);
     seed_durable_virtual_key(&state, "vk-515", secret, |_| {});

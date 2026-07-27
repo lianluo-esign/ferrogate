@@ -28,6 +28,59 @@ fn default_config_uses_localhost_8080() {
     );
     assert_eq!(config.agent_runtime.max_turns, 4);
     assert_eq!(config.agent_runtime.timeout_millis, 30_000);
+    // #542: the omitted `[auth]` section lands on "authentication required".
+    // Before #542 there was no section and the answer was inferred from the
+    // three assertions above it -- empty api_keys and a disabled auth service
+    // meant no request had to present anything, and every one of them was
+    // admitted as an unrestricted platform operator.
+    assert!(!config.auth.disabled);
+    assert!(config.auth_required());
+}
+
+/// #542: the open posture is a named field, spelled the way the startup error
+/// tells an operator to spell it. Rename or re-type the field and this stops
+/// compiling; drop the `#[serde(default)]` on `Config::auth` and every config
+/// file without an `[auth]` section stops loading.
+#[test]
+fn auth_section_is_the_named_switch_for_the_open_posture() {
+    let config = Config::from_toml_str("[auth]\ndisabled = true\n")
+        .expect("[auth] disabled = true is a valid config on its own");
+
+    assert!(config.auth.disabled);
+    assert!(!config.auth_required());
+
+    let default_posture =
+        Config::from_toml_str("[auth]\n").expect("an empty [auth] section is valid");
+    assert!(default_posture.auth_required());
+
+    // The section is closed: a typo is refused rather than silently ignored,
+    // which for this field would mean "I thought I disabled auth" or, worse,
+    // "I thought I enabled it".
+    let typo = Config::from_toml_str("[auth]\ndisable = true\n");
+    assert!(typo.is_err(), "an unknown [auth] field must be rejected");
+}
+
+/// #542: what counts as a credential source, asked once so the gateway's
+/// startup gate and the Control Plane API service's cannot disagree.
+#[test]
+fn credential_sources_are_static_keys_external_auth_or_a_durable_backend() {
+    assert!(!Config::default().has_credential_source());
+
+    let with_static_key =
+        Config::from_toml_str("[[api_keys]]\nid = \"k1\"\nname = \"k1\"\nkey = \"secret\"\n")
+            .unwrap();
+    assert!(with_static_key.has_credential_source());
+
+    let mut with_auth_service = Config::default();
+    with_auth_service.auth_service.enabled = true;
+    assert!(with_auth_service.has_credential_source());
+
+    let mut with_durable_backend = Config::default();
+    with_durable_backend.storage.provider = ferrogate_storage::StorageProviderKind::Postgres;
+    assert!(
+        with_durable_backend.has_credential_source(),
+        "#542: virtual keys live in the durable control plane and are a credential source"
+    );
 }
 
 #[test]

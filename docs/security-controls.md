@@ -19,6 +19,22 @@ separately.
 
 ## Authentication & Credential Storage
 
+Gateway authentication is **required by default and stated, never inferred**
+(issue #542). Whether a request must present a credential is one field,
+`[auth] disabled` (`crates/ferrogate-cli/src/config/types.rs`
+`Config::auth_required`); the open posture — every request admitted as an
+unrestricted platform operator — is reachable only by writing
+`[auth] disabled = true`. It used to be derived from
+`auth_service.enabled || !api_keys.is_empty()`, which counted static config
+keys only: a deployment whose credentials were all durable/virtual keys, or one
+that simply omitted `[[api_keys]]`, had authentication switched off by that
+omission. A config that requires authentication but has no credential source at
+all (no `[[api_keys]]`, no enabled `[auth_service]`, no durable
+Postgres/Supabase `[storage]` backend) refuses to start, naming the switch,
+rather than running open (`crates/ferrogate-cli/src/lifecycle.rs`
+`ensure_auth_posture_is_declared`, mirroring the same gate on the Control Plane
+API service).
+
 Admin-console user passwords are hashed with Argon2 (`argon2` crate) before
 storage — never stored or compared in plain text
 (`crates/ferrogate-auth/src/lib.rs:1253` `hash_password`,

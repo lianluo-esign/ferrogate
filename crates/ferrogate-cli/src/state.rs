@@ -4774,8 +4774,15 @@ impl AppState {
         format!("fg-{next:016x}")
     }
 
+    /// #542: delegates to the single config-level predicate. This used to be
+    /// `auth_service.enabled || !api_keys.is_empty()` -- an inference from where
+    /// the deployment kept its credentials, which counted STATIC config keys
+    /// only. A deployment whose keys were all durable/virtual (minted through
+    /// `POST /admin/v1/virtual-keys`) therefore had authentication switched off,
+    /// and every request was admitted as an unrestricted platform operator
+    /// without presenting anything. See [`Config::auth_required`].
     pub(crate) fn auth_required(&self) -> bool {
-        self.config.auth_service.enabled || !self.config.api_keys.is_empty()
+        self.config.auth_required()
     }
 
     /// Pre-authentication network gate (issue #166): rejects requests whose

@@ -313,6 +313,12 @@ impl Config {
             // #515: no `[tenancy]` surface in a Caddyfile either, so bridged
             // deployments get the legacy-compatible defaults.
             tenancy: crate::config::TenancyConfig::default(),
+            // #542: a Caddyfile has no way to say "this gateway is open", so a
+            // bridged deployment lands on the safe default -- authentication
+            // required. If it has no credential source, `serve` refuses to start
+            // and names the native `[auth] disabled` switch rather than running
+            // open.
+            auth: crate::config::AuthConfig::default(),
         }
     }
 

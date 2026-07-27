@@ -67,6 +67,27 @@ implicit_platform_operator = true
 # keys reference is registered through /admin/v1/tenant-accounts.
 require_registered_tenant = false
 
+# Authentication posture (issue #542). Authentication is REQUIRED by default:
+# every request must present a credential, which is resolved against the
+# external auth service, the durable/virtual key store, and [[api_keys]] -- in
+# that order. There is nothing to switch on here.
+#
+# Before #542 this was inferred from `auth_service.enabled ||
+# !api_keys.is_empty()`, which counted STATIC config keys only: a deployment
+# whose credentials were all virtual keys, minted through
+# POST /admin/v1/virtual-keys, had authentication switched OFF by an empty
+# [[api_keys]] section, and every request was admitted with no credential at
+# all as an unrestricted platform operator.
+#
+# Uncomment to run an OPEN gateway -- every request admitted as a platform
+# operator, no credential required. Appropriate for a laptop, a demo, or a
+# gateway used purely as an L7 reverse proxy on a trusted network. A config
+# with no credential source (no [[api_keys]], no enabled [auth_service], no
+# durable postgres/supabase [storage] backend) refuses to start without it,
+# rather than running open by default.
+# [auth]
+# disabled = true
+
 [storage]
 request_log_retention_records = 10000
 audit_event_retention_records = 10000

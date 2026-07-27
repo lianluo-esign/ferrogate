@@ -3,7 +3,7 @@
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-17
 // description: End-to-end regression for the admin CSRF / confused-deputy
-// defense. In zero-config mode (no api_keys, auth disabled) authenticate()
+// defense. Under [auth] disabled = true (#542) authenticate()
 // admits every request, so without a cross-site guard a malicious web page
 // could drive a state-changing /admin POST as a CORS "simple request",
 // hijacking the gateway config via the victim's browser. A cross-site browser
@@ -15,9 +15,18 @@ mod support;
 use support::{free_addr, http_request, start_gateway, wait_for_gateway};
 
 fn write_config(path: &std::path::Path, gateway_addr: &str) {
-    // Deliberately zero-config: no [[api_keys]] and no auth_service, so
-    // auth_required() is false and authenticate() admits every request.
-    std::fs::write(path, format!("listen = \"{gateway_addr}\"\n")).unwrap();
+    // Deliberately open: no [[api_keys]] and no auth_service, so
+    // authenticate() admits every request and the CSRF guard is the only thing
+    // standing between a malicious page and the admin surface. Since #542 that
+    // posture is stated by name -- an empty [[api_keys]] section no longer
+    // switches authentication off, and a config with no credential source and
+    // no [auth] disabled refuses to start -- which makes this fixture say
+    // exactly what it is testing.
+    std::fs::write(
+        path,
+        format!("listen = \"{gateway_addr}\"\n\n[auth]\ndisabled = true\n"),
+    )
+    .unwrap();
 }
 
 fn status_line(response: &str) -> &str {

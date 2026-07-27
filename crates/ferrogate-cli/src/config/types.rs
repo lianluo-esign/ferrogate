@@ -147,6 +147,91 @@ pub(crate) struct Config {
     /// checked foreign key). See [`TenancyConfig`].
     #[serde(default)]
     pub(crate) tenancy: TenancyConfig,
+    /// #542: whether this deployment authenticates at all. See [`AuthConfig`];
+    /// the default requires authentication.
+    #[serde(default)]
+    pub(crate) auth: AuthConfig,
+}
+
+/// Deployment-wide authentication posture (issue #542).
+///
+/// Before #542 there was no such section: whether the gateway authenticated at
+/// all was *inferred* from `auth_service.enabled || !api_keys.is_empty()` --
+/// i.e. from the presence of STATIC config credentials. Durable/virtual keys
+/// minted through `POST /admin/v1/virtual-keys` and stored in the control plane
+/// were not counted, so a deployment whose credentials all live in storage had
+/// authentication switched off entirely: `authenticate()` took the "auth
+/// disabled" early return, admitted a request that presented no credential at
+/// all, and handed back the wildcard scope with `platform_operator: true`.
+/// An *omitted* config section granted platform root -- the same defect shape
+/// as #515 and #540.
+///
+/// The inference is gone. Authentication is required unless an operator says
+/// otherwise BY NAME, in one field that means exactly one thing.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthConfig {
+    /// `false` (the default): every request must present a credential, which is
+    /// then resolved against the external auth service, the durable/virtual key
+    /// store, and `[[api_keys]]` -- in that order. A request with no credential
+    /// is refused, whatever the config happens to contain.
+    ///
+    /// `true`: authentication is switched OFF deployment-wide and every request
+    /// is admitted as an unrestricted platform operator. This is the old
+    /// zero-config convenience posture, now reachable only by naming it. It is
+    /// appropriate for a laptop, a demo, or a gateway used purely as an L7
+    /// reverse proxy on a trusted network -- never for one reachable from
+    /// anywhere a credential would have mattered.
+    ///
+    /// Migration: a deployment that has no credential source at all (no
+    /// `[[api_keys]]`, no enabled `[auth_service]`, no durable Postgres/Supabase
+    /// `[storage]` backend to hold virtual keys) used to run in the implicit
+    /// open posture. It no longer starts silently: `ferrogate run` refuses with
+    /// an error naming this field, so the posture is chosen rather than
+    /// inherited.
+    #[serde(default)]
+    pub(crate) disabled: bool,
+}
+
+impl Config {
+    /// The one deployment-wide answer to "must a request present a credential?"
+    /// (issue #542). Read by `AppState::auth_required`, by the `ferrogate check`
+    /// report and by `/admin/v1/status`, so all three agree by construction
+    /// rather than by three hand-copied expressions -- one of which
+    /// (`lifecycle::ConfigSummary`) had already drifted, reporting
+    /// `auth_required` from `[[api_keys]]` alone and ignoring `[auth_service]`.
+    ///
+    /// It deliberately does NOT count credentials. Counting them is what made
+    /// authentication depend on where a deployment happens to keep its keys:
+    /// static keys switched it on, durable/virtual keys in the control plane did
+    /// not, and an empty `[[api_keys]]` section switched it off. The posture is
+    /// now stated, not inferred, and the safe answer is the default.
+    pub(crate) fn auth_required(&self) -> bool {
+        !self.auth.disabled
+    }
+
+    /// Whether this config can resolve a presented credential to *anything*
+    /// (issue #542): a static `[[api_keys]]` entry, an enabled external
+    /// `[auth_service]`, or a durable Postgres/Supabase `[storage]` backend
+    /// holding virtual keys.
+    ///
+    /// This is a startup question, not a request-time one -- deliberately so.
+    /// The alternative, "authentication is required if the control plane
+    /// currently holds an active virtual key", would put a storage read on every
+    /// request and would still be wrong: a deployment that booted with zero keys
+    /// would stay open until the first key was minted, which is the #542 hole
+    /// with an extra step. Whether a request must authenticate is answered by
+    /// [`Config::auth_required`] alone; this only decides whether a deployment
+    /// that requires authentication has any way to perform it, and is checked
+    /// once, at startup, by `gateway::serve` and `execute_control_api_serve`.
+    pub(crate) fn has_credential_source(&self) -> bool {
+        !self.api_keys.is_empty()
+            || self.auth_service.enabled
+            || matches!(
+                self.storage.provider,
+                StorageProviderKind::Postgres | StorageProviderKind::Supabase
+            )
+    }
 }
 
 /// Deployment-wide tenant-identity semantics (issue #515).
@@ -3002,6 +3087,7 @@ impl Default for Config {
             asset_egress_price_per_gb: None,
             cloudflare: None,
             tenancy: TenancyConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }

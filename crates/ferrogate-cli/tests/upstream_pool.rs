@@ -94,6 +94,11 @@ fn upstream_pool_uses_round_robin_endpoint_selection() {
             r#"
 listen = "{gateway_addr}"
 
+# #542: no credential source of any kind, so the open posture is named
+# rather than inherited from an empty [[api_keys]] section.
+[auth]
+disabled = true
+
 [[upstreams]]
 name = "pool"
 url = "http://{first_addr}"

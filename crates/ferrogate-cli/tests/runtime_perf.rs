@@ -97,6 +97,11 @@ fn runtime_healthz_and_proxy_debug_perf_smoke() {
             r#"
 listen = "{gateway_addr}"
 
+# #542: no credential source of any kind, so the open posture is named
+# rather than inherited from an empty [[api_keys]] section.
+[auth]
+disabled = true
+
 [[upstreams]]
 name = "perf"
 url = "http://{upstream_addr}"
@@ -146,6 +151,11 @@ fn admin_dashboard_static_debug_perf_smoke() {
         format!(
             r#"
 listen = "{gateway_addr}"
+
+# #542: no credential source of any kind, so the open posture is named
+# rather than inherited from an empty [[api_keys]] section.
+[auth]
+disabled = true
 "#
         ),
     )

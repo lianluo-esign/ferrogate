@@ -208,15 +208,18 @@ impl AdminApiService {
 
 pub(crate) fn execute_control_api_serve(config: Config) -> anyhow::Result<()> {
     // Fail closed at startup: this service must never be an open control-plane
-    // proxy. The gateway's zero-config "auth disabled" convenience mode
-    // (no api_keys, no external auth service) is deliberately NOT
-    // mirrored here -- a control-plane edge with no credential source at all
-    // is a misconfiguration, not a mode.
+    // proxy. The gateway's "auth disabled" convenience mode ([auth] disabled,
+    // #542) is deliberately NOT mirrored here -- a control-plane edge with no
+    // credential source at all is a misconfiguration, not a mode.
+    //
+    // #542: the credential-source question is now asked through the shared
+    // `Config::has_credential_source` predicate, so this service and the
+    // gateway's own startup gate cannot drift apart about what counts as one.
     let has_durable_backend = matches!(
         config.storage.provider,
         StorageProviderKind::Postgres | StorageProviderKind::Supabase
     );
-    if config.api_keys.is_empty() && !config.auth_service.enabled && !has_durable_backend {
+    if !config.has_credential_source() {
         anyhow::bail!(
             "refusing to start an open Control Plane API proxy: the config has no credential \
              source (no [[api_keys]], no enabled [auth_service], and no durable Postgres/Supabase \

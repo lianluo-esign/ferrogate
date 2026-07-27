@@ -83,8 +83,8 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        // CSRF / confused-deputy defense for admin mutations. In zero-config
-        // mode auth is disabled, so `authenticate()` admits any request; without
+        // CSRF / confused-deputy defense for admin mutations. Under `[auth]
+        // disabled = true` (#542) `authenticate()` admits any request; without
         // this a malicious web page could drive a cross-site state-changing POST
         // to an /admin route (e.g. config/reload) as a CORS "simple request"
         // (text/plain, no preflight), using the victim's browser as a confused

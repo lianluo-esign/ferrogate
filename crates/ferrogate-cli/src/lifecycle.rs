@@ -35,6 +35,68 @@ pub(crate) fn format_validate_report(config: &Config) -> String {
     )
 }
 
+/// Startup gate for the deployment's authentication posture (issue #542).
+///
+/// Two configs are refused before the gateway ever binds a listener, both
+/// because they mean something the operator almost certainly did not intend and
+/// neither can be resolved safely at request time:
+///
+/// 1. **Nothing to authenticate against.** `[auth] disabled` is false (the
+///    default) but the config has no credential source at all. This is exactly
+///    the deployment that ran in the implicit open posture before #542. It does
+///    not silently flip to "refuse every request", and it emphatically does not
+///    keep admitting everyone as platform root: it stops, and the error names
+///    the switch that restores the old behaviour. Same fail-closed shape, and
+///    the same message spirit, as `execute_control_api_serve`.
+/// 2. **A contradiction.** `[auth] disabled = true` alongside a declared static
+///    credential source (`[[api_keys]]` or an enabled `[auth_service]`). Those
+///    credentials would be silently ignored and every request admitted as root
+///    -- an operator who wrote both is protected by neither, and which one they
+///    meant is not ours to guess.
+///
+/// A durable `[storage]` backend is not part of case 2: a virtual key can be
+/// minted into a shared control plane by anyone, at any time, including long
+/// after this deployment chose its posture, so its presence is not a statement
+/// this deployment made. Case 1 accepts it as a credential *source* (the keys
+/// can be resolved) without letting it override a named `disabled = true`.
+pub(crate) fn ensure_auth_posture_is_declared(config: &Config) -> AnyResult<()> {
+    if config.auth.disabled {
+        let mut declared: Vec<&str> = Vec::new();
+        if !config.api_keys.is_empty() {
+            declared.push("[[api_keys]]");
+        }
+        if config.auth_service.enabled {
+            declared.push("[auth_service] enabled = true");
+        }
+        if !declared.is_empty() {
+            bail!(
+                "refusing to start: [auth] disabled = true switches authentication off for every \
+                 request, but this config also declares a credential source ({}) that would then \
+                 never be consulted -- every caller, credentialed or not, would be admitted as an \
+                 unrestricted platform operator; remove [auth] disabled or remove the credential \
+                 source",
+                declared.join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    if !config.has_credential_source() {
+        bail!(
+            "refusing to start: authentication is required (the default) but this config has no \
+             credential source -- no [[api_keys]], no enabled [auth_service], and no durable \
+             postgres/supabase [storage] backend to hold virtual keys -- so every request would \
+             be refused; add a credential source, or, if this gateway is genuinely meant to be \
+             open to anyone who can reach it, say so by name with:\n\n[auth]\ndisabled = true\n\n\
+             (before FerroGate #542 that open posture was what an empty [[api_keys]] section \
+             silently landed on, and it admitted every unauthenticated request as an unrestricted \
+             platform operator)"
+        );
+    }
+
+    Ok(())
+}
+
 pub(crate) fn format_reload_report(config: &Config) -> String {
     let summary = ConfigSummary::from_config(config);
     let report = ReloadReport::validate_only(summary.snapshot.clone());
@@ -347,7 +409,12 @@ impl ConfigSummary {
             providers: config.providers.len(),
             models: config.models.len(),
             api_keys: config.api_keys.len(),
-            auth_required: !config.api_keys.is_empty(),
+            // #542: the one predicate, not a third hand-copied expression.
+            // This one had drifted furthest -- it ignored `[auth_service]`
+            // entirely, so `ferrogate check` reported `auth_required=false` for
+            // a deployment that authenticated every request against an external
+            // service.
+            auth_required: config.auth_required(),
         }
     }
 }
@@ -365,7 +432,108 @@ mod tests {
 
         assert!(report.contains("FerroGate config OK"));
         assert!(report.contains("snapshot="));
-        assert!(report.contains("auth_required=false"));
+        // #542: an empty config REQUIRES authentication. This line read
+        // `auth_required=false` before, and the report was computed from
+        // `!config.api_keys.is_empty()` -- a third copy of the predicate that
+        // did not even consult `[auth_service]`.
+        assert!(report.contains("auth_required=true"));
+    }
+
+    /// #542: the report tracks the one predicate, including through the named
+    /// switch. Re-derive it from `[[api_keys]]` (the pre-#542 expression) and
+    /// the `disabled` case below still says `true`.
+    #[test]
+    fn validate_report_tracks_the_named_auth_switch() {
+        let mut config = Config::default();
+        config.auth.disabled = true;
+
+        assert!(format_validate_report(&config).contains("auth_required=false"));
+
+        let mut with_external_auth = Config::default();
+        with_external_auth.auth_service.enabled = true;
+        with_external_auth.auth.disabled = false;
+
+        assert!(format_validate_report(&with_external_auth).contains("auth_required=true"));
+    }
+
+    /// #542 migration: the deployment that used to run in the implicit open
+    /// posture -- no `[[api_keys]]`, no `[auth_service]`, no durable backend --
+    /// does not start silently and does not flip silently. It stops, and the
+    /// error names the switch that restores the old behaviour.
+    ///
+    /// Delete the `has_credential_source` branch and this goes red.
+    #[test]
+    fn a_config_with_no_credential_source_refuses_to_start_and_names_the_switch() {
+        let config = Config::default();
+
+        let error = ensure_auth_posture_is_declared(&config)
+            .expect_err("an implicitly-open gateway must not start")
+            .to_string();
+
+        assert!(error.contains("no credential source"), "{error}");
+        assert!(
+            error.contains("[auth]") && error.contains("disabled = true"),
+            "the error must name the switch verbatim so an operator can paste it: {error}"
+        );
+    }
+
+    /// #542: each credential source, on its own, is enough to start. The durable
+    /// backend case is the whole point of the issue -- a deployment whose keys
+    /// are all virtual must boot, and must boot REQUIRING authentication.
+    #[test]
+    fn any_credential_source_starts_with_authentication_required() {
+        let with_static_key = Config::from_toml_str(
+            "[[api_keys]]\nid = \"k1\"\nname = \"k1\"\nkey = \"secret\"\n",
+        )
+        .expect("a config with one static key");
+        assert!(ensure_auth_posture_is_declared(&with_static_key).is_ok());
+        assert!(with_static_key.auth_required());
+
+        let mut with_auth_service = Config::default();
+        with_auth_service.auth_service.enabled = true;
+        assert!(ensure_auth_posture_is_declared(&with_auth_service).is_ok());
+        assert!(with_auth_service.auth_required());
+
+        let mut with_durable_keys = Config::default();
+        with_durable_keys.storage.provider = ferrogate_storage::StorageProviderKind::Supabase;
+        assert!(
+            ensure_auth_posture_is_declared(&with_durable_keys).is_ok(),
+            "#542: a deployment whose credentials are all virtual keys must start"
+        );
+        assert!(
+            with_durable_keys.auth_required(),
+            "#542: ...and it must start REQUIRING authentication, which is the whole bug"
+        );
+    }
+
+    /// #542 ask 2: the open posture is opted into by name, and saying so is
+    /// enough on its own -- no credential source needed, because there is
+    /// nothing to authenticate.
+    #[test]
+    fn auth_disabled_by_name_starts_without_a_credential_source() {
+        let mut config = Config::default();
+        config.auth.disabled = true;
+
+        assert!(ensure_auth_posture_is_declared(&config).is_ok());
+        assert!(!config.auth_required());
+    }
+
+    /// #542: `[auth] disabled = true` next to a declared static credential is a
+    /// contradiction whose quiet resolution is "the keys are ignored and
+    /// everyone is platform root" -- the exact outcome the issue exists to
+    /// prevent. Refused, with both halves named.
+    #[test]
+    fn auth_disabled_alongside_a_declared_credential_source_refuses_to_start() {
+        let mut config = Config::default();
+        config.auth.disabled = true;
+        config.auth_service.enabled = true;
+
+        let error = ensure_auth_posture_is_declared(&config)
+            .expect_err("a config that both disables and configures authentication is refused")
+            .to_string();
+
+        assert!(error.contains("[auth] disabled = true"), "{error}");
+        assert!(error.contains("[auth_service]"), "{error}");
     }
 
     #[test]

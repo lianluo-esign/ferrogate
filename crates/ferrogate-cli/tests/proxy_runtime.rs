@@ -368,6 +368,13 @@ fn healthz_and_reverse_proxy_vertical_slice_work() {
             r#"
 listen = "{gateway_addr}"
 
+# #542: a pure L7 reverse-proxy deployment has no credentials of any
+# kind and is open by design. Since #542 that posture is named rather
+# than inherited from an empty [[api_keys]] section, and a config with
+# no credential source refuses to start without it.
+[auth]
+disabled = true
+
 [[upstreams]]
 name = "echo"
 url = "http://{upstream_addr}/base"
@@ -451,6 +458,13 @@ fn reverse_proxy_accepts_traceparent_and_preserves_trace_headers() {
             r#"
 listen = "{gateway_addr}"
 
+# #542: a pure L7 reverse-proxy deployment has no credentials of any
+# kind and is open by design. Since #542 that posture is named rather
+# than inherited from an empty [[api_keys]] section, and a config with
+# no credential source refuses to start without it.
+[auth]
+disabled = true
+
 [[upstreams]]
 name = "echo"
 url = "http://{upstream_addr}"
@@ -505,6 +519,13 @@ fn proxied_response_body_is_not_fully_buffered_before_downstream_write() {
         format!(
             r#"
 listen = "{gateway_addr}"
+
+# #542: a pure L7 reverse-proxy deployment has no credentials of any
+# kind and is open by design. Since #542 that posture is named rather
+# than inherited from an empty [[api_keys]] section, and a config with
+# no credential source refuses to start without it.
+[auth]
+disabled = true
 
 [[upstreams]]
 name = "stream"
@@ -573,6 +594,13 @@ fn tls_listener_serves_healthz_when_certificate_is_configured() {
             r#"
 listen = "{gateway_addr}"
 
+# #542: a pure L7 reverse-proxy deployment has no credentials of any
+# kind and is open by design. Since #542 that posture is named rather
+# than inherited from an empty [[api_keys]] section, and a config with
+# no credential source refuses to start without it.
+[auth]
+disabled = true
+
 [tls]
 enabled = true
 cert_path = "{}"
@@ -636,7 +664,12 @@ fn inherited_listener_has_no_rebind_window() {
 
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    std::fs::write(&config, format!("listen = \"{gateway_addr}\"\n")).unwrap();
+    std::fs::write(
+        &config,
+        // #542: no credential source, so the open posture is stated by name.
+        format!("listen = \"{gateway_addr}\"\n\n[auth]\ndisabled = true\n"),
+    )
+    .unwrap();
 
     let mut gateway = start_gateway(&config, gateway_listener);
     contender_stop.store(true, Ordering::Release);
@@ -655,6 +688,53 @@ fn inherited_listener_has_no_rebind_window() {
     assert!(response.contains("HTTP/1.1 200 OK"), "{response}");
     assert!(response.contains("\"status\":\"ok\""), "{response}");
     gateway.shutdown();
+}
+
+/// #542, at the process boundary: the config every other test in this file
+/// used to write -- a bare `listen` with no credential source of any kind --
+/// no longer starts a gateway.
+///
+/// It is the deployment the issue is about. Until #542, `ferrogate run` on this
+/// file bound a listener whose `authenticate()` admitted every request, with no
+/// credential presented, carrying the wildcard scope and `platform_operator:
+/// true`; a virtual key minted into the control plane changed nothing, because
+/// the predicate that decided it counted `[[api_keys]]` only. The gateway now
+/// refuses to start and the error names the switch, so an operator who wants
+/// the open posture gets it by asking, and one who does not gets told.
+///
+/// Delete the startup gate in `gateway::serve` and this goes red: the process
+/// binds and stays up instead of exiting with the message.
+#[test]
+fn a_gateway_with_no_credential_source_refuses_to_start_and_names_the_switch() {
+    let gateway_listener = ListenerReservation::reserve();
+    let gateway_addr = gateway_listener.addr().to_string();
+    drop(gateway_listener);
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, format!("listen = \"{gateway_addr}\"\n")).unwrap();
+
+    let output = ferrogate()
+        .args(["run", "--config", config.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "an implicitly-open gateway must not start"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no credential source"),
+        "unexpected startup error: {stderr}"
+    );
+    assert!(
+        stderr.contains("[auth]") && stderr.contains("disabled = true"),
+        "the error must name the switch so the operator can act on it: {stderr}"
+    );
+    assert!(
+        TcpStream::connect(&gateway_addr).is_err(),
+        "nothing may be listening after a refused startup"
+    );
 }
 
 #[test]
