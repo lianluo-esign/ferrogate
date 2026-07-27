@@ -292,3 +292,361 @@ fn quota_policy_admin_surface_bootstraps_hierarchy_and_enforces_tpm_and_model_al
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+// --- issue #516: both branches of `authorize_scoped_resource` ------------
+//
+// `/admin/v1/quota-policies/{scope_type}/{scope_id}` is one of the two
+// surfaces guarded by `crate::auth::authorize_scoped_resource`, and until
+// #516 neither of that guard's two deny branches was held by a test in this
+// suite: a test-gate mutation that made an *unresolvable* `scope_id` return
+// `Ok(())` (fail open) left every suite in the crate green.
+//
+// Both branches are reachable over plain HTTP: a tenant-scoped caller is
+// exactly the shape `provision_gateway_api_key` mints on every admin-console
+// login, and it is modelled here by a static config key carrying
+// `organization_id` (the same construction
+// tests/tenant_isolation_admin_api.rs uses).
+
+const QUOTA_ADMIN: [&str; 2] = [
+    "Authorization: Bearer admin-secret",
+    "Content-Type: application/json",
+];
+const QUOTA_TENANT_A: [&str; 2] = [
+    "Authorization: Bearer scope-a-secret",
+    "Content-Type: application/json",
+];
+const QUOTA_TENANT_B: [&str; 2] = [
+    "Authorization: Bearer scope-b-secret",
+    "Content-Type: application/json",
+];
+
+/// Config for the two scope-authorization tests below: a platform-operator
+/// key plus one tenant-scoped admin-console-shaped key per tenant. No
+/// provider/model is needed -- these tests never leave the admin surface.
+fn write_scope_auth_config(path: &std::path::Path, gateway_addr: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Platform operator"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "scope-a-console"
+name = "Tenant A admin-console session key"
+key = "scope-a-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-scope-a"
+
+[[api_keys]]
+id = "scope-b-console"
+name = "Tenant B admin-console session key"
+key = "scope-b-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-scope-b"
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn bootstrap_scope_auth_tenants(gateway_addr: &str) {
+    for tenant_id in ["tenant-scope-a", "tenant-scope-b"] {
+        let registered = http_request(
+            gateway_addr,
+            "POST",
+            "/admin/v1/tenant-accounts",
+            &QUOTA_ADMIN,
+            &format!(r#"{{"id":"{tenant_id}","name":"{tenant_id}","slug":"{tenant_id}"}}"#),
+        );
+        assert!(
+            status_line(&registered).contains("200") || status_line(&registered).contains("201"),
+            "tenant registration failed for {tenant_id}: {registered}"
+        );
+    }
+}
+
+/// Issue #516, branch 1 of `authorize_scoped_resource` -- **fail closed on an
+/// unresolvable `scope_id`**.
+///
+/// A tenant-scoped caller names a project / workspace / virtual-key scope id
+/// that does not exist at all. The guard cannot resolve an owning tenant, and
+/// must deny: "nonexistent means safe to touch" is the wrong default, because
+/// a dangling id today is a live id the moment some other tenant creates it
+/// (and, on the PUT path, failing open would *create* a policy row keyed on
+/// another tenant's future resource).
+///
+/// Mutation check: making the unresolvable case return `Ok(())` turns the GET
+/// into a 404 `quota_policy_not_found` and the PUT into a 200 write, and this
+/// test goes red on both.
+#[test]
+fn unresolvable_quota_policy_scope_id_is_denied_not_treated_as_absent() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_scope_auth_config(&config, &gateway_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+    bootstrap_scope_auth_tenants(&gateway_addr);
+
+    // Every scope kind that resolves through storage, with an id that was
+    // never created by anyone.
+    for scope_type in ["project", "workspace", "key"] {
+        let read = http_request(
+            &gateway_addr,
+            "GET",
+            &format!("/admin/v1/quota-policies/{scope_type}/dangling-{scope_type}-id"),
+            &QUOTA_TENANT_A,
+            "",
+        );
+        assert!(
+            status_line(&read).contains("403"),
+            "a tenant-scoped caller naming a nonexistent {scope_type} scope id must be denied \
+             (fail closed), not fall through to the handler's not-found path: {read}"
+        );
+        assert!(
+            read.contains("tenant_scope_denied"),
+            "the denial must be the tenant-scope guard, not some other error: {read}"
+        );
+
+        let write = http_request(
+            &gateway_addr,
+            "PUT",
+            &format!("/admin/v1/quota-policies/{scope_type}/dangling-{scope_type}-id"),
+            &QUOTA_TENANT_A,
+            r#"{"rpm_limit":1}"#,
+        );
+        assert!(
+            status_line(&write).contains("403"),
+            "writing a quota policy at a nonexistent {scope_type} scope id must be denied for a \
+             tenant-scoped caller: {write}"
+        );
+        assert!(
+            write.contains("tenant_scope_denied"),
+            "the denial must be the tenant-scope guard, not some other error: {write}"
+        );
+
+        let delete = http_request(
+            &gateway_addr,
+            "DELETE",
+            &format!("/admin/v1/quota-policies/{scope_type}/dangling-{scope_type}-id"),
+            &QUOTA_TENANT_A,
+            "",
+        );
+        assert!(
+            status_line(&delete).contains("403"),
+            "deleting a quota policy at a nonexistent {scope_type} scope id must be denied for a \
+             tenant-scoped caller: {delete}"
+        );
+        assert!(delete.contains("tenant_scope_denied"), "{delete}");
+    }
+
+    // The denied PUTs must not have leaked a policy row into existence: the
+    // platform operator, who bypasses the guard entirely, still sees nothing
+    // at the dangling scope.
+    let operator_read = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/quota-policies/project/dangling-project-id",
+        &QUOTA_ADMIN,
+        "",
+    );
+    assert!(
+        status_line(&operator_read).contains("404"),
+        "the denied PUT must not have written a policy at the dangling scope: {operator_read}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+/// Issue #516, branch 2 of `authorize_scoped_resource` -- **deny when the
+/// scope resolves to a different tenant**.
+///
+/// Tenant B names tenant A's project / workspace / virtual key. Resolution
+/// succeeds, so the fail-closed branch above never fires; only the
+/// owner-mismatch comparison stands between tenant B and tenant A's quota
+/// policy. Failing open here is a real cross-tenant read *and* write on a
+/// live policy row, not a 404.
+///
+/// Mutation check: making the resolved-owner-mismatch case return `Ok(())`
+/// turns the GET into a 200 that hands tenant B tenant A's policy body, and
+/// this test goes red.
+#[test]
+fn quota_policy_scope_owned_by_another_tenant_is_denied() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_scope_auth_config(&config, &gateway_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+    bootstrap_scope_auth_tenants(&gateway_addr);
+
+    // Tenant A's resource chain, built by the platform operator.
+    let project = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/projects",
+        &QUOTA_ADMIN,
+        r#"{"id":"project-scope-a","tenant_id":"tenant-scope-a","name":"Project A","slug":"project-scope-a"}"#,
+    ));
+    assert_eq!(project["project"]["tenant_id"], "tenant-scope-a");
+    let workspace = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/workspaces",
+        &QUOTA_ADMIN,
+        r#"{"id":"workspace-scope-a","project_id":"project-scope-a","name":"Workspace A","slug":"workspace-scope-a"}"#,
+    ));
+    assert_eq!(workspace["workspace"]["project_id"], "project-scope-a");
+    let created_key = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/virtual-keys",
+        &QUOTA_ADMIN,
+        r#"{"name":"Tenant A key","workspace_id":"workspace-scope-a","scopes":["chat.completions"]}"#,
+    ));
+    assert_eq!(created_key["key"]["tenant_id"], "tenant-scope-a");
+    let key_id = created_key["key"]["id"].as_str().unwrap().to_string();
+
+    // A live quota policy at each of tenant A's scopes, so a fail-open guard
+    // would hand tenant B a real policy body rather than a 404.
+    for (scope_type, scope_id) in [
+        ("tenant", "tenant-scope-a".to_string()),
+        ("project", "project-scope-a".to_string()),
+        ("workspace", "workspace-scope-a".to_string()),
+        ("key", key_id.clone()),
+    ] {
+        let seeded = http_request(
+            &gateway_addr,
+            "PUT",
+            &format!("/admin/v1/quota-policies/{scope_type}/{scope_id}"),
+            &QUOTA_ADMIN,
+            r#"{"rpm_limit":11}"#,
+        );
+        assert!(
+            status_line(&seeded).contains("200"),
+            "operator must be able to seed tenant A's {scope_type} policy: {seeded}"
+        );
+
+        // Tenant A itself is still allowed through -- this is the guard's
+        // Ok() arm, and it must not be collateral damage of the deny arms.
+        let own_read = response_json(http_request(
+            &gateway_addr,
+            "GET",
+            &format!("/admin/v1/quota-policies/{scope_type}/{scope_id}"),
+            &QUOTA_TENANT_A,
+            "",
+        ));
+        assert_eq!(
+            own_read["policy"]["rpm_limit"], 11,
+            "tenant A must still read its own {scope_type} policy: {own_read}"
+        );
+
+        // Tenant B must not.
+        let stolen_read = http_request(
+            &gateway_addr,
+            "GET",
+            &format!("/admin/v1/quota-policies/{scope_type}/{scope_id}"),
+            &QUOTA_TENANT_B,
+            "",
+        );
+        assert!(
+            status_line(&stolen_read).contains("403"),
+            "tenant B must not read a quota policy whose {scope_type} scope resolves to tenant A: \
+             {stolen_read}"
+        );
+        assert!(
+            stolen_read.contains("tenant_scope_denied"),
+            "the denial must be the tenant-scope guard: {stolen_read}"
+        );
+        assert!(
+            !stolen_read.contains("\"rpm_limit\":11"),
+            "tenant A's policy body must never reach tenant B: {stolen_read}"
+        );
+
+        let stolen_write = http_request(
+            &gateway_addr,
+            "PATCH",
+            &format!("/admin/v1/quota-policies/{scope_type}/{scope_id}"),
+            &QUOTA_TENANT_B,
+            r#"{"rpm_limit":1}"#,
+        );
+        assert!(
+            status_line(&stolen_write).contains("403"),
+            "tenant B must not write a quota policy whose {scope_type} scope resolves to tenant \
+             A: {stolen_write}"
+        );
+        assert!(
+            stolen_write.contains("tenant_scope_denied"),
+            "{stolen_write}"
+        );
+
+        let stolen_delete = http_request(
+            &gateway_addr,
+            "DELETE",
+            &format!("/admin/v1/quota-policies/{scope_type}/{scope_id}"),
+            &QUOTA_TENANT_B,
+            "",
+        );
+        assert!(
+            status_line(&stolen_delete).contains("403"),
+            "tenant B must not delete a quota policy whose {scope_type} scope resolves to tenant \
+             A: {stolen_delete}"
+        );
+        assert!(
+            stolen_delete.contains("tenant_scope_denied"),
+            "{stolen_delete}"
+        );
+
+        // The denied DELETE must not have taken effect.
+        let survives = response_json(http_request(
+            &gateway_addr,
+            "GET",
+            &format!("/admin/v1/quota-policies/{scope_type}/{scope_id}"),
+            &QUOTA_ADMIN,
+            "",
+        ));
+        assert_eq!(
+            survives["policy"]["rpm_limit"], 11,
+            "tenant A's {scope_type} policy must survive tenant B's denied mutations: {survives}"
+        );
+    }
+
+    // The list endpoint runs the same guard per row: tenant B sees none of
+    // tenant A's four policies.
+    let listed = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/quota-policies",
+        &QUOTA_TENANT_B,
+        "",
+    ));
+    assert_eq!(
+        listed["data"].as_array().unwrap().len(),
+        0,
+        "tenant B's quota-policy listing must not include tenant A's policies: {listed}"
+    );
+    let listed_a = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/quota-policies",
+        &QUOTA_TENANT_A,
+        "",
+    ));
+    assert_eq!(
+        listed_a["data"].as_array().unwrap().len(),
+        4,
+        "tenant A must still see all four of its own policies: {listed_a}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

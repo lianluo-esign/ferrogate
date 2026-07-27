@@ -196,3 +196,282 @@ fn usage_report_admin_surface_reflects_settled_billing_cost() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+// --- issue #516: both branches of `authorize_scoped_resource` ------------
+//
+// `/admin/v1/usage-reports?scope_type=..&scope_id=..` is the second of the
+// two surfaces guarded by `crate::auth::authorize_scoped_resource`. Until
+// #516 neither of that guard's two deny branches was held by a test in this
+// suite -- the suite that owns the surface: a test-gate mutation that made an
+// *unresolvable* `scope_id` return `Ok(())` (fail open) left it green, and so
+// did a mutation of the resolved-owner-mismatch branch.
+//
+// Both branches are reachable over plain HTTP with a tenant-scoped caller,
+// which is exactly the shape `provision_gateway_api_key` mints on every
+// admin-console login and is modelled here by a static config key carrying
+// `organization_id`.
+
+const USAGE_ADMIN: [&str; 2] = [
+    "Authorization: Bearer admin-secret",
+    "Content-Type: application/json",
+];
+const USAGE_TENANT_A: [&str; 2] = [
+    "Authorization: Bearer usage-a-secret",
+    "Content-Type: application/json",
+];
+const USAGE_TENANT_B: [&str; 2] = [
+    "Authorization: Bearer usage-b-secret",
+    "Content-Type: application/json",
+];
+
+fn write_scope_auth_config(path: &std::path::Path, gateway_addr: &str, provider_addr: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[api_keys]]
+id = "admin"
+name = "Platform operator"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "usage-a-console"
+name = "Tenant A admin-console session key"
+key = "usage-a-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-usage-a"
+
+[[api_keys]]
+id = "usage-b-console"
+name = "Tenant B admin-console session key"
+key = "usage-b-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-usage-b"
+"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Bootstraps tenant A's full scope chain (tenant -> project -> workspace ->
+/// virtual key) plus an empty tenant B, and returns tenant A's key id and
+/// plaintext secret.
+fn bootstrap_usage_scope_chain(gateway_addr: &str) -> (String, String) {
+    for tenant_id in ["tenant-usage-a", "tenant-usage-b"] {
+        let registered = http_request(
+            gateway_addr,
+            "POST",
+            "/admin/v1/tenant-accounts",
+            &USAGE_ADMIN,
+            &format!(r#"{{"id":"{tenant_id}","name":"{tenant_id}","slug":"{tenant_id}"}}"#),
+        );
+        assert!(
+            status_line(&registered).contains("200") || status_line(&registered).contains("201"),
+            "tenant registration failed for {tenant_id}: {registered}"
+        );
+    }
+    let project = response_json(http_request(
+        gateway_addr,
+        "POST",
+        "/admin/v1/projects",
+        &USAGE_ADMIN,
+        r#"{"id":"project-usage-a","tenant_id":"tenant-usage-a","name":"Project A","slug":"project-usage-a"}"#,
+    ));
+    assert_eq!(project["project"]["tenant_id"], "tenant-usage-a");
+    let workspace = response_json(http_request(
+        gateway_addr,
+        "POST",
+        "/admin/v1/workspaces",
+        &USAGE_ADMIN,
+        r#"{"id":"workspace-usage-a","project_id":"project-usage-a","name":"Workspace A","slug":"workspace-usage-a"}"#,
+    ));
+    assert_eq!(workspace["workspace"]["project_id"], "project-usage-a");
+    let created_key = response_json(http_request(
+        gateway_addr,
+        "POST",
+        "/admin/v1/virtual-keys",
+        &USAGE_ADMIN,
+        r#"{"name":"Tenant A usage key","workspace_id":"workspace-usage-a","scopes":["chat.completions"],"allowed_models":["fast-chat"]}"#,
+    ));
+    assert_eq!(created_key["key"]["tenant_id"], "tenant-usage-a");
+    (
+        created_key["key"]["id"].as_str().unwrap().to_string(),
+        created_key["secret"].as_str().unwrap().to_string(),
+    )
+}
+
+/// Issue #516, branch 1 of `authorize_scoped_resource` -- **fail closed on an
+/// unresolvable `scope_id`**.
+///
+/// A tenant-scoped caller filters the usage report by a project / workspace /
+/// key scope id that does not exist. The guard cannot resolve an owning
+/// tenant and must deny with 403 `tenant_scope_denied`. Failing open here
+/// does not merely return an empty report: the caller-supplied filter is then
+/// applied verbatim against `usage_monthly_rollups` with no tenant narrowing
+/// at all, which is the same primitive as a cross-tenant read the instant
+/// that id becomes live under another tenant.
+///
+/// Mutation check: making the unresolvable case return `Ok(())` turns each
+/// tenant-scoped request below into a 200, and this test goes red.
+#[test]
+fn unresolvable_usage_report_scope_id_is_denied_not_treated_as_absent() {
+    let gateway_addr = free_addr();
+    let (provider_addr, _provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_unused","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_scope_auth_config(&config, &gateway_addr, &provider_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+    bootstrap_usage_scope_chain(&gateway_addr);
+
+    for scope_type in ["project", "workspace", "key"] {
+        let denied = http_request(
+            &gateway_addr,
+            "GET",
+            &format!(
+                "/admin/v1/usage-reports?scope_type={scope_type}&scope_id=dangling-{scope_type}-id"
+            ),
+            &USAGE_TENANT_A,
+            "",
+        );
+        assert!(
+            status_line(&denied).contains("403"),
+            "a tenant-scoped caller filtering by a nonexistent {scope_type} scope id must be \
+             denied (fail closed), not served an unnarrowed report: {denied}"
+        );
+        assert!(
+            denied.contains("tenant_scope_denied"),
+            "the denial must be the tenant-scope guard, not some other error: {denied}"
+        );
+    }
+
+    // The platform operator, which bypasses the guard, still gets a 200 --
+    // proving the 403s above come from the tenant-scope guard and not from
+    // the dangling id being rejected somewhere earlier in the pipeline.
+    let operator = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/usage-reports?scope_type=project&scope_id=dangling-project-id",
+        &USAGE_ADMIN,
+        "",
+    );
+    assert!(
+        status_line(&operator).contains("200"),
+        "a dangling scope id is not itself an error -- only a tenant-scoped caller is denied: \
+         {operator}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+/// Issue #516, branch 2 of `authorize_scoped_resource` -- **deny when the
+/// scope resolves to a different tenant**.
+///
+/// Tenant B filters the usage report by tenant A's tenant / project /
+/// workspace / virtual key. Resolution succeeds, so the fail-closed branch
+/// never fires; only the owner-mismatch comparison stands between tenant B
+/// and tenant A's settled spend. A real billing event is settled first, so
+/// failing open is an actual cross-tenant disclosure of token counts and USD
+/// cost, not an empty list.
+///
+/// Mutation check: making the resolved-owner-mismatch case return `Ok(())`
+/// turns each request below into a 200 carrying tenant A's rollup row, and
+/// this test goes red.
+#[test]
+fn usage_report_scope_owned_by_another_tenant_is_denied() {
+    let gateway_addr = free_addr();
+    let (provider_addr, _provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_scope","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1000,"completion_tokens":1000,"total_tokens":2000}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_scope_auth_config(&config, &gateway_addr, &provider_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+    let (key_id, secret) = bootstrap_usage_scope_chain(&gateway_addr);
+
+    // Settle one real billing event under tenant A so there is something
+    // worth stealing at every level of the scope chain.
+    let completion = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            &format!("Authorization: Bearer {secret}"),
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[]}"#,
+    );
+    assert!(
+        status_line(&completion).contains("200 OK"),
+        "chat completion should succeed: {completion}"
+    );
+
+    for (scope_type, scope_id) in [
+        ("tenant", "tenant-usage-a".to_string()),
+        ("project", "project-usage-a".to_string()),
+        ("workspace", "workspace-usage-a".to_string()),
+        ("key", key_id.clone()),
+    ] {
+        let path = format!("/admin/v1/usage-reports?scope_type={scope_type}&scope_id={scope_id}");
+
+        // Tenant A reading its own rollup is the guard's Ok() arm, and must
+        // keep working -- and must actually return the settled row, so the
+        // deny assertions below are about authorization, not emptiness.
+        let own = response_json(http_request(
+            &gateway_addr,
+            "GET",
+            &path,
+            &USAGE_TENANT_A,
+            "",
+        ));
+        let own_rows = own["data"].as_array().unwrap();
+        assert_eq!(
+            own_rows.len(),
+            1,
+            "tenant A must still see its own {scope_type} rollup: {own}"
+        );
+        assert_eq!(own_rows[0]["total_tokens"], 2000, "{own}");
+
+        // Tenant B must not.
+        let stolen = http_request(&gateway_addr, "GET", &path, &USAGE_TENANT_B, "");
+        assert!(
+            status_line(&stolen).contains("403"),
+            "tenant B must not read a usage report whose {scope_type} scope resolves to tenant A: \
+             {stolen}"
+        );
+        assert!(
+            stolen.contains("tenant_scope_denied"),
+            "the denial must be the tenant-scope guard: {stolen}"
+        );
+        assert!(
+            !stolen.contains("\"total_tokens\":2000"),
+            "tenant A's settled usage must never reach tenant B: {stolen}"
+        );
+    }
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
