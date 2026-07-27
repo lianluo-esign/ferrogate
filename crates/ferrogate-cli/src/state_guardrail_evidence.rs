@@ -43,26 +43,28 @@ impl AppState {
         // #307: keep the full (tenant-scoped) request-log set around — child
         // rows that declared a parent action are discovered by fingerprint
         // even when they do not match the investigation selector themselves.
-        let all_requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
-            .into_iter()
-            .filter(|log| investigation_matches_tenant(&filter, &log.tenant))
-            .collect::<Vec<_>>();
+        let all_requests =
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.request_logs())
+                .into_iter()
+                .filter(|log| investigation_matches_tenant(&filter, &log.tenant))
+                .collect::<Vec<_>>();
         let mut requests = all_requests
             .iter()
             .filter(|log| investigation_matches_request(&filter, log))
             .cloned()
             .collect::<Vec<_>>();
-        let mut agent_runs = crate::gateway::block_on_sync_bridge(self.repositories.agent_runs())
-            .into_iter()
-            .filter(|run| investigation_matches_agent_run(&filter, run))
-            .collect::<Vec<_>>();
+        let mut agent_runs =
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_runs())
+                .into_iter()
+                .filter(|run| investigation_matches_agent_run(&filter, run))
+                .collect::<Vec<_>>();
         let mut agent_events =
-            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_events())
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_run_events())
                 .into_iter()
                 .filter(|event| investigation_matches_agent_event(&filter, event))
                 .collect::<Vec<_>>();
         let mut audit_events =
-            crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.audit_events())
                 .into_iter()
                 .filter(|event| investigation_matches_audit(&filter, event))
                 .collect::<Vec<_>>();
@@ -96,7 +98,7 @@ impl AppState {
             .collect::<Vec<_>>();
         let mut seen_billing_events = HashSet::new();
         let mut billing_events = Vec::new();
-        for event in crate::gateway::block_on_sync_bridge(self.repositories.billing_events())
+        for event in ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.billing_events())
             .into_iter()
             .chain(self.metering_events.list())
             .filter(|event| investigation_matches_billing(&filter, event))
@@ -148,17 +150,18 @@ impl AppState {
             .iter()
             .map(|request| request.request_id.clone())
             .collect::<HashSet<_>>();
-        let child_dispatches =
-            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
-                .into_iter()
-                .filter(|dispatch| {
-                    dispatch.parent_action_fingerprint.is_some()
-                        && filter
-                            .tenant_id
-                            .as_ref()
-                            .is_none_or(|tenant_id| &dispatch.tenant_id == tenant_id)
-                })
-                .collect::<Vec<_>>();
+        let child_dispatches = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.self_hosted_run_dispatches(),
+        )
+        .into_iter()
+        .filter(|dispatch| {
+            dispatch.parent_action_fingerprint.is_some()
+                && filter
+                    .tenant_id
+                    .as_ref()
+                    .is_none_or(|tenant_id| &dispatch.tenant_id == tenant_id)
+        })
+        .collect::<Vec<_>>();
         let selected_dispatch_ids = child_dispatches
             .iter()
             .filter(|dispatch| {

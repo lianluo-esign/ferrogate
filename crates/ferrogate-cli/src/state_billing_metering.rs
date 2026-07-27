@@ -337,7 +337,8 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn billing_events(&self) -> Vec<BillingEvent> {
-        let persisted = crate::gateway::block_on_sync_bridge(self.repositories.billing_events());
+        let persisted =
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.billing_events());
         if persisted.is_empty() {
             self.metering_events.list()
         } else {
@@ -354,7 +355,7 @@ impl AppState {
     ) -> AdminPage<BillingEvent> {
         if let Some(tenant_id) = tenant_scope {
             let filtered: Vec<BillingEvent> =
-                crate::gateway::block_on_sync_bridge(self.repositories.billing_events())
+                ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.billing_events())
                     .into_iter()
                     .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
                     .collect();
@@ -381,7 +382,7 @@ impl AppState {
             };
         }
 
-        let page = crate::gateway::block_on_sync_bridge(
+        let page = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .billing_events_page(pagination.offset, pagination.limit),
         );
@@ -446,7 +447,8 @@ impl AppState {
         // telemetry.rs (no tokio runtime) as well as async admin handlers;
         // block_on_sync_bridge handles both. Same rationale as
         // wallet_balance_exhausted.
-        let aggregates = crate::gateway::block_on_sync_bridge(self.repositories.usage_aggregates());
+        let aggregates =
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.usage_aggregates());
         let Some(tenant_id) = tenant_scope else {
             return aggregates;
         };
@@ -485,9 +487,9 @@ impl AppState {
                     .enqueue(EvidenceWriteJob::ObservedPresenceTouch(touch));
             }
         } else {
-            crate::gateway::block_on_sync_bridge(self.repositories.append_request_log(log));
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.append_request_log(log));
             if let Some(touch) = presence_touch {
-                crate::gateway::block_on_sync_bridge(
+                ferrogate_sync_bridge::block_on_sync_bridge(
                     self.repositories.touch_observed_agent_presence(touch),
                 )
                 .ok();
@@ -571,7 +573,9 @@ impl AppState {
             self.evidence_writer
                 .enqueue(EvidenceWriteJob::AuditEvent(event));
         } else {
-            crate::gateway::block_on_sync_bridge(self.repositories.append_audit_event(event));
+            ferrogate_sync_bridge::block_on_sync_bridge(
+                self.repositories.append_audit_event(event),
+            );
         }
     }
 

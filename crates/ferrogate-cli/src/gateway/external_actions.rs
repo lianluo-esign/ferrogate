@@ -1081,7 +1081,7 @@ mod tests {
     }
 
     fn register_workspace(state: &AppState, id: &str, project_id: &str, tenant_id: &str) {
-        crate::gateway::block_on_sync_bridge(state.upsert_workspace(
+        ferrogate_sync_bridge::block_on_sync_bridge(state.upsert_workspace(
             ferrogate_storage::StoredWorkspace {
                 id: id.to_string(),
                 project_id: project_id.to_string(),
@@ -1149,7 +1149,7 @@ mod tests {
         // project slot. It is tighter, so if it ever bound it would win the
         // `min`-across-the-chain merge and be unmissable here.
         for (scope_id, budget) in [("project-1", 500.0_f64), ("workspace-1", 1.0_f64)] {
-            crate::gateway::block_on_sync_bridge(
+            ferrogate_sync_bridge::block_on_sync_bridge(
                 state.upsert_quota_policy(project_budget_policy(scope_id, budget)),
             )
             .expect("quota policy upsert should succeed");
@@ -1164,8 +1164,9 @@ mod tests {
             crate::state::ProjectAttribution::Resolved("project-1".to_string())
         );
 
-        let quota = crate::gateway::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
-            .expect("quota resolution should succeed");
+        let quota =
+            ferrogate_sync_bridge::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
+                .expect("quota resolution should succeed");
         assert_eq!(
             quota.monthly_budget_scope,
             Some(ferrogate_policy::QuotaScopeSelector {
@@ -1182,7 +1183,7 @@ mod tests {
     #[test]
     fn external_action_attribution_has_no_project_scope_when_workspace_is_unknown() {
         let state = AppState::new(crate::config::Config::default());
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             state.upsert_quota_policy(project_budget_policy("workspace-1", 1.0)),
         )
         .expect("quota policy upsert should succeed");
@@ -1199,8 +1200,9 @@ mod tests {
             crate::state::ProjectAttribution::Unknown
         );
 
-        let quota = crate::gateway::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
-            .expect("quota resolution should succeed");
+        let quota =
+            ferrogate_sync_bridge::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
+                .expect("quota resolution should succeed");
         assert_eq!(quota.monthly_budget_scope, None);
         assert_eq!(quota.monthly_budget_usd, None);
     }

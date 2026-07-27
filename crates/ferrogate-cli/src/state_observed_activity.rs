@@ -56,7 +56,7 @@ impl AppState {
         // which the derivation then rendered as a confident "not running".
         let presence_window_start = now_unix.saturating_sub(running_ttl_seconds) as i64;
         let mut presence_last_seen: HashMap<(String, String), u64> = HashMap::new();
-        let presence_error = match crate::gateway::block_on_sync_bridge(
+        let presence_error = match ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .list_observed_agent_presence_since(tenant_scope, presence_window_start),
         ) {
@@ -90,15 +90,15 @@ impl AppState {
         // sessions, self-hosted run dispatches, and recorded agent runs.
         let mut attributed_run_ids: HashSet<String> = HashSet::new();
         for session in
-            crate::gateway::block_on_sync_bridge(self.repositories.managed_worker_sessions())
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.managed_worker_sessions())
         {
             if !session.run_id.is_empty() {
                 attributed_run_ids.insert(session.run_id);
             }
         }
-        for dispatch in
-            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
-        {
+        for dispatch in ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.self_hosted_run_dispatches(),
+        ) {
             if !dispatch.run_id.is_empty() {
                 attributed_run_ids.insert(dispatch.run_id);
             }
@@ -106,7 +106,7 @@ impl AppState {
                 attributed_run_ids.insert(agent_run_id);
             }
         }
-        for run in crate::gateway::block_on_sync_bridge(self.repositories.agent_runs()) {
+        for run in ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_runs()) {
             if !run.id.is_empty() {
                 attributed_run_ids.insert(run.id);
             }
@@ -136,8 +136,8 @@ impl AppState {
         // failure to list key records must never fail the endpoint; the hint is
         // simply omitted.
         let mut credential_names: HashMap<String, String> = HashMap::new();
-        for key in
-            crate::gateway::block_on_sync_bridge(self.list_virtual_api_keys()).unwrap_or_default()
+        for key in ferrogate_sync_bridge::block_on_sync_bridge(self.list_virtual_api_keys())
+            .unwrap_or_default()
         {
             if let Some(scope) = tenant_scope {
                 if key.tenant_id != scope {

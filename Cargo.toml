@@ -26,6 +26,7 @@ members = [
     "crates/ferrogate-runtime",
     "crates/ferrogate-secrets",
     "crates/ferrogate-storage",
+    "crates/ferrogate-sync-bridge",
     "tools/ferrogate-test",
 ]
 default-members = ["crates/ferrogate-cli"]

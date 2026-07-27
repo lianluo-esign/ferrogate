@@ -66,7 +66,7 @@ fn recording_a_request_log_backs_observed_activity_with_durable_presence() {
     state.record_request_log(recent_request_log("req-1", "tenant-a", "key-1", now));
 
     // The durable presence store was touched (memory backend writes inline).
-    let presence = crate::gateway::block_on_sync_bridge(
+    let presence = ferrogate_sync_bridge::block_on_sync_bridge(
         state
             .repositories
             .list_observed_agent_presence_since(Some("tenant-a"), 0),
@@ -100,7 +100,7 @@ fn repeated_requests_for_one_key_coalesce_into_a_single_presence_row() {
     state.record_request_log(recent_request_log("req-2", "tenant-a", "key-1", now));
     state.record_request_log(recent_request_log("req-3", "tenant-a", "key-1", now));
 
-    let presence = crate::gateway::block_on_sync_bridge(
+    let presence = ferrogate_sync_bridge::block_on_sync_bridge(
         state
             .repositories
             .list_observed_agent_presence_since(Some("tenant-a"), 0),

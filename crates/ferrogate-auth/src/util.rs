@@ -20,11 +20,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `std::thread::spawn` per connection with no tokio runtime anywhere in the
 /// chain, and admin-console/SCIM handlers are shared by ~15 call sites that
 /// would all need to become `async fn` (cascading into `route_request`,
-/// `handle_connection`, and `serve`'s accept loop) to avoid this. Mirrors
-/// `ferrogate-cli`'s `gateway::block_on_sync_bridge` -- same
-/// `Handle::try_current()` + multi-thread-flavor check, falling back to a
-/// dedicated `current_thread` runtime, kept as a small local copy since the
-/// two crates don't share this kind of helper.
+/// `handle_connection`, and `serve`'s accept loop) to avoid this.
+///
+/// Byte-for-byte identical to `ferrogate_sync_bridge::block_on_sync_bridge`,
+/// which is where `ferrogate-cli`'s copy went in issue #553 stage 3a-0. The
+/// justification for keeping a private copy -- "the two crates don't share
+/// this kind of helper" -- no longer holds now that a shared crate exists;
+/// folding this one in is a separate slice, deliberately not bundled into a
+/// move-only change.
 pub(crate) fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
 where
     T: Send,

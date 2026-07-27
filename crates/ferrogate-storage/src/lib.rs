@@ -9490,10 +9490,12 @@ fn ledger_storage_error(error: StorageError) -> ferrogate_billing::BillingError 
 /// `ferrogate-billing` (which cannot depend on this crate), consumed by the
 /// synchronous `ferrogate billing serve` HTTP service (`ferrogate_billing::serve`
 /// is a sync fn with no tokio runtime). Rather than making the whole trait +
-/// service async, the three impl methods below bridge internally. Mirrors
-/// `ferrogate-cli`'s `gateway::block_on_sync_bridge` and `ferrogate-auth`'s
-/// copy: reuse a surrounding multi-thread runtime via `block_in_place`, else
-/// spin a scoped `current_thread` runtime.
+/// service async, the three impl methods below bridge internally. Shares the
+/// `block_in_place`-on-an-ambient-multi-thread-runtime half of
+/// `ferrogate_sync_bridge::block_on_sync_bridge` (issue #553 stage 3a-0, where
+/// `ferrogate-cli`'s copy moved to), but deliberately does NOT share the
+/// fallback: see [`sync_bridge_runtime`] below for why this crate needs a
+/// long-lived process-wide runtime rather than a per-call throwaway one.
 /// Process-wide runtime that drives every synchronous storage bridge call.
 ///
 /// It MUST be long-lived: `tokio-postgres` spawns each pooled connection's

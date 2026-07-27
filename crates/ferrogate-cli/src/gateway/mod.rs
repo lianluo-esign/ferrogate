@@ -86,6 +86,7 @@ pub(crate) use ferrogate_gateway::{
 };
 
 use anyhow::{Context, Result as AnyResult};
+use ferrogate_sync_bridge::block_on_sync_bridge;
 use http::HeaderMap;
 use pingora::{
     listeners::tls::TlsSettings,
@@ -447,29 +448,6 @@ fn managed_worker_capability_policy_for_tenant(
     }
     policy.target_grants = effective_grants;
     Ok(policy)
-}
-
-pub(crate) fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
-where
-    T: Send,
-{
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-            return tokio::task::block_in_place(|| handle.block_on(future));
-        }
-    }
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("sync-bridge runtime should build")
-                    .block_on(future)
-            })
-            .join()
-            .expect("sync-bridge runtime thread should not panic")
-    })
 }
 
 #[derive(Debug)]

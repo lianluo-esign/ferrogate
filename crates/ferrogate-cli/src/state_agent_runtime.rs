@@ -18,12 +18,12 @@ impl AppState {
         // handles both. Flushes the background evidence writer first (#309)
         // so readers keep read-your-writes over the deferred durable writes.
         self.flush_evidence_writer();
-        crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.request_logs())
     }
 
     pub(crate) fn audit_events(&self) -> Vec<StoredAuditEvent> {
         self.flush_evidence_writer();
-        crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.audit_events())
     }
 
     pub(crate) fn metering_events(&self) -> Vec<BillingEvent> {
@@ -236,7 +236,7 @@ impl AppState {
         self.flush_evidence_writer();
         if let Some(tenant_id) = tenant_scope {
             let filtered: Vec<StoredRequestLog> =
-                crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
+                ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.request_logs())
                     .into_iter()
                     .filter(|log| log.tenant.organization_id.as_deref() == Some(tenant_id))
                     .collect();
@@ -253,7 +253,7 @@ impl AppState {
                 limit: pagination.limit,
             };
         }
-        let page = crate::gateway::block_on_sync_bridge(
+        let page = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .request_logs_page(pagination.offset, pagination.limit),
         );
@@ -276,7 +276,7 @@ impl AppState {
             .into_iter()
             .map(|event| (event.request_id, event.usage))
             .collect::<HashMap<_, _>>();
-        crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.request_logs())
             .into_iter()
             .filter(|log| filter.matches(log))
             .take(filter.limit)
@@ -297,7 +297,7 @@ impl AppState {
         self.flush_evidence_writer();
         if let Some(tenant_id) = tenant_scope {
             let filtered: Vec<StoredAuditEvent> =
-                crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
+                ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.audit_events())
                     .into_iter()
                     .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
                     .collect();
@@ -314,7 +314,7 @@ impl AppState {
                 limit: pagination.limit,
             };
         }
-        let page = crate::gateway::block_on_sync_bridge(
+        let page = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .audit_events_page(pagination.offset, pagination.limit),
         );
@@ -360,11 +360,12 @@ impl AppState {
         pagination: AdminPagination,
         tenant_scope: Option<&str>,
     ) -> AdminPage<crate::responses::AdminManagedWorkerSession> {
-        let lifecycle_events = crate::gateway::block_on_sync_bridge(
+        let lifecycle_events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.managed_worker_lifecycle_events(),
         );
-        let worker_sessions =
-            crate::gateway::block_on_sync_bridge(self.repositories.managed_worker_sessions());
+        let worker_sessions = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.managed_worker_sessions(),
+        );
         let mut sessions = worker_sessions
             .into_iter()
             .map(|session| {
@@ -490,7 +491,7 @@ impl AppState {
             token_secret: ferrogate_runtime::generate_transport_token_secret(),
         };
         let transport_token_secret = registration.token_secret.clone();
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_self_hosted_worker_registration(registration.clone()),
         )
@@ -512,7 +513,7 @@ impl AppState {
     ) -> Result<crate::responses::AdminSelfHostedWorkerRotateResponse, SelfHostedWorkerRecordError>
     {
         validate_self_hosted_rotate_request(&request)?;
-        let mut registration = crate::gateway::block_on_sync_bridge(
+        let mut registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
         .ok_or_else(|| {
@@ -530,7 +531,7 @@ impl AppState {
         registration.token_secret = ferrogate_runtime::generate_transport_token_secret();
         let transport_token_secret = registration.token_secret.clone();
         let rotated_at_unix = now_unix_seconds();
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_self_hosted_worker_registration(registration.clone()),
         )
@@ -577,7 +578,7 @@ impl AppState {
         let Some(issuer) = self_hosted_mtls_cert_issuer_from_env()? else {
             return Ok(None);
         };
-        let registration = crate::gateway::block_on_sync_bridge(
+        let registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
         .ok_or_else(|| {
@@ -602,11 +603,12 @@ impl AppState {
     pub(crate) fn rebuild_self_hosted_worker_dispatch_runtime(
         &self,
     ) -> Result<(), SelfHostedWorkerRecordError> {
-        let registrations = crate::gateway::block_on_sync_bridge(
+        let registrations = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registrations(),
         );
-        let dispatches =
-            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches());
+        let dispatches = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.self_hosted_run_dispatches(),
+        );
         let records = match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => {
                 dispatch
@@ -788,7 +790,7 @@ impl AppState {
         worker_id: &str,
         token_id: &str,
     ) -> Result<String, SelfHostedWorkerError> {
-        let registration = crate::gateway::block_on_sync_bridge(
+        let registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
         .filter(|registration| {
@@ -826,7 +828,7 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_heartbeat_request(&request)?;
-        let mut registration = crate::gateway::block_on_sync_bridge(
+        let mut registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
         .ok_or_else(|| {
@@ -848,14 +850,14 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .append_self_hosted_worker_heartbeat(heartbeat.clone()),
         )
         .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         registration.status = heartbeat.status.clone();
         registration.last_seen_at_unix = heartbeat.observed_at_unix;
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_self_hosted_worker_registration(registration),
         )
@@ -899,7 +901,7 @@ impl AppState {
                 ));
             }
         }
-        let registration = crate::gateway::block_on_sync_bridge(
+        let registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
         .ok_or_else(|| {
@@ -931,7 +933,7 @@ impl AppState {
             agent_run_id: correlation.agent_run_id,
             parent_action_fingerprint: correlation.parent_action_fingerprint,
         };
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .append_self_hosted_worker_telemetry_event(stored_event.clone()),
         )
@@ -973,7 +975,7 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_artifact_request(&request)?;
-        let registration = crate::gateway::block_on_sync_bridge(
+        let registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
         .ok_or_else(|| {
@@ -987,7 +989,7 @@ impl AppState {
         // re-attribute another worker's (another tenant's) artifact by reusing
         // its id. Reject when the existing row belongs to a different worker.
         let artifact_id = request.artifact_id.trim().to_string();
-        if let Some(existing) = crate::gateway::block_on_sync_bridge(
+        if let Some(existing) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_artifact(&artifact_id),
         ) {
             if existing.worker_id != registration.id {
@@ -1014,7 +1016,7 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_self_hosted_worker_artifact(stored_artifact.clone()),
         )
@@ -1050,7 +1052,7 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_checkpoint_request(&request)?;
-        let registration = crate::gateway::block_on_sync_bridge(
+        let registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
         .ok_or_else(|| {
@@ -1064,7 +1066,7 @@ impl AppState {
         // different worker so one tenant cannot destroy/re-attribute another
         // tenant's resume checkpoint.
         let checkpoint_id = request.checkpoint_id.trim().to_string();
-        if let Some(existing) = crate::gateway::block_on_sync_bridge(
+        if let Some(existing) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .self_hosted_worker_checkpoint(&checkpoint_id),
         ) {
@@ -1091,7 +1093,7 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_self_hosted_worker_checkpoint(stored_checkpoint.clone()),
         )
@@ -1123,13 +1125,13 @@ impl AppState {
         &self,
         id: &str,
     ) -> Option<crate::responses::AdminSelfHostedWorkerRecord> {
-        let registration = crate::gateway::block_on_sync_bridge(
+        let registration = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(id),
         )?;
-        let latest_heartbeat = crate::gateway::block_on_sync_bridge(
+        let latest_heartbeat = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.latest_self_hosted_worker_heartbeat(id),
         );
-        let stats = crate::gateway::block_on_sync_bridge(
+        let stats = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_activity_stats(id),
         );
         Some(self_hosted_worker_record_from_parts(
@@ -1147,10 +1149,10 @@ impl AppState {
     ) -> Option<crate::responses::AdminSelfHostedWorkerEventStream> {
         // Worker-id filters pushed into the repository (SQL on the durable
         // path) instead of listing whole tables (issue #231).
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )?;
-        let mut events = crate::gateway::block_on_sync_bridge(
+        let mut events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .self_hosted_worker_telemetry_events_for_worker(worker_id),
         );
@@ -1212,58 +1214,57 @@ impl AppState {
     /// backends; the per-worker hot path uses
     /// [`Self::self_hosted_worker_record`] instead.
     fn self_hosted_worker_records(&self) -> Vec<crate::responses::AdminSelfHostedWorkerRecord> {
-        let heartbeats =
-            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_heartbeats());
-        let telemetry_events = crate::gateway::block_on_sync_bridge(
+        let heartbeats = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_heartbeats(),
+        );
+        let telemetry_events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_telemetry_events(),
         );
-        let artifacts =
-            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_artifacts());
-        let checkpoints = crate::gateway::block_on_sync_bridge(
+        let artifacts = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_artifacts(),
+        );
+        let checkpoints = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.self_hosted_worker_checkpoints(),
         );
         let now_unix = now_unix_seconds();
-        crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_registrations())
-            .into_iter()
-            .map(|registration| {
-                let latest_heartbeat = latest_self_hosted_heartbeat(&heartbeats, &registration.id);
-                let stats = ferrogate_storage::StoredSelfHostedWorkerActivityStats {
-                    telemetry_event_count: telemetry_events
-                        .iter()
-                        .filter(|event| event.worker_id == registration.id)
-                        .count(),
-                    artifact_count: artifacts
-                        .iter()
-                        .filter(|artifact| artifact.worker_id == registration.id)
-                        .count(),
-                    checkpoint_count: checkpoints
-                        .iter()
-                        .filter(|checkpoint| checkpoint.worker_id == registration.id)
-                        .count(),
-                    latest_event_at_unix: telemetry_events
-                        .iter()
-                        .filter(|event| event.worker_id == registration.id)
-                        .filter_map(|event| event.occurred_at_unix)
-                        .max(),
-                    latest_artifact_at_unix: artifacts
-                        .iter()
-                        .filter(|artifact| artifact.worker_id == registration.id)
-                        .filter_map(|artifact| artifact.created_at_unix)
-                        .max(),
-                    latest_checkpoint_at_unix: checkpoints
-                        .iter()
-                        .filter(|checkpoint| checkpoint.worker_id == registration.id)
-                        .filter_map(|checkpoint| checkpoint.created_at_unix)
-                        .max(),
-                };
-                self_hosted_worker_record_from_parts(
-                    registration,
-                    latest_heartbeat,
-                    stats,
-                    now_unix,
-                )
-            })
-            .collect()
+        ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .into_iter()
+        .map(|registration| {
+            let latest_heartbeat = latest_self_hosted_heartbeat(&heartbeats, &registration.id);
+            let stats = ferrogate_storage::StoredSelfHostedWorkerActivityStats {
+                telemetry_event_count: telemetry_events
+                    .iter()
+                    .filter(|event| event.worker_id == registration.id)
+                    .count(),
+                artifact_count: artifacts
+                    .iter()
+                    .filter(|artifact| artifact.worker_id == registration.id)
+                    .count(),
+                checkpoint_count: checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.worker_id == registration.id)
+                    .count(),
+                latest_event_at_unix: telemetry_events
+                    .iter()
+                    .filter(|event| event.worker_id == registration.id)
+                    .filter_map(|event| event.occurred_at_unix)
+                    .max(),
+                latest_artifact_at_unix: artifacts
+                    .iter()
+                    .filter(|artifact| artifact.worker_id == registration.id)
+                    .filter_map(|artifact| artifact.created_at_unix)
+                    .max(),
+                latest_checkpoint_at_unix: checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.worker_id == registration.id)
+                    .filter_map(|checkpoint| checkpoint.created_at_unix)
+                    .max(),
+            };
+            self_hosted_worker_record_from_parts(registration, latest_heartbeat, stats, now_unix)
+        })
+        .collect()
     }
 
     /// `tenant_scope`: a tenant-scoped caller only sees telemetry events for
@@ -1285,7 +1286,7 @@ impl AppState {
         // `SELF_HOSTED_RUN_TIMELINE_EVENT_LIMIT` events so an over-long run
         // still reports its latest lifecycle state. The tenant-scope filter
         // stays here (applied to the already-bounded slice).
-        let mut events = crate::gateway::block_on_sync_bridge(
+        let mut events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .self_hosted_worker_telemetry_events_for_run(
                     run_id,
@@ -1374,7 +1375,7 @@ impl AppState {
     /// without a trace (nothing is fabricated).
     pub(crate) fn agent_run_trace_id(&self, run_id: &str) -> Option<String> {
         self.flush_evidence_writer();
-        crate::gateway::block_on_sync_bridge(self.repositories.agent_run(run_id))
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_run(run_id))
             .and_then(|run| run.trace_id)
     }
 
@@ -1398,10 +1399,10 @@ impl AppState {
         filter: &AgentRunFilter,
     ) -> Option<Vec<StoredAgentRunEvent>> {
         self.flush_evidence_writer();
-        let run = crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
+        let run = ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_run(id))
             .filter(|run| agent_run_matches_filter(&run.request_id, &run.tenant, filter));
         let run_ids = [id.to_string()];
-        let events = crate::gateway::block_on_sync_bridge(
+        let events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.agent_run_events_for_runs(&run_ids),
         )
         .into_iter()
@@ -1424,19 +1425,19 @@ impl AppState {
         // tenant than `filter.organization_id` would still surface via
         // `run` even though every related collection below is empty for
         // that tenant.
-        let run = crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
+        let run = ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_run(id))
             .filter(|run| agent_run_matches_filter(&run.request_id, &run.tenant, &filter));
         // run_id filters pushed into the repository (SQL on the durable
         // path, issue #231) instead of loading whole tables; the per-record
         // tenant/request filter still applies to the filtered slices.
         let run_ids = [id.to_string()];
-        let agent_events = crate::gateway::block_on_sync_bridge(
+        let agent_events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.agent_run_events_for_runs(&run_ids),
         )
         .into_iter()
         .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
         .collect::<Vec<_>>();
-        let requests = crate::gateway::block_on_sync_bridge(
+        let requests = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.request_logs_for_agent_runs(&run_ids),
         )
         .into_iter()
@@ -1449,7 +1450,7 @@ impl AppState {
             .filter(|event| event.agent_run_id.as_deref() == Some(id))
             .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
             .collect::<Vec<_>>();
-        let audit_events = crate::gateway::block_on_sync_bridge(
+        let audit_events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.audit_events_for_agent_runs(&run_ids),
         )
         .into_iter()
@@ -1492,11 +1493,12 @@ impl AppState {
         // runs. Billing events live in-process (metering store), so their
         // run ids are unioned in here.
         let billing_events = self.metering_events.list();
-        let mut run_ids =
-            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_summary_seed_ids(
+        let mut run_ids = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.agent_run_summary_seed_ids(
                 filter.request_id.as_deref(),
                 AGENT_RUN_SUMMARY_SCAN_LIMIT,
-            ));
+            ),
+        );
         run_ids.extend(
             billing_events
                 .iter()
@@ -1504,15 +1506,16 @@ impl AppState {
         );
         run_ids.sort();
         run_ids.dedup();
-        let runs =
-            crate::gateway::block_on_sync_bridge(self.repositories.agent_runs_by_ids(&run_ids));
-        let agent_events = crate::gateway::block_on_sync_bridge(
+        let runs = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.agent_runs_by_ids(&run_ids),
+        );
+        let agent_events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.agent_run_events_for_runs(&run_ids),
         );
-        let requests = crate::gateway::block_on_sync_bridge(
+        let requests = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.request_logs_for_agent_runs(&run_ids),
         );
-        let audit_events = crate::gateway::block_on_sync_bridge(
+        let audit_events = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.audit_events_for_agent_runs(&run_ids),
         );
         run_ids
@@ -1591,7 +1594,7 @@ impl AppState {
             return;
         }
         if let Err(error) =
-            crate::gateway::block_on_sync_bridge(self.repositories.upsert_agent_run(run))
+            ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.upsert_agent_run(run))
         {
             warn!("failed to persist agent run record: {error}");
         }
@@ -1604,7 +1607,7 @@ impl AppState {
     /// row whose upsert is still queued.
     pub(crate) fn agent_run_record(&self, id: &str) -> Option<StoredAgentRun> {
         self.flush_evidence_writer();
-        crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_run(id))
     }
 
     /// #474: the queued self-hosted dispatch that carries `run_id` for
@@ -1654,7 +1657,7 @@ impl AppState {
         run_id: &str,
         action: SelfHostedRunAction,
     ) -> Option<SelfHostedRunDispatch> {
-        crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
             .into_iter()
             .filter(|record| record.run_id == run_id && record.acknowledged_status.is_none())
             .filter_map(|record| self_hosted_queue_record_from_storage(record).ok())
@@ -1679,7 +1682,7 @@ impl AppState {
             Ok(mut runtime) => runtime.queue.remove_run(dispatch_id),
             Err(poisoned) => poisoned.into_inner().queue.remove_run(dispatch_id),
         };
-        match crate::gateway::block_on_sync_bridge(
+        match ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .delete_self_hosted_run_dispatch(dispatch_id),
         ) {
@@ -1728,7 +1731,7 @@ impl AppState {
         if !withdrawn {
             return false;
         }
-        if let Err(error) = crate::gateway::block_on_sync_bridge(
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .delete_self_hosted_run_dispatch(dispatch_id),
         ) {
@@ -1781,7 +1784,7 @@ impl AppState {
     pub(crate) fn reclaim_settled_run_dispatches(&self, run_id: &str) -> usize {
         let mut dispatch_ids = self.self_hosted_dispatch_ids_for_run(run_id);
         if dispatch_ids.is_empty() {
-            dispatch_ids = crate::gateway::block_on_sync_bridge(
+            dispatch_ids = ferrogate_sync_bridge::block_on_sync_bridge(
                 self.repositories.self_hosted_run_dispatches(),
             )
             .into_iter()
@@ -1811,7 +1814,7 @@ impl AppState {
         // The cancel/complete paths write the run row through the evidence
         // writer, so an unflushed terminalization must not read back as open.
         self.flush_evidence_writer();
-        crate::gateway::block_on_sync_bridge(self.repositories.agent_runs_by_ids(run_ids))
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_runs_by_ids(run_ids))
             .into_iter()
             .filter(|run| agent_run_status_is_terminal(&run.status))
             .map(|run| run.id)
@@ -1848,7 +1851,7 @@ impl AppState {
         {
             return record.assigned_worker_id.clone();
         }
-        crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
             .into_iter()
             .find(|record| {
                 record.run_id == run_id && record.action == self_hosted_run_action_as_str(action)
@@ -2008,9 +2011,9 @@ impl AppState {
                 .enqueue(EvidenceWriteJob::AgentRunEvent(event));
             return;
         }
-        if let Err(error) =
-            crate::gateway::block_on_sync_bridge(self.repositories.append_agent_run_event(event))
-        {
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
+            self.repositories.append_agent_run_event(event),
+        ) {
             warn!("failed to persist agent run event record: {error}");
         }
     }
@@ -2202,7 +2205,7 @@ impl AppState {
             })
             .to_string(),
         };
-        if let Err(error) = crate::gateway::block_on_sync_bridge(
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.upsert_agent_worker_instance(agent_worker),
         ) {
             warn!("failed to persist agent-worker instance record: {error}");
@@ -2231,7 +2234,7 @@ impl AppState {
             .to_string(),
             resource_limits_json: "{}".to_string(),
         };
-        if let Err(error) = crate::gateway::block_on_sync_bridge(
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.upsert_managed_worker_session(session),
         ) {
             warn!("failed to persist managed worker session record: {error}");
@@ -2253,7 +2256,7 @@ impl AppState {
             capability_envelope_id: record.capability_envelope_id.clone(),
             selected_at_unix: occurred_at_unix,
         };
-        if let Err(error) = crate::gateway::block_on_sync_bridge(
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_managed_worker_isolation_selection(isolation_selection),
         ) {
@@ -2276,7 +2279,7 @@ impl AppState {
             writable_workspace: filesystem_policy.writable_workspace,
             host_path_mounts: filesystem_policy.host_path_mounts,
         };
-        if let Err(error) = crate::gateway::block_on_sync_bridge(
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_managed_worker_isolation_policy(isolation_policy_record),
         ) {
@@ -2305,7 +2308,7 @@ impl AppState {
             })
             .to_string(),
         };
-        if let Err(error) = crate::gateway::block_on_sync_bridge(
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .append_managed_worker_lifecycle_event(event),
         ) {
@@ -2356,7 +2359,7 @@ impl AppState {
             })
             .to_string(),
         };
-        if let Err(error) = crate::gateway::block_on_sync_bridge(
+        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .upsert_managed_worker_isolation_evidence(evidence),
         ) {
@@ -2368,7 +2371,7 @@ impl AppState {
         self.flush_evidence_writer();
         let target = format!("tool_session:{session_id}");
         let target_prefix = format!("{target}/");
-        crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
+        ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.audit_events())
             .into_iter()
             .filter(|event| {
                 event.action == "tool.execute"

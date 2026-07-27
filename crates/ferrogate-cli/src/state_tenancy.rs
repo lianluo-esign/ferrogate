@@ -194,7 +194,7 @@ impl AppState {
         let project = project_attribution_from_lookup(
             tenant_id,
             workspace_id,
-            crate::gateway::block_on_sync_bridge(
+            ferrogate_sync_bridge::block_on_sync_bridge(
                 self.repositories.resolve_workspace_scope(workspace_id),
             ),
         );

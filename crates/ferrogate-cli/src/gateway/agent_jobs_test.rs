@@ -548,7 +548,7 @@ fn lease_start_dispatch_to_worker(
         agent_run_id: dispatch.agent_run_id,
         parent_action_fingerprint: dispatch.parent_action_fingerprint,
     };
-    crate::gateway::block_on_sync_bridge(
+    ferrogate_sync_bridge::block_on_sync_bridge(
         state
             .repositories_arc()
             .upsert_self_hosted_run_dispatch(stored),
@@ -706,10 +706,12 @@ fn a_worker_report_for_a_leased_dispatch_with_no_run_row_fabricates_nothing() {
         "precondition: the run row genuinely does not exist"
     );
     assert_eq!(
-        crate::gateway::block_on_sync_bridge(state.repositories_arc().self_hosted_run_dispatches())
-            .into_iter()
-            .find(|record| record.run_id == run_id && record.action == "start_run")
-            .and_then(|record| record.assigned_worker_id),
+        ferrogate_sync_bridge::block_on_sync_bridge(
+            state.repositories_arc().self_hosted_run_dispatches()
+        )
+        .into_iter()
+        .find(|record| record.run_id == run_id && record.action == "start_run")
+        .and_then(|record| record.assigned_worker_id),
         Some("worker-1".to_string()),
         "precondition: the reporting worker holds the lease, so the #503 lease \
          guard PASSES and cannot mask what this test is proving"
@@ -875,13 +877,14 @@ fn a_cancel_on_a_replica_that_never_served_the_submit_still_reaches_the_runtime(
         .expect("the submitting node enqueues + persists the start dispatch");
 
     // Simulate the OTHER replica: same durable rows, empty in-process queue.
-    let persisted =
-        crate::gateway::block_on_sync_bridge(state.repositories_arc().self_hosted_run_dispatches())
-            .into_iter()
-            .find(|record| record.run_id == run_id)
-            .expect("the submit persisted a durable dispatch row");
+    let persisted = ferrogate_sync_bridge::block_on_sync_bridge(
+        state.repositories_arc().self_hosted_run_dispatches(),
+    )
+    .into_iter()
+    .find(|record| record.run_id == run_id)
+    .expect("the submit persisted a durable dispatch row");
     let replica = AppState::new(Config::default());
-    crate::gateway::block_on_sync_bridge(
+    ferrogate_sync_bridge::block_on_sync_bridge(
         replica
             .repositories_arc()
             .upsert_self_hosted_run_dispatch(persisted),
@@ -936,10 +939,10 @@ fn a_cancel_on_a_replica_that_never_served_the_submit_still_reaches_the_runtime(
     // queue from those durable rows, the cancelled job is no longer leasable.
     let rebuilt = AppState::new(Config::default());
     let (_worker_id, identity) = register_job_worker(&rebuilt, "tenant-a");
-    for record in crate::gateway::block_on_sync_bridge(
+    for record in ferrogate_sync_bridge::block_on_sync_bridge(
         replica.repositories_arc().self_hosted_run_dispatches(),
     ) {
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             rebuilt
                 .repositories_arc()
                 .upsert_self_hosted_run_dispatch(record),
@@ -975,20 +978,23 @@ fn a_submitted_job_survives_a_restart_of_the_serving_component() {
         .expect("submit enqueues + persists the start dispatch");
     state.record_agent_run(queued_run(&run_id, "tenant-a"));
 
-    let dispatch_rows =
-        crate::gateway::block_on_sync_bridge(state.repositories_arc().self_hosted_run_dispatches());
+    let dispatch_rows = ferrogate_sync_bridge::block_on_sync_bridge(
+        state.repositories_arc().self_hosted_run_dispatches(),
+    );
     let run_row = state.agent_run_record(&run_id).expect("run row");
     drop(state);
 
     // Restart: brand-new process state, nothing carried in memory.
     let restarted = AppState::new(Config::default());
-    crate::gateway::block_on_sync_bridge(restarted.repositories_arc().upsert_agent_run(run_row))
-        .expect("the run row is durable");
+    ferrogate_sync_bridge::block_on_sync_bridge(
+        restarted.repositories_arc().upsert_agent_run(run_row),
+    )
+    .expect("the run row is durable");
     for record in dispatch_rows
         .into_iter()
         .filter(|record| record.run_id == run_id)
     {
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             restarted
                 .repositories_arc()
                 .upsert_self_hosted_run_dispatch(record),
@@ -1244,11 +1250,12 @@ fn poll_for_lease(
 /// the rows read back in full at every startup and reload, and the thing #502's
 /// reclaim has to actually shrink.
 fn durable_dispatch_ids(state: &AppState) -> Vec<String> {
-    let mut ids: Vec<String> =
-        crate::gateway::block_on_sync_bridge(state.repositories_arc().self_hosted_run_dispatches())
-            .into_iter()
-            .map(|record| record.dispatch_id)
-            .collect();
+    let mut ids: Vec<String> = ferrogate_sync_bridge::block_on_sync_bridge(
+        state.repositories_arc().self_hosted_run_dispatches(),
+    )
+    .into_iter()
+    .map(|record| record.dispatch_id)
+    .collect();
     ids.sort();
     ids
 }
@@ -1469,10 +1476,10 @@ fn a_settled_runs_rows_are_reclaimed_by_a_node_that_never_held_them_in_memory() 
 
     // The node that serves the settlement: same durable table, empty queue.
     let settling = AppState::new(Config::default());
-    for record in crate::gateway::block_on_sync_bridge(
+    for record in ferrogate_sync_bridge::block_on_sync_bridge(
         submitter.repositories_arc().self_hosted_run_dispatches(),
     ) {
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             settling
                 .repositories_arc()
                 .upsert_self_hosted_run_dispatch(record),
@@ -1557,10 +1564,10 @@ fn a_peer_still_holding_a_cancelled_jobs_start_dispatch_refuses_to_lease_it() {
     // the submits, so it holds its own in-memory copy of both start dispatches.
     let peer = AppState::new(Config::default());
     let (_worker_id, identity) = register_job_worker(&peer, "tenant-a");
-    for record in crate::gateway::block_on_sync_bridge(
+    for record in ferrogate_sync_bridge::block_on_sync_bridge(
         submitter.repositories_arc().self_hosted_run_dispatches(),
     ) {
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             peer.repositories_arc()
                 .upsert_self_hosted_run_dispatch(record),
         )
@@ -1579,7 +1586,7 @@ fn a_peer_still_holding_a_cancelled_jobs_start_dispatch_refuses_to_lease_it() {
     // writes it immediately after stopping the work in the runtime.
     for run_id in [&cancelled_id, &live_id] {
         let row = submitter.agent_run_record(run_id).expect("run row");
-        crate::gateway::block_on_sync_bridge(peer.repositories_arc().upsert_agent_run(row))
+        ferrogate_sync_bridge::block_on_sync_bridge(peer.repositories_arc().upsert_agent_run(row))
             .expect("the peer reads the same run table");
     }
     // Nothing reached the peer's own state: no `cancel_run` was minted at all,

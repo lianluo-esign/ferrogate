@@ -4404,8 +4404,10 @@ fn persist_self_hosted_dispatch_records(
     records: Vec<StoredSelfHostedRunDispatch>,
 ) -> Result<(), SelfHostedWorkerError> {
     for record in records {
-        crate::gateway::block_on_sync_bridge(repositories.upsert_self_hosted_run_dispatch(record))
-            .map_err(|error| SelfHostedWorkerError::InvalidTransport(error.to_string()))?;
+        ferrogate_sync_bridge::block_on_sync_bridge(
+            repositories.upsert_self_hosted_run_dispatch(record),
+        )
+        .map_err(|error| SelfHostedWorkerError::InvalidTransport(error.to_string()))?;
     }
     Ok(())
 }
@@ -4605,11 +4607,12 @@ impl AppState {
         let cluster_counters = ClusterCounterBackend::from_config(&config);
         let self_hosted_dispatch = Arc::new(Mutex::new(SelfHostedWorkerDispatchRuntime::default()));
         {
-            let registrations = crate::gateway::block_on_sync_bridge(
+            let registrations = ferrogate_sync_bridge::block_on_sync_bridge(
                 repositories.self_hosted_worker_registrations(),
             );
-            let dispatches =
-                crate::gateway::block_on_sync_bridge(repositories.self_hosted_run_dispatches());
+            let dispatches = ferrogate_sync_bridge::block_on_sync_bridge(
+                repositories.self_hosted_run_dispatches(),
+            );
             let records = match self_hosted_dispatch.lock() {
                 Ok(mut dispatch) => {
                     dispatch.rebuild_registries(registrations, dispatches)?;
@@ -4970,7 +4973,7 @@ impl AppState {
     pub(crate) fn list_usage_monthly_rollups(
         &self,
     ) -> anyhow::Result<Vec<StoredUsageMonthlyRollup>> {
-        Ok(crate::gateway::block_on_sync_bridge(
+        Ok(ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories.list_usage_monthly_rollups(),
         )?)
     }
@@ -4982,7 +4985,7 @@ impl AppState {
         scope_id: &str,
         period_month: &str,
     ) -> anyhow::Result<Option<StoredUsageMonthlyRollup>> {
-        Ok(crate::gateway::block_on_sync_bridge(
+        Ok(ferrogate_sync_bridge::block_on_sync_bridge(
             self.repositories
                 .get_usage_monthly_rollup(scope_type, scope_id, period_month),
         )?)

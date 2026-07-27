@@ -735,14 +735,14 @@ mod tests {
     fn disabled_scheduler_is_a_no_op() {
         let state = AppState::new(Config::default()); // scheduler.enabled = false
                                                       // A due schedule exists, but a disabled sweeper must not touch it.
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             state
                 .repositories
                 .upsert_agent_schedule(interval_schedule("s1", 1)),
         )
         .expect("seed schedule");
-        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
-        let fires = crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
+        let fires = ferrogate_sync_bridge::block_on_sync_bridge(
             state.repositories.list_agent_schedule_fires("s1", 10),
         )
         .expect("list fires");
@@ -756,17 +756,17 @@ mod tests {
         // slot after it is still in the future, so skip_missed treats this as an
         // on-time fire rather than a catch-up.
         let now = now_unix_seconds().unwrap_or_default() as i64;
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             state
                 .repositories
                 .upsert_agent_schedule(interval_schedule("s1", now)),
         )
         .expect("seed schedule");
 
-        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
 
         // Exactly one fire recorded, marked dispatched, with a linked dispatch.
-        let fires = crate::gateway::block_on_sync_bridge(
+        let fires = ferrogate_sync_bridge::block_on_sync_bridge(
             state.repositories.list_agent_schedule_fires("s1", 10),
         )
         .expect("list fires");
@@ -779,8 +779,8 @@ mod tests {
 
         // next_fire advanced strictly past now; a second immediate tick does not
         // double-fire the same slot.
-        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
-        let fires = crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
+        let fires = ferrogate_sync_bridge::block_on_sync_bridge(
             state.repositories.list_agent_schedule_fires("s1", 10),
         )
         .expect("list fires");
@@ -798,14 +798,16 @@ mod tests {
         let mut schedule = interval_schedule("run-sched", now);
         schedule.target_kind = ScheduleTargetKind::AgentRun;
         schedule.target_json = "{}".into();
-        crate::gateway::block_on_sync_bridge(state.repositories.upsert_agent_schedule(schedule))
-            .expect("seed schedule");
+        ferrogate_sync_bridge::block_on_sync_bridge(
+            state.repositories.upsert_agent_schedule(schedule),
+        )
+        .expect("seed schedule");
 
-        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
 
         // The fire is recorded as dispatched and linked to a created run id (not
         // a self-hosted dispatch id).
-        let fires = crate::gateway::block_on_sync_bridge(
+        let fires = ferrogate_sync_bridge::block_on_sync_bridge(
             state
                 .repositories
                 .list_agent_schedule_fires("run-sched", 10),
@@ -832,12 +834,12 @@ mod tests {
         // A far-future next_fire so the tick loop would never fire it; run-now
         // must trigger regardless.
         let schedule = interval_schedule("manual-sched", i64::MAX / 2);
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             state.repositories.upsert_agent_schedule(schedule.clone()),
         )
         .expect("seed schedule");
 
-        let fire = crate::gateway::block_on_sync_bridge(state.run_agent_schedule_now(
+        let fire = ferrogate_sync_bridge::block_on_sync_bridge(state.run_agent_schedule_now(
             &schedule,
             Some(&ScheduleFireCorrelation {
                 request_id: "fg-run-now-1",
@@ -857,8 +859,9 @@ mod tests {
         // #305: the durable dispatch row carries the manual trigger's
         // {request_id, trace_id} and the agent run it starts, so the lease
         // joins timeline/audit/approval evidence on the same triple.
-        let dispatches =
-            crate::gateway::block_on_sync_bridge(state.repositories.self_hosted_run_dispatches());
+        let dispatches = ferrogate_sync_bridge::block_on_sync_bridge(
+            state.repositories.self_hosted_run_dispatches(),
+        );
         let dispatch = dispatches
             .iter()
             .find(|dispatch| dispatch.dispatch_id == dispatch_id)
@@ -882,17 +885,18 @@ mod tests {
     fn tick_fired_dispatch_carries_no_fabricated_request_context() {
         let state = AppState::new(scheduler_enabled_config());
         let now = now_unix_seconds().unwrap_or_default() as i64;
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             state
                 .repositories
                 .upsert_agent_schedule(interval_schedule("tick-corr", now - 1)),
         )
         .expect("seed schedule");
 
-        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
 
-        let dispatches =
-            crate::gateway::block_on_sync_bridge(state.repositories.self_hosted_run_dispatches());
+        let dispatches = ferrogate_sync_bridge::block_on_sync_bridge(
+            state.repositories.self_hosted_run_dispatches(),
+        );
         let dispatch = dispatches
             .iter()
             .find(|dispatch| {
@@ -917,16 +921,16 @@ mod tests {
         // A schedule whose next fire is far in the past (interval 60s) with the
         // default skip_missed policy must NOT fire the stale slot and must
         // fast-forward next_fire to a future slot.
-        crate::gateway::block_on_sync_bridge(
+        ferrogate_sync_bridge::block_on_sync_bridge(
             state
                 .repositories
                 .upsert_agent_schedule(interval_schedule("stale", 1)),
         )
         .expect("seed schedule");
 
-        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
 
-        let fires = crate::gateway::block_on_sync_bridge(
+        let fires = ferrogate_sync_bridge::block_on_sync_bridge(
             state.repositories.list_agent_schedule_fires("stale", 10),
         )
         .expect("list fires");
@@ -934,10 +938,11 @@ mod tests {
             fires.is_empty(),
             "skip_missed does not fire missed slots on catch-up"
         );
-        let schedule =
-            crate::gateway::block_on_sync_bridge(state.repositories.get_agent_schedule("stale"))
-                .expect("get")
-                .expect("schedule present");
+        let schedule = ferrogate_sync_bridge::block_on_sync_bridge(
+            state.repositories.get_agent_schedule("stale"),
+        )
+        .expect("get")
+        .expect("schedule present");
         let now = now_unix_seconds().unwrap_or_default() as i64;
         assert!(
             schedule.next_fire_at_unix.is_some_and(|next| next > now),

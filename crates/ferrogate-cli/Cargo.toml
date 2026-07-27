@@ -63,6 +63,7 @@ ferrogate-routing = { path = "../ferrogate-routing" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
 ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
+ferrogate-sync-bridge = { path = "../ferrogate-sync-bridge" }
 futures-util.workspace = true
 getrandom.workspace = true
 http.workspace = true

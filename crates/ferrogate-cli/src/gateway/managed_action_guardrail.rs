@@ -16,9 +16,9 @@ use ferrogate_guardrails::{
     DetectorStage, GuardrailEnvelope, ManagedActionClass, ManagedActionContext,
 };
 use ferrogate_runtime::{CapabilityAction, ManagedExternalAction};
+use ferrogate_sync_bridge::block_on_sync_bridge;
 use serde_json::Value;
 
-use super::block_on_sync_bridge;
 use crate::config::GuardrailStage;
 use crate::state::{AppState, GuardrailEvaluationContext, GuardrailMatch};
 
