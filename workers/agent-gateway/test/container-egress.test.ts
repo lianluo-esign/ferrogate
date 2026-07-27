@@ -39,6 +39,22 @@
 //       attributed to an interceptor that only carried plaintext HTTP. `AgentSandbox`
 //       now pins it true and the suite asserts the HTTPS registration exists.
 //
+//   WHAT THE SECOND REWORK CHANGED (second code review). The reviewer re-derived the
+//   pinned SDK line by line instead of trusting a green run — which is the only reason
+//   the following were found, since this lane executes nothing:
+//     * ONE ASSERTION WAS FALSE. The failed-sealed-reset test claimed the instance
+//       still carried the previous grant and then read the DO's allowlist FIELD, which
+//       the SDK has already emptied by the time the registration throws. It would have
+//       RED on correct code. What survives a failed reset is the installed interceptor,
+//       and that is what the test now measures. See that test for the derivation.
+//     * TWO COMMENTS CLAIMED MORE THAN THE HARNESS CAN SEE: that probing both URL
+//       schemes distinguishes two registrations (it cannot — one fetcher, and
+//       `ContainerProxy` never reads the scheme), and that asserting `enableInternet`
+//       proves the entrypoint exports `ContainerProxy` (it does not; that is now an
+//       import plus an identity check).
+//     * `egressPosture` — the caller's own posture label — had no test at all, so both
+//       refusals in `containerStart` could be deleted silently. INVARIANT 3c holds them.
+//
 //   NOT PROVABLE HERE, AND NOT PRETENDED. `enableInternet = false` is enforced by the
 //   Cloudflare platform OUTSIDE the container; whether the platform honours it, whether
 //   root inside the container can defeat it, and whether the container image trusts the
@@ -54,6 +70,12 @@ import { describe, expect, it } from "vitest";
 import wranglerToml from "../wrangler.toml?raw";
 import type { AppliedPosture, EgressVerdict, ProbeSandbox } from "./harness/worker";
 import type { Env } from "../src/index";
+// A VALUE import, not a type one, and load-bearing: `ctx.exports.ContainerProxy` — the
+// only way `setAllowedHosts`/`setDeniedHosts` can build an interceptor — resolves through
+// the Worker entrypoint's own export. Dropping `export { ContainerProxy }` from
+// src/index.ts makes this module fail to resolve. See the last test in this file.
+import { ContainerProxy } from "../src/index";
+import { ContainerProxy as SandboxContainerProxy } from "@cloudflare/sandbox";
 import {
   containerStart,
   governedEgressHosts,
@@ -248,13 +270,21 @@ describe("the governed allowlist constrains what the container may reach", () =>
     expect(verdict).toEqual({ verdict: "denied", status: 520, body: "Origin is disallowed" });
   }, 30_000);
 
-  it("denies an LLM provider through the applied denylist, on both schemes", async () => {
+  it("denies an LLM provider through the applied denylist, whatever the URL scheme", async () => {
     await tetheredStart();
-    // BOTH schemes on purpose. `interceptAllOutboundHttp` carries the plaintext
-    // request; the `https:*` registration carries the TLS one. Probing only
-    // `https://` while the class shipped `interceptHttps = false` was the previous
-    // suite's attribution error: the outcome was right, the mechanism named was
-    // not the one acting.
+    // WHAT THE TWO URLS DO AND DO NOT SHOW. They do NOT attribute the two schemes to
+    // two registrations: `decideThroughInstalledInterceptor` resolves ONE fetcher
+    // (`interceptions.at(-1)`), `applyOutboundInterception` hands the SAME fetcher
+    // object to every registration (`container.js:1196-1213`), and `ContainerProxy`
+    // branches on `url.hostname` alone — it never reads the scheme
+    // (`container.js:197-262`). So this is one decision function asked twice, and a
+    // harness that could tell the `https:*` registration from the `all-http:*` one
+    // would have to hold the two fetchers apart, which this one does not.
+    // What it DOES pin is that the denial is a property of the HOST, so no `http://`
+    // downgrade slips past a rule that was reasoned about in TLS terms. The claim
+    // that an HTTPS interception exists at all is held elsewhere, on the field
+    // (`interceptHttps = true`) and on the registration (`https:*`) — see the
+    // `interceptHttps` test above and the `applies exactly the authorized host` one.
     for (const url of [`https://${PROVIDER}/v1/messages`, `http://${PROVIDER}/v1/messages`]) {
       const verdict = await decideInstalled(instance, url);
       expect(verdict, `${url} must be refused`).toEqual({
@@ -442,6 +472,92 @@ describe("a caller-supplied denylist can only widen the Worker's own", () => {
 });
 
 // ---------------------------------------------------------------------------
+// INVARIANT 3c — the caller's `egressPosture` is CHECKED, never believed
+//
+// `containerStart` derives the posture from the validated allowlist and then refuses
+// a request whose own `egressPosture` field disagrees with that derivation. Until now
+// no test in this suite ever SENT `egressPosture`, so deleting both refusals left the
+// suite green — the same shape as the `egressDenylist` gap above.
+//
+// It is the mildest of the enforcement branches, because it fails toward MORE
+// restriction and `EgressPostureAttestation::verify` on the Rust side compares the
+// attestation against the request independently. But it is the one branch in
+// `containerStart` with no assertion at all, and "the label the caller sent is not
+// what decides the posture" is exactly the confusion #471 is about.
+// ---------------------------------------------------------------------------
+
+describe("the requested egressPosture must agree with the derived one", () => {
+  it("refuses a tethered label with no allowlist — the label cannot open anything", async () => {
+    // The direction that matters: a caller that says "gateway-tethered" while sending
+    // nothing to tether to must not be handed a posture its own label implies.
+    const instance = "fg.tenant-a.sess-1.posture-echo-tethered";
+    const result = await start({ instance, egressPosture: "gateway-tethered" });
+    expect(result.status).toBe(422);
+    expect(result.body.error).toBe("invalid_spec");
+    expect(result.body.message).toContain("does not match the requested allowlist");
+    // Refused BEFORE any RPC, so the instance is untouched rather than half-configured.
+    const posture = await appliedPosture(instance);
+    expect(posture.allowedHosts).toBeUndefined();
+    expect(posture.interceptions).toEqual([]);
+  });
+
+  it("refuses a sealed label that arrives with an allowlist", async () => {
+    // The mirror, so the check is not "tethered is always refused". An allowlist the
+    // Worker would otherwise ACCEPT (`GOVERNED_HOST` is the one authorized host) is
+    // still refused, because the label contradicts it.
+    const instance = "fg.tenant-a.sess-1.posture-echo-sealed";
+    const result = await start({
+      instance,
+      egressPosture: "sealed",
+      egressAllowlist: [GOVERNED_HOST],
+    });
+    expect(result.status).toBe(422);
+    expect(result.body.error).toBe("invalid_spec");
+    expect(result.body.message).toContain("does not match the requested allowlist");
+    expect((await appliedPosture(instance)).interceptions).toEqual([]);
+  });
+
+  it("refuses a posture label that is not one of the two, by name", async () => {
+    // Asserted on the MESSAGE, not on the status: an unknown label is also a mismatch,
+    // so deleting the vocabulary check would still produce a 422 from the mismatch
+    // check below it. Only the message tells the two branches apart, so only the
+    // message catches deleting the vocabulary check.
+    for (const requested of ["open", "", "SEALED", "gateway_tethered", 7, null, true]) {
+      const result = await start({
+        instance: "fg.tenant-a.sess-1.posture-echo-junk",
+        egressPosture: requested,
+      });
+      expect(result.status, `egressPosture ${JSON.stringify(requested)} must be refused`).toBe(422);
+      expect(result.body.message).toBe("egressPosture must be sealed or gateway-tethered");
+    }
+  });
+
+  it("accepts either label when it agrees — so the refusals above are not vacuous", async () => {
+    // Without this, deleting the derivation and refusing EVERY request that carries an
+    // `egressPosture` would pass all three tests above.
+    const sealed = await start({
+      instance: "fg.tenant-a.sess-1.posture-echo-ok-sealed",
+      egressPosture: "sealed",
+    });
+    expect(sealed.status).toBe(200);
+    expect(sealed.body.egress?.posture).toBe("sealed");
+
+    const tethered = await start({
+      instance: "fg.tenant-a.sess-1.posture-echo-ok-tethered",
+      egressPosture: "gateway-tethered",
+      egressAllowlist: [GOVERNED_HOST],
+    });
+    expect(tethered.status).toBe(200);
+    expect(tethered.body.egress?.posture).toBe("gateway-tethered");
+    // And the accepted label did not become the source of truth: the attested posture
+    // is still the one derived from the allowlist and applied to the instance.
+    expect(tethered.body.egress?.allowedHosts).toEqual(
+      (await appliedPosture("fg.tenant-a.sess-1.posture-echo-ok-tethered")).allowedHosts,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // INVARIANT 4 — the attestation reports what was APPLIED
 // ---------------------------------------------------------------------------
 
@@ -612,8 +728,28 @@ describe("the start attestation matches the applied posture", () => {
     // Since the sealed path applies the empty lists, it can fail the same way — and
     // a sealed start that could not clear a previous run's grant is precisely the
     // false attestation this rework exists to remove. It must surface as an error.
+    //
+    // WHERE THE RESET DIES, EXACTLY. `setAllowedHosts` assigns the field and THEN
+    // refreshes (`containers/dist/lib/container.js:487-490`), and the refresh builds
+    // the `ContainerProxy` props before it registers anything
+    // (`container.js:1184-1197`), so what the failure interrupts is the REGISTRATION
+    // — `interceptOutboundHttps('*', …)` at `container.js:1208`. Two layers therefore
+    // disagree, and the assertions below pin both halves:
+    //   * the DO's own field is already reset (`allowedHostsOverride = []`, persisted
+    //     at `container.js:1183`), so reading it would say "sealed";
+    //   * the INSTALLED interceptor is still the tethered one, because the call that
+    //     would have replaced it is the call that threw — so the container's live
+    //     enforcement still grants the previous run's host.
+    // The second is the real state of the world, and it is why the Worker must refuse
+    // rather than attest. The first rework asserted the field with the second's
+    // comment above it, which reds on correct code; that is fixed here.
     const instance = "fg.tenant-a.sess-1.sealed-apply-fails";
     expect((await start({ instance, egressAllowlist: [GOVERNED_HOST] })).status).toBe(200);
+    const tethered = await appliedPosture(instance);
+    // The precondition has to be real, or nothing below distinguishes anything.
+    expect(tethered.allowedHosts).toEqual([GOVERNED_HOST]);
+    expect(tethered.interceptions).toContain("all-http:*");
+
     await runInDurableObject(sandbox(instance), async (probe) =>
       probe.failNextInterception("container control plane unavailable"),
     );
@@ -621,9 +757,37 @@ describe("the start attestation matches the applied posture", () => {
     expect(result.status).not.toBe(200);
     expect(result.body.error).toBe("container_error");
     expect(result.body.egress).toBeUndefined();
-    // The instance still carries the previous grant — which is why the run is refused.
-    expect((await appliedPosture(instance)).allowedHosts).toEqual([GOVERNED_HOST]);
-  });
+
+    const posture = await appliedPosture(instance);
+    // ORDER, observed on the failing path. Pins container.ts's sealed branch calling
+    // `setAllowedHosts` FIRST: the allowlist field is reset even though the run then
+    // failed. Reorder the two setters (deny first) or delete the allow call, and the
+    // throw happens before `allowedHostsOverride` is touched — the field is still
+    // `[GOVERNED_HOST]` and this reds. The tethered path's order is pinned at the
+    // "deny is applied before allow" test; this is the sealed path's.
+    expect(posture.allowedHosts).toEqual([]);
+    // The reset got as far as BUILDING a posture — one more props record than the
+    // tethered start left behind, with the emptied allowlist in it — which is what
+    // places the failure at the registration and not before it.
+    expect(posture.props.length).toBe(tethered.props.length + 1);
+    expect(posture.props.at(-1)?.allowedHosts).toEqual([]);
+    // ...and registered NOTHING. No interception was added, so the fetcher the
+    // container is actually running behind is still the tethered one.
+    expect(posture.interceptions).toEqual(tethered.interceptions);
+
+    // THE ENFORCEMENT LAYER, which is the observable that carries the stale grant.
+    // `decideThroughInstalledInterceptor` resolves `interceptions.at(-1)` — the
+    // fetcher `applyOutboundInterception` installed during the tethered start, whose
+    // props still read `allowedHosts: ["gw.ferrogate.test"]`. Cloudflare's own
+    // decision function therefore still lets that host out. Pins
+    // harness/worker.ts:261-265: rebuild those props from the instance's live state
+    // (which is what `decideFromLivePosture` does) and this comes back `denied`,
+    // because the DO field says `[]` — the reconstruction would hide exactly the
+    // divergence this test exists to show. It is also a negative control on
+    // `decide()`: collapse an unreachable host to `denied` and this reds too.
+    const verdict = await decideInstalled(instance, `https://${GOVERNED_HOST}/v1/chat`);
+    expect(verdict.verdict).toBe("egress-attempted");
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -673,10 +837,21 @@ describe("wrangler.toml binds the tier to the sealed class", () => {
     expect(flags).toContain("enable_ctx_exports");
   });
 
-  it("exports ContainerProxy from the Worker entrypoint", async () => {
-    // Same dependency from the runtime side: if the entrypoint stops exporting it, the
-    // harness cannot resolve it and the instrumented instance refuses to construct.
-    const posture = await appliedPosture("fg.tenant-a.sess-1.exports");
-    expect(posture.enableInternet).toBe(false);
+  it("re-exports the SDK's ContainerProxy from the Worker entrypoint", () => {
+    // The other half of the same dependency, and a LINK-TIME one: workerd only lists an
+    // entrypoint in `ctx.exports` when the ENTRY MODULE names it, so every interceptor
+    // in this suite resolves through `src/index.ts`'s `export { ContainerProxy }`
+    // (re-exported verbatim by test/harness/worker.ts, which sources it from
+    // `../../src/index` rather than from the SDK precisely so that deleting the
+    // production export breaks this build).
+    //
+    // The named import at the top of this file is therefore half the assertion —
+    // delete the export and this module fails to resolve rather than failing an
+    // expectation. The identity check is the other half: re-exporting a local class of
+    // the same name would satisfy the import while every `setAllowedHosts` /
+    // `setDeniedHosts` call built a fetcher that decides nothing. The previous version
+    // of this test asserted `enableInternet === false`, which says nothing about any
+    // export and duplicated the first test in this file.
+    expect(ContainerProxy).toBe(SandboxContainerProxy);
   });
 });
