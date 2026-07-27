@@ -1011,11 +1011,7 @@ fn admin_site_domain(
 /// * `200 OK` -- an already-proven binding re-bound within the same tenant.
 /// * `201 Created` -- a new binding whose ownership was already proven.
 fn site_domain_bind_status(proven: bool, existing: bool) -> BindTerminal {
-    BindTerminal(match (proven, existing) {
-        (false, _) => StatusCode::ACCEPTED,
-        (true, true) => StatusCode::OK,
-        (true, false) => StatusCode::CREATED,
-    })
+    bind_terminal::BindTerminal::select(proven, existing)
 }
 
 /// The bind handler's success status, constructible ONLY by
@@ -1028,18 +1024,43 @@ fn site_domain_bind_status(proven: bool, existing: bool) -> BindTerminal {
 /// `StatusCode::NO_CONTENT` left the test green while the gateway answered an
 /// undeclared 204 -- the sending-side/applying-side shape.
 ///
-/// A newtype with a private field makes that mutation a COMPILE error instead
-/// of a silent pass: the bind response writer takes a `BindTerminal`, and the
-/// only way to obtain one is to run the selector. A test cannot substitute for
-/// this, because the property is "no other value can reach the writer", which
-/// is a statement about every possible caller.
-struct BindTerminal(StatusCode);
+/// A newtype whose field cannot be reached from here makes that mutation a
+/// COMPILE error instead of a silent pass: the bind response writer takes a
+/// `BindTerminal`, and the only way to obtain one is to run the selector. A
+/// test cannot substitute for this, because the property is "no other value
+/// can reach the writer", which is a statement about every possible caller.
+///
+/// The FIRST attempt at this (#530 review round 2) put the newtype in THIS
+/// module, next to the handler. Rust field privacy is module-scoped, so
+/// `BindTerminal(StatusCode::NO_CONTENT)` was still in scope for the one
+/// caller that matters and the mutation compiled clean -- the barrier was
+/// documented but not built. It lives in a private submodule now, which is
+/// what actually puts the constructor out of the handler's reach.
+mod bind_terminal {
+    use http::StatusCode;
 
-impl BindTerminal {
-    fn status(&self) -> StatusCode {
-        self.0
+    /// The bind handler's success status. The field is private to this
+    /// module, so nothing in `site_domains` can build one except through
+    /// [`BindTerminal::select`].
+    pub(super) struct BindTerminal(StatusCode);
+
+    impl BindTerminal {
+        /// The three-way terminal. This is the ONLY constructor.
+        pub(super) fn select(proven: bool, existing: bool) -> BindTerminal {
+            BindTerminal(match (proven, existing) {
+                (false, _) => StatusCode::ACCEPTED,
+                (true, true) => StatusCode::OK,
+                (true, false) => StatusCode::CREATED,
+            })
+        }
+
+        pub(super) fn status(&self) -> StatusCode {
+            self.0
+        }
     }
 }
+
+use bind_terminal::BindTerminal;
 
 /// Normalizes and validates a bind-request hostname: lowercase, no port, at
 /// least two DNS labels of `[a-z0-9-]` (no leading/trailing hyphen), max 253
