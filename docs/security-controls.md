@@ -17,6 +17,28 @@ readable via the Admin API and the admin-console's read-only Audit Events
 page. Coverage is not yet universal across every resource type — tracked
 separately.
 
+### CLI action attribution
+
+Every request the `ferrogate` CLI issues — reads included — carries a
+client-minted `action_id`, a client fingerprint that names the credential
+*source* but never the credential, and the client's own clock reading under a
+header whose name ends in `-unverified` (issue #548). Enforcement is a compile
+error rather than a review convention: the two functions that materialize an
+outbound request each take a `ClientActionIdentity` as a required argument, and
+that type has no public constructor other than `mint`.
+
+The audit instant is **server-issued or `null` with a stated reason** — the
+client clock never stands in for it. **No FerroGate deployment issues a time
+token today**, so every CLI receipt currently reports `client_sent_at: null`
+with the code `no_server_issued_time_token`; the issuing endpoint is server-side
+work #548 defers. Two PII-bearing fields (a machine label and a client-reported
+address) are opt-in and off by default, and neither can blind the trail, because
+`action_id` is unconditional and the authoritative source IP is the one the
+server observes.
+
+See [`docs/cli-audit-attribution.md`](cli-audit-attribution.md) for the headers,
+the two environment variables, and what a receipt shows.
+
 ## Authentication & Credential Storage
 
 Gateway authentication is **required by default and stated, never inferred**

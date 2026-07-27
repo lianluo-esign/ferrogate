@@ -99,6 +99,14 @@ struct RecordingTransport {
     /// dies (or the body cannot be read) after the request was handed over.
     /// This is the ambiguous case — the server may have committed.
     dead: Option<String>,
+    /// When set, the response carries `x-ferrogate-time-token`.
+    ///
+    /// Without this the transport emitted only `x-request-id`/`x-trace-id`, so
+    /// `ControlPlaneClient::harvest_time_token` early-returned on every fixture
+    /// and no test could tell a token read *before* the call from one read
+    /// *after* it — which is the ordering the whole `presented` variable exists
+    /// to guarantee.
+    time_token: Option<String>,
 }
 
 impl RecordingTransport {
@@ -112,6 +120,7 @@ impl RecordingTransport {
             body: body.as_bytes().to_vec(),
             status,
             dead: None,
+            time_token: None,
         }
     }
 
@@ -122,7 +131,14 @@ impl RecordingTransport {
             body: Vec::new(),
             status: 0,
             dead: Some(message.to_string()),
+            time_token: None,
         }
+    }
+
+    /// The same transport, answering with a server time token.
+    fn issuing_time_token(mut self, token: &str) -> RecordingTransport {
+        self.time_token = Some(token.to_string());
+        self
     }
 
     fn request_count(&self) -> usize {
@@ -140,16 +156,21 @@ impl Transport for RecordingTransport {
         let body = self.body.clone();
         let status = self.status;
         let dead = self.dead.clone();
+        let time_token = self.time_token.clone();
         Box::pin(async move {
             if let Some(message) = dead {
                 return Err(CliError::transport(message));
             }
+            let mut headers = vec![
+                ("x-request-id".to_string(), "fgadm-receipt-1".to_string()),
+                ("x-trace-id".to_string(), "trace-receipt-1".to_string()),
+            ];
+            if let Some(token) = time_token {
+                headers.push((crate::action_identity::TIME_TOKEN_HEADER.to_string(), token));
+            }
             Ok(RawResponse {
                 status,
-                headers: vec![
-                    ("x-request-id".to_string(), "fgadm-receipt-1".to_string()),
-                    ("x-trace-id".to_string(), "trace-receipt-1".to_string()),
-                ],
+                headers,
                 body,
             })
         })
@@ -311,15 +332,22 @@ fn every_registered_verb_carries_the_action_identity_on_the_wire() {
 }
 
 /// A dry run reports the action identity it *would* have used, and reports
-/// `client_sent_at` as absent-with-a-reason rather than as a clock reading.
+/// `client_sent_at` as absent because **nothing was sent**.
 ///
-/// Pins: the `(false, _)` arm of `MutationPlan::client_identity`, and the
-/// `client_clock_unverified_unix` field being filled from the identity.
+/// Pins: the `(false, _)` arm of `MutationPlan::client_identity` — and only that
+/// arm — plus `client_clock_unverified_unix` being filled from the identity.
 ///
-/// Catches: filling `client_sent_at` from `client_clock_unverified_unix` when no
-/// token is held — the single mutation the whole timestamp design exists to
-/// prevent. It produces a plausible instant, so only an assertion on the
-/// *absence code* can see it.
+/// Catches: reusing whatever token the identity happens to hold on a path that
+/// issued no request (the `REQUEST_NOT_SENT` assertion reds), and dropping the
+/// client's own reading (the last assertion reds).
+///
+/// **What it does not catch, corrected:** this test's doc header used to claim
+/// it caught "filling `client_sent_at` from the local clock when no token is
+/// held". It cannot — it takes the dry-run arm and asserts `REQUEST_NOT_SENT`,
+/// a different arm and a different code from the one that mutation lives in.
+/// That claim now belongs to
+/// [`an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in`],
+/// which takes the arm that actually runs.
 #[test]
 fn a_receipt_reports_the_action_id_and_refuses_to_invent_a_client_sent_at() {
     let registry = full_registry();
@@ -372,14 +400,27 @@ fn a_receipt_reports_the_action_id_and_refuses_to_invent_a_client_sent_at() {
 /// two instants stay in two fields.
 ///
 /// Pins: the `(true, Some(time))` arm of `MutationPlan::client_identity`, and
-/// `MutationPlan::send` reading the held token *before* the call.
+/// `MutationPlan::send` reading the held token *before* the call
+/// (`receipt.rs`'s `let presented = self.identity.server_issued_time();`).
 ///
-/// Catches: reading the token after `client.send` (this fixture's response
-/// carries a *different* token, so the receipt would report the instant that
-/// arrived WITH the answer rather than the one the request carried); and merging
-/// the two instants into one field, which the inequality assertion reds.
+/// Catches: moving that read to after `client.send(...)`. The fixture response
+/// carries a **different, valid** time token for the same action, which
+/// `harvest_time_token` accepts and stores, so a read taken afterwards reports
+/// `RESPONSE_ISSUED_AT` — the instant that arrived *with the answer* — instead
+/// of the one the request carried, and both the `presented` equality and the
+/// inequality against the client's own reading red.
+///
+/// This is the assertion the test claimed and did not have: the old fixture's
+/// response emitted only `x-request-id` and `x-trace-id`, so `harvest_time_token`
+/// early-returned, the held token never changed across the call, and moving the
+/// read produced an identical receipt. The production ordering was correct;
+/// nothing held it.
 #[test]
 fn an_executed_mutation_reports_the_server_instant_it_presented() {
+    /// The instant the *response* carries. Distinct from the presented one, so
+    /// "before" and "after" the call are two different receipts.
+    const RESPONSE_ISSUED_AT: u64 = 1_800_000_000;
+
     let registry = full_registry();
     let verb = registry.resolve("projects", "create").expect("registered");
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
@@ -395,7 +436,16 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
         ))
         .expect("the fixture token is bound to this action and inside its TTL");
 
-    let transport = std::sync::Arc::new(RecordingTransport::with_body(r#"{"id":"proj_1"}"#));
+    let transport = std::sync::Arc::new(
+        RecordingTransport::with_body(r#"{"id":"proj_1"}"#).issuing_time_token(&format!(
+            "v1;issued_at={RESPONSE_ISSUED_AT};ttl=300;action_id={};sig=zzz",
+            identity.action_id()
+        )),
+    );
+    assert_ne!(
+        presented, RESPONSE_ISSUED_AT,
+        "the two instants must differ, or the ordering assertion below proves nothing"
+    );
     let client = ControlPlaneClient::new(
         test_context(),
         None,
@@ -424,7 +474,22 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
         .value
         .as_ref()
         .expect("a held token is reported as the authoritative client_sent_at");
-    assert_eq!(sent_at.issued_at_unix, presented);
+    assert_eq!(
+        sent_at.issued_at_unix, presented,
+        "the receipt reports the instant the REQUEST carried, not the one that arrived with the \
+         answer to it"
+    );
+    // The response's token really was harvested — otherwise the assertion above
+    // would hold for the trivial reason that nothing could ever have changed it,
+    // which is exactly how this test used to be vacuous.
+    assert_eq!(
+        identity
+            .server_issued_time()
+            .expect("the response's token was harvested")
+            .issued_at_unix(),
+        RESPONSE_ISSUED_AT,
+        "harvest_time_token must have replaced the held token during the call"
+    );
     assert_eq!(sent_at.bound_action_id, receipt.client_identity.action_id);
     assert_eq!(
         sent_at.authority,
@@ -435,6 +500,127 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
         sent_at.issued_at_unix, receipt.client_identity.client_clock_unverified_unix,
         "the server-issued instant and the client's own reading are two authorities in two \
          fields; a fixture where they coincide would prove nothing"
+    );
+    assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+}
+
+/// **The arm that runs 100% of the time.** A mutation that really was sent, by a
+/// client holding no server time token, reports `client_sent_at: null` with
+/// [`absence_codes::NO_SERVER_TIME_TOKEN`] — and the local clock does not stand
+/// in for it.
+///
+/// Pins: the `(true, None)` arm of `MutationPlan::client_identity`
+/// (`receipt.rs`, `Attested::absent(absence_codes::NO_SERVER_TIME_TOKEN, …)`).
+///
+/// Catches: replacing that `Attested::absent(...)` with
+/// ```text
+/// Attested::present(ServerIssuedClientSentAt {
+///     issued_at_unix: self.identity.client_clock().unverified_unix_seconds(),
+///     ttl_seconds: 0,
+///     bound_action_id: self.identity.action_id().to_string(),
+///     authority: SERVER_TIME_AUTHORITY.to_string(),
+/// })
+/// ```
+/// — the local clock wearing the server's authority, which is verbatim the one
+/// thing this whole timestamp design exists to prevent. Nothing else in the
+/// suite sees it:
+///
+/// * `a_receipt_reports_the_action_id_and_refuses_to_invent_a_client_sent_at`
+///   takes the dry-run `(false, _)` arm and asserts a different code;
+/// * `an_executed_mutation_reports_the_server_instant_it_presented` takes
+///   `(true, Some)`;
+/// * `MutationReceipt::validate` passes, because a forger fills
+///   `bound_action_id` and `authority` too;
+/// * the `SystemTime::now()` source guard passes, because the mutation adds no
+///   clock read — it launders one the identity already took.
+///
+/// And this is not a corner: no deployment issues a time token, and every
+/// mutating verb is the first request of its action, so `(true, None)` is the
+/// arm every real receipt takes. It had zero assertions —
+/// `git grep NO_SERVER_TIME_TOKEN` returned the constant, the prose, and one
+/// production use.
+///
+/// `absent_reason.code` is what is asserted, not just `value.is_none()`: the
+/// mutation above produces a *plausible* instant, so only the code can tell
+/// "the server issued none" from "nothing was sent" from a silently filled one.
+#[test]
+fn an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in() {
+    let registry = full_registry();
+    let verb = registry.resolve("projects", "create").expect("registered");
+    let RenderGate::Receipt(renderer) = verb.render_gate() else {
+        panic!("create must be gated to a receipt");
+    };
+    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let identity = ClientActionIdentity::fixture();
+    assert!(
+        identity.server_issued_time().is_none(),
+        "the premise of this test is a client holding no token — the state of every deployment"
+    );
+
+    // No `issuing_time_token`: this transport answers the way every control
+    // plane that exists answers today.
+    let transport = std::sync::Arc::new(RecordingTransport::with_body(r#"{"id":"proj_1"}"#));
+    let client = ControlPlaneClient::new(
+        test_context(),
+        None,
+        std::sync::Arc::clone(&transport),
+        identity.clone(),
+    );
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &test_context(),
+        &identity,
+        false,
+    )
+    .expect("plan");
+    let report = block_on(plan.execute(&client));
+    let receipt = report
+        .output()
+        .receipt()
+        .expect("a mutating verb returns a receipt");
+
+    // The request really left: without this the assertions below would also
+    // hold on a plan that never sent anything, which is the other arm.
+    assert_eq!(
+        transport.request_count(),
+        1,
+        "this must be the SENT arm, not the dry-run one"
+    );
+    assert_eq!(receipt.outcome, MutationOutcome::Applied);
+
+    assert_eq!(
+        receipt.client_identity.client_sent_at.value, None,
+        "no server issued an instant, so the receipt must carry none: {:?}",
+        receipt.client_identity.client_sent_at
+    );
+    assert_eq!(
+        receipt
+            .client_identity
+            .client_sent_at
+            .absent_reason
+            .as_ref()
+            .map(|reason| reason.code.as_str()),
+        Some(absence_codes::NO_SERVER_TIME_TOKEN),
+        "the absence is a finding with a code of its own — NOT 'request not sent', which is a \
+         different fact about a different arm"
+    );
+    // The client's own reading is present, and stayed on its own side of the
+    // line. Rendering the receipt is what a sink would consume, so the check
+    // that no other field carries that number is made against the JSON.
+    let clock = receipt.client_identity.client_clock_unverified_unix;
+    assert_eq!(clock, identity.client_clock().unverified_unix_seconds());
+    let json = render_output(OutputFormat::Json, report.output(), |_| {
+        unreachable!("a receipt never routes through the bare-body projection")
+    })
+    .expect("json");
+    assert_eq!(
+        json.matches(&clock.to_string()).count(),
+        1,
+        "the client's own reading appears exactly once, in the field named for it; a second \
+         occurrence means it was copied into client_sent_at: {json}"
     );
     assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
 }
@@ -486,6 +672,174 @@ fn the_rendered_receipt_keeps_the_two_instants_distinguishable() {
         "the human rendering must say which instant is which too: {table}"
     );
     assert!(table.contains("client.client_sent_at (server-issued)"));
+    // The third authority label. It was listed in the receipt's own authority
+    // table and rendered by `to_rows`, and nothing asserted it — so dropping
+    // "(client-asserted)" from the row, and with it the one word telling an
+    // operator that this address is the client's claim and not the server's
+    // observation, reded nothing.
+    assert!(
+        table.contains("client.reported_ip (client-asserted)"),
+        "the client-asserted address must say so in the human rendering, or a reader will take \
+         it for the source IP the server observed: {table}"
+    );
+    assert!(
+        !table.contains("client.reported_ip (server"),
+        "there is exactly one authority for this row and it is not the server: {table}"
+    );
+}
+
+/// The two fingerprints on a receipt cannot be confused for one another, and
+/// `validate()` is what says so.
+///
+/// Pins: the `client_fingerprint` checks in [`MutationReceipt::validate`].
+///
+/// Catches: rendering the CLIENT fingerprint as `sha256:<64 hex>`. That is the
+/// two-fingerprint confusion issue #548 explicitly warned about — `target.action_fingerprint`
+/// digests the *call* and is mirrored byte-for-byte from `ferrogate-runtime`,
+/// while `client_identity.client_fingerprint` describes the *client* and is not
+/// a digest at all. `validate()` pinned the shape of the first and asserted
+/// nothing whatsoever about the second, so a receipt carrying two `sha256:`
+/// values validated clean and an audit consumer joining on digests would join
+/// the wrong records.
+#[test]
+fn validate_refuses_a_client_fingerprint_dressed_up_as_an_action_fingerprint() {
+    let registry = full_registry();
+    let verb = registry.resolve("projects", "create").expect("registered");
+    let RenderGate::Receipt(renderer) = verb.render_gate() else {
+        panic!("create must be gated to a receipt");
+    };
+    let (spec, segments) = probe_spec("projects", "create").expect("probe");
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &segments,
+        &test_context(),
+        &ClientActionIdentity::fixture(),
+        true,
+    )
+    .expect("plan");
+    let receipt = plan
+        .dry_run()
+        .receipt()
+        .expect("a mutating verb returns a receipt")
+        .clone();
+    assert!(
+        receipt.validate().is_empty(),
+        "the produced receipt is well formed to begin with: {:?}",
+        receipt.validate()
+    );
+
+    let mut forged = receipt.clone();
+    forged.client_identity.client_fingerprint = format!("sha256:{}", "a".repeat(64));
+    let problems = forged.validate();
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("client_fingerprint")
+                && problem.contains("not a digest")),
+        "a client fingerprint rendered as a canonical action fingerprint must be named as the \
+         confusion it is: {problems:?}"
+    );
+
+    let mut unmarked = receipt;
+    unmarked.client_identity.client_fingerprint = "cli=1.0;os=linux".to_string();
+    assert!(
+        unmarked
+            .validate()
+            .iter()
+            .any(|problem| problem.contains("schema marker")),
+        "a fingerprint with no schema marker cannot be told apart from a future v2: {:?}",
+        unmarked.validate()
+    );
+}
+
+/// The local clock cannot reach [`ServerIssuedClientSentAt`] along any path this
+/// crate takes, and this is the half of that claim a test can hold.
+///
+/// Pins: [`ServerIssuedClientSentAt::from_server_time`] being the **only**
+/// struct literal of that type in the crate.
+///
+/// Catches: a second construction site anywhere in `ferrogate-control-plane-client` —
+/// which is exactly the shape of the surviving mutation in
+/// [`an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in`],
+/// and of any future "just fill it in from the clock, it is only a fallback".
+///
+/// It is a source scan and not a value assertion for the same reason the
+/// `SystemTime::now()` guard is: a fabricated instant is a perfectly plausible
+/// number, and the defect is the *existence of a path*, not any particular
+/// value on it. Together with `ServerIssuedTime` having no constructor taking an
+/// instant — only `parse`, over bytes a server sent — this is the whole chain.
+///
+/// Deliberately scoped: the struct's fields are `pub` and it derives
+/// `Deserialize`, both load-bearing (the CLI's renderers read the fields, an
+/// audit consumer must parse a receipt back). So the guarantee is about this
+/// crate's own code and is stated that way, rather than dressed up as a
+/// type-level impossibility it is not.
+#[test]
+fn the_only_way_to_mint_a_client_sent_at_is_from_a_parsed_server_token() {
+    // Assembled at runtime so this file's own scan is not a hit. The
+    // alternative — skipping `*_test.rs` — would exempt test code from a rule
+    // that should bind it too: a fixture receipt built with a hand-written
+    // instant is how the shape gets normalised before it reaches production.
+    let needle = format!("{}{}", "ServerIssuedClientSentAt", " {");
+    let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut literals: Vec<String> = Vec::new();
+    let mut files_scanned = 0usize;
+    for entry in std::fs::read_dir(&source_dir).expect("the crate's src/ is readable") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        files_scanned += 1;
+        let source = std::fs::read_to_string(&path).expect("source file is UTF-8");
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<unnamed>")
+            .to_string();
+        let mut enclosing = String::from("<file scope>");
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            // Prose quotes the literal on purpose — including the mutation this
+            // test exists to catch, spelled out in a doc comment. A guard a
+            // comment can trip is not a guard.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if let Some(rest) = trimmed
+                .strip_prefix("pub fn ")
+                .or_else(|| trimmed.strip_prefix("fn "))
+                .or_else(|| trimmed.strip_prefix("pub(crate) fn "))
+            {
+                enclosing = rest
+                    .split(['(', '<'])
+                    .next()
+                    .unwrap_or("<unnamed>")
+                    .to_string();
+            }
+            // The type's own declaration and its `impl` block spell the same
+            // characters and construct nothing.
+            let is_declaration = trimmed.starts_with("impl ")
+                || trimmed.contains(&format!("struct {}", "ServerIssuedClientSentAt"));
+            if trimmed.contains(&needle) && !is_declaration {
+                literals.push(format!("{name}::{enclosing}"));
+            }
+        }
+    }
+    // A floor: an empty or mis-rooted scan would otherwise make the assertion
+    // below vacuous by finding nothing at all.
+    assert!(
+        files_scanned > 20,
+        "expected the whole crate's src/, scanned only {files_scanned} files"
+    );
+    assert_eq!(
+        literals,
+        vec!["receipt.rs::from_server_time".to_string()],
+        "ServerIssuedClientSentAt is constructed in exactly one place, from a ServerIssuedTime \
+         and from nothing else. A second construction site is how a local clock reaches the \
+         audit instant while every value assertion in this suite stays green"
+    );
 }
 
 /// Every registered verb's DECLARED effect agrees with the HTTP method its

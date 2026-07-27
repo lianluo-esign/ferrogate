@@ -45,6 +45,13 @@ pub(crate) mod store;
 #[path = "fingerprint_parity_test.rs"]
 mod fingerprint_parity_test;
 
+/// The audit-path clock guard, on this side of the crate boundary (issue #548).
+/// `ferrogate-control-plane-client`'s own guard cannot `include_str!` these
+/// files, and this is where receipts are rendered.
+#[cfg(test)]
+#[path = "clock_guard_test.rs"]
+mod clock_guard_test;
+
 pub(crate) use context_cmd::run_context;
 pub(crate) use ops_cmd::run_ops;
 pub(crate) use resource_cmd::{build_ctl_command, run_resource, CTL_COMMAND};

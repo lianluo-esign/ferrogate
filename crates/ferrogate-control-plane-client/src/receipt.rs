@@ -63,6 +63,16 @@
 //! leaving the reader to infer coverage from the module title is the same rule
 //! the receipt itself follows: an absence is a finding, not a silence.
 //!
+//! **This list is not the audit-attribution boundary**, and issue #548 borrowed
+//! it once as if it were. Two things differ. It is scoped to *mutating* verbs,
+//! and #548 covers reads as well, so `assets pull`, `assets list` and
+//! `plans list` belong to that question and not to this one. And `assets` and
+//! `plans` are no longer outside it: their raw-TCP client now takes a
+//! [`crate::action_identity::ClientActionIdentity`] as a required argument, so
+//! they carry an `action_id` while still printing a bare body. The attribution
+//! boundary is stated in [`crate::action_identity`]'s module docs, and it names
+//! `ferrogate reload --admin-url` as what is still outside it.
+//!
 //! # Registry-level enforcement (structural, not a convention)
 //!
 //! Two compile-time barriers, not a lint:
@@ -128,9 +138,15 @@
 //!
 //! Three things about that field are load-bearing and easy to get wrong:
 //!
-//! * **`client_sent_at` is server-issued or null.** It is never filled from the
-//!   local clock; a request that presented no token reports
-//!   [`absence_codes::NO_SERVER_TIME_TOKEN`], which is a finding, not a silence.
+//! * **`client_sent_at` is server-issued or null, and today it is always null.**
+//!   It is never filled from the local clock; a request that presented no token
+//!   reports [`absence_codes::NO_SERVER_TIME_TOKEN`], which is a finding, not a
+//!   silence. And no deployment issues a token yet — the issuing endpoint is
+//!   server-side work #548 defers — so on every receipt this CLI renders today
+//!   the field is `null` with that code. It is stated here, in
+//!   [`crate::action_identity`], and in `docs/cli-audit-attribution.md`, in the
+//!   same spirit as `--tenant`'s "NOT HONORED BY THE SERVER TODAY", so an
+//!   operator reads a documented state rather than guessing at a null.
 //! * **`client_clock_unverified_unix` is a different fact.** It is the client's
 //!   own reading, carried beside the server's so an auditor can measure skew.
 //!   The two are never merged, and nothing may order or authorize on the second.
@@ -664,8 +680,33 @@ pub struct ReceiptCorrelation {
 /// client echoed (issue #548).
 ///
 /// Every field states where it came from, so a consumer never has to assume.
-/// There is no path from a local clock into this struct: it is built only from
-/// a parsed [`crate::action_identity::ServerIssuedTime`].
+///
+/// # What "no path from a local clock" does and does not mean
+///
+/// An earlier draft of this doc claimed flatly that "there is no path from a
+/// local clock into this struct". That was false, and worth correcting rather
+/// than leaving as reassurance: the fields are `pub`, the type derives
+/// `Deserialize`, and both are load-bearing — the CLI's own `ctl` renderers read
+/// the fields, and an audit consumer must be able to parse a receipt back.
+/// Anyone holding this type can therefore write any number they like into
+/// `issued_at_unix`.
+///
+/// The guarantee that does hold is narrower and checkable, and it is about
+/// *production*, not about the type:
+///
+/// 1. [`ServerIssuedClientSentAt::from_server_time`] is the **only** expression
+///    in this crate that constructs the struct, pinned by
+///    `the_only_way_to_mint_a_client_sent_at_is_from_a_parsed_server_token`,
+///    which scans the crate's own source for a second struct literal.
+/// 2. Its only argument is a [`crate::action_identity::ServerIssuedTime`], which
+///    has no constructor taking an instant — only
+///    [`crate::action_identity::ServerIssuedTime::parse`], over bytes a server
+///    sent.
+///
+/// So a local clock cannot reach this struct along any path the CLI takes, and
+/// adding one is a red test rather than a review finding. Deserializing a
+/// receipt someone else wrote is *reading a record*, not minting an instant, and
+/// [`MutationReceipt::validate`] is what judges a record read back in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerIssuedClientSentAt {
     /// Seconds since the Unix epoch, as the server stated them.
@@ -681,6 +722,24 @@ pub struct ServerIssuedClientSentAt {
     /// serialized record names its own authority rather than leaving a reader to
     /// infer it from the field name.
     pub authority: String,
+}
+
+impl ServerIssuedClientSentAt {
+    /// The single expression in this crate that mints one of these.
+    ///
+    /// It takes a [`ServerIssuedTime`] and nothing else, and `ServerIssuedTime`
+    /// can only be obtained by parsing bytes a server sent. That is the whole
+    /// chain, and `the_only_way_to_mint_a_client_sent_at_is_from_a_parsed_server_token`
+    /// holds the "single expression" half of it by scanning this crate's source
+    /// for a second struct literal.
+    pub(crate) fn from_server_time(time: &ServerIssuedTime) -> Self {
+        ServerIssuedClientSentAt {
+            issued_at_unix: time.issued_at_unix(),
+            ttl_seconds: time.ttl_seconds(),
+            bound_action_id: time.bound_action_id().to_string(),
+            authority: crate::action_identity::SERVER_TIME_AUTHORITY.to_string(),
+        }
+    }
 }
 
 /// What the CLI asserted about itself when it issued this action (issue #548).
@@ -874,6 +933,32 @@ impl MutationReceipt {
                 "client_identity.action_id '{}' is not {}<32 lowercase hex>",
                 self.client_identity.action_id,
                 crate::action_identity::ACTION_ID_PREFIX
+            ));
+        }
+        // The two fingerprints on this receipt describe different things and
+        // are the confusion issue #548 warned about: `target.action_fingerprint`
+        // is a `sha256:<64 hex>` digest of the CALL, mirrored from
+        // ferrogate-runtime, and `client_identity.client_fingerprint` is a
+        // `v1;k=v;...` description of the CLIENT and is not a digest at all.
+        // Only the first was pinned here, so a receipt rendering the client
+        // fingerprint as `sha256:<hex>` validated clean and re-created exactly
+        // that confusion for an audit consumer joining on digests. Both
+        // directions are now checked: the shape it must have, and the shape it
+        // must not be mistaken for.
+        let client_fingerprint = &self.client_identity.client_fingerprint;
+        if !client_fingerprint.starts_with(crate::action_identity::IDENTITY_SCHEMA_VERSION) {
+            problems.push(format!(
+                "client_identity.client_fingerprint '{client_fingerprint}' does not start with \
+                 the '{}' schema marker",
+                crate::action_identity::IDENTITY_SCHEMA_VERSION
+            ));
+        }
+        if is_canonical_action_fingerprint(client_fingerprint) {
+            problems.push(format!(
+                "client_identity.client_fingerprint '{client_fingerprint}' is rendered as a \
+                 canonical ACTION fingerprint; the client fingerprint describes the client and \
+                 is not a digest, and an audit consumer joining the two would join the wrong \
+                 records"
             ));
         }
         // A `client_sent_at` bound to a different action than the receipt
@@ -1803,6 +1888,20 @@ impl<'a> MutationPlan<'a> {
     ///    [`absence_codes::NO_SERVER_TIME_TOKEN`], not a local clock reading.
     ///    That is the whole point of the design: the audit instant is the
     ///    server's or it is null.
+    ///
+    ///    **This is the arm that runs, in every deployment that exists.** No
+    ///    control plane issues a time token today, and a mutating verb is always
+    ///    the first request of its action anyway, so `(true, None)` is the arm
+    ///    100% of real receipts take — which is exactly why it needs a test of
+    ///    its own rather than inheriting confidence from the dry-run arm beside
+    ///    it. `an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in`
+    ///    is that test, and the mutation it exists to catch is filling this arm
+    ///    with `self.identity.client_clock().unverified_unix_seconds()`: the
+    ///    local clock wearing the server's authority, producing a perfectly
+    ///    plausible instant that nothing else in the receipt contradicts.
+    ///    `validate()` cannot see it (a forger sets `bound_action_id` and
+    ///    `authority` too) and the `SystemTime::now()` source guard cannot see it
+    ///    (it adds no clock read — it launders one that was already taken).
     /// 3. **`client_clock_unverified_unix` is always present**, because it is
     ///    always knowable and it is the only evidence of client skew. It is a
     ///    plain `u64` rather than an [`Attested`] for that reason — it is never
@@ -1815,12 +1914,9 @@ impl<'a> MutationPlan<'a> {
     ) -> ReceiptClientIdentity {
         let sent = !matches!(executed, Executed::NotSent);
         let client_sent_at = match (sent, presented_time) {
-            (true, Some(time)) => Attested::present(ServerIssuedClientSentAt {
-                issued_at_unix: time.issued_at_unix(),
-                ttl_seconds: time.ttl_seconds(),
-                bound_action_id: time.bound_action_id().to_string(),
-                authority: crate::action_identity::SERVER_TIME_AUTHORITY.to_string(),
-            }),
+            (true, Some(time)) => {
+                Attested::present(ServerIssuedClientSentAt::from_server_time(&time))
+            }
             (true, None) => Attested::absent(
                 absence_codes::NO_SERVER_TIME_TOKEN,
                 "no server-issued time token was held when this request was prepared (the \

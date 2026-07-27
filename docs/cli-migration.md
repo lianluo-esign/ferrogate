@@ -106,3 +106,11 @@ New in this slice:
   ```sh
   FERROGATE_REGENERATE_DOCS=1 cargo test -p ferrogate-cli reference
   ```
+
+  Because it is derived from the command tree, it covers flags and their `[env:
+  ...]` bindings only. Two client-attribution variables are **not** flags and so
+  are documented by hand instead:
+  [`docs/cli-audit-attribution.md`](cli-audit-attribution.md) describes
+  `FERROGATE_CLIENT_HOST_LABEL` and `FERROGATE_CLIENT_REPORTED_IP`, what every
+  request now carries about the client (issue #548), and why a receipt's
+  `client_sent_at` is `null` on every deployment that exists today.

@@ -9,7 +9,7 @@
 
 use anyhow::Result as AnyResult;
 
-use crate::assets_cli::{print_json_or_raise, send_request, GatewayEndpoint};
+use crate::assets_cli::{mint_action_identity, print_json_or_raise, send_request, GatewayEndpoint};
 use crate::cli::{PlansAssignArgs, PlansCommands, PlansConnectionArgs, PlansCreateArgs};
 
 pub(crate) fn execute_plans_command(command: PlansCommands) -> AnyResult<()> {
@@ -22,6 +22,7 @@ pub(crate) fn execute_plans_command(command: PlansCommands) -> AnyResult<()> {
 
 fn execute_create(args: PlansCreateArgs) -> AnyResult<()> {
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
+    let identity = mint_action_identity(&args.connection.gateway_url, &args.connection.api_key)?;
     let mut payload = serde_json::json!({
         "name": args.name,
         "slug": args.slug,
@@ -44,12 +45,14 @@ fn execute_create(args: PlansCreateArgs) -> AnyResult<()> {
         &args.connection.api_key,
         Some("application/json"),
         &body,
+        &identity,
     )?;
     print_json_or_raise(&response, "create plan")
 }
 
 fn execute_list(connection: PlansConnectionArgs) -> AnyResult<()> {
     let endpoint = GatewayEndpoint::parse(&connection.gateway_url)?;
+    let identity = mint_action_identity(&connection.gateway_url, &connection.api_key)?;
     let response = send_request(
         &endpoint,
         "GET",
@@ -57,12 +60,14 @@ fn execute_list(connection: PlansConnectionArgs) -> AnyResult<()> {
         &connection.api_key,
         None,
         &[],
+        &identity,
     )?;
     print_json_or_raise(&response, "list plans")
 }
 
 fn execute_assign(args: PlansAssignArgs) -> AnyResult<()> {
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
+    let identity = mint_action_identity(&args.connection.gateway_url, &args.connection.api_key)?;
     let body = serde_json::to_vec(&serde_json::json!({ "plan_id": args.plan_id }))?;
     let response = send_request(
         &endpoint,
@@ -71,6 +76,7 @@ fn execute_assign(args: PlansAssignArgs) -> AnyResult<()> {
         &args.connection.api_key,
         Some("application/json"),
         &body,
+        &identity,
     )?;
     print_json_or_raise(&response, "assign plan")
 }

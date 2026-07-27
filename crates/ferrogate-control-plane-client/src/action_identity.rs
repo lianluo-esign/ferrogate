@@ -133,8 +133,12 @@
 //!   only [`ServerIssuedTime::parse`].
 //! * [`ClientClockReading`] — the client's own reading, in its own field, under
 //!   a header whose name ends in `-unverified`. It is *evidence about the
-//!   client*, never an input to ordering or authorization; it is deliberately
-//!   not `Ord`, so nothing can sort by it without saying so in a new impl.
+//!   client*, never an input to ordering or authorization. The wrapper is not
+//!   `Ord`, which stops a `sort()` on a collection of readings, but that is a
+//!   speed bump and not a barrier: [`ClientClockReading::unverified_unix_seconds`]
+//!   hands out a bare `u64` that compares like any other. The real barrier is
+//!   the name — of the accessor, of the header, and of the receipt field — and
+//!   it is stated here rather than dressed up as a type-level guarantee.
 //!
 //! **Why both (the hybrid).** One field cannot express clock skew. The
 //! server-issued token proves when the *server* issued it; the client reading
@@ -165,6 +169,29 @@
 //! | `--all-pages` walk of N pages | N | N − 1 |
 //! | any multi-request verb | N | N − 1 |
 //!
+//! **And what that N−1 is worth on a receipt today: nothing.** The table above
+//! describes requests on the wire. A [`crate::receipt::MutationReceipt`] is
+//! rendered only for a *mutating* verb, every mutating verb is a single request
+//! (`--all-pages` is refused on a mutating method), and a token can only arrive
+//! *with a response* — so the request that produces a receipt is always the
+//! action's first, and `client_sent_at` on a receipt is structurally `null`.
+//! The N−1 saving lands on reads, which produce no receipt. The
+//! `(true, Some(_))` arm of [`crate::receipt::MutationPlan::client_identity`] is
+//! therefore production-dead until the server issues tokens *and* something
+//! makes a mutating verb the second request of an action; it is implemented and
+//! tested anyway, because the alternative is discovering the shape only once a
+//! server starts issuing.
+//!
+//! **Nothing issues a time token today.** No FerroGate deployment mints
+//! [`TIME_TOKEN_HEADER`]: the issuing endpoint is server-side work this issue
+//! defers, and the contract declares the header on zero responses (pinned by
+//! `no_operation_yet_issues_a_server_time_token`, the same shape as
+//! `tenant_scope_is_not_yet_an_openapi_parameter`). So in every deployment that
+//! exists, every receipt reports `client_sent_at: null` with
+//! [`crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN`]. Said here, in
+//! `docs/cli-audit-attribution.md`, and on the receipt itself, rather than left
+//! for an operator to infer from a null.
+//!
 //! When no token is held, `client_sent_at` is `null` **with a stated reason**
 //! ([`crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN`]) — not backfilled
 //! from the local clock. That is the point of the whole design, and it is why
@@ -184,11 +211,25 @@
 //!   matters and the only one a client can make *without* trusting a clock, so
 //!   it is the one that is authoritative here: a token minted for action A
 //!   cannot be moved onto action B.
-//! * **Outside its TTL** — refused as a courtesy, judged against
-//!   [`ClientClockReading`], which is by construction untrusted. A client with a
-//!   skewed clock will present an expired token; that is why **the authoritative
-//!   TTL refusal is the server's**, against its own clock. The client-side check
-//!   exists so the common case fails locally and loudly instead of on the wire.
+//! * **Outside its TTL, by more than [`CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS`]** —
+//!   refused as a courtesy, judged against [`ClientClockReading`], which is by
+//!   construction untrusted. **The authoritative TTL refusal is the server's**,
+//!   against its own clock; this one exists only so the grossly-wrong case fails
+//!   locally instead of on the wire.
+//!
+//!   The allowance is the correction of a defect this design shipped with. The
+//!   reading is taken once, at [`ClientActionIdentity::mint`], and frozen for
+//!   the invocation. A token the server issues one second later therefore has
+//!   `issued_at > now` against that frozen reading, and a bare
+//!   `now < issued_at` check called it "from the future" and dropped it — as it
+//!   dropped *every* token under any positive server-minus-client skew, and any
+//!   invocation that crossed a second boundary. The whole premise of the design
+//!   is that the audit instant does not depend on the client clock; a check that
+//!   consults the client clock with zero tolerance reintroduces the dependence
+//!   and fails closed *against the feature*. So both ends now carry an explicit
+//!   allowance, wide enough to cover the invocation's own duration and
+//!   ordinary NTP-scale skew, and the check is documented as what it is: a
+//!   filter for the absurd, not a validity decision.
 //!
 //! # Enforcement: a compile error, not a lint
 //!
@@ -206,10 +247,54 @@
 //!    `prepare_request`, which had an identity in hand.
 //!
 //! Writing a new verb that issues a request without the identity is a type
-//! error, not a review finding. What is *not* covered, said plainly rather than
-//! implied: a command that bypasses [`crate::transport::Transport`] entirely and
-//! drives `reqwest` itself is outside this chokepoint, exactly as the hand-written
-//! verticals listed in [`crate::receipt`] are outside the render gate.
+//! error, not a review finding.
+//!
+//! ## The second chokepoint, and why there are two
+//!
+//! [`crate::transport::Transport`] is not the only way this repo puts bytes on
+//! the wire. `ferrogate-cli`'s `assets` and `plans` command groups predate the
+//! typed client and drive a hand-rolled raw-`TcpStream` HTTP client
+//! (`ferrogate_cli::assets_cli::send_request`) rather than `reqwest`, because
+//! `ferrogate-cli`'s `main()` is a synchronous entry point. Between them they
+//! issue seven requests, four of which are **mutations** (`plans create` POSTs
+//! `/admin/v1/plans`, `plans assign` PATCHes `/admin/v1/tenant-accounts/{id}`,
+//! `assets push` PUTs and `assets delete` DELETEs an asset) and three of which
+//! are reads (`assets pull`, `assets list`, `plans list`) — and this issue asks
+//! for reads too. The first two are Control Plane mutations with no registry
+//! family to route through instead.
+//!
+//! So `send_request` takes `&ClientActionIdentity` as a **required argument**,
+//! for exactly the reason [`crate::transport::prepare_request`] does: it is the
+//! single function that materializes those requests, and a required argument of
+//! an un-forgeable type is a compile error rather than a convention. It writes
+//! [`ClientActionIdentity::headers`] into the raw request line-by-line, which is
+//! why [`encode_header_value`] escapes CR and LF rather than deleting them:
+//! there is no `http::HeaderValue` between that string and the socket.
+//!
+//! The boundary that remains, named rather than implied. Two originating
+//! requests still go out unattributed, and both are outside this slice:
+//!
+//! * **`ferrogate reload --admin-url …`** mutates a running gateway's live
+//!   config through a *third* hand-rolled raw-TCP client, which lives in
+//!   `ferrogate_gateway::lifecycle` rather than in `ferrogate-cli` — a crate
+//!   this one must not depend on. Closing it means giving that function an
+//!   identity argument too, which is a `ferrogate-gateway` change and is
+//!   follow-up work, not a silence. It is the same command
+//!   [`crate::receipt`]'s own scope section already names as receiptless.
+//! * **`ferrogate storage migrate-to-supabase`** talks to PostgreSQL, not HTTP,
+//!   and carries no header at all.
+//!
+//! `ferrogate admin-api`'s upstream socket is deliberately *not* on that list:
+//! it is a reverse proxy relaying the admin console's request, and minting an
+//! `action_id` there would record the console's action against the proxy
+//! process.
+//!
+//! Within `ferrogate-cli` the set is closed and checked: a source guard
+//! (`every_outbound_http_call_goes_through_an_attributed_chokepoint`) holds an
+//! allow-list of every `TcpStream::connect*` in that crate, so a fourth
+//! hand-rolled client there is a red test rather than a silent hole. The guard
+//! scans `crates/ferrogate-cli/src` and says so; it does not and cannot speak
+//! for `ferrogate-gateway`.
 
 use std::sync::{Arc, Mutex};
 
@@ -239,9 +324,17 @@ pub const CLIENT_REPORTED_IP_HEADER: &str = "x-ferrogate-client-reported-ip";
 
 /// Environment variable an operator sets to disclose a machine label. Absent by
 /// default; see the module docs for why the hostname is not detected.
+///
+/// It is an environment variable and **not a clap flag**, so it cannot appear in
+/// the generated `docs/cli-reference.md`, which is derived from the command
+/// tree. It is documented by hand in `docs/cli-audit-attribution.md`, and
+/// `the_opt_in_variables_are_documented_where_an_operator_will_find_them` pins
+/// that so the two cannot drift.
 pub const HOST_LABEL_ENV: &str = "FERROGATE_CLIENT_HOST_LABEL";
 
 /// Environment variable an operator sets to report a client-side address.
+/// Documented by hand in `docs/cli-audit-attribution.md`, for the same reason as
+/// [`HOST_LABEL_ENV`].
 pub const REPORTED_IP_ENV: &str = "FERROGATE_CLIENT_REPORTED_IP";
 
 /// Prefix every minted [`ActionId`] carries, so a value is recognizable in a
@@ -273,6 +366,24 @@ pub const FINGERPRINT_FIELDS: [&str; 7] = [
 /// receipt states where the instant came from instead of leaving it to a
 /// reader's assumption.
 pub const SERVER_TIME_AUTHORITY: &str = "server_issued_time_token";
+
+/// How far outside its declared window a server-issued token may still be
+/// accepted by the **client's** courtesy check.
+///
+/// Judged against [`ClientClockReading`], which is frozen at
+/// [`ClientActionIdentity::mint`] and untrusted by construction. Five minutes
+/// covers three things at once: the invocation's own duration (the reading is
+/// older than every token the invocation harvests), ordinary NTP-scale skew
+/// between the operator's machine and the control plane, and a second boundary
+/// crossed between minting and the first response. Without it a token issued
+/// one second into the invocation reads as "from the future" and is silently
+/// dropped — which is the design failing closed against itself, since the whole
+/// premise is that the audit instant does not depend on the client clock.
+///
+/// It is deliberately loose. **The authoritative TTL decision is the server's**,
+/// against its own clock; this bound exists to catch the absurd (a token a day
+/// stale) locally instead of on the wire, and nothing rests on it.
+pub const CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS: u64 = 300;
 
 // ---------------------------------------------------------------------------
 // Action id.
@@ -341,10 +452,18 @@ impl std::fmt::Display for ActionId {
 
 /// The client's own clock, read once per invocation.
 ///
-/// Deliberately **not** `Ord`/`PartialOrd`: nothing can sort or compare
-/// invocations by this value without writing a new impl and justifying it. It
-/// is not `Serialize` either — [`crate::receipt`] places it in a field whose
-/// name carries the warning, rather than letting it be serialized anonymously.
+/// Not `Ord`/`PartialOrd`, which stops `sort()` on a collection of readings and
+/// makes a comparison of two of them a deliberate act. That is a speed bump and
+/// **not** a barrier, and it is worth saying so instead of over-claiming:
+/// [`ClientClockReading::unverified_unix_seconds`] returns a bare `u64` that
+/// compares like any other integer, so anyone who wants to order by this value
+/// can, in one expression.
+///
+/// What actually guards the value is naming, in three places a reader cannot
+/// miss: the accessor says `unverified`, the header
+/// ([`CLIENT_CLOCK_HEADER`]) ends in `-unverified`, and the receipt field is
+/// `client_clock_unverified_unix`. It is not `Serialize` either, so it cannot be
+/// serialized anonymously into some other struct's field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientClockReading {
     unix_seconds: u64,
@@ -473,11 +592,28 @@ pub struct ServerIssuedTime {
     ttl_seconds: u64,
     action_id: String,
     signature: String,
+    /// The token exactly as the server sent it. Held so [`ServerIssuedTime::render`]
+    /// can echo it *verbatim* instead of reconstructing it from the parsed
+    /// fields — a reconstruction drops the unknown segments [`ServerIssuedTime::parse`]
+    /// deliberately tolerates, so the first forward-compatible field the server
+    /// adds would silently invalidate every echoed token's signature.
+    raw: String,
 }
 
 impl ServerIssuedTime {
     /// Parse a token from [`TIME_TOKEN_HEADER`].
     pub fn parse(raw: &str) -> Result<ServerIssuedTime, TimeTokenRefusal> {
+        // The token is echoed back onto the wire verbatim, including through
+        // `assets_cli::send_request`, which writes header lines into a socket
+        // with no `http::HeaderValue` in between. A byte outside the printable
+        // ASCII range is therefore either a request-splitting attempt or a
+        // token no HTTP stack would accept; refuse it here, where the refusal
+        // is a coded diagnostic, rather than at `.send()` as a builder error.
+        if let Some(offending) = raw.chars().find(|ch| !matches!(*ch as u32, 0x20..=0x7E)) {
+            return Err(TimeTokenRefusal::Malformed(format!(
+                "token carries {offending:?}, which no HTTP header value may hold"
+            )));
+        }
         let mut parts = raw.split(';');
         let version = parts.next().unwrap_or_default().trim();
         if version != IDENTITY_SCHEMA_VERSION {
@@ -523,6 +659,7 @@ impl ServerIssuedTime {
             ttl_seconds,
             action_id,
             signature,
+            raw: raw.to_string(),
         })
     }
 
@@ -531,6 +668,14 @@ impl ServerIssuedTime {
     /// `reading` is the client's own clock and is used **only** for the TTL
     /// courtesy check; the binding check does not consult it, which is why a
     /// skewed client still cannot move a token between actions.
+    ///
+    /// Both ends of the window carry [`CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS`].
+    /// The upper bound without it would be a client refusing a token the server
+    /// would have honoured; the lower bound without it refused **every** token
+    /// under any positive server-minus-client skew, and every token issued after
+    /// the second in which the invocation minted its reading — which is most of
+    /// them, since the reading is frozen at mint. That is the design failing
+    /// closed against its own premise, and it is what the allowance corrects.
     pub fn accept_for(
         self,
         action_id: &ActionId,
@@ -543,11 +688,18 @@ impl ServerIssuedTime {
             });
         }
         let now = reading.unverified_unix_seconds();
-        let expires_at = self.issued_at_unix.saturating_add(self.ttl_seconds);
-        // Both ends are checked: a token from the future is as suspect as an
-        // expired one, and only checking the upper bound would let a server
-        // (or a proxy) hand out pre-dated tokens the client would forward.
-        if now > expires_at || now < self.issued_at_unix {
+        let not_after = self
+            .issued_at_unix
+            .saturating_add(self.ttl_seconds)
+            .saturating_add(CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS);
+        // The lower bound is kept, widened: only checking the upper one would
+        // let a server (or a proxy) hand out tokens pre-dated by a year and have
+        // the client forward them. Widened, because "issued one second after
+        // this process started" is not a pre-dated token, it is the normal case.
+        let not_before = self
+            .issued_at_unix
+            .saturating_sub(CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS);
+        if now > not_after || now < not_before {
             return Err(TimeTokenRefusal::Expired {
                 issued_at_unix: self.issued_at_unix,
                 ttl_seconds: self.ttl_seconds,
@@ -573,11 +725,17 @@ impl ServerIssuedTime {
     }
 
     /// The header value, byte-identical to what the server sent.
+    ///
+    /// Returns the stored `raw` rather than re-rendering the parsed fields.
+    /// Re-rendering looked equivalent and was not: [`ServerIssuedTime::parse`]
+    /// ignores unknown segments on purpose, so a server that added one
+    /// forward-compatible field would have every echoed token come back missing
+    /// it — a different byte string over which the `sig` no longer verifies, and
+    /// a contradiction of this method's own doc and of the OpenAPI "echoed
+    /// verbatim". Held in a private field, so the only way to obtain the string
+    /// is still to have been handed it by a server.
     pub fn render(&self) -> String {
-        format!(
-            "{IDENTITY_SCHEMA_VERSION};issued_at={};ttl={};action_id={};sig={}",
-            self.issued_at_unix, self.ttl_seconds, self.action_id, self.signature
-        )
+        self.raw.clone()
     }
 }
 
@@ -693,7 +851,7 @@ impl ClientFingerprint {
                 rendered.push(';');
                 rendered.push_str(key);
                 rendered.push('=');
-                rendered.push_str(&sanitize_header_value(&value));
+                rendered.push_str(&encode_header_value(&value));
             }
         }
         rendered
@@ -725,14 +883,57 @@ impl std::fmt::Debug for ClientFingerprint {
     }
 }
 
-/// Strip the characters that would split one header value into two, so an
-/// operator-supplied label cannot inject a header.
-fn sanitize_header_value(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !matches!(ch, '\r' | '\n' | ';'))
-        .filter(|ch| !ch.is_control())
-        .collect()
+/// Characters an encoded header value carries unescaped: the RFC 3986
+/// unreserved set plus `:` and `/`, so an IPv6 address and a path-like label
+/// stay readable.
+///
+/// `;` and `=` are **not** in it. They are the fingerprint blob's own
+/// delimiters, and leaving them through is how an operator-supplied label forges
+/// a second field.
+fn is_header_value_safe(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | '_' | '~' | ':' | '/')
+}
+
+/// Percent-encode `value` down to the characters [`is_header_value_safe`]
+/// allows, escaping every other byte as `%XX`.
+///
+/// # Why encoding and not deletion
+///
+/// This replaced a filter that *deleted* `\r`, `\n`, `;` and anything
+/// `char::is_control`, and it fixes two defects that filter had.
+///
+/// 1. **Deletion joins what it separates.** A label of
+///    `box\r\nx-ferrogate-action-id: fgact_evil;cred=none` came out as
+///    `boxx-ferrogate-action-id: fgact_evilcred=none` — no forged segment, but a
+///    literal `cred=` welded into the middle of the value by the removal of the
+///    `;` in front of it. Anything grepping the blob sees a field that was never
+///    declared. Encoding cannot weld: `%3B` is one segment's worth of text and
+///    reads back as one.
+/// 2. **Nothing restricted the output to ASCII.** `http::HeaderValue`'s
+///    `TryFrom<&str>` rejects every byte outside `32..=126`, and `reqwest`
+///    surfaces that at `.send()` as an opaque builder error. Two operator-reachable
+///    inputs reach this function — [`HOST_LABEL_ENV`] and, since #548, the
+///    resolved **context name**, which nothing in [`crate::context`] validates —
+///    so a context named `生产` or `prod-café` failed *every* request the CLI
+///    issued, at the chokepoint, with an unattributable error. This project's
+///    own issues are written in Chinese; that is not a hypothetical profile
+///    name. The encoding makes the output visible-ASCII by construction, so the
+///    name survives as `%E7%94%9F%E4%BA%A7` instead of bricking the client.
+///
+/// Lossless, so an audit consumer can percent-decode back to what the operator
+/// wrote. `%` itself is escaped to `%25`, or the encoding would be ambiguous.
+pub fn encode_header_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let ch = byte as char;
+        if byte.is_ascii() && is_header_value_safe(ch) {
+            encoded.push(ch);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +1068,7 @@ impl ClientActionIdentity {
         if let Some(reported_ip) = self.fingerprint.reported_ip() {
             headers.push((
                 CLIENT_REPORTED_IP_HEADER.to_string(),
-                sanitize_header_value(reported_ip),
+                encode_header_value(reported_ip),
             ));
         }
         headers

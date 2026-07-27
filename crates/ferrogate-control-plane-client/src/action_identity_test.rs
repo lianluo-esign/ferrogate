@@ -22,8 +22,20 @@
 //!   username, and the field set is what was reviewed.
 //! * [`the_fingerprint_never_carries_the_token_it_was_built_from`] — #489/#492/
 //!   #537's live defect class, asserted on the rendered form, on `Debug`, and
-//!   on the token's decimal-byte spelling, with a positive shape assertion so an
-//!   impl that drops every field is not silently accepted.
+//!   on the token's decimal-byte spelling **crossed with** its truncated
+//!   prefixes, for `Inline` *and* `Env` credentials, with a positive shape
+//!   assertion so an impl that drops every field is not silently accepted.
+//! * [`the_headers_sent_are_exactly_the_reviewed_set_in_every_shape`] — the
+//!   wire-side twin of the field-set tripwire. Every other assertion here looks
+//!   a header up by name, so nothing else reds when a header is *added*.
+//! * [`a_non_ascii_context_name_or_label_still_produces_a_sendable_header`] —
+//!   asserted against `http::HeaderValue::try_from`, the predicate the real
+//!   transport applies, because a value this client cannot send is a value that
+//!   fails every request rather than one that logs badly.
+//! * [`a_time_token_outside_its_window_is_refused_at_both_ends`] — its fixtures
+//!   deliberately do **not** tie the server's `issued_at` to the client's frozen
+//!   reading. Tying them together is what hid a check that dropped every token
+//!   under any positive clock skew.
 
 use super::*;
 use crate::auth::AuthSource;
@@ -60,6 +72,67 @@ fn decimal_bytes(value: &str) -> String {
         .map(|byte| byte.to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Every spelling of a leak this suite refuses, for one candidate string:
+/// verbatim, the 4/8/16-character prefixes an offline guesser wants, and the
+/// decimal-byte rendering a **derived** `Debug` produces for a `Vec<u8>`.
+///
+/// The two axes are crossed rather than run separately. Checking plaintext for
+/// prefixes and decimal bytes only for the whole secret leaves a hole exactly
+/// the width of a truncated `Vec<u8>` behind a derived `Debug` — a 16-byte key
+/// id, the single most likely shape for a "safe" credential handle to take —
+/// which matches neither axis alone.
+fn leak_spellings(secret: &str) -> Vec<(String, String)> {
+    let mut spellings = vec![
+        ("the bearer token verbatim".to_string(), secret.to_string()),
+        (
+            "the token's decimal-byte spelling (what a DERIVED Debug prints for a Vec<u8>)"
+                .to_string(),
+            decimal_bytes(secret),
+        ),
+    ];
+    for prefix_len in [4usize, 8, 16] {
+        let prefix = &secret[..prefix_len];
+        spellings.push((
+            format!("a {prefix_len}-character prefix of the bearer token"),
+            prefix.to_string(),
+        ));
+        spellings.push((
+            format!(
+                "a {prefix_len}-byte prefix of the bearer token in decimal bytes (a truncated \
+                 key id behind a derived Debug)"
+            ),
+            decimal_bytes(prefix),
+        ));
+    }
+    spellings
+}
+
+/// Assert that none of [`leak_spellings`] appears in `haystack`.
+fn assert_no_leak(label: &str, haystack: &str, secret: &str) {
+    for (spelling, needle) in leak_spellings(secret) {
+        assert!(
+            !haystack.contains(&needle),
+            "{label} carries {spelling}, which is an offline-guessing oracle: {haystack}"
+        );
+    }
+}
+
+/// The `;`-delimited segments of a rendered fingerprint whose key is `key`.
+///
+/// Counting raw `"cred="` substrings across the whole blob is *not* the same
+/// question and was the bug in this file's first cut: it counts text that a
+/// parser would never read as a field, so it reds on correct code the moment an
+/// operator-supplied value happens to contain the characters. A parser splits on
+/// `;` and then on the first `=`; so does this.
+fn segments_named<'a>(rendered: &'a str, key: &str) -> Vec<&'a str> {
+    rendered
+        .split(';')
+        .filter_map(|segment| segment.split_once('='))
+        .filter(|(name, _)| *name == key)
+        .map(|(_, value)| value)
+        .collect()
 }
 
 /// Pins: [`ActionId::mint`]'s use of `getrandom` and the
@@ -140,75 +213,87 @@ fn the_fingerprint_declares_exactly_the_reviewed_field_set() {
 }
 
 /// Pins: [`ClientFingerprint::detect`] reading [`AuthSource::audit_source`]
-/// rather than the token, and the hand-written `Debug`.
+/// rather than the token, and the hand-written `Debug`, for **every credential
+/// source that can hold material** — `Inline`, which carries the token in the
+/// variant, and `Env`, which names a variable whose *value* is the token.
 ///
-/// Catches: `credential_source: token.clone()` in `detect` (plaintext
-/// assertion reds); storing a prefix or a truncated key id (the 4/8/16-prefix
-/// assertions red); replacing the hand-written `Debug` with a derive **and**
-/// adding a byte-vector field (the decimal-byte assertion reds — a derived
-/// `Debug` prints `[122, 113, 120, …]`, which a plaintext-only check misses).
+/// Catches: `credential_source: token.clone()` in `detect` (the `Inline`
+/// plaintext assertion reds); the `Env` special case the earlier cut of this
+/// test could not see — `AuthSource::Env { var } => std::env::var(var).unwrap_or_default()`,
+/// which puts the token in the header on the credential source this repo's own
+/// auth docs call the recommended default for scripting (the `Env` block reds);
+/// storing a prefix or a truncated key id (the 4/8/16-prefix assertions red);
+/// replacing the hand-written `Debug` with a derive **and** adding a byte-vector
+/// field (the decimal-byte assertions red — a derived `Debug` prints
+/// `[122, 113, 120, …]`, which a plaintext-only check misses), including for a
+/// *truncated* byte vector, which neither axis caught alone.
 /// The positive-shape assertion catches the mirror mutation: an impl that
 /// simply drops every field would satisfy every absence check.
 #[test]
 fn the_fingerprint_never_carries_the_token_it_was_built_from() {
-    let context = context_with_auth(AuthSource::Inline {
-        token: SECRET.to_string(),
-    });
-    let fingerprint = ClientFingerprint::detect(&context, &FingerprintEnv::default());
-    let rendered = fingerprint.render();
-    let debug = format!("{fingerprint:?}");
-    let identity = ClientActionIdentity {
-        action_id: ActionId::mint().expect("mint"),
-        fingerprint: fingerprint.clone(),
-        clock: ClientClockReading::from_unix_seconds(1_800_000_000),
-        server_time: Arc::new(Mutex::new(None)),
-    };
-    let headers = identity
-        .headers()
-        .iter()
-        .map(|(name, value)| format!("{name}: {value}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let identity_debug = format!("{identity:?}");
+    // A variable name no other test uses, so the two credential shapes below
+    // cannot interfere with a parallel test through the process environment.
+    const TOKEN_VAR: &str = "FERROGATE_TOKEN_FOR_THE_548_LEAK_GUARD";
+    std::env::set_var(TOKEN_VAR, SECRET);
 
-    for (label, haystack) in [
-        ("rendered fingerprint", &rendered),
-        ("fingerprint Debug", &debug),
-        ("sent headers", &headers),
-        ("identity Debug", &identity_debug),
+    for (source_label, auth, expected_cred) in [
+        (
+            "inline",
+            AuthSource::Inline {
+                token: SECRET.to_string(),
+            },
+            "cred=inline".to_string(),
+        ),
+        (
+            "env",
+            AuthSource::Env {
+                var: TOKEN_VAR.to_string(),
+            },
+            format!("cred=env:{TOKEN_VAR}"),
+        ),
     ] {
-        assert!(
-            !haystack.contains(SECRET),
-            "{label} carries the bearer token verbatim: {haystack}"
-        );
-        for prefix_len in [4usize, 8, 16] {
-            let prefix = &SECRET[..prefix_len];
-            assert!(
-                !haystack.contains(prefix),
-                "{label} carries a {prefix_len}-character prefix of the bearer token, which is \
-                 an offline-guessing oracle: {haystack}"
-            );
+        let context = context_with_auth(auth);
+        let fingerprint = ClientFingerprint::detect(&context, &FingerprintEnv::default());
+        let rendered = fingerprint.render();
+        let debug = format!("{fingerprint:?}");
+        let identity = ClientActionIdentity {
+            action_id: ActionId::mint().expect("mint"),
+            fingerprint: fingerprint.clone(),
+            clock: ClientClockReading::from_unix_seconds(1_800_000_000),
+            server_time: Arc::new(Mutex::new(None)),
+        };
+        let headers = identity
+            .headers()
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let identity_debug = format!("{identity:?}");
+
+        for (surface, haystack) in [
+            ("rendered fingerprint", &rendered),
+            ("fingerprint Debug", &debug),
+            ("sent headers", &headers),
+            ("identity Debug", &identity_debug),
+        ] {
+            assert_no_leak(&format!("[{source_label}] {surface}"), haystack, SECRET);
         }
+
+        // Positive shape: an impl that drops every field would pass every
+        // absence check above, so the fields that MUST be there are asserted.
+        assert!(rendered.starts_with(IDENTITY_SCHEMA_VERSION));
+        assert!(rendered.contains(&format!("cli={}", crate::version::CLI_VERSION)));
+        assert!(rendered.contains(&format!("os={}", std::env::consts::OS)));
+        assert!(rendered.contains(&format!("arch={}", std::env::consts::ARCH)));
+        assert!(rendered.contains("context=prod-eu"));
         assert!(
-            !haystack.contains(&decimal_bytes(SECRET)),
-            "{label} carries the token's decimal-byte spelling — the rendering a DERIVED Debug \
-             produces for a Vec<u8>, against which a plaintext-only assertion is vacuous: \
-             {haystack}"
+            rendered.contains(&expected_cred),
+            "[{source_label}] the credential SOURCE is what the fingerprint carries, and \
+             dropping it would make the absence assertions above vacuous: {rendered}"
         );
     }
 
-    // Positive shape: an impl that drops every field would pass every absence
-    // check above, so the fields that MUST be there are asserted too.
-    assert!(rendered.starts_with(IDENTITY_SCHEMA_VERSION));
-    assert!(rendered.contains(&format!("cli={}", crate::version::CLI_VERSION)));
-    assert!(rendered.contains(&format!("os={}", std::env::consts::OS)));
-    assert!(rendered.contains(&format!("arch={}", std::env::consts::ARCH)));
-    assert!(rendered.contains("context=prod-eu"));
-    assert!(
-        rendered.contains("cred=inline"),
-        "the credential SOURCE is what the fingerprint carries, and dropping it would make the \
-         absence assertions above vacuous: {rendered}"
-    );
+    std::env::remove_var(TOKEN_VAR);
 }
 
 /// Pins: the `env:VAR` / `stdin` / `inline` / `none` mapping in
@@ -309,28 +394,126 @@ fn the_client_reported_ip_never_rides_inside_the_fingerprint_blob() {
     );
 }
 
-/// Pins: [`sanitize_header_value`]'s filter set.
+/// Pins: [`encode_header_value`]'s escape set — CR, LF, `;`, `=` and every
+/// control character.
 ///
-/// Catches: dropping the filter (a `\r\n` in an operator-supplied label would
-/// then split the header and let a value forge `x-ferrogate-action-id`), and
-/// dropping `';'` (which would let a label forge extra fingerprint segments —
+/// Catches: dropping CR/LF (a `\r\n` in an operator-supplied label splits the
+/// header and forges `x-ferrogate-action-id`; there is no `http::HeaderValue`
+/// between this string and the socket on the `assets`/`plans` path), and
+/// dropping `;`/`=` (which lets a label forge extra fingerprint segments —
 /// `host=a;cred=none` reading back as two fields).
+///
+/// The assertion counts `;`-delimited **segments named `cred`**, not raw
+/// `"cred="` substrings. That distinction is the whole reason this test was
+/// rewritten: the previous cut asserted `rendered.matches("cred=").count() == 1`
+/// against a sanitizer that *deleted* the offending characters, and deletion
+/// welded the label's own `;cred=none` onto the text in front of it — leaving a
+/// literal `cred=` inside the host segment that no parser would ever read as a
+/// field. The count was 2, the assertion demanded 1, and the test reded on
+/// correct code, deterministically, on the first run.
 #[test]
 fn an_operator_supplied_label_cannot_forge_a_header_or_a_field() {
+    let hostile = "box\r\nx-ferrogate-action-id: fgact_evil;cred=none";
     let fingerprint = ClientFingerprint::detect(
         &context_with_auth(AuthSource::None),
         &FingerprintEnv {
-            host_label: Some("box\r\nx-ferrogate-action-id: fgact_evil;cred=none".to_string()),
+            host_label: Some(hostile.to_string()),
             reported_ip: None,
         },
     );
     let rendered = fingerprint.render();
-    assert!(!rendered.contains('\r') && !rendered.contains('\n'));
+
+    assert!(
+        !rendered.contains('\r') && !rendered.contains('\n'),
+        "a CR or LF in the value splits the header: {rendered}"
+    );
     assert_eq!(
-        rendered.matches("cred=").count(),
-        1,
+        segments_named(&rendered, "cred"),
+        vec!["none"],
         "a label must not be able to inject a second field: {rendered}"
     );
+    assert_eq!(
+        segments_named(&rendered, "host").len(),
+        1,
+        "the label occupies exactly one segment however hostile it is: {rendered}"
+    );
+    assert_eq!(
+        segments_named(&rendered, "x-ferrogate-action-id"),
+        Vec::<&str>::new(),
+        "the label must not be able to name a header, let alone the action id: {rendered}"
+    );
+    // Lossless, not lossy: the operator's own text is still recoverable. Without
+    // this the whole assertion set would also pass on an encoder that threw the
+    // label away, which is the mutation that quietly deletes evidence.
+    assert_eq!(
+        segments_named(&rendered, "host"),
+        vec!["box%0D%0Ax-ferrogate-action-id:%20fgact_evil%3Bcred%3Dnone"],
+        "the escaped label is the operator's text, percent-decodable back to it: {rendered}"
+    );
+}
+
+/// A context name or host label outside ASCII must not brick the CLI.
+///
+/// Pins: [`encode_header_value`] restricting its output to `32..=126`.
+///
+/// Catches: the filter this replaced, which removed only CR, LF, `;` and
+/// `char::is_control` and let every other byte through. `http::HeaderValue`'s
+/// `TryFrom<&str>` rejects any byte outside `32..=126`, so a context named `生产`
+/// or `prod-café` — and this project's own issues are written in Chinese —
+/// failed **every** request the CLI issued, at the chokepoint, as an opaque
+/// `reqwest` builder error. Nothing in `context.rs` validates a context name,
+/// and #548 is what first put it on the wire.
+///
+/// The assertion is on `http::HeaderValue::try_from`, i.e. on the same
+/// predicate the real transport applies, rather than on a hand-rolled ASCII
+/// check that could drift from it.
+#[test]
+fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
+    for (label, context_name, host_label) in [
+        ("chinese context", "生产", None),
+        ("accented context", "prod-café", None),
+        ("emoji host label", "prod-eu", Some("🚀-runner")),
+        ("cyrillic host label", "prod-eu", Some("сервер-1")),
+        ("del and high-ascii", "prod-eu", Some("a\u{7f}b\u{80}c")),
+    ] {
+        let mut context = context_with_auth(AuthSource::None);
+        context.context_name = Some(context_name.to_string());
+        let fingerprint = ClientFingerprint::detect(
+            &context,
+            &FingerprintEnv {
+                host_label: host_label.map(str::to_string),
+                reported_ip: None,
+            },
+        );
+        let rendered = fingerprint.render();
+        let identity = ClientActionIdentity {
+            action_id: ActionId::mint().expect("mint"),
+            fingerprint,
+            clock: ClientClockReading::from_unix_seconds(1_800_000_000),
+            server_time: Arc::new(Mutex::new(None)),
+        };
+        for (name, value) in identity.headers() {
+            assert!(
+                http::HeaderValue::try_from(value.as_str()).is_ok(),
+                "[{label}] '{name}: {value}' is not a header value reqwest can build; every \
+                 request this CLI issues would fail with an unattributable transport error"
+            );
+        }
+        // And it is escaped, not discarded: an encoder that dropped every
+        // non-ASCII byte would satisfy the assertion above while silently
+        // erasing which context an action was taken in.
+        let context_segment = segments_named(&rendered, "context");
+        assert_eq!(
+            context_segment,
+            vec![encode_header_value(context_name)],
+            "[{label}] the context name must survive as escaped text, not be deleted: {rendered}"
+        );
+        assert!(
+            context_segment[0].len() >= context_name.chars().count(),
+            "[{label}] an escaped name is never shorter than the characters it encodes: \
+             {rendered}"
+        );
+    }
 }
 
 /// Pins: the action-id binding check at the top of
@@ -362,45 +545,168 @@ fn a_time_token_issued_for_another_action_is_refused() {
 }
 
 /// Pins: both halves of the TTL window check in
-/// [`ServerIssuedTime::accept_for`] — `now > expires_at` and
-/// `now < issued_at`.
+/// [`ServerIssuedTime::accept_for`], **and**
+/// [`CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS`] being applied to each.
 ///
-/// Catches: deleting the upper bound (the expired case is then accepted, which
-/// is what lets an attacker pre-fetch tokens and backdate an action); deleting
-/// the lower bound (a pre-dated token is accepted); and an off-by-one that
-/// turns `>` into `>=` (the exactly-at-the-boundary case reds).
+/// Catches: deleting the upper bound (the day-stale case is then accepted,
+/// which is what lets an attacker pre-fetch tokens and backdate an action);
+/// deleting the lower bound (a token pre-dated by a year is accepted); an
+/// off-by-one that turns `>` into `>=` (the exactly-at-the-boundary cases red);
+/// and — the reason this test was rewritten — **setting the allowance back to
+/// zero**, which the `one second after the frozen reading` case reds.
+///
+/// That last one is not hypothetical, it is the defect this slice shipped with.
+/// The reading is taken once at [`ClientActionIdentity::mint`] and frozen, so a
+/// token the server issues one second into the invocation has
+/// `issued_at > now`; a bare `now < issued_at` check called it "from the
+/// future" and dropped it, silently, to stderr. It dropped every token under
+/// any positive server-minus-client skew and every invocation that crossed a
+/// second boundary — which is to say it dropped the feature. The four fixtures
+/// in the original test all built the token with
+/// `issued_at = identity.client_clock().unverified_unix_seconds()`, exactly the
+/// frozen value, so none of them could see it.
 #[test]
 fn a_time_token_outside_its_window_is_refused_at_both_ends() {
+    const MINTED_AT: u64 = 1_800_000_000;
+    const TTL: u64 = 30;
     let action = ActionId::mint().expect("mint");
-    let token = |now: u64| {
+    // `issued_at` is the SERVER's instant and `now` the client's frozen reading;
+    // the two are deliberately independent here, because a fixture that ties
+    // them together is what hid the defect.
+    let token = |issued_at: u64, now: u64| {
         ServerIssuedTime::parse(&format!(
-            "v1;issued_at=1800000000;ttl=30;action_id={action};sig=abc"
+            "v1;issued_at={issued_at};ttl={TTL};action_id={action};sig=abc"
         ))
         .expect("parses")
         .accept_for(&action, &ClientClockReading::from_unix_seconds(now))
     };
-    assert_eq!(
-        token(1_800_000_031)
-            .expect_err("one second past the window is outside it")
-            .code(),
-        "time_token_expired"
-    );
-    assert_eq!(
-        token(1_799_999_999)
-            .expect_err("a token from the future is as suspect as an expired one")
-            .code(),
-        "time_token_expired"
-    );
-    // The boundaries themselves are inside the window; without these two the
-    // assertions above would also pass on an `accept_for` that refuses every
-    // token it is ever handed.
+
+    // The regression case. Everything else in this test would pass with the
+    // allowance set to zero; this is the assertion that would not.
     assert!(
-        token(1_800_000_000).is_ok(),
+        token(MINTED_AT + 1, MINTED_AT).is_ok(),
+        "a token the server issued one second after this process read its clock is the NORMAL \
+         case, not a token from the future"
+    );
+    assert!(
+        token(MINTED_AT + CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS, MINTED_AT).is_ok(),
+        "skew up to the full allowance is tolerated"
+    );
+    assert!(
+        token(
+            MINTED_AT,
+            MINTED_AT + TTL + CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS
+        )
+        .is_ok(),
+        "the far edge of the widened window is inside it"
+    );
+    assert!(
+        token(MINTED_AT, MINTED_AT).is_ok(),
         "issued_at is inside the window"
     );
+
+    // Both ends still refuse, one second past the widened boundary.
+    assert_eq!(
+        token(
+            MINTED_AT,
+            MINTED_AT + TTL + CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS + 1
+        )
+        .expect_err("one second past the widened window is outside it")
+        .code(),
+        "time_token_expired"
+    );
+    assert_eq!(
+        token(
+            MINTED_AT + CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS + 1,
+            MINTED_AT
+        )
+        .expect_err("a token pre-dated by more than the allowance is still refused")
+        .code(),
+        "time_token_expired"
+    );
+    // The absurd cases the courtesy check exists for at all.
+    assert_eq!(
+        token(MINTED_AT, MINTED_AT + 86_400)
+            .expect_err("a day-stale token is refused")
+            .code(),
+        "time_token_expired"
+    );
+    assert_eq!(
+        token(MINTED_AT + 86_400, MINTED_AT)
+            .expect_err("a token dated a day ahead is refused")
+            .code(),
+        "time_token_expired"
+    );
+}
+
+/// Pins: [`ServerIssuedTime::render`] returning the stored raw token rather
+/// than re-rendering the four parsed fields.
+///
+/// Catches: reconstructing the string with
+/// `format!("v1;issued_at={};ttl={};action_id={};sig={}", …)`. That looks
+/// equivalent and is not: [`ServerIssuedTime::parse`] tolerates unknown segments
+/// on purpose, so the first forward-compatible field a server adds is dropped by
+/// the reconstruction — a different byte string, over which the server's own
+/// `sig` no longer verifies, silently invalidating every echoed token. The
+/// OpenAPI description and this method's own doc both say "echoed verbatim";
+/// nothing held them to it.
+#[test]
+fn a_time_token_is_echoed_byte_for_byte_including_fields_this_client_does_not_know() {
+    let action = ActionId::mint().expect("mint");
+    let forward_compatible =
+        format!("v1;issued_at=1800000000;ttl=30;action_id={action};sig=abc;region=eu;nonce=7");
+    let parsed = ServerIssuedTime::parse(&forward_compatible).expect("unknown segments are fine");
+    assert_eq!(
+        parsed.render(),
+        forward_compatible,
+        "the echoed token must be the bytes the server sent, unknown segments included"
+    );
+    // Positive shape: the known fields are still parsed out, so a `render` that
+    // simply stored the string and parsed nothing would not pass.
+    assert_eq!(parsed.issued_at_unix(), 1_800_000_000);
+    assert_eq!(parsed.ttl_seconds(), 30);
+    assert_eq!(parsed.bound_action_id(), action.as_str());
+}
+
+/// Pins: the printable-ASCII guard at the top of [`ServerIssuedTime::parse`].
+///
+/// Catches: deleting it. A token is echoed back onto the wire verbatim, and on
+/// the `assets`/`plans` path it is written into a socket with no
+/// `http::HeaderValue` in between — so a server (or an intermediary) that
+/// answered with a `\r\n` inside the token would have this client splice a
+/// header of its choosing into the *next* request of the same action.
+#[test]
+fn a_time_token_carrying_bytes_no_header_may_hold_is_refused() {
+    for (label, raw) in [
+        (
+            "CRLF request splitting",
+            "v1;issued_at=1800000000;ttl=30;action_id=fgact_x;sig=a\r\nx-ferrogate-tenant: org_evil",
+        ),
+        (
+            "bare newline",
+            "v1;issued_at=1800000000;ttl=30;action_id=fgact_x;sig=a\nb",
+        ),
+        (
+            "NUL",
+            "v1;issued_at=1800000000;ttl=30;action_id=fgact_x;sig=a\0b",
+        ),
+        (
+            "non-ASCII",
+            "v1;issued_at=1800000000;ttl=30;action_id=fgact_x;sig=a生b",
+        ),
+    ] {
+        assert_eq!(
+            ServerIssuedTime::parse(raw)
+                .expect_err(&format!("'{label}' must be refused"))
+                .code(),
+            "time_token_malformed",
+            "'{label}' was accepted"
+        );
+    }
+    // The mirror: a token made only of printable ASCII still parses, so the
+    // guard above cannot be satisfied by refusing everything.
     assert!(
-        token(1_800_000_030).is_ok(),
-        "issued_at + ttl is inside the window"
+        ServerIssuedTime::parse("v1;issued_at=1800000000;ttl=30;action_id=fgact_x;sig=abc").is_ok()
     );
 }
 
@@ -582,6 +888,85 @@ fn the_unconditional_headers_are_present_and_the_clock_header_says_it_is_unverif
     );
 }
 
+/// The header **set** — not just "these names are present" — in each of the
+/// three shapes an invocation can be in.
+///
+/// Pins: the exact, ordered vector [`ClientActionIdentity::headers`] returns.
+///
+/// Catches: **adding** a header. Every other assertion in this file looks a
+/// header up by name, so pushing `("x-ferrogate-client-username", env USER)`
+/// onto that vector reds nothing — and `client_reported_ip` already proves that
+/// a field can be declared in [`FINGERPRINT_FIELDS`], kept out of the blob, and
+/// still be carried out-of-band on its own header. [`FINGERPRINT_FIELDS`] is a
+/// tripwire for the blob; this is the tripwire for the wire. Removing a header
+/// reds it too, from the other side.
+///
+/// The privacy decision is a set, so it is pinned as a set, in the same spirit
+/// as `the_fingerprint_declares_exactly_the_reviewed_field_set`.
+#[test]
+fn the_headers_sent_are_exactly_the_reviewed_set_in_every_shape() {
+    let identity_with = |reported_ip: Option<&str>| ClientActionIdentity {
+        action_id: ActionId::mint().expect("mint"),
+        fingerprint: ClientFingerprint::detect(
+            &context_with_auth(AuthSource::None),
+            &FingerprintEnv {
+                host_label: None,
+                reported_ip: reported_ip.map(str::to_string),
+            },
+        ),
+        clock: ClientClockReading::from_unix_seconds(1_800_000_000),
+        server_time: Arc::new(Mutex::new(None)),
+    };
+    let names = |identity: &ClientActionIdentity| -> Vec<String> {
+        identity
+            .headers()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    };
+
+    let plain = identity_with(None);
+    assert_eq!(
+        names(&plain),
+        vec![
+            ACTION_ID_HEADER.to_string(),
+            CLIENT_FINGERPRINT_HEADER.to_string(),
+            CLIENT_CLOCK_HEADER.to_string(),
+        ],
+        "the default invocation discloses these three headers and nothing else"
+    );
+
+    let disclosed = identity_with(Some("10.4.2.9"));
+    assert_eq!(
+        names(&disclosed),
+        vec![
+            ACTION_ID_HEADER.to_string(),
+            CLIENT_FINGERPRINT_HEADER.to_string(),
+            CLIENT_CLOCK_HEADER.to_string(),
+            CLIENT_REPORTED_IP_HEADER.to_string(),
+        ],
+        "opting in to a reported address adds exactly one header"
+    );
+
+    let with_token = identity_with(None);
+    with_token
+        .accept_server_time(&format!(
+            "v1;issued_at=1800000000;ttl=300;action_id={};sig=abc",
+            with_token.action_id()
+        ))
+        .expect("accepted");
+    assert_eq!(
+        names(&with_token),
+        vec![
+            ACTION_ID_HEADER.to_string(),
+            CLIENT_FINGERPRINT_HEADER.to_string(),
+            CLIENT_CLOCK_HEADER.to_string(),
+            TIME_TOKEN_HEADER.to_string(),
+        ],
+        "holding a server time token adds exactly one header"
+    );
+}
+
 /// Pins: `ClientClockReading::read_local_clock` being the sole `SystemTime::now()`
 /// in the audit path.
 ///
@@ -631,5 +1016,61 @@ fn the_only_local_clock_read_in_the_audit_path_is_the_one_named_for_it() {
         "the audit path reads the local clock in exactly one place, named for what it does. \
          Anything else is the defect issue #548's acceptance list names: a client clock \
          reaching the audit timestamp, where it would look like a perfectly plausible instant"
+    );
+}
+
+/// The two opt-in variables are documented where an operator will actually
+/// find them.
+///
+/// Pins: `docs/cli-audit-attribution.md` naming [`HOST_LABEL_ENV`] and
+/// [`REPORTED_IP_ENV`], and stating that no deployment issues a time token
+/// today.
+///
+/// Catches: renaming either constant without updating the documentation, and
+/// deleting the page. Neither variable is a clap flag, so
+/// `docs/cli-reference.md` — which is generated from the command tree — can
+/// never pick them up, and before this page they appeared in **no** `.md` file
+/// in the repository: two operator-facing knobs, one of them controlling PII
+/// disclosure, discoverable only by reading the source.
+///
+/// It also pins the "not honored today" statement, which is this repo's
+/// established shape for a shipped-but-inert capability (`--tenant` carries
+/// "NOT HONORED BY THE SERVER TODAY" in ten places plus an stderr notice). The
+/// contract-side half is
+/// `crate::transport_test::no_operation_yet_issues_a_server_time_token`, which
+/// fails the day a response declares the header — so the doc and the contract
+/// are corrected together or not at all.
+#[test]
+fn the_opt_in_variables_are_documented_where_an_operator_will_find_them() {
+    const PAGE: &str = include_str!("../../../docs/cli-audit-attribution.md");
+    for needle in [
+        HOST_LABEL_ENV,
+        REPORTED_IP_ENV,
+        ACTION_ID_HEADER,
+        CLIENT_FINGERPRINT_HEADER,
+        CLIENT_CLOCK_HEADER,
+        TIME_TOKEN_HEADER,
+        CLIENT_REPORTED_IP_HEADER,
+    ] {
+        assert!(
+            PAGE.contains(needle),
+            "'{needle}' is not documented in docs/cli-audit-attribution.md; it is not a clap \
+             flag, so the generated cli-reference.md will never mention it either"
+        );
+    }
+    assert!(
+        PAGE.contains("NOT ISSUED BY ANY FERROGATE DEPLOYMENT TODAY"),
+        "the page must state that nothing issues a time token yet, or an operator reads a null \
+         client_sent_at and has to guess whether it is a bug"
+    );
+    assert!(
+        PAGE.contains(crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN),
+        "the page must name the absence code an operator will actually see on a receipt"
+    );
+    // The opt-in default is the privacy decision; a page that documented the
+    // variables without saying they are off would misdescribe it.
+    assert!(
+        PAGE.contains("off by default"),
+        "the page must say both variables are off by default"
     );
 }

@@ -1455,3 +1455,234 @@ fn merged_pages_drop_every_per_page_cursor_key() {
         );
     }
 }
+
+/// The whole cross-crate guarantee of issue #548 is three words in
+/// `transport.rs`, and this is the test that holds them.
+///
+/// Pins: `pub(crate)` on every field of [`PreparedRequest`].
+///
+/// Catches: widening any of them back to `pub`. That single edit re-opens the
+/// hole the design closed — with `pub` fields, `ferrogate-cli` (or any consumer)
+/// can write a `PreparedRequest { .. }` literal, or a functional update
+/// `PreparedRequest { headers: vec![], ..other }`, and hand it straight to
+/// `Transport::execute` with no identity anywhere in sight. Nothing else reds:
+/// the crate compiles, `every_registered_verb_carries_the_action_identity_on_the_wire`
+/// still passes (it goes through `prepare_request`), and the E0451 that was the
+/// enforcement simply stops being emitted.
+///
+/// It is a source scan because the property is *absence of an ability* in
+/// another crate. Rust has no way to assert "this literal does not compile"
+/// from inside the crate that defines the type — `#[cfg(test)]` code here is
+/// in-crate and can spell the literal freely — and a `trybuild` harness would be
+/// a new dev-dependency and a compiler invocation per run. The scan checks the
+/// exact text the guarantee rests on.
+#[test]
+fn the_prepared_request_fields_stay_closed_to_other_crates() {
+    let source = include_str!("transport.rs");
+    let mut in_struct = false;
+    let mut fields: Vec<(String, bool)> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("pub struct PreparedRequest {") {
+            in_struct = true;
+            continue;
+        }
+        if in_struct {
+            if trimmed == "}" {
+                break;
+            }
+            let Some((declaration, _)) = trimmed.split_once(':') else {
+                continue;
+            };
+            let name = declaration
+                .rsplit(' ')
+                .next()
+                .unwrap_or(declaration)
+                .to_string();
+            fields.push((name, declaration.starts_with("pub(crate) ")));
+        }
+    }
+    assert!(
+        in_struct,
+        "PreparedRequest's declaration was not found; this guard is scanning the wrong text"
+    );
+    assert_eq!(
+        fields.len(),
+        4,
+        "expected the four fields of a prepared request, saw {fields:?}"
+    );
+    let leaked: Vec<&String> = fields
+        .iter()
+        .filter(|(_, closed)| !closed)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "PreparedRequest::{leaked:?} is visible outside this crate. A consumer can then build a \
+         request with a struct literal or a `..other` update and execute it with no \
+         ClientActionIdentity in hand, which is the entire compile-error argument for issue #548"
+    );
+}
+
+/// Every operation in the contract declares the five client-identity headers
+/// the CLI sends on every request.
+///
+/// Pins: the `parameters` block on each path item of
+/// `docs/openapi/admin-api.openapi.json`.
+///
+/// Catches: dropping the `$ref`s from any path — including the state this slice
+/// first shipped in, where all five entries existed under
+/// `components.parameters` and were referenced by **zero of 251 operations**.
+/// That is not a declaration: an admin-console developer could not send one
+/// type-safely (the generated client emits a header only where an operation
+/// declares it), and a validating gateway had nothing to read. The repo's
+/// `check-openapi.py` cannot see it either — its component comparison iterates
+/// *baseline* keys, so an added component can never fail it, and deleting all
+/// forty-five lines would also exit 0. So the check lives here, where it runs.
+///
+/// The count is derived from the document rather than written down, so a path
+/// added tomorrow is covered the day it lands.
+#[test]
+fn every_operation_declares_the_client_identity_headers() {
+    const IDENTITY_HEADERS: [&str; 5] = [
+        ACTION_ID_HEADER,
+        CLIENT_FINGERPRINT_HEADER,
+        CLIENT_CLOCK_HEADER,
+        TIME_TOKEN_HEADER,
+        crate::action_identity::CLIENT_REPORTED_IP_HEADER,
+    ];
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+            .expect("the OpenAPI contract parses");
+    let components = spec["components"]["parameters"]
+        .as_object()
+        .expect("components.parameters")
+        .clone();
+    // `$ref` -> declared header name, so the assertion below is against the
+    // header the CLI actually sends and not against a component name.
+    let declared_name = move |parameter: &serde_json::Value| -> Option<String> {
+        if let Some(raw) = parameter.get("$ref").and_then(|value| value.as_str()) {
+            let key = raw.strip_prefix("#/components/parameters/")?;
+            return components
+                .get(key)?
+                .get("name")?
+                .as_str()
+                .map(str::to_string);
+        }
+        parameter
+            .get("name")
+            .and_then(|name| name.as_str())
+            .map(str::to_string)
+    };
+
+    let methods = [
+        "get", "put", "post", "delete", "patch", "head", "options", "trace",
+    ];
+    let mut operations = 0usize;
+    let mut undeclared: Vec<String> = Vec::new();
+    for (path, item) in spec["paths"].as_object().expect("paths") {
+        let names = |value: Option<&serde_json::Value>| -> Vec<String> {
+            value
+                .and_then(|value| value.as_array())
+                .map(|parameters| parameters.iter().filter_map(&declared_name).collect())
+                .unwrap_or_default()
+        };
+        let path_level = names(item.get("parameters"));
+        for (method, operation) in item.as_object().expect("path item") {
+            if !methods.contains(&method.as_str()) {
+                continue;
+            }
+            operations += 1;
+            // OpenAPI path-item inheritance: an operation sees its own
+            // parameters plus the path's. openapi-typescript merges them the
+            // same way, which is what makes the generated client type-safe.
+            let mut declared = path_level.clone();
+            declared.extend(names(operation.get("parameters")));
+            for header in IDENTITY_HEADERS {
+                if !declared.iter().any(|name| name == header) {
+                    undeclared.push(format!("{method} {path} is missing {header}"));
+                }
+            }
+        }
+    }
+    // A floor, not a census: an empty or mis-parsed document would otherwise
+    // make the loop vacuous.
+    assert!(
+        operations > 200,
+        "expected the whole contract, saw only {operations} operations"
+    );
+    assert!(
+        undeclared.is_empty(),
+        "{} operation/header pairs are undeclared, e.g. {:?}. The CLI sends these on EVERY \
+         request; a contract that declares them nowhere cannot be read by a gateway or typed by \
+         a client",
+        undeclared.len(),
+        &undeclared[..undeclared.len().min(5)]
+    );
+}
+
+/// **Nothing issues a server time token yet**, and this pins that claim to the
+/// contract rather than to a comment — the same shape as
+/// [`tenant_scope_is_not_yet_an_openapi_parameter`].
+///
+/// The piggy-back harvests [`TIME_TOKEN_HEADER`] off a *response*. No operation
+/// declares it as a response header, because no FerroGate deployment issues one:
+/// the issuing endpoint is server-side work issue #548 defers. That is why every
+/// receipt this CLI renders today reports `client_sent_at: null` with
+/// `NO_SERVER_TIME_TOKEN`, and it is stated in `docs/cli-audit-attribution.md`,
+/// in `crate::action_identity`'s module docs, and here.
+///
+/// Catches: the day a response *does* declare it. This test then fails and
+/// forces the "no deployment issues one today" wording to be corrected in all
+/// three places at once, instead of quietly outliving the fact.
+///
+/// The reusable declaration lives at
+/// `components.headers.ClientTimeTokenResponseHeader` so the shape is in the
+/// contract and a server implementing it has something to reference; the
+/// assertion is that nothing references it *yet*.
+#[test]
+fn no_operation_yet_issues_a_server_time_token() {
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+            .expect("the OpenAPI contract parses");
+    assert!(
+        spec["components"]["headers"]
+            .get("ClientTimeTokenResponseHeader")
+            .and_then(|header| header.get("description"))
+            .is_some(),
+        "the response-side shape must be declared as a reusable component, or a server has \
+         nothing to implement against and the absence below says nothing"
+    );
+
+    let mut issuing: Vec<String> = Vec::new();
+    for (path, item) in spec["paths"].as_object().expect("paths") {
+        let Some(operations) = item.as_object() else {
+            continue;
+        };
+        for (method, operation) in operations {
+            let Some(responses) = operation.get("responses").and_then(|r| r.as_object()) else {
+                continue;
+            };
+            for (status, response) in responses {
+                let Some(headers) = response.get("headers").and_then(|h| h.as_object()) else {
+                    continue;
+                };
+                for name in headers.keys() {
+                    if name.eq_ignore_ascii_case(TIME_TOKEN_HEADER) {
+                        issuing.push(format!("{method} {path} {status}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        issuing.is_empty(),
+        "the API now issues a '{TIME_TOKEN_HEADER}' on {issuing:?} — correct the \
+         'no deployment issues one today' statement in docs/cli-audit-attribution.md, in \
+         action_identity's module docs and in receipt's, and revisit whether the receipt's \
+         NO_SERVER_TIME_TOKEN wording still reads honestly"
+    );
+}
