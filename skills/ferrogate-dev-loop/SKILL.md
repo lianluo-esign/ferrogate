@@ -22,9 +22,13 @@ loop's output: `ferrogate-code-review` (In review) and `ferrogate-test`
    test agent owns E2E in the Testing lane). Still *write* the tests a slice
    needs — only their execution moves downstream — and state plainly in the
    commit's `Not-tested:` trailer and the handoff comment that nothing was run.
-   Contract-shaped checks that are not tests (`scripts/check-openapi.py` when
-   you edit the spec, `tsc --noEmit` when you edit `workers/**/*.ts`) still
-   apply: they guard `main` against a break `cargo check` cannot see.
+   Checks that are not tests still apply, because `cargo check` cannot see
+   them and the code-review agent bounces on them: **`cargo fmt` before every
+   commit** (`AGENTS.md:346` lists `cargo fmt --check` in the static gate —
+   #493 was bounced for exactly this, and the same pass caught an unrelated
+   fmt break already on `main`), `scripts/check-openapi.py` when you edit the
+   spec, and `tsc --noEmit` when you edit `workers/**/*.ts`. Read the
+   directive as "skip the *tests*", not "skip the static gate".
 2. **Advance to "In review", never further.** The code-review agent owns
    In review → Testing; the test gate owns Testing → Done. This loop never
    writes those two transitions.

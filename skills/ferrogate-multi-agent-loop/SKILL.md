@@ -58,6 +58,10 @@ it writes:**
   time.
 - **Do NOT run `cargo test`, `clippy`, or the mutation-verification pass.**
   Those are the review and test agents' findings now, returned via Ready.
+- **`cargo fmt` before every commit is NOT optional.** `AGENTS.md:346` puts
+  `cargo fmt --check` in the static gate and the review agent bounces on it;
+  #493 lost a whole review round to two unwrapped lines. "Skip the tests" is
+  not "skip the static gate".
 - **Still WRITE the tests.** They are code the reviewer expects and the test
   agent runs; only their *execution* moves downstream. Writing an assertion so
   it is not vacuous is still the dev's job (see `ferrogate-dev-loop`, "mutation
