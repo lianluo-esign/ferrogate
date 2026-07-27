@@ -776,6 +776,8 @@ api_keys:
     name: "Presign E2E operator"
     key: "presign-e2e-admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
   - id: "presign-e2e-client"
     name: "Presign E2E tenant client"
     key: "presign-e2e-client-secret"

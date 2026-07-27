@@ -2179,6 +2179,8 @@ api_keys:
     name: "MCP E2E admin"
     key: "mcp-identity-admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
   - id: "mcp-e2e-key-a"
     name: "MCP E2E user A"
     key: "mcp-identity-user-a-secret"

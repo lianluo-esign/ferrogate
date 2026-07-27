@@ -925,6 +925,11 @@ api_keys:
     name: "Async job E2E operator"
     key: "job-e2e-admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is something a config SAYS. This key registers the
+    # worker and reads across tenants, so it declares the posture rather than
+    # inheriting it from an omitted field -- the gateway now refuses to start
+    # on a key that annotates neither `platform_operator` nor `organization_id`.
+    platform_operator: true
   - id: "job-e2e-caller"
     name: "Async job E2E submitter"
     key: "job-e2e-caller-secret"

@@ -1861,6 +1861,8 @@ api_keys:
     name: "Guardrail E2E admin"
     key: "guardrail-admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
   - id: "guardrail-structured-client"
     name: "Structured Guardrail E2E client"
     key: "guardrail-structured-client-secret"

@@ -489,7 +489,15 @@ fn policy_body(policy_id: &str, keyword: &str, block_code: &str) -> String {
         "mode": "enforce",
         "streaming": "buffer_and_enforce",
         "on_pass": [{"kind": "allow"}],
-        "on_fail": [{"kind": "block", "code": block_code, "message": "blocked by the E2E policy"}]
+        "on_fail": [{"kind": "block", "code": block_code, "message": "blocked by the E2E policy"}],
+        // `on_error` is a REQUIRED field of the policy document; omitting it
+        // fails the create with `invalid_request_body: missing field on_error`
+        // before the CLI receipt this scenario is about is ever produced.
+        "on_error": [{
+            "kind": "block",
+            "code": "receipt_e2e_detector_unavailable",
+            "message": "the E2E detector was unavailable"
+        }]
     })
     .to_string()
 }
@@ -520,6 +528,8 @@ api_keys:
     name: "CLI receipt E2E host operator"
     key: "{ADMIN_KEY}"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
 "#
     )
 }

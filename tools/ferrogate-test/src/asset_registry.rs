@@ -833,6 +833,8 @@ api_keys:
     name: "Registry E2E operator"
     key: "registry-e2e-admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
   - id: "registry-e2e-client"
     name: "Registry E2E tenant client"
     key: "registry-e2e-client-secret"

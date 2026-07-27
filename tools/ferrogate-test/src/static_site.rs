@@ -482,9 +482,14 @@ fn verify_withheld_publish_agreement(args: &LocalArgs) -> Result<()> {
         ],
         &bundle,
     )?;
-    if published.status != 200 && published.status != 201 {
+    // #528 made the withheld push answer **202** specifically, so the status
+    // itself names the visibility instead of being an ordinary 2xx the caller
+    // has to disambiguate from the body. Pinning 202 exactly (rather than
+    // widening this to "any 2xx") is what keeps that contract testable: a
+    // regression back to 200/201 would otherwise pass here.
+    if published.status != 202 {
         bail!(
-            "a withheld bundle is stored, not rejected -- expected a 2xx: {}",
+            "a withheld bundle is stored, not rejected, and #528 answers 202 for it: {}",
             published.raw
         );
     }
@@ -1128,6 +1133,8 @@ api_keys:
     name: "Static site E2E host operator"
     key: "site-e2e-admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
   - id: "site-e2e-client"
     name: "Static site E2E tenant client"
     key: "site-e2e-client-secret"

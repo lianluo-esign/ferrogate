@@ -465,6 +465,8 @@ api_keys:
     name: "Workers AI Llama Guard host operator"
     key: "wa-llama-host-admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
   - id: "wa-llama-client"
     name: "Workers AI Llama Guard traffic client"
     key: "wa-llama-client-secret"

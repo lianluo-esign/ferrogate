@@ -1104,6 +1104,8 @@ api_keys:
     name: "Component compliance admin"
     key: "admin-secret"
     scopes: ["admin.read", "admin.write"]
+    # #540: platform root is stated, never inherited from an omitted field.
+    platform_operator: true
 {}"#,
         crate::constants::BILLING_SERVICE_TOKEN,
         // #351: the same operator-declared x402 spend policies the local TOML
