@@ -45,7 +45,7 @@ use ferrogate_cli_core::dispatch::{build_request, redact_response, secret_fields
 use ferrogate_cli_core::error::{CliError, CliResult};
 use ferrogate_cli_core::output::{render_output, Table};
 use ferrogate_cli_core::receipt::{
-    BareRenderer, MutationPlan, ReceiptRenderer, RenderGate, VerbOutput,
+    BareRenderer, MutationPlan, MutationReport, ReceiptRenderer, RenderGate, VerbOutput,
 };
 use ferrogate_cli_core::registry_helpers::ResourceInput;
 use ferrogate_cli_core::resource::ListParams;
@@ -339,7 +339,10 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     // plus a raw body into printable output. Adding a resource family cannot
     // reintroduce a bare mutation response, because the family never touches
     // this code at all.
-    let output = match descriptor.render_gate() {
+    // A mutating verb yields a receipt on EVERY terminal path, so the failure
+    // travels alongside the output instead of short-circuiting the render. It
+    // is propagated below, after the receipt has reached stdout.
+    let (output, failure) = match descriptor.render_gate() {
         RenderGate::Bare(renderer) => {
             if resource.dry_run {
                 return Err(CliError::usage(format!(
@@ -348,15 +351,18 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
                     descriptor.effect.as_str()
                 )));
             }
-            read_output(
-                renderer,
-                group_name,
-                &resource,
-                spec,
-                &redaction_spec,
-                effective,
-                credential,
-            )?
+            (
+                read_output(
+                    renderer,
+                    group_name,
+                    &resource,
+                    spec,
+                    &redaction_spec,
+                    effective,
+                    credential,
+                )?,
+                None,
+            )
         }
         RenderGate::Receipt(renderer) => {
             if resource.all_pages {
@@ -374,6 +380,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
                 credential,
                 resource.dry_run,
             )?
+            .into_parts()
         }
     };
 
@@ -403,7 +410,17 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
             }
         }
     }
-    Ok(())
+
+    // A failed mutation still exits on the error's own class — the receipt on
+    // stdout is the audit record, not an absolution. Returning here (rather
+    // than before the render) is what makes the receipt the output contract of
+    // a mutating verb on the failing paths too: the operator's pipeline records
+    // `outcome: rejected` or `outcome: unknown` with the target fingerprint,
+    // and the prose goes to stderr as it always did.
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Execute a non-mutating verb and gate its body into a [`VerbOutput`].
@@ -474,16 +491,21 @@ fn mutation_output(
     effective: EffectiveContext,
     credential: Option<Credential>,
     dry_run: bool,
-) -> CliResult<VerbOutput> {
+) -> CliResult<MutationReport> {
     let plan = MutationPlan::new(renderer, group_name, spec, segments, &effective, dry_run)?;
     if plan.is_dry_run() {
-        return Ok(plan.dry_run());
+        return Ok(MutationReport::from(plan.dry_run()));
     }
     let runtime = dispatch::runtime()?;
+    // Building the transport is the last thing that can fail without a
+    // receipt: it is a local TLS/timeout configuration error, so nothing was
+    // sent and there is no mutation to attest. Everything from `plan.send`
+    // onwards produces a receipt whatever happens — 2xx, error envelope, or a
+    // connection that died without an answer.
     runtime.block_on(async move {
         let transport = ReqwestTransport::new(&effective)?;
         let client = ControlPlaneClient::new(effective, credential, transport);
-        plan.send(&client).await
+        Ok(plan.send(&client).await)
     })
 }
 

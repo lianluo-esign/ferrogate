@@ -26,15 +26,42 @@
 //! …}` with **both keys always serialized**. A field the Control Plane API does
 //! not return is `null` *with a stated reason code*, never omitted. That is
 //! deliberate — an absent audit id is itself the finding. A structural scan of
-//! `docs/openapi/admin-api.openapi.json` at the time of writing found that
-//! **117 of 117** coverable mutating operations declare no audit identifier in
-//! any 2xx response schema, and zero declare a `dry_run` echo. Issue #505 is
+//! `docs/openapi/admin-api.openapi.json` finds **135** mutating operations
+//! (`POST`/`PUT`/`PATCH`/`DELETE`), of which **117** are covered by this
+//! registry, and **none** declares an audit identifier in any resolved 2xx
+//! response schema; zero declare a `dry_run` echo. That scan is not a
+//! historical note — `no_mutating_operation_in_the_contract_returns_an_audit_id`
+//! re-derives it from the contract on every run and prints the full
+//! enumeration, so the claim fails the day it stops being true. Issue #505 is
 //! explicit that this slice must *record* that gap, not add the server-side
 //! write path, so the receipt reports it in a machine-greppable way:
 //!
 //! ```sh
 //! ferrogate ctl <group> <verb> … --output json | jq -e '.audit_id.absent_reason.code'
 //! ```
+//!
+//! # Scope: the `ctl` registry, and what is knowingly outside it
+//!
+//! The gate is total over the **registry**, which is every `ferrogate ctl
+//! <group> <verb>` command. It is not total over the binary. These shipped
+//! mutating commands are hand-written verticals that predate the registry and
+//! still print a bare body or a line of prose, and closing them is follow-up
+//! work, not a silence:
+//!
+//! * `ferrogate assets push` (PUT) / `ferrogate assets delete` (DELETE)
+//! * `ferrogate plans create` (POST) / `ferrogate plans assign`
+//! * `ferrogate reload --admin-url …`, which mutates a *running* gateway's
+//!   live config and prints prose
+//! * `ferrogate storage migrate-to-supabase`, which still carries its own
+//!   ad-hoc `--dry-run`/`--execute` pair — the per-resource pattern the
+//!   uniform `--dry-run` replaces inside `ctl`
+//! * `ferrogate context create/use/delete`, which are local mutations:
+//!   [`VerbEffect::Local`] exists for them but no shipped verb uses it yet, so
+//!   they never meet the gate at all
+//!
+//! Each is a real CLI mutation with no receipt. Naming them here rather than
+//! leaving the reader to infer coverage from the module title is the same rule
+//! the receipt itself follows: an absence is a finding, not a silence.
 //!
 //! # Registry-level enforcement (structural, not a convention)
 //!
@@ -113,8 +140,10 @@ pub const CLI_ACTION_CLASS: &str = "rest";
 /// never on the prose in [`AbsenceReason::detail`].
 pub mod absence_codes {
     /// The endpoint's 2xx schema declares no audit identifier. Applies to all
-    /// 117 coverable mutating operations in the contract today (issue #505,
-    /// acceptance box 6).
+    /// 135 mutating operations in the contract today — the 117 this registry
+    /// covers and the 18 it does not (issue #505, acceptance box 6); the
+    /// enumeration is re-derived by
+    /// `no_mutating_operation_in_the_contract_returns_an_audit_id`.
     pub const NO_AUDIT_ID_IN_CONTRACT: &str = "endpoint_returns_no_audit_id";
     /// The endpoint's 2xx schema declares no approval identifier.
     pub const NO_APPROVAL_ID_IN_CONTRACT: &str = "endpoint_returns_no_approval_id";
@@ -140,14 +169,30 @@ pub mod absence_codes {
     pub const SUBJECT_NOT_LOCALLY_RESOLVABLE: &str = "subject_not_locally_resolvable";
     /// The response carried no `x-request-id` / `x-trace-id`.
     pub const NO_CORRELATION_ID: &str = "response_carries_no_correlation_id";
-    /// The verb addresses a collection, so the mutation names no single id
-    /// until the server assigns one.
+    /// The verb addresses a collection and nothing was executed, so no id
+    /// exists yet: the server assigns one only when the call is made.
     pub const COLLECTION_SCOPED_MUTATION: &str = "collection_scoped_mutation";
+    /// The verb addressed a collection, the call was made, and the response
+    /// document named no id for the object it created (or named more than one
+    /// candidate, which is the same thing: the client cannot tell which).
+    pub const RESPONSE_NAMES_NO_RESOURCE_ID: &str = "response_names_no_resource_id";
     /// The request document carried no `idempotency_key`, so a retry is not
     /// provably the same call.
     pub const NO_IDEMPOTENCY_KEY_SUPPLIED: &str = "request_carries_no_idempotency_key";
     /// A local verb never reached the Control Plane API.
     pub const LOCAL_VERB: &str = "local_verb_issues_no_request";
+    /// The server refused the mutation, so no server-side artifact of the
+    /// change exists to point at.
+    pub const MUTATION_NOT_APPLIED: &str = "mutation_not_applied";
+    /// The client obtained no authoritative answer, so whether the artifact
+    /// exists server-side is not knowable from here.
+    pub const MUTATION_OUTCOME_UNKNOWN: &str = "mutation_outcome_unknown";
+    /// The request never left the process, so nothing changed.
+    pub const REQUEST_NOT_SENT: &str = "request_not_sent";
+    /// No HTTP response was obtained at all (connect, timeout, TLS, decode).
+    pub const NO_HTTP_RESPONSE: &str = "no_authoritative_http_response";
+    /// The call succeeded, so there is no failure to report.
+    pub const MUTATION_SUCCEEDED: &str = "mutation_succeeded";
 }
 
 /// Why a receipt field is `null`. `code` is the stable discriminator; `detail`
@@ -392,9 +437,27 @@ impl DecisionClass {
     }
 }
 
-/// A policy decision as reported by the Control Plane API. Field names mirror
-/// the runtime `ActionDecision` serde shape so a receipt and a runtime audit
-/// row join without translation.
+/// A **governance verdict on this CLI call**, as reported by the Control Plane
+/// API. Field names mirror the runtime `ActionDecision` serde shape so a
+/// receipt and a runtime audit row join without translation.
+///
+/// # Why this is always absent today
+///
+/// It is deliberately *not* whatever the response happens to spell `decision`.
+/// `ToolApprovalRecord`, `AdminPaymentAttempt` and `GuardrailEvaluation` each
+/// declare a `decision` field, but those describe the **resource's own state**
+/// — the approval verdict a `tool-approvals deny` just recorded, the payment
+/// attempt's outcome — not whether the control plane permitted the operator to
+/// make the call. Harvesting them conflated the two: a *successful* `ctl
+/// tool-approvals deny ta_9` returned HTTP 200 and rendered
+/// `decision.value.decision == "deny"`, so an audit query selecting refused
+/// mutations picked up every successful denial as a refusal of itself.
+///
+/// No mutating operation in the contract returns a verdict on the call, so the
+/// honest value is [`absence_codes::NO_DECISION_IN_CONTRACT`] on all of them.
+/// The type stays because the vocabulary is the contract the day an endpoint
+/// does return one; nothing populates it until then, and
+/// `decision_is_never_harvested_from_the_resources_own_state` pins that.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptDecision {
     pub decision: DecisionClass,
@@ -425,6 +488,63 @@ pub struct RollbackPointer {
     pub note: String,
 }
 
+/// What actually became of the mutation — the field an audit pipeline reads to
+/// decide whether the change happened.
+///
+/// A receipt is emitted on **every** terminal path, including the failing ones,
+/// because "no output at all" is the one answer an operator cannot audit. The
+/// distinction that matters is the last two variants: a server that refused the
+/// call changed nothing, while a client that never got an answer knows nothing
+/// — the 504-after-commit case, where the mutation may well have landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationOutcome {
+    /// The Control Plane API answered 2xx: the change is applied.
+    Applied,
+    /// The Control Plane API answered with an error envelope. The server made
+    /// an authoritative decision not to apply the change.
+    Rejected,
+    /// No authoritative answer was obtained (connect, timeout, TLS, or a
+    /// response that could not be read). The mutation **may or may not** have
+    /// been applied server-side; the client cannot tell, and neither should a
+    /// consumer of this receipt assume either way.
+    Unknown,
+    /// Nothing left the process: a `--dry-run`, or a request the client refused
+    /// to send. Nothing changed.
+    NotSent,
+}
+
+impl MutationOutcome {
+    /// Stable spelling, matching the serde tag.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MutationOutcome::Applied => "applied",
+            MutationOutcome::Rejected => "rejected",
+            MutationOutcome::Unknown => "unknown",
+            MutationOutcome::NotSent => "not_sent",
+        }
+    }
+
+    /// Whether the change is known to have taken effect.
+    pub fn is_applied(self) -> bool {
+        matches!(self, MutationOutcome::Applied)
+    }
+}
+
+/// The failure a non-applied mutation ended on, in the receipt's own
+/// vocabulary. Carries no stack of prose: `class` and `code` are what a query
+/// selects on, `message` is what a human reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptFailure {
+    /// `api` (the server answered with an error envelope), `transport` (no
+    /// authoritative answer), `usage`, or `auth`.
+    pub class: String,
+    /// The server's stable error code, or `client_error` when the failure never
+    /// reached the server.
+    pub code: String,
+    pub message: String,
+}
+
 /// Correlation ids the server returned, for joining to gateway evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptCorrelation {
@@ -449,6 +569,12 @@ pub struct MutationReceipt {
     /// `dry_run: false` when it actually issued that call, because this field
     /// describes the client's execution decision, not the endpoint's name.
     pub dry_run: bool,
+    /// Whether the change is applied, refused, unknown, or never sent. Read
+    /// this before anything else on the receipt: every server-derived field
+    /// below is meaningless unless this says `applied`.
+    pub outcome: MutationOutcome,
+    /// The failure the call ended on, absent when it succeeded.
+    pub failure: Attested<ReceiptFailure>,
     pub actor: ReceiptActor,
     pub target: ReceiptTarget,
     pub decision: Attested<ReceiptDecision>,
@@ -525,6 +651,7 @@ impl MutationReceipt {
             self.target.object_version.is_well_formed(),
         );
         check("decision", self.decision.is_well_formed());
+        check("failure", self.failure.is_well_formed());
         check("approval_id", self.approval_id.is_well_formed());
         check("audit_id", self.audit_id.is_well_formed());
         check("rollback", self.rollback.is_well_formed());
@@ -547,6 +674,36 @@ impl MutationReceipt {
                 "rollback.restores_revision",
                 pointer.restores_revision.is_well_formed(),
             );
+        }
+        // Cross-field invariants. Without these the outcome field could
+        // disagree with the rest of the receipt and still validate — an
+        // `applied` receipt carrying a failure, or a dry run claiming the
+        // change landed, are exactly the contradictions an audit consumer
+        // cannot resolve from the outside.
+        if self.dry_run && self.outcome != MutationOutcome::NotSent {
+            problems.push(format!(
+                "dry_run receipts must report outcome 'not_sent', got '{}'",
+                self.outcome.as_str()
+            ));
+        }
+        if self.outcome.is_applied() && self.failure.value.is_some() {
+            problems.push("an applied mutation cannot carry a failure".to_string());
+        }
+        if matches!(
+            self.outcome,
+            MutationOutcome::Rejected | MutationOutcome::Unknown
+        ) && self.failure.value.is_none()
+        {
+            problems.push(format!(
+                "outcome '{}' must name the failure it ended on",
+                self.outcome.as_str()
+            ));
+        }
+        if !self.outcome.is_applied() && self.response.is_some() {
+            problems.push(format!(
+                "outcome '{}' carries a response document; only an applied mutation has one",
+                self.outcome.as_str()
+            ));
         }
         problems
     }
@@ -575,6 +732,17 @@ impl MutationReceipt {
             ),
             ("operation_id".to_string(), cell(&self.operation_id)),
             ("dry_run".to_string(), self.dry_run.to_string()),
+            ("outcome".to_string(), self.outcome.as_str().to_string()),
+            (
+                "failure".to_string(),
+                match (&self.failure.value, &self.failure.absent_reason) {
+                    (Some(failure), _) => {
+                        format!("{}/{}: {}", failure.class, failure.code, failure.message)
+                    }
+                    (None, Some(reason)) => format!("null ({})", reason.code),
+                    (None, None) => "null (UNATTESTED)".to_string(),
+                },
+            ),
             ("actor.subject".to_string(), cell(&self.actor.subject)),
             (
                 "actor.credential_source".to_string(),
@@ -772,20 +940,90 @@ impl VerbDescriptor {
 }
 
 // ---------------------------------------------------------------------------
+// Method/effect exceptions: where the HTTP verb does not predict the effect.
+// ---------------------------------------------------------------------------
+
+/// One verb whose declared [`VerbEffect`] deliberately disagrees with the HTTP
+/// method its builder emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MethodEffectException {
+    pub group: &'static str,
+    pub verb: &'static str,
+    /// The method the family builder emits for this verb. Stated so a builder
+    /// change invalidates the exception instead of silently widening it.
+    pub method: &'static str,
+    /// The effect that is true of the verb, regardless of the method.
+    pub effect: VerbEffect,
+    /// Why the method is not the truth here. Required prose: an exception with
+    /// no stated reason is indistinguishable from a misclassification someone
+    /// silenced.
+    pub why: &'static str,
+}
+
+/// Every verb whose effect the HTTP method gets wrong.
+///
+/// The classification guard in `receipt_test.rs` derives a verb's effect
+/// independently by rebuilding its request through the real family builder and
+/// reading the method. That is the right instinct — it is the only witness the
+/// test has that is not the field under test — but the method is a *proxy* for
+/// the effect, not the effect itself, and a bare `assert_eq!(!method_is_safe,
+/// verb.is_mutating())` made the proxy authoritative. It therefore did not
+/// detect misclassification of effect; it detected disagreement with the
+/// method, and it **pinned the one known-wrong classification in place**:
+/// correcting `mcp-identity callback` to `mutating` used to fail the guard.
+///
+/// This list is that guard's escape hatch, and it is deliberately narrow: an
+/// entry must name the method it expects, so it stops applying the moment the
+/// builder changes, and `method_effect_exceptions_are_all_live_and_needed`
+/// fails on any entry that names an unregistered verb, states the wrong
+/// method, or agrees with the method (i.e. is no longer an exception at all).
+pub const METHOD_EFFECT_EXCEPTIONS: &[MethodEffectException] = &[MethodEffectException {
+    group: "mcp-identity",
+    verb: "callback",
+    method: "GET",
+    effect: VerbEffect::Mutating,
+    why: "completeMcpIdentityOauth is a GET only because it is the OAuth redirect target the \
+          authorization server sends the browser to. It exchanges the authorization code and \
+          persists an identity grant, so it changes Control-Plane state and owes the operator a \
+          receipt exactly like `authorize` does.",
+}];
+
+/// The declared effect for `group verb` when the HTTP method is not a reliable
+/// witness, or `None` when the method is.
+pub fn method_effect_exception(group: &str, verb: &str) -> Option<&'static MethodEffectException> {
+    METHOD_EFFECT_EXCEPTIONS
+        .iter()
+        .find(|exception| exception.group == group && exception.verb == verb)
+}
+
+// ---------------------------------------------------------------------------
 // Revision chains and rollback pointers.
 // ---------------------------------------------------------------------------
 
 /// A resource family with a server-side revision chain, and how a mutation to
 /// it is reversed.
+///
+/// Membership is not "the family's response happens to contain the word
+/// `revision`". It is the conjunction of two facts, both checkable:
+///
+/// 1. the family's objects really are an append-only chain of revisions, and
+/// 2. the family's **own request builder** accepts `rollback_verb` and
+///    `archive_verb` with the argument shape [`RollbackPointer::command`]
+///    emits — because that doc promises the argv is safe to execute verbatim.
+///
+/// `rollback_pointer_argv_round_trips_through_every_familys_own_builder` holds
+/// (2) for every entry in [`REVISIONED_FAMILIES`], so an entry no test names
+/// cannot exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevisionedFamily {
     /// Registry group name.
     pub group: &'static str,
-    /// Verb that promotes an earlier revision back to live.
+    /// Verb that promotes an earlier revision back to live. Takes the chain id
+    /// plus `--data {"revision":N}`.
     pub rollback_verb: &'static str,
     /// Verb that retires the revision this mutation created, used when the
     /// created revision is the first in its chain and there is nothing to roll
-    /// back *to*.
+    /// back *to*. Takes the chain id plus the revision as a second segment.
     pub archive_verb: &'static str,
     /// Response field naming the revision number.
     pub revision_key: &'static str,
@@ -793,34 +1031,40 @@ pub struct RevisionedFamily {
     pub chain_id_keys: &'static [&'static str],
 }
 
-/// The families whose objects are revision chains. Derived from the OpenAPI
-/// contract: these are the mutating groups whose 2xx schemas declare a
-/// `revision`. Everything else gets a rollback pointer that is explicitly
-/// absent with [`absence_codes::RESOURCE_HAS_NO_REVISIONS`] rather than a
-/// missing key.
-pub const REVISIONED_FAMILIES: &[RevisionedFamily] = &[
-    RevisionedFamily {
-        group: "guardrail-policies",
-        rollback_verb: "rollback",
-        archive_verb: "archive",
-        revision_key: "revision",
-        chain_id_keys: &["policy_id", "id"],
-    },
-    RevisionedFamily {
-        group: "agent-schedules",
-        rollback_verb: "replace",
-        archive_verb: "delete",
-        revision_key: "revision",
-        chain_id_keys: &["id"],
-    },
-    RevisionedFamily {
-        group: "gateway-configs",
-        rollback_verb: "replace",
-        archive_verb: "delete",
-        revision_key: "revision",
-        chain_id_keys: &["id"],
-    },
-];
+/// The families whose objects are revision chains **and** whose builders accept
+/// the reversal argv the pointer emits. Everything else gets a rollback pointer
+/// that is explicitly absent with
+/// [`absence_codes::RESOURCE_HAS_NO_REVISIONS`] rather than a missing key.
+///
+/// # Why this list is one entry
+///
+/// It used to carry `agent-schedules` and `gateway-configs` as well, on the
+/// strength of their objects carrying a `revision` counter. Neither is a
+/// revision chain: both route through `build_crud`, so `revision` is a
+/// concurrency token on a single mutable row, and neither has a verb that
+/// restores an earlier one. The pointer emitted for them was therefore not
+/// merely uninformative, it was **destructive**: a `gateway-configs update` at
+/// revision 4 produced
+/// `ctl gateway-configs replace prod --data '{"revision":3}'`, which is a
+/// `PUT /admin/v1/gateway-configs/prod` that replaces the whole config profile
+/// with a one-field document — and the note above it claimed revisions were
+/// append-only. On a first revision the archive arm produced
+/// `ctl agent-schedules delete <id> 1`, addressing
+/// `DELETE /admin/v1/agent-schedules/<id>/1`, a path the API does not have.
+/// A receipt is an audit artifact, so a field that is wrong is worse than a
+/// field that is absent; both now report
+/// [`absence_codes::RESOURCE_HAS_NO_REVISIONS`], which is true of them.
+pub const REVISIONED_FAMILIES: &[RevisionedFamily] = &[RevisionedFamily {
+    // `rollback` is POST /guardrail-policies/{id}/rollback with a revision
+    // body; `archive` is DELETE /guardrail-policies/{id}/revisions/{revision}.
+    // Both are real verbs of this family's own builder — see
+    // `guardrail::build_guardrail_policies`.
+    group: "guardrail-policies",
+    rollback_verb: "rollback",
+    archive_verb: "archive",
+    revision_key: "revision",
+    chain_id_keys: &["policy_id", "id"],
+}];
 
 /// The revisioned-family entry for `group`, if any.
 pub fn revisioned_family(group: &str) -> Option<&'static RevisionedFamily> {
@@ -837,11 +1081,16 @@ pub fn revisioned_family(group: &str) -> Option<&'static RevisionedFamily> {
 /// checked against the contract and currently yields nothing for the audit and
 /// approval keys — which is the point: the receipt reports the gap rather than
 /// pretending the identifier does not exist.
+///
+/// Priority is load-bearing, not cosmetic: `revision` outranks `version`
+/// outranks `etag` because that is the order of specificity with which the
+/// contract names *the changed object's* version, and
+/// `object_version_prefers_the_most_specific_key` pins it.
 const AUDIT_ID_KEYS: &[&str] = &["audit_id", "audit_event_id", "audit_log_id"];
 const APPROVAL_ID_KEYS: &[&str] = &["approval_id", "tool_approval_id"];
 const OBJECT_VERSION_KEYS: &[&str] = &["revision", "version", "etag", "updated_at_unix"];
-const DECISION_KEYS: &[&str] = &["decision"];
-const DECISION_REASON_KEYS: &[&str] = &["decision_reason", "reason"];
+/// Keys naming the object a mutation addressed, in priority order.
+const RESOURCE_ID_KEYS: &[&str] = &["id", "policy_id"];
 
 /// One planned mutating invocation: the verb obligation, the request it will
 /// issue, and whether it is a dry run.
@@ -857,8 +1106,84 @@ pub struct MutationPlan<'a> {
     dry_run: bool,
     target: CliActionTarget,
     actor: ReceiptActor,
-    resource_id: Attested<String>,
+    /// The id path segments the invocation addressed, joined with `/`. `None`
+    /// for a collection-scoped verb.
+    resource_id: Option<String>,
     idempotency_key: Attested<String>,
+}
+
+/// What the client learned about the mutation, and the only input
+/// [`MutationPlan::build_receipt`] reads. Total over the four terminal states,
+/// so no path through [`MutationPlan::execute`] can end without a receipt.
+#[derive(Debug)]
+enum Executed<'a> {
+    /// `--dry-run`: nothing left the process.
+    NotSent,
+    /// The Control Plane API answered 2xx.
+    Applied(&'a ApiResponse),
+    /// The call failed. The `MutationOutcome` is derived from the error class,
+    /// because "the server refused" and "we never found out" are different
+    /// facts an operator acts on differently.
+    Failed(&'a CliError),
+}
+
+/// The result of executing a mutation: **always** a receipt, plus the failure
+/// when there was one.
+///
+/// This type exists because `Result<VerbOutput, CliError>` cannot express the
+/// contract. Under the old signature a non-2xx returned `Err` before rendering,
+/// so `--output json` printed an empty stdout and a line of prose on stderr: a
+/// `guardrail-policies activate` that 504s after the server committed recorded
+/// *nothing* in an audit pipeline — no `dry_run`, no status, no fingerprint, no
+/// statement that the outcome is unknown. The receipt is the output contract of
+/// a mutating verb; a contract with no way to say "this did not happen" fails
+/// exactly where an operator needs it.
+///
+/// The caller renders `output` to stdout and then propagates `failure`, so the
+/// process still exits on the error's own exit class.
+#[derive(Debug)]
+pub struct MutationReport {
+    output: VerbOutput,
+    failure: Option<CliError>,
+}
+
+impl MutationReport {
+    /// The receipt, produced on every path.
+    pub fn output(&self) -> &VerbOutput {
+        &self.output
+    }
+
+    /// The failure this mutation ended on, if any.
+    pub fn failure(&self) -> Option<&CliError> {
+        self.failure.as_ref()
+    }
+
+    /// Split into the renderable receipt and the failure to propagate. The
+    /// caller is expected to print the receipt **before** returning the error.
+    pub fn into_parts(self) -> (VerbOutput, Option<CliError>) {
+        (self.output, self.failure)
+    }
+
+    /// Collapse to a plain result, discarding the failing receipt. Only for
+    /// callers that have no stdout to write to (tests, internal probes) —
+    /// the shipped command path must use [`MutationReport::into_parts`].
+    pub fn into_result(self) -> CliResult<VerbOutput> {
+        match self.failure {
+            Some(error) => Err(error),
+            None => Ok(self.output),
+        }
+    }
+}
+
+impl From<VerbOutput> for MutationReport {
+    /// A receipt with no failure — the dry-run path, which cannot fail once the
+    /// plan exists.
+    fn from(output: VerbOutput) -> MutationReport {
+        MutationReport {
+            output,
+            failure: None,
+        }
+    }
 }
 
 impl<'a> MutationPlan<'a> {
@@ -905,11 +1230,11 @@ impl<'a> MutationPlan<'a> {
             ),
             endpoint: context.endpoint.clone(),
         };
-        let resource_id = Attested::or_absent(
-            (!segments.is_empty()).then(|| segments.join("/")),
-            absence_codes::COLLECTION_SCOPED_MUTATION,
-            "the verb addresses a collection; the server assigns the id in the response",
-        );
+        // The id the *invocation* addressed. A collection verb has none until
+        // the server assigns one, which `harvested_resource_id` picks up off
+        // the response — this is only the fallback for the paths where no
+        // response exists (dry run, refusal, ambiguous failure).
+        let resource_id = (!segments.is_empty()).then(|| segments.join("/"));
         let idempotency_key = Attested::or_absent(
             spec.body
                 .as_ref()
@@ -952,36 +1277,89 @@ impl<'a> MutationPlan<'a> {
     /// `null` with [`absence_codes::DRY_RUN_NOT_EXECUTED`].
     pub fn dry_run(self) -> VerbOutput {
         let verb = self.renderer.verb().clone();
-        let receipt = self.build_receipt(&verb, None);
+        let receipt = self.build_receipt(&verb, Executed::NotSent);
         self.renderer.render(receipt)
     }
 
-    /// Issue the mutation and produce its receipt.
-    pub async fn send<T: Transport>(self, client: &ControlPlaneClient<T>) -> CliResult<VerbOutput> {
-        let response = client.send(&self.spec).await?;
+    /// Issue the mutation and produce its receipt — **on every path**,
+    /// including a non-2xx and a transport failure that never got an answer.
+    /// See [`MutationReport`].
+    pub async fn send<T: Transport>(self, client: &ControlPlaneClient<T>) -> MutationReport {
         let verb = self.renderer.verb().clone();
-        let receipt = self.build_receipt(&verb, Some(&response));
-        Ok(self.renderer.render(receipt))
+        let (receipt, failure) = match client.send(&self.spec).await {
+            Ok(response) => (
+                self.build_receipt(&verb, Executed::Applied(&response)),
+                None,
+            ),
+            Err(error) => (
+                self.build_receipt(&verb, Executed::Failed(&error)),
+                Some(error),
+            ),
+        };
+        MutationReport {
+            output: self.renderer.render(receipt),
+            failure,
+        }
     }
 
     /// Route on the dry-run flag. The dry-run arm never borrows `client`.
-    pub async fn execute<T: Transport>(
-        self,
-        client: &ControlPlaneClient<T>,
-    ) -> CliResult<VerbOutput> {
+    pub async fn execute<T: Transport>(self, client: &ControlPlaneClient<T>) -> MutationReport {
         if self.dry_run {
-            return Ok(self.dry_run());
+            return MutationReport {
+                output: self.dry_run(),
+                failure: None,
+            };
         }
         self.send(client).await
     }
 
-    fn build_receipt(
-        &self,
-        verb: &VerbDescriptor,
-        response: Option<&ApiResponse>,
-    ) -> MutationReceipt {
+    fn build_receipt(&self, verb: &VerbDescriptor, executed: Executed<'_>) -> MutationReceipt {
+        let response = match executed {
+            Executed::Applied(response) => Some(response),
+            Executed::NotSent | Executed::Failed(_) => None,
+        };
         let body = response.map(|response| &response.body);
-        let dry_detail = "this invocation was a dry run: no state-changing request was issued";
+        let outcome = match &executed {
+            Executed::NotSent => MutationOutcome::NotSent,
+            Executed::Applied(_) => MutationOutcome::Applied,
+            Executed::Failed(error) => match error {
+                // An error envelope is the server's authoritative refusal: it
+                // decided, and it did not apply the change.
+                CliError::Api(_) => MutationOutcome::Rejected,
+                // No authoritative answer. The request may have been delivered
+                // and committed before the connection died - the 504-after-
+                // commit case - so claiming it did not happen would be a
+                // fabrication in the opposite direction.
+                CliError::Transport(_) => MutationOutcome::Unknown,
+                // `ControlPlaneClient::send` only raises these from
+                // `prepare_request`, i.e. before the transport is touched.
+                CliError::Usage(_) | CliError::Auth(_) => MutationOutcome::NotSent,
+            },
+        };
+        // The reason every server-derived field is null, stated once and used
+        // everywhere so a failing receipt cannot claim `dry_run` semantics on
+        // one field and something else on the next.
+        let (missing_code, missing_detail): (&str, &str) = match outcome {
+            MutationOutcome::Applied => ("", ""),
+            MutationOutcome::NotSent if self.dry_run => (
+                absence_codes::DRY_RUN_NOT_EXECUTED,
+                "this invocation was a dry run: no state-changing request was issued",
+            ),
+            MutationOutcome::NotSent => (
+                absence_codes::REQUEST_NOT_SENT,
+                "the request was rejected locally and never left the process, so nothing changed",
+            ),
+            MutationOutcome::Rejected => (
+                absence_codes::MUTATION_NOT_APPLIED,
+                "the Control Plane API refused this mutation, so no server-side artifact of the \
+                 change exists",
+            ),
+            MutationOutcome::Unknown => (
+                absence_codes::MUTATION_OUTCOME_UNKNOWN,
+                "no authoritative response was obtained: the mutation may or may not have been \
+                 applied server-side, and this client cannot tell which",
+            ),
+        };
         MutationReceipt {
             object: RECEIPT_OBJECT.to_string(),
             receipt_version: RECEIPT_VERSION,
@@ -993,10 +1371,19 @@ impl<'a> MutationPlan<'a> {
                 "this verb maps to no Control Plane API operation",
             ),
             dry_run: self.dry_run,
+            outcome,
+            failure: match &executed {
+                Executed::Failed(error) => Attested::present(receipt_failure(error)),
+                Executed::Applied(_) => Attested::absent(
+                    absence_codes::MUTATION_SUCCEEDED,
+                    "the Control Plane API accepted this mutation",
+                ),
+                Executed::NotSent => Attested::absent(missing_code, missing_detail),
+            },
             actor: self.actor.clone(),
             target: ReceiptTarget {
                 group: self.group.clone(),
-                resource_id: self.resource_id.clone(),
+                resource_id: self.attested_resource_id(body),
                 method: self.spec.method.as_str().to_string(),
                 path: self.spec.path.clone(),
                 action: CLI_ACTION_CLASS.to_string(),
@@ -1005,72 +1392,131 @@ impl<'a> MutationPlan<'a> {
                 action_fingerprint_contract: ACTION_FINGERPRINT_CONTRACT.to_string(),
                 object_version: match body {
                     Some(body) => Attested::or_absent(
-                        first_scalar(body, OBJECT_VERSION_KEYS),
+                        envelope_scalar(body, OBJECT_VERSION_KEYS),
                         absence_codes::NO_OBJECT_VERSION,
                         "the response document named no revision, version, or etag for the \
                          changed object",
                     ),
-                    None => Attested::absent(absence_codes::DRY_RUN_NOT_EXECUTED, dry_detail),
+                    None => Attested::absent(missing_code, missing_detail),
                 },
             },
-            decision: match body {
-                Some(body) => Attested::or_absent(
-                    decision_from_body(body),
-                    absence_codes::NO_DECISION_IN_CONTRACT,
-                    "this endpoint's response schema declares no policy decision; the mutation \
-                     was authorized by the bearer token's scope alone",
-                ),
-                None => Attested::absent(absence_codes::DRY_RUN_NOT_EXECUTED, dry_detail),
-            },
+            // Never harvested from the response. See `ReceiptDecision`: the
+            // `decision` a response carries is the resource's own state, not a
+            // verdict on this call, and no operation in the contract returns
+            // the latter.
+            decision: Attested::absent(
+                absence_codes::NO_DECISION_IN_CONTRACT,
+                "no Control Plane API operation returns a governance verdict on the CLI call \
+                 itself; the `decision` a response may carry describes the resource's own state \
+                 (an approval's verdict, a payment attempt's outcome) and is deliberately not \
+                 reported here - see issue #505",
+            ),
             approval_id: match body {
                 Some(body) => Attested::or_absent(
-                    first_scalar(body, APPROVAL_ID_KEYS),
+                    envelope_scalar(body, APPROVAL_ID_KEYS),
                     absence_codes::NO_APPROVAL_ID_IN_CONTRACT,
                     "this endpoint's response schema declares no approval identifier; the \
                      mutation crossed no approval gate",
                 ),
-                None => Attested::absent(absence_codes::DRY_RUN_NOT_EXECUTED, dry_detail),
+                None => Attested::absent(missing_code, missing_detail),
             },
             audit_id: match body {
                 Some(body) => Attested::or_absent(
-                    first_scalar(body, AUDIT_ID_KEYS),
+                    envelope_scalar(body, AUDIT_ID_KEYS),
                     absence_codes::NO_AUDIT_ID_IN_CONTRACT,
-                    "this endpoint returns no audit identifier (no coverable mutating operation \
-                     in the contract does); the audit row exists server-side but cannot be \
-                     addressed from this response - see issue #505",
+                    "this endpoint returns no audit identifier (none of the 135 mutating \
+                     operations in the contract does); the audit row exists server-side but \
+                     cannot be addressed from this response - see issue #505",
                 ),
-                None => Attested::absent(absence_codes::DRY_RUN_NOT_EXECUTED, dry_detail),
+                None => Attested::absent(missing_code, missing_detail),
             },
-            rollback: self.rollback_pointer(body),
+            // "This family has no revision chain" is a fact about the family,
+            // not about this call, so it is reported even on a dry run or a
+            // refusal - `rollback_pointer` checks the family before it looks
+            // at the body.
+            rollback: self.rollback_pointer(body, missing_code, missing_detail),
             idempotency_key: self.idempotency_key.clone(),
             correlation: ReceiptCorrelation {
-                request_id: match response {
-                    Some(response) => Attested::or_absent(
+                request_id: match (response, &executed) {
+                    (Some(response), _) => Attested::or_absent(
                         response.request_id.clone(),
                         absence_codes::NO_CORRELATION_ID,
                         "the response carried no x-request-id header or envelope request_id",
                     ),
-                    None => Attested::absent(absence_codes::DRY_RUN_NOT_EXECUTED, dry_detail),
+                    // A refusal still correlates: the server's error envelope
+                    // carries the same ids, and a failed mutation is precisely
+                    // when an operator needs to join to gateway evidence.
+                    (None, Executed::Failed(CliError::Api(api))) => Attested::or_absent(
+                        api.request_id.clone(),
+                        absence_codes::NO_CORRELATION_ID,
+                        "the error response carried no x-request-id header or envelope request_id",
+                    ),
+                    _ => Attested::absent(missing_code, missing_detail),
                 },
-                trace_id: match response {
-                    Some(response) => Attested::or_absent(
+                trace_id: match (response, &executed) {
+                    (Some(response), _) => Attested::or_absent(
                         response.trace_id.clone(),
                         absence_codes::NO_CORRELATION_ID,
                         "the response carried no x-trace-id header",
                     ),
-                    None => Attested::absent(absence_codes::DRY_RUN_NOT_EXECUTED, dry_detail),
+                    (None, Executed::Failed(CliError::Api(api))) => Attested::or_absent(
+                        api.trace_id.clone(),
+                        absence_codes::NO_CORRELATION_ID,
+                        "the error response carried no x-trace-id header",
+                    ),
+                    _ => Attested::absent(missing_code, missing_detail),
                 },
             },
-            http_status: match response {
-                Some(response) => Attested::present(response.status),
-                None => Attested::absent(absence_codes::DRY_RUN_NOT_EXECUTED, dry_detail),
+            http_status: match (response, &executed) {
+                (Some(response), _) => Attested::present(response.status),
+                (None, Executed::Failed(CliError::Api(api))) => Attested::present(api.http_status),
+                (None, Executed::Failed(CliError::Transport(_))) => Attested::absent(
+                    absence_codes::NO_HTTP_RESPONSE,
+                    "the transport obtained no authoritative HTTP response",
+                ),
+                _ => Attested::absent(missing_code, missing_detail),
             },
             response: body.cloned(),
         }
     }
 
+    /// The id of the object the mutation addressed — harvested from the
+    /// response when the server assigned it, and otherwise the id segments the
+    /// invocation named.
+    ///
+    /// The response is consulted *first* for a collection verb, because that is
+    /// the whole point: `ctl projects create` used to leave this `null` with
+    /// "the server assigns the id in the response" even though the response had
+    /// already arrived carrying `proj_1`, so an audit query keyed on
+    /// `target.resource_id` could not say what was created and the operator had
+    /// to parse the nested raw body — the bare-body reading this receipt exists
+    /// to remove.
+    fn attested_resource_id(&self, body: Option<&Value>) -> Attested<String> {
+        if let Some(addressed) = &self.resource_id {
+            return Attested::present(addressed.clone());
+        }
+        match body {
+            Some(body) => Attested::or_absent(
+                envelope_scalar(body, RESOURCE_ID_KEYS),
+                absence_codes::RESPONSE_NAMES_NO_RESOURCE_ID,
+                "the verb addressed a collection and the response document named no single id \
+                 for the object it created",
+            ),
+            None => Attested::absent(
+                absence_codes::COLLECTION_SCOPED_MUTATION,
+                "the verb addresses a collection and no response was obtained, so no id was \
+                 assigned to name",
+            ),
+        }
+    }
+
     /// Derive the reversal pointer for the changed object.
-    fn rollback_pointer(&self, body: Option<&Value>) -> Attested<RollbackPointer> {
+    fn rollback_pointer(
+        &self,
+        body: Option<&Value>,
+        missing_code: &str,
+        missing_detail: &str,
+    ) -> Attested<RollbackPointer> {
         let Some(family) = revisioned_family(&self.group) else {
             return Attested::absent(
                 absence_codes::RESOURCE_HAS_NO_REVISIONS,
@@ -1079,13 +1525,9 @@ impl<'a> MutationPlan<'a> {
             );
         };
         let Some(body) = body else {
-            return Attested::absent(
-                absence_codes::DRY_RUN_NOT_EXECUTED,
-                "this invocation was a dry run: no revision was created, so there is nothing \
-                 to roll back",
-            );
+            return Attested::absent(missing_code, missing_detail);
         };
-        let Some(revision) = first_scalar(body, &[family.revision_key]) else {
+        let Some(revision) = envelope_scalar(body, &[family.revision_key]) else {
             return Attested::absent(
                 absence_codes::RESPONSE_CARRIES_NO_REVISION,
                 "the response named no revision, so the reversal target cannot be derived \
@@ -1095,8 +1537,8 @@ impl<'a> MutationPlan<'a> {
         // The chain id comes from the response when the server named it, and
         // otherwise from the id segments the operator addressed - never from
         // prose, so the emitted command is always complete.
-        let chain_id = first_scalar(body, family.chain_id_keys)
-            .or_else(|| self.resource_id.value.clone())
+        let chain_id = envelope_scalar(body, family.chain_id_keys)
+            .or_else(|| self.resource_id.clone())
             .unwrap_or_default();
         let previous = revision
             .parse::<u64>()
@@ -1145,7 +1587,43 @@ impl<'a> MutationPlan<'a> {
     }
 }
 
+/// Project a [`CliError`] onto the receipt's failure vocabulary.
+///
+/// The server's own `code` survives when there is one, so an audit query can
+/// select `failure.code == "revision_conflict"` without parsing prose.
+fn receipt_failure(error: &CliError) -> ReceiptFailure {
+    match error {
+        CliError::Api(api) => ReceiptFailure {
+            class: "api".to_string(),
+            code: api.code.clone(),
+            message: api.message.clone(),
+        },
+        CliError::Transport(message) => ReceiptFailure {
+            class: "transport".to_string(),
+            code: "no_authoritative_response".to_string(),
+            message: message.clone(),
+        },
+        CliError::Usage(message) => ReceiptFailure {
+            class: "usage".to_string(),
+            code: "client_error".to_string(),
+            message: message.clone(),
+        },
+        CliError::Auth(message) => ReceiptFailure {
+            class: "auth".to_string(),
+            code: "client_error".to_string(),
+            message: message.clone(),
+        },
+    }
+}
+
 /// How the credential was obtained — never the credential itself.
+///
+/// `AuthSource::Inline { token }` holds a plaintext bearer token, and this
+/// function is the only thing standing between it and a receipt piped into an
+/// audit query. Returning `"inline"` — the *shape* of the source, never the
+/// material — is the whole contract;
+/// `receipt_never_carries_the_token_it_authenticated_with` pins it by asserting
+/// on the rendered JSON and table, not on this function's return value.
 fn credential_source(auth: &AuthSource) -> String {
     match auth {
         AuthSource::None => "none".to_string(),
@@ -1155,58 +1633,62 @@ fn credential_source(auth: &AuthSource) -> String {
     }
 }
 
-/// The first scalar value found under any of `keys`, searching the document
-/// depth-first. Response documents wrap the object one level down
-/// (`{"object": "...", "policy": {...}}`), so a top-level-only lookup would
-/// miss every identifier the server actually returns.
-fn first_scalar(body: &Value, keys: &[&str]) -> Option<String> {
-    fn scalar(value: &Value) -> Option<String> {
-        match value {
-            Value::String(text) if !text.is_empty() => Some(text.clone()),
-            Value::Number(number) => Some(number.to_string()),
-            _ => None,
-        }
+/// A scalar the receipt is willing to attest: a non-empty string or a number.
+fn attestable_scalar(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
     }
-    fn walk(value: &Value, keys: &[&str], depth: usize) -> Option<String> {
-        if depth > 4 {
-            return None;
-        }
-        match value {
-            Value::Object(map) => {
-                for key in keys {
-                    if let Some(found) = map.get(*key).and_then(scalar) {
-                        return Some(found);
-                    }
-                }
-                map.values().find_map(|value| walk(value, keys, depth + 1))
-            }
-            Value::Array(items) => items.iter().find_map(|item| walk(item, keys, depth + 1)),
-            _ => None,
-        }
-    }
-    walk(body, keys, 0)
 }
 
-/// Project a response's decision fields onto the canonical decision vocabulary
-/// (`allow`/`deny`/`ask`/`degrade`) the runtime uses. An unrecognized value is
-/// **not** coerced to `allow`: it yields `None`, so the receipt reports the
-/// field as absent rather than inventing a permissive decision.
-fn decision_from_body(body: &Value) -> Option<ReceiptDecision> {
-    let raw = first_scalar(body, DECISION_KEYS)?;
-    let class = match raw.to_ascii_lowercase().as_str() {
-        "allow" | "allowed" | "approve" | "approved" => DecisionClass::Allow,
-        "deny" | "denied" | "reject" | "rejected" | "expired" => DecisionClass::Deny,
-        "ask" | "pending" | "approval_required" => DecisionClass::Ask,
-        "degrade" | "degraded" => DecisionClass::Degrade,
-        _ => return None,
-    };
-    Some(ReceiptDecision {
-        decision: class,
-        reason: DecisionReason {
-            code: raw,
-            detail: first_scalar(body, DECISION_REASON_KEYS),
-        },
-    })
+/// The single resource object a Control Plane API response envelope wraps, if
+/// the envelope is unambiguous about which one it is.
+///
+/// Every mutating 2xx schema in the contract is either the object itself or
+/// `{"object": "<type>", "<resource>": { … }}`. So the resource is: the one
+/// object-valued sibling other than the `object` discriminator. Two of them
+/// means the envelope names no single subject, and the honest answer is to
+/// harvest nothing rather than to pick one.
+fn wrapped_resource(body: &Value) -> Option<&Value> {
+    let map = body.as_object()?;
+    let mut nested = map
+        .iter()
+        .filter(|(key, value)| key.as_str() != "object" && value.is_object());
+    let (_, only) = nested.next()?;
+    match nested.next() {
+        Some(_) => None,
+        None => Some(only),
+    }
+}
+
+/// The first scalar found under any of `keys`, searched **only** where the
+/// contract puts the changed object: the envelope's top level, and then the one
+/// resource object it wraps.
+///
+/// This replaced a depth-4 depth-first walk of the whole document, which was
+/// wrong in two compounding ways. Sibling order is alphabetical (`serde_json`
+/// is built without `preserve_order` here), so which of several equally-deep
+/// matches won was decided by key spelling; and the walk descended into nested
+/// sub-documents, where a rule's or plugin's own `version` — `SkillPackage`,
+/// `AssetSummary`, `AdminPlugin`, `X402ConversionRule` all declare one — would
+/// be attested as `target.object_version`, a field documented as the version of
+/// the *changed object*. Bounding the search to the envelope makes the answer a
+/// function of the contract's shape instead of a function of alphabetization.
+fn envelope_scalar(body: &Value, keys: &[&str]) -> Option<String> {
+    let map = body.as_object()?;
+    for key in keys {
+        if let Some(found) = map.get(*key).and_then(attestable_scalar) {
+            return Some(found);
+        }
+    }
+    let resource = wrapped_resource(body)?.as_object()?;
+    for key in keys {
+        if let Some(found) = resource.get(*key).and_then(attestable_scalar) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

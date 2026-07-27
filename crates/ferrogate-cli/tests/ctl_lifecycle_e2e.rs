@@ -140,6 +140,46 @@ fn endpoint_for(addr: &str) -> String {
     format!("http://{addr}")
 }
 
+/// A mutating verb the server refused still writes its decision receipt to
+/// stdout, stating that the change did **not** take effect and why.
+///
+/// Before the #505 rework a non-2xx returned before rendering, so `--output
+/// json` produced an empty stdout and the only record of the attempt was prose
+/// on stderr. The receipt is the output contract of a mutating verb; a contract
+/// that goes silent on failure fails exactly where an operator needs it, so
+/// "stdout is empty on a failed mutation" is no longer the assertion — "stdout
+/// carries a receipt that says it did not happen" is.
+fn assert_refused_receipt(run: &CliRun, expected_code: &str) {
+    let receipt = run.json();
+    assert_eq!(
+        receipt["object"], "mutation_receipt",
+        "a failed mutation must still emit a receipt: {receipt}"
+    );
+    assert_eq!(
+        receipt["outcome"], "rejected",
+        "the server answered with an error envelope, so the change was refused: {receipt}"
+    );
+    assert_eq!(receipt["dry_run"], false, "{receipt}");
+    assert_eq!(
+        receipt["failure"]["value"]["code"], expected_code,
+        "the receipt must carry the server's own error code: {receipt}"
+    );
+    assert!(
+        receipt["http_status"]["value"].is_number(),
+        "the refusal's status is part of the audit record: {receipt}"
+    );
+    assert!(
+        receipt["response"].is_null(),
+        "a refused mutation carries no response document: {receipt}"
+    );
+    assert!(
+        receipt["target"]["action_fingerprint"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:")),
+        "the refused action is still identified: {receipt}"
+    );
+}
+
 fn body_of(response: &str) -> &str {
     response
         .split_once("\r\n\r\n")
@@ -409,11 +449,12 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
         "activating a missing revision -> NotFoundConflict (exit 4): {}",
         bad.stderr()
     );
-    assert!(
-        bad.stdout().trim().is_empty(),
-        "no data on stdout for a failed activation: {}",
-        bad.stdout()
-    );
+    // Since the #505 rework a failed mutation still emits its receipt on
+    // stdout: an activation that the server refused is exactly the event an
+    // audit pipeline must record, and an empty stdout recorded nothing at all.
+    // The prose stays on stderr; the receipt says WHAT was attempted and that
+    // it did not take effect.
+    assert_refused_receipt(&bad, "guardrail_policy_revision_not_found");
     assert!(
         bad.stderr().contains("guardrail_policy_revision_not_found"),
         "actionable server error surfaced: {}",
@@ -797,11 +838,7 @@ fn tool_approval_decision_via_cli_records_audit_and_fails_closed() {
         "server fingerprint-mismatch code surfaced: {}",
         mismatch.stderr()
     );
-    assert!(
-        mismatch.stdout().trim().is_empty(),
-        "no data on stdout for a failed decision: {}",
-        mismatch.stdout()
-    );
+    assert_refused_receipt(&mismatch, "tool_approval_fingerprint_mismatch");
     // The gated execution fails closed too.
     assert_eq!(denied_exec.join().unwrap()["error"]["code"], "tool_denied");
 
@@ -981,10 +1018,17 @@ fn insufficient_scope_and_wrong_tenant_fail_closed_via_cli() {
         cross.code(),
         cross.stderr()
     );
+    // A cross-tenant denial is a refused mutation, so it too leaves a receipt
+    // naming the target it was refused on — the audit record of an attempted
+    // cross-tenant write is more valuable than a clean stdout.
+    let receipt = cross.json();
+    assert_eq!(receipt["object"], "mutation_receipt", "{receipt}");
+    assert_eq!(receipt["outcome"], "rejected", "{receipt}");
+    assert_eq!(receipt["dry_run"], false, "{receipt}");
+    assert_eq!(receipt["group"], "agent-schedules", "{receipt}");
     assert!(
-        cross.stdout().trim().is_empty(),
-        "no data on stdout for a cross-tenant denial: {}",
-        cross.stdout()
+        receipt["response"].is_null(),
+        "a refused mutation carries no response document: {receipt}"
     );
 
     gateway.kill().unwrap();

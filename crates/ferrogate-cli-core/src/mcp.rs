@@ -97,7 +97,15 @@ impl CommandGroup for McpIdentityGroup {
                     "Revoke an MCP identity grant",
                     "revokeMcpIdentity",
                 ),
-                VerbDescriptor::read(
+                // A GET that MUTATES. `completeMcpIdentityOauth` is a GET only
+                // because it is the OAuth redirect target the authorization
+                // server sends a browser to; completing the flow exchanges the
+                // authorization code and persists an identity grant. The
+                // method is therefore not the witness to its effect, and this
+                // is the one registered verb where the two disagree - see
+                // `receipt::METHOD_EFFECT_EXCEPTIONS`, which carries the
+                // reason and is checked by the classification guard.
+                VerbDescriptor::mutating(
                     "callback",
                     "Complete an MCP identity OAuth callback",
                     "completeMcpIdentityOauth",
