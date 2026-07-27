@@ -139,6 +139,20 @@ stops assuming verbs that do not exist.
 | **cancel** | Cloudflare documents **fibers** (`startFiber().cancel`, `abortSubAgent`) — but the pinned `agents@0.0.109` **ships no fiber API at all** (`grep -ri fiber node_modules/agents/` finds nothing). | `POST /control/cancel` — a **cooperative** cancel: abort an `AbortSignal` the workload observes + set a durable latch that refuses later `invoke`s. Distinct from "stop". See the caveat below. |
 | **destroy / delete** | `this.destroy()` — drops the DO's tables, deletes the alarm, clears storage, then aborts the object. | `POST /control/destroy` — calls `this.destroy()`. Because the abort also tears down the RPC channel the call arrived on, a completed destroy surfaces as a rejected RPC with reason `"destroyed"`, which the route maps back to the `cleaned_up` envelope. |
 
+**Why `destroy` must be the SDK call and not `ctx.storage.deleteAll()` (issue
+#482).** `deleteAll()` alone looks equivalent — it clears the synced state, so a
+following `status` still answers 404 — but it leaves the Durable Object's **alarm
+armed**: Cloudflare only made `deleteAll()` delete the alarm from compatibility
+date `2026-02-24`, and this Worker deploys `compatibility_date = "2025-06-01"`
+with no `delete_all_deletes_alarm` flag. It also leaves `cf_agents_schedules`
+standing, so the Agent constructor re-arms the alarm from the surviving row on
+the next wake. Either way a run destroyed while carrying a #426 schedule wakes
+back up after its own cleanup and bills compute, and in-flight work and
+WebSockets are never aborted (`ctx.abort()` is skipped).
+`workers/agent-gateway/test/destroy-alarm.test.ts` pins this: after a destroy the
+platform reports **no** pending alarm, while a sibling run that was not destroyed
+still has one.
+
 ### RPC vs. path routing (per verb)
 
 Every control verb uses **DO RPC** via `getAgentByName(ns, name).method(...)` (the

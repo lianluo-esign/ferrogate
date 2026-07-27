@@ -89,6 +89,21 @@ exactly that. See
 [`../../docs/cloudflare-agent-gateway.md`](../../docs/cloudflare-agent-gateway.md)
 §3a for the full verb→primitive→route mapping.
 
+**`destroy` calls the SDK primitive, alarm and all.** `destroyRun()` signals any
+in-flight workload, writes the `cleaned_up` status its envelope reports, and then
+calls the SDK's `this.destroy()`, which DROPs the four `cf_agents_*` tables,
+calls `ctx.storage.deleteAlarm()`, clears storage and finally aborts the object
+with reason `"destroyed"`. Because that abort also tears down the RPC channel the
+destroy call arrived on, a *completed* destroy surfaces to the route as a
+rejected RPC carrying that reason, which is mapped back onto the `cleaned_up`
+envelope. The `deleteAlarm()` is load-bearing rather than decorative: at this
+deployment's `compatibility_date = "2025-06-01"`, `ctx.storage.deleteAll()` does
+**not** clear the Durable Object's alarm (Cloudflare made it do so only from
+compatibility date `2026-02-24`), so a destroy that called `deleteAll()` alone
+would leave a #426 schedule's alarm pending — it fires, the Durable Object is
+re-instantiated, and a run marked `cleaned_up` wakes up and bills compute. Issue
+#482; regression-tested in `test/destroy-alarm.test.ts`.
+
 The Rust side (`crates/ferrogate-runtime/src/cloudflare_gateway_control.rs`)
 maps `CloudflareControlSurface` verbs onto exactly these routes.
 
