@@ -137,16 +137,7 @@ fn head_of_ledger(sql: &str) -> (u64, String) {
             .next()
             .unwrap_or_default()
             .trim();
-        // Postgres folds an UNQUOTED identifier and compares a QUOTED one byte
-        // for byte, so `"Storage_Schema_Migrations"` is a DIFFERENT table. This
-        // reader used to strip the quotes and fold anyway, which made it read a
-        // row `ferrogate-storage` deliberately ignores and red the assertion
-        // below falsely -- the scenario blocked on its own bookkeeping again.
-        let is_ledger = match table.strip_prefix('"').and_then(|q| q.strip_suffix('"')) {
-            Some(quoted) => quoted == "storage_schema_migrations",
-            None => table.eq_ignore_ascii_case("storage_schema_migrations"),
-        };
-        if !is_ledger {
+        if !resolves_to_ledger(table) {
             continue;
         }
         let mut clause = after_table
@@ -184,6 +175,52 @@ fn head_of_ledger(sql: &str) -> (u64, String) {
         }
     }
     head.expect("the control-plane SQL must record migrations")
+}
+
+/// True when a table reference's last dot-component IS the ledger table.
+///
+/// Postgres folds an UNQUOTED identifier and compares a QUOTED one byte for
+/// byte, so `"Storage_Schema_Migrations"` is a DIFFERENT table. This reader used
+/// to strip the quotes and fold anyway, which made it read a row
+/// `ferrogate-storage` deliberately ignores and red
+/// `the_supabase_restart_migration_expectation_is_the_head_of_the_applied_sql`
+/// falsely -- the scenario blocked on its own bookkeeping again.
+fn resolves_to_ledger(reference: &str) -> bool {
+    let table = reference
+        .trim()
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    match table.strip_prefix('"').and_then(|q| q.strip_suffix('"')) {
+        Some(quoted) => quoted == "storage_schema_migrations",
+        None => table.eq_ignore_ascii_case("storage_schema_migrations"),
+    }
+}
+
+/// Does a stored (non-`DO`) dollar-quoted body hold a ledger `INSERT`?
+///
+/// Anchored exactly the way [`head_of_ledger`] anchors, so there is no second
+/// matcher to drift: whole-word `INSERT`, then `INTO`, then optional `ONLY`,
+/// then the table reference.
+fn body_hides_a_ledger_insert(body: &str) -> bool {
+    let upper = body.to_ascii_uppercase();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    upper.match_indices("INSERT").any(|(at, _)| {
+        if at > 0 && word(body.as_bytes()[at - 1]) {
+            return false;
+        }
+        let Some(after_into) = after_keyword(&body[at..], "INSERT")
+            .and_then(|rest| after_keyword(rest.trim_start(), "INTO"))
+        else {
+            return false;
+        };
+        let after_only = after_keyword(after_into.trim_start(), "ONLY").unwrap_or(after_into);
+        after_only
+            .trim_start()
+            .split_once('(')
+            .is_some_and(|(reference, _)| resolves_to_ledger(reference))
+    })
 }
 
 /// `keyword` at the front of `text`, case-insensitively and as a whole word;
@@ -257,9 +294,21 @@ fn strip_sql_comments(sql: &str) -> String {
                         .find(tag)
                         .unwrap_or_else(|| panic!("a `{tag} ... {tag}` body is never closed"));
                     // A `DO` body runs as the file loads and records real ledger
-                    // rows; any other body is text the server merely stores.
+                    // rows. Any other body is a string -- and whether the server
+                    // ever RUNS that string is not something this text decides:
+                    // `CREATE PROCEDURE p() AS $b$ ... $b$;` applies nothing
+                    // until `CALL p();` applies all of it. `ferrogate-storage`
+                    // refuses such a body rather than guessing, so this reader
+                    // refuses it too; four readers disagreeing about which rows
+                    // exist is the failure this file exists to prevent.
                     if ends_with_do_introducer(&code) {
                         code.push_str(&strip_sql_comments(&body[..end]));
+                    } else {
+                        assert!(
+                            !body_hides_a_ledger_insert(&body[..end]),
+                            "a stored `{tag} ... {tag}` body hides a storage_schema_migrations \
+                             INSERT; `CALL`, `SELECT f()` and `EXECUTE` all apply it"
+                        );
                     }
                     rest = &body[end + tag.len()..];
                 }
@@ -353,13 +402,17 @@ fn ends_with_e_prefix(code: &str) -> bool {
 /// the SQL, ANY divergence between the harness's expectation and the file reds,
 /// including the harness simply falling behind a new migration.
 ///
-/// Does NOT catch: a ledger row written by `COPY`, `UPDATE`, `MERGE` or SQL
-/// assembled at runtime. Like the three readers in `ferrogate-storage`, this one
-/// anchors on `INSERT`, so on that dimension they all go quiet together. It also
-/// does not skip `'...'` literals when hunting for the anchor, so a literal
-/// containing the words `INSERT INTO storage_schema_migrations` would be read
-/// here and not by the const parser -- a divergence that reds this test rather
-/// than hiding anything.
+/// Does NOT catch: a ledger row written by `COPY`, `UPDATE` or `MERGE`. Like the
+/// three readers in `ferrogate-storage`, this one anchors on `INSERT`, so on that
+/// dimension they all go quiet together.
+///
+/// It does not skip `'...'` literals when hunting for the anchor -- review
+/// checked this reader shape by shape and found no lag anywhere in it, which is
+/// why `insert_anchors` in `ferrogate-storage` was rewritten to match rather
+/// than the other way round. A literal containing the words
+/// `INSERT INTO storage_schema_migrations` would be read here; it cannot reach
+/// this assertion, because `region_hides_ledger_insert` makes that same text a
+/// const panic and `ferrogate-storage` does not build at all.
 #[test]
 fn the_supabase_restart_migration_expectation_is_the_head_of_the_applied_sql() {
     let (version, name) = head_of_ledger(CONTROL_PLANE_INIT_SQL);
@@ -376,8 +429,10 @@ fn the_supabase_restart_migration_expectation_is_the_head_of_the_applied_sql() {
 /// Pins `head_of_ledger` and `strip_sql_comments` against the shapes the #511
 /// rework settled on the storage side: a second tuple in one `VALUES` clause, a
 /// schema-qualified table, keywords in any case with `ONLY`, a row parked
-/// inside a comment, a case-sensitive double-quoted table name, and an
-/// apostrophe living outside a `'...'` literal.
+/// inside a comment, a case-sensitive double-quoted table name, an apostrophe
+/// living outside a `'...'` literal, and a stored body carrying no ledger row.
+/// The stored body that DOES carry one is
+/// `the_harness_reader_refuses_a_ledger_row_inside_a_stored_body`, below.
 ///
 /// Catches: leaving this reader line-oriented, which is where review found it;
 /// and folding a quoted identifier, which review found here after the last
@@ -444,19 +499,40 @@ fn the_harness_ledger_reader_reads_the_ledger_shapes_listed_here() {
         (60, "060_after_the_apostrophes".to_string()),
         "a reader that knows only `'...'` reads nothing after the first stray apostrophe"
     );
-    // A `CREATE FUNCTION` body is stored, not run, so a ledger row written
-    // there is not applied and must not raise the harness's expectation.
+    // A stored body with no ledger row in it is skipped, so a schema file that
+    // ships helper functions still reads.
     assert_eq!(
         head_of_ledger(
-            "CREATE FUNCTION seed() RETURNS void AS $b$\n\
-               INSERT INTO storage_schema_migrations (version, name)\n\
-               VALUES (99, '099_never_applied');\n\
+            "CREATE FUNCTION touch() RETURNS void AS $b$\n\
+               INSERT INTO audit_log (note) VALUES ('touched');\n\
              $b$ LANGUAGE sql;\n\
              INSERT INTO storage_schema_migrations (version, name)\n\
              VALUES (60, '060_actually_applied');\n"
         ),
         (60, "060_actually_applied".to_string()),
-        "a body-blind reader reports 99 and puts the harness above every database"
+        "a body-blind reader reports the audit row and cannot parse its VALUES"
+    );
+}
+
+/// A ledger row inside a STORED dollar-quoted body is refused here too.
+///
+/// Pins `strip_sql_comments`' `else` branch and `body_hides_a_ledger_insert`.
+///
+/// Catches: this reader keeping the round-3 rule (skip every non-`DO` body)
+/// after `ferrogate-storage` stopped guessing. `CREATE PROCEDURE p() AS $b$
+/// INSERT ... $b$; CALL p();` writes a row the DATABASE has, so a reader that
+/// skips it reports a head BELOW the database and the restart scenario fails on
+/// bookkeeping -- #511's own mechanism -- while the storage crate refuses to
+/// build. Whichever answer is right, the two must not differ.
+#[test]
+#[should_panic(expected = "body hides a storage_schema_migrations INSERT")]
+fn the_harness_reader_refuses_a_ledger_row_inside_a_stored_body() {
+    let _ = head_of_ledger(
+        "CREATE PROCEDURE p() AS $b$\n\
+           INSERT INTO storage_schema_migrations (version, name)\n\
+           VALUES (60, '060_via_call');\n\
+         $b$ LANGUAGE sql;\n\
+         CALL p();\n",
     );
 }
 

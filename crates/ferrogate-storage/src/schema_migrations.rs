@@ -41,31 +41,39 @@
 //!   recognized statement is data, not code, so no comment marker inside one
 //!   starts a comment. An unterminated comment or literal is a const panic, not
 //!   a silent skip to end-of-file.
-//! * **Quoting is read the way Postgres lexes it, and a quoted region may not
-//!   HIDE a ledger statement.** Review found the previous round's literal
+//! * **Quoting is read the way Postgres lexes it, and NO region this scan skips
+//!   may HIDE a ledger statement.** Review found the previous round's literal
 //!   skipping fail-OPEN: it recognized only the bare `'...'` spelling, so ONE
 //!   stray apostrophe outside it -- in a `COPY ... FROM stdin` payload, in
 //!   `$q$don't$q$`, in the identifier `"it's"`, in `E'a\''` -- shifted every
 //!   later quote by one and dropped ledger rows in silence (64 rows became 38,
-//!   or 22, with no panic). Two things answer that, and the second is the one
-//!   that does not depend on guessing every construct:
-//!   1. `E'...'` (backslash escapes), `U&'...'`, `"..."` (doubled delimiter) and
+//!   with no panic, on all four spellings). Two things answer that, and the
+//!   second is the one that does not depend on guessing every construct:
+//!   1. `E'...'` (backslash escapes), `"..."` (doubled delimiter) and
 //!      `$tag$ ... $tag$` are each lexed as their own region, so an apostrophe
 //!      inside one is data and cannot shift anything;
-//!   2. before a `'...'` or `"..."` region is skipped, its INTERIOR is scanned
-//!      for a ledger `INSERT`, and finding one is a const panic. Any desync,
-//!      from any construct modelled or not, either swallows a ledger anchor
-//!      (arm 2 fires) or truncates a ledger statement (the arms below fire).
-//!      Losing a migration quietly is what this module exists to prevent, so
-//!      the fallback is a build failure, not a lower head.
-//! * **`$tag$ ... $tag$` is scanned only where Postgres EXECUTES it.** This
-//!   file's 17 `DO $$ ... $$` blocks run while it loads and record real ledger
-//!   rows, so the scan steps INSIDE them. Any other dollar-quoted body -- a
-//!   `CREATE FUNCTION ... AS $b$ ... $b$` -- is a string the server stores, so
-//!   a ledger `INSERT` written there is NOT applied and is skipped; counting it
-//!   used to put the head one migration ABOVE the database. One `DO` level is
-//!   tracked, so a `DO` block nested in a `DO` block is a const panic rather
-//!   than a mis-scoped body.
+//!   2. before ANY of the regions this scan consumes -- a `'...'` or `"..."`
+//!      region, or a dollar-quoted body it is about to skip -- its INTERIOR is
+//!      scanned for a ledger `INSERT`, and finding one is a const panic. The
+//!      round-3 version checked only the quoted arm, which is how a ledger row
+//!      inside `CREATE PROCEDURE p() AS $b$ ... $b$; CALL p();` or inside
+//!      `DO $$ BEGIN EXECUTE $x$ ... $x$; END $$;` -- both of which the DATABASE
+//!      applies -- came back one migration short with no panic. Losing a
+//!      migration quietly is what this module exists to prevent, so the
+//!      fallback is a build failure, not a lower head.
+//! * **`$tag$ ... $tag$` is scanned only where Postgres EXECUTES it, and
+//!   REFUSED where it might.** This file's 17 `DO $$ ... $$` blocks run while it
+//!   loads and record real ledger rows, so the scan steps INSIDE them. Any other
+//!   dollar-quoted body -- `CREATE FUNCTION ... AS $b$ ... $b$`, the `$x$ ... $x$`
+//!   argument of an `EXECUTE` -- is a string, and whether the server ever RUNS
+//!   that string is not a lexical question: `CREATE FUNCTION f() ... $b$ ... $b$`
+//!   alone applies nothing, the same text followed by `SELECT f();` applies
+//!   everything. So a body of that kind is skipped when it holds no ledger
+//!   anchor and is a const panic when it does, instead of being guessed at in
+//!   either direction. One `DO` level is tracked, so a `DO` block nested in a
+//!   `DO` block is a const panic rather than a mis-scoped body, and a statement
+//!   that parses past a `DO` block's closing tag is a const panic rather than a
+//!   cursor that jumps backwards over text it has already read.
 //! * **What counts as a ledger statement.** `INSERT INTO [ONLY]
 //!   [<schema> .] <table>` where the table reference resolves to
 //!   `storage_schema_migrations`: keywords in ANY case, any run of whitespace
@@ -84,15 +92,38 @@
 //!   fallback value: there is no `unwrap_or` or `unwrap_or_default`, and the two
 //!   ways a zero head could still be produced -- no rows at all, and a ledger
 //!   whose only rows are version `0` -- are themselves panics.
-//! * **The residue, stated without flattery.** A ledger row recorded by
-//!   `UPDATE`, by `MERGE`, or by `COPY ... FROM stdin` with the version in the
-//!   payload is outside what this scan sees, and NOTHING detects it. Every
-//!   reader of this file (this one, the two in `schema_migrations_test.rs`, and
-//!   the harness's in `tools/ferrogate-test/src/storage_test.rs`) anchors on
-//!   `INSERT`, so on that dimension they go quiet together. That residue is
-//!   disclosed, not covered. What is no longer part of it: an `INSERT`
-//!   assembled from a string literal at runtime now fails the BUILD, because
-//!   the interior of every skipped literal is checked for a ledger anchor.
+//! * **The residue, stated without flattery.** Three things are outside what
+//!   this scan can see, and they are disclosed rather than covered:
+//!   1. A ledger row recorded by `UPDATE`, by `MERGE`, or by `COPY ... FROM
+//!      stdin` with the version in the payload. Every reader of this file (this
+//!      one, the two in `schema_migrations_test.rs`, and the harness's in
+//!      `tools/ferrogate-test/src/storage_test.rs`) anchors on `INSERT`, so on
+//!      that dimension they all go quiet together.
+//!   2. A desync that lands INSIDE the table identifier itself. The interior
+//!      check finds anchors that still MATCH, so `storage_schema_migra'tions`
+//!      is a hidden row it does not name -- review swept the whole file byte by
+//!      byte and found 6 such positions out of 3423, every one of them SQL that
+//!      would not load.
+//!   3. Which dollar-quoted bodies the server actually executes. This scan
+//!      REFUSES a stored body that holds a ledger anchor rather than deciding;
+//!      the cost is that a `CREATE FUNCTION` body genuinely never called could
+//!      not carry one either. The file has no `CREATE FUNCTION` at all.
+//!
+//!   What is no longer residue: an `INSERT` assembled from a string literal or
+//!   from a dollar-quoted body and executed at runtime now fails the BUILD.
+//!
+//! # One budget this module lives inside
+//!
+//! `rustc` DENIES a const evaluation that runs too many steps
+//! (`long_running_const_eval`), and this scan walks 119 KB one byte at a time,
+//! so the budget is not theoretical: adding the interior check to the dollar arm
+//! took it over, and the module stopped compiling with an error naming
+//! `identifier_is`, not anything about migrations. The single-byte `d`/`i`
+//! guards in [`head_migration`] and [`region_hides_ledger_insert`] and the
+//! spelled-out two-byte comparisons in [`skip_ignorable_to`] are what buys it
+//! back. None of them can change an answer -- each guards a call whose first act
+//! is to require that same byte -- but anything added to the per-byte path here
+//! has to be paid for somewhere.
 //! * **What the cross-check actually covers** is a DIFFERENT residue: an
 //!   `INSERT` shape this parser stops matching while a differently written
 //!   reader still sees it. That is why `schema_migrations_test.rs` compares both
@@ -179,6 +210,18 @@ const fn head_migration(sql: &'static str) -> LedgerHead {
     let mut resume = 0usize;
     while cursor < bytes.len() {
         if body_end != 0 && cursor >= body_end {
+            // Leaving the body means jumping to `resume`, which is FORWARD of
+            // `body_end` -- unless a statement inside the block parsed past the
+            // closing tag, in which case the jump would be backwards and the
+            // text between would be scanned, and counted, twice. The tag can
+            // only end up mid-statement if it was never the tag this scan
+            // thought it was, so the honest answer is a build failure.
+            if cursor > resume {
+                panic!(
+                    "sql/001_init_postgres.sql: a statement inside a `DO` block runs past the \
+                     block's closing tag; the tag this scan matched is not where the block ends"
+                );
+            }
             cursor = resume;
             body_end = 0;
             resume = 0;
@@ -196,22 +239,39 @@ const fn head_migration(sql: &'static str) -> LedgerHead {
             continue;
         }
         // `DO $$ ... $$` is the one dollar-quoted body Postgres RUNS while
-        // loading this file, so it is stepped into rather than skipped: three of
-        // the file's ledger rows are written inside one.
-        let (is_do, do_body, do_end, do_after) = do_block_at(bytes, cursor, limit);
-        if is_do {
-            if body_end != 0 {
-                panic!(
-                    "sql/001_init_postgres.sql: a `DO` block is nested inside another `DO` block; \
-                     this scan reads one level and will not guess at the rest"
-                );
+        // loading this file, so it is stepped into rather than skipped: 14 of
+        // the file's 64 ledger rows are written inside one.
+        //
+        // The `d`/`i` guards are not an optimization for its own sake. This
+        // scan walks 119 KB one byte at a time and rustc DENIES a const
+        // evaluation that runs too long -- without them the module stops
+        // compiling at all, which is how this round found the ceiling. They
+        // cannot change an answer: `do_block_at` and `ledger_insert_at` both
+        // begin with `keyword_at`, which requires exactly this byte.
+        let byte = bytes[cursor];
+        if byte == b'D' || byte == b'd' {
+            let (is_do, do_body, do_end, do_after) = do_block_at(bytes, cursor, limit);
+            if is_do {
+                if body_end != 0 {
+                    panic!(
+                        "sql/001_init_postgres.sql: a `DO` block is nested inside another `DO` \
+                         block; this scan reads one level and will not guess at the rest"
+                    );
+                }
+                body_end = do_end;
+                resume = do_after;
+                cursor = do_body;
+                continue;
             }
-            body_end = do_end;
-            resume = do_after;
-            cursor = do_body;
+        }
+        if byte != b'I' && byte != b'i' {
+            cursor += 1;
             continue;
         }
-        let (is_ledger, after_table) = ledger_insert_at(bytes, cursor);
+        // Unbounded even inside a `DO` body: a ledger statement that straddles
+        // the body's closing tag must be READ and then rejected by the overrun
+        // guard above, not quietly fail to match at the tag.
+        let (is_ledger, after_table) = ledger_insert_at(bytes, cursor, bytes.len(), false);
         if !is_ledger {
             cursor += 1;
             continue;
@@ -333,28 +393,36 @@ const fn head_migration(sql: &'static str) -> LedgerHead {
 /// `INSERT INTO [ONLY] [<schema> .] <table>` resolving to [`LEDGER_TABLE`].
 ///
 /// Returns `(matched, offset_after_the_table_reference)`. Everything between
-/// tokens goes through [`skip_ignorable`], so newlines, runs of spaces and
+/// tokens goes through [`skip_ignorable_to`], so newlines, runs of spaces and
 /// comments are all legal there; keywords are matched case-insensitively with
 /// an identifier boundary on both sides, so `PREINSERT INTO ...` and
 /// `INSERTINTO` are not statements.
-const fn ledger_insert_at(bytes: &[u8], at: usize) -> (bool, usize) {
+///
+/// `limit`/`sub_scan` exist so that [`region_hides_ledger_insert`] can run THIS
+/// matcher, not a second one written to be nearly the same, over the interior of
+/// a region: with `sub_scan` set, running out of text mid-token is "no anchor
+/// here" instead of "this file is malformed". Review's round-3 read found the
+/// asymmetric alternative worth praising and the panic worth fixing -- a region
+/// holding `INSERT INTO "unterminated` used to abort the build naming an
+/// unclosed identifier, which is not what went wrong.
+const fn ledger_insert_at(bytes: &[u8], at: usize, limit: usize, sub_scan: bool) -> (bool, usize) {
     if at > 0 && is_identifier_byte(bytes[at - 1]) {
         return (false, at);
     }
-    if !keyword_at(bytes, at, b"insert") {
+    if !keyword_at_to(bytes, at, b"insert", limit) {
         return (false, at);
     }
     let mut cursor = at + 6;
-    let separated = skip_ignorable(bytes, cursor);
+    let separated = skip_ignorable_to(bytes, cursor, limit, sub_scan);
     if separated == cursor {
         return (false, at);
     }
     cursor = separated;
-    if !keyword_at(bytes, cursor, b"into") {
+    if !keyword_at_to(bytes, cursor, b"into", limit) {
         return (false, at);
     }
     cursor += 4;
-    let separated = skip_ignorable(bytes, cursor);
+    let separated = skip_ignorable_to(bytes, cursor, limit, sub_scan);
     if separated == cursor {
         return (false, at);
     }
@@ -364,11 +432,13 @@ const fn ledger_insert_at(bytes: &[u8], at: usize) -> (bool, usize) {
     // is consumed only when no `.` follows it. Requiring whitespace after the
     // keyword instead (the previous shape) walked past
     // `INSERT INTO only.storage_schema_migrations` without a sound.
-    let (mut start, mut end, mut after, mut quoted) = read_identifier(bytes, cursor);
+    let (mut start, mut end, mut after, mut quoted) =
+        read_identifier(bytes, cursor, limit, sub_scan);
     if !quoted && identifier_is(bytes, start, end, false, b"only") {
-        let dotted = skip_ignorable(bytes, after);
-        if dotted >= bytes.len() || bytes[dotted] != b'.' {
-            let (next_start, next_end, next_after, next_quoted) = read_identifier(bytes, dotted);
+        let dotted = skip_ignorable_to(bytes, after, limit, sub_scan);
+        if dotted >= limit || bytes[dotted] != b'.' {
+            let (next_start, next_end, next_after, next_quoted) =
+                read_identifier(bytes, dotted, limit, sub_scan);
             start = next_start;
             end = next_end;
             after = next_after;
@@ -379,10 +449,14 @@ const fn ledger_insert_at(bytes: &[u8], at: usize) -> (bool, usize) {
     // `ferrogate_control . storage_schema_migrations` and
     // `"storage_schema_migrations"` both resolve to the ledger, and
     // `storage_schema_migrations_archive` does not.
-    let qualifier = skip_ignorable(bytes, after);
-    if qualifier < bytes.len() && bytes[qualifier] == b'.' {
-        let (next_start, next_end, next_after, next_quoted) =
-            read_identifier(bytes, skip_ignorable(bytes, qualifier + 1));
+    let qualifier = skip_ignorable_to(bytes, after, limit, sub_scan);
+    if qualifier < limit && bytes[qualifier] == b'.' {
+        let (next_start, next_end, next_after, next_quoted) = read_identifier(
+            bytes,
+            skip_ignorable_to(bytes, qualifier + 1, limit, sub_scan),
+            limit,
+            sub_scan,
+        );
         start = next_start;
         end = next_end;
         after = next_after;
@@ -408,7 +482,7 @@ const fn expect_ledger_columns(bytes: &[u8], from: usize) -> usize {
         );
     }
     at = skip_ignorable(bytes, at + 1);
-    let (start, end, after, quoted) = read_identifier(bytes, at);
+    let (start, end, after, quoted) = read_identifier(bytes, at, bytes.len(), false);
     if !identifier_is(bytes, start, end, quoted, LEDGER_VERSION_COLUMN) {
         panic!(
             "sql/001_init_postgres.sql: a storage_schema_migrations INSERT does not use the \
@@ -423,7 +497,7 @@ const fn expect_ledger_columns(bytes: &[u8], from: usize) -> usize {
         );
     }
     at = skip_ignorable(bytes, at + 1);
-    let (start, end, after, quoted) = read_identifier(bytes, at);
+    let (start, end, after, quoted) = read_identifier(bytes, at, bytes.len(), false);
     if !identifier_is(bytes, start, end, quoted, LEDGER_NAME_COLUMN) {
         panic!(
             "sql/001_init_postgres.sql: a storage_schema_migrations INSERT does not use the \
@@ -449,41 +523,53 @@ const fn expect_ledger_columns(bytes: &[u8], from: usize) -> usize {
 /// contains no `*/` at all, so anything that looked for block comments first
 /// would open one that never closes and swallow every migration in the file.
 const fn skip_ignorable(bytes: &[u8], from: usize) -> usize {
-    skip_ignorable_to(bytes, from, bytes.len())
+    skip_ignorable_to(bytes, from, bytes.len(), false)
 }
 
 /// [`skip_ignorable`], stopping at `limit` -- the end of the `DO` body currently
-/// being scanned, or the end of the file.
-const fn skip_ignorable_to(bytes: &[u8], from: usize, limit: usize) -> usize {
+/// being scanned, the end of a region being checked for a hidden anchor, or the
+/// end of the file.
+///
+/// `sub_scan` says which of those it is. On the real scan an unterminated
+/// `/* ... */` is a malformed file and a const panic; inside a region being
+/// checked for a hidden anchor it just means the region ran out, and panicking
+/// there would abort the build naming a cause that is not the problem.
+const fn skip_ignorable_to(bytes: &[u8], from: usize, limit: usize, sub_scan: bool) -> usize {
     let mut at = from;
     loop {
         if at < limit && bytes[at].is_ascii_whitespace() {
             at += 1;
             continue;
         }
-        if at + 2 <= limit && matches_at(bytes, at, b"--") {
+        // Spelled out byte by byte rather than through `matches_at`: this runs
+        // once per byte of a 119 KB file and rustc denies a const evaluation
+        // that takes too many steps. Two comparisons, same predicate.
+        if at + 2 <= limit && bytes[at] == b'-' && bytes[at + 1] == b'-' {
             at += 2;
             while at < limit && bytes[at] != b'\n' {
                 at += 1;
             }
             continue;
         }
-        if at + 2 <= limit && matches_at(bytes, at, b"/*") {
+        if at + 2 <= limit && bytes[at] == b'/' && bytes[at + 1] == b'*' {
             // Postgres nests block comments, so depth is counted rather than
             // stopping at the first `*/`.
             let mut depth = 1usize;
             at += 2;
             while depth > 0 {
                 if at >= limit {
+                    if sub_scan {
+                        return limit;
+                    }
                     panic!(
                         "sql/001_init_postgres.sql: a `/* ... */` comment is never closed; the \
                          rest of the file would be read as a comment"
                     );
                 }
-                if at + 2 <= limit && matches_at(bytes, at, b"/*") {
+                if at + 2 <= limit && bytes[at] == b'/' && bytes[at + 1] == b'*' {
                     depth += 1;
                     at += 2;
-                } else if at + 2 <= limit && matches_at(bytes, at, b"*/") {
+                } else if at + 2 <= limit && bytes[at] == b'*' && bytes[at + 1] == b'/' {
                     depth -= 1;
                     at += 2;
                 } else {
@@ -510,28 +596,24 @@ const fn skip_ignorable_to(bytes: &[u8], from: usize, limit: usize) -> usize {
 /// one and dropped ledger rows without a word. See [`reject_hidden_ledger_insert`]
 /// for the backstop that makes any surviving desync loud.
 const fn skip_noncode(bytes: &[u8], from: usize, limit: usize) -> usize {
-    let at = skip_ignorable_to(bytes, from, limit);
+    let at = skip_ignorable_to(bytes, from, limit, false);
     if at >= limit {
         return at;
     }
     // `E'a\''` is one literal: inside it a backslash escapes the next byte, so a
     // reader that only knows `''` ends the literal one quote early.
+    //
+    // (There is no `U&'...'` arm. Round 3 had one and review proved it an
+    // EQUIVALENT mutant: deleting it changes no output, because `U` and `&` are
+    // walked over one byte at a time and the plain `'` arm below then opens the
+    // identical region with the identical arguments. Dead code that looks like a
+    // guarantee is worse than no code, so it is gone rather than listed.)
     if (bytes[at] == b'E' || bytes[at] == b'e')
         && at + 1 < limit
         && bytes[at + 1] == b'\''
         && (at == 0 || !is_identifier_byte(bytes[at - 1]))
     {
         return skip_quoted(bytes, at + 1, limit, b'\'', true);
-    }
-    // `U&'...'` is a plain literal with a Unicode escape convention this scan
-    // does not need to decode; what matters is where it ends.
-    if (bytes[at] == b'U' || bytes[at] == b'u')
-        && at + 2 < limit
-        && bytes[at + 1] == b'&'
-        && bytes[at + 2] == b'\''
-        && (at == 0 || !is_identifier_byte(bytes[at - 1]))
-    {
-        return skip_quoted(bytes, at + 2, limit, b'\'', false);
     }
     if bytes[at] == b'\'' {
         return skip_quoted(bytes, at, limit, b'\'', false);
@@ -542,11 +624,25 @@ const fn skip_noncode(bytes: &[u8], from: usize, limit: usize) -> usize {
         return skip_quoted(bytes, at, limit, b'"', false);
     }
     // A dollar-quoted body reached HERE is one the outer loop did not recognize
-    // as a `DO` block, i.e. a function or procedure body: text the server
-    // stores, not code it runs while loading this file.
+    // as a `DO` block: a function or procedure body, or the argument of an
+    // `EXECUTE`. Whether the server RUNS that text is not decidable from the
+    // text -- `CREATE PROCEDURE p() AS $b$ ... $b$;` applies nothing until
+    // `CALL p();` applies all of it -- so skipping it is only safe while it
+    // holds no ledger anchor. Round 3 skipped it unconditionally and review
+    // exploited exactly that: both spellings above read one migration SHORT of
+    // the database, silently.
     let (tagged, tag_len) = dollar_tag_at(bytes, at, limit);
     if tagged {
-        return dollar_body_end(bytes, at, tag_len, limit) + tag_len;
+        let end = dollar_body_end(bytes, at, tag_len, limit);
+        if region_hides_ledger_insert(bytes, at + tag_len, end) {
+            panic!(
+                "sql/001_init_postgres.sql: a stored `$...$` body hides a \
+                 storage_schema_migrations INSERT. Whether the server ever runs that body is not \
+                 something this file's text decides -- `CALL`, `SELECT f()` and `EXECUTE` all \
+                 apply it -- so the ledger row must be written where it can be read"
+            );
+        }
+        return end + tag_len;
     }
     at
 }
@@ -581,40 +677,54 @@ const fn skip_quoted(
                 scan += 2;
                 continue;
             }
-            reject_hidden_ledger_insert(bytes, open + 1, scan);
+            if region_hides_ledger_insert(bytes, open + 1, scan) {
+                panic!(
+                    "sql/001_init_postgres.sql: a quoted region hides a storage_schema_migrations \
+                     INSERT. Either an unbalanced quote made this scan read code as data -- which \
+                     would drop migrations in silence -- or the ledger is written from a string at \
+                     runtime, which no reader of this file can follow"
+                );
+            }
             return scan + 1;
         }
         scan += 1;
     }
 }
 
-/// A quoted region may not HIDE a ledger statement.
+/// Does `start..end` -- a region this scan is about to consume without reading
+/// it as code -- contain a ledger `INSERT`?
 ///
 /// This is the backstop that does not depend on modelling every construct
-/// correctly. Whatever makes the quote pairing desync -- an apostrophe in a
-/// `COPY ... FROM stdin` payload, a spelling of a literal Postgres has and this
-/// scan does not -- the observable effect is that a region swallows text it
-/// should not have, and the text this module cannot afford to lose is a ledger
-/// `INSERT`. Losing one silently lowers the head, which is issue #511 itself, so
-/// finding one inside a skipped region is a build failure.
+/// correctly. Whatever makes the scan swallow text it should have read -- an
+/// apostrophe in a `COPY ... FROM stdin` payload, a spelling of a literal
+/// Postgres has and this scan does not, a stored body someone `CALL`s -- the
+/// observable effect is the same, and the text this module cannot afford to lose
+/// is a ledger `INSERT`. Losing one silently lowers the head, which is issue
+/// #511 itself, so each caller turns a `true` here into a build failure naming
+/// its own construct.
 ///
-/// It also closes a residue the module used to only disclose: a ledger `INSERT`
-/// assembled from a string literal and executed at runtime is now rejected
-/// rather than counted as absent.
-const fn reject_hidden_ledger_insert(bytes: &[u8], start: usize, end: usize) {
+/// It runs [`ledger_insert_at`] -- the SAME matcher the real scan uses, with
+/// `sub_scan` set -- rather than a second one written to be nearly the same, so
+/// lower case, `InSeRt   InTo`, comments between tokens, `public . table`,
+/// `ONLY` and quoted names all fire here exactly as they fire out there. What it
+/// does NOT catch is a desync that lands inside the table identifier itself
+/// (`storage_schema_migra'tions`), because that anchor no longer matches
+/// anywhere; the module doc's residue bullet 2 says so.
+const fn region_hides_ledger_insert(bytes: &[u8], start: usize, end: usize) -> bool {
     let mut at = start;
     while at < end {
-        let (is_ledger, _) = ledger_insert_at(bytes, at);
-        if is_ledger {
-            panic!(
-                "sql/001_init_postgres.sql: a quoted region hides a storage_schema_migrations \
-                 INSERT. Either an unbalanced quote made this scan read code as data -- which \
-                 would drop migrations in silence -- or the ledger is written from a string at \
-                 runtime, which no reader of this file can follow"
-            );
+        // Same `i` guard, for the same reason, with the same argument that it
+        // cannot change an answer: `ledger_insert_at` starts with `keyword_at`
+        // on `insert`.
+        if bytes[at] == b'I' || bytes[at] == b'i' {
+            let (is_ledger, _) = ledger_insert_at(bytes, at, end, true);
+            if is_ledger {
+                return true;
+            }
         }
         at += 1;
     }
+    false
 }
 
 /// `$tag$` at `at`: returns `(matched, length of the whole delimiter)`.
@@ -673,14 +783,14 @@ const fn do_block_at(bytes: &[u8], at: usize, limit: usize) -> (bool, usize, usi
     if at > 0 && is_identifier_byte(bytes[at - 1]) {
         return (false, 0, 0, 0);
     }
-    if !keyword_at(bytes, at, b"do") {
+    if !keyword_at_to(bytes, at, b"do", limit) {
         return (false, 0, 0, 0);
     }
-    let mut cursor = skip_ignorable_to(bytes, at + 2, limit);
-    if keyword_at(bytes, cursor, b"language") {
-        let named = skip_ignorable_to(bytes, cursor + 8, limit);
-        let (_, _, after, _) = read_identifier(bytes, named);
-        cursor = skip_ignorable_to(bytes, after, limit);
+    let mut cursor = skip_ignorable_to(bytes, at + 2, limit, false);
+    if keyword_at_to(bytes, cursor, b"language", limit) {
+        let named = skip_ignorable_to(bytes, cursor + 8, limit, false);
+        let (_, _, after, _) = read_identifier(bytes, named, limit, false);
+        cursor = skip_ignorable_to(bytes, after, limit, false);
     }
     let (tagged, tag_len) = dollar_tag_at(bytes, cursor, limit);
     if !tagged {
@@ -692,16 +802,31 @@ const fn do_block_at(bytes: &[u8], at: usize, limit: usize) -> (bool, usize, usi
 
 /// Read one SQL identifier, tolerating the double-quoted form, and return
 /// `(start, end, after, quoted)` where `start..end` is the bare identifier text.
-const fn read_identifier(bytes: &[u8], from: usize) -> (usize, usize, usize, bool) {
+///
+/// On the real scan (`sub_scan == false`, `limit == bytes.len()`) an unclosed
+/// `"..."` is a const panic. Inside a region being checked for a hidden anchor it
+/// is not: the region simply ended, so the identifier is whatever it holds. That
+/// is the difference between `INSERT INTO "unterminated` inside a literal
+/// aborting the build with the wrong cause -- review's minor 4 -- and it either
+/// naming the ledger (a hidden anchor, reported as one) or not (no anchor).
+const fn read_identifier(
+    bytes: &[u8],
+    from: usize,
+    limit: usize,
+    sub_scan: bool,
+) -> (usize, usize, usize, bool) {
     let mut at = from;
-    if at < bytes.len() && bytes[at] == b'"' {
+    if at < limit && bytes[at] == b'"' {
         at += 1;
         let start = at;
-        while at < bytes.len() && bytes[at] != b'"' {
+        while at < limit && bytes[at] != b'"' {
             at += 1;
         }
         let end = at;
-        if at >= bytes.len() {
+        if at >= limit {
+            if sub_scan {
+                return (start, end, end, true);
+            }
             // Same fail-open class as an unterminated literal: returning here
             // would let the rest of the file be read as one table name.
             panic!(
@@ -713,7 +838,7 @@ const fn read_identifier(bytes: &[u8], from: usize) -> (usize, usize, usize, boo
         return (start, end, at, true);
     }
     let start = at;
-    while at < bytes.len() && is_identifier_byte(bytes[at]) {
+    while at < limit && is_identifier_byte(bytes[at]) {
         at += 1;
     }
     (start, at, at, false)
@@ -753,7 +878,14 @@ const fn identifier_is(
 /// `INSERTED` is not `INSERT`. The boundary BEFORE the keyword is the caller's
 /// job (only the anchor needs one).
 const fn keyword_at(bytes: &[u8], at: usize, keyword: &[u8]) -> bool {
-    if at + keyword.len() > bytes.len() {
+    keyword_at_to(bytes, at, keyword, bytes.len())
+}
+
+/// [`keyword_at`], not reading past `limit` -- so a keyword cannot be half
+/// inside the region [`region_hides_ledger_insert`] is checking and half in the
+/// code after it.
+const fn keyword_at_to(bytes: &[u8], at: usize, keyword: &[u8], limit: usize) -> bool {
+    if at + keyword.len() > limit {
         return false;
     }
     let mut offset = 0usize;
@@ -764,7 +896,7 @@ const fn keyword_at(bytes: &[u8], at: usize, keyword: &[u8]) -> bool {
         offset += 1;
     }
     let end = at + keyword.len();
-    end >= bytes.len() || !is_identifier_byte(bytes[end])
+    end >= limit || !is_identifier_byte(bytes[end])
 }
 
 const fn is_identifier_byte(byte: u8) -> bool {
@@ -777,20 +909,6 @@ const fn ascii_lower(byte: u8) -> u8 {
     } else {
         byte
     }
-}
-
-const fn matches_at(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
-    if at + needle.len() > bytes.len() {
-        return false;
-    }
-    let mut offset = 0usize;
-    while offset < needle.len() {
-        if bytes[at + offset] != needle[offset] {
-            return false;
-        }
-        offset += 1;
-    }
-    true
 }
 
 const fn const_substring(text: &'static str, start: usize, len: usize) -> &'static str {
