@@ -11752,7 +11752,7 @@
         },
         "responses": {
           "201": {
-            "description": "Site domain bound.",
+            "description": "Site domain bound and serving: a newly created binding whose ownership was already proven, so the hostname is in the ACME order set and serves immediately.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11762,7 +11762,17 @@
             }
           },
           "200": {
-            "description": "Existing binding for the hostname updated (re-bound within the same tenant).",
+            "description": "Existing proven binding for the hostname updated (re-bound within the same tenant). Still serving; the ACME order set is unchanged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSiteDomainResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Binding recorded but NOT serving. Ownership is unproven, so the gateway deliberately keeps the hostname out of the ACME order set (no certificate is ordered) and it will not answer traffic until POST /admin/v1/site-domains/{hostname}/verify succeeds. Clients must branch on this: it is a 2xx that does not mean the domain is live. Read `site_domain.serving` / `verification.state` rather than inferring from the status code.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11931,6 +11941,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"

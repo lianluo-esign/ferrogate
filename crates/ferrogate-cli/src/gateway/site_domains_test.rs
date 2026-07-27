@@ -67,3 +67,70 @@ fn malformed_dns_labels_are_rejected() {
     let long_hostname = format!("{}.example.com", "a.".repeat(130));
     assert!(validate_site_domain_hostname(Some(&long_hostname)).is_err());
 }
+
+/// #530: the handler answers 200/201/**202**, but the OpenAPI document declared
+/// only 200/201. This couples the two so they cannot drift apart again: the
+/// statuses the handler can actually produce, enumerated over every input, must
+/// all be declared for `bindSiteDomain`.
+///
+/// The assertion is on the produced status set, not on the source text — adding
+/// a fourth terminal to `site_domain_bind_status` without declaring it reds
+/// this, and deleting the `202` declaration from the spec reds it too.
+#[test]
+fn every_bind_terminal_is_declared_in_the_openapi_document() {
+    const SPEC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/openapi/admin-api.openapi.json"
+    ));
+
+    let produced: std::collections::BTreeSet<u16> = [true, false]
+        .into_iter()
+        .flat_map(|proven| {
+            [true, false]
+                .into_iter()
+                .map(move |existing| site_domain_bind_status(proven, existing).as_u16())
+        })
+        .collect();
+    // The three-way terminal the issue names. If this changes, the spec below
+    // must change with it -- that coupling is the whole point of the test.
+    assert_eq!(
+        produced,
+        [200u16, 201, 202].into_iter().collect(),
+        "bind terminals changed"
+    );
+
+    let spec: serde_json::Value = serde_json::from_str(SPEC).expect("admin-api.openapi.json parses");
+    let declared = spec["paths"]["/admin/v1/site-domains"]["post"]["responses"]
+        .as_object()
+        .expect("bindSiteDomain declares responses");
+    for status in &produced {
+        assert!(
+            declared.contains_key(&status.to_string()),
+            "handler can return {status} but bindSiteDomain does not declare it; \
+             declared = {:?}",
+            declared.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Sibling audit the issue asked for: `verifySiteDomain` answers `400
+/// invalid_site_domain` when the `tenant_id` query parameter is absent
+/// (`site_domains.rs`, the `None =>` arm of the tenant resolution), which the
+/// document did not declare either. Pinned here so the sibling gap does not
+/// silently reopen.
+#[test]
+fn verify_declares_the_missing_tenant_bad_request() {
+    const SPEC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/openapi/admin-api.openapi.json"
+    ));
+    let spec: serde_json::Value = serde_json::from_str(SPEC).expect("admin-api.openapi.json parses");
+    let declared = spec["paths"]["/admin/v1/site-domains/{hostname}/verify"]["post"]["responses"]
+        .as_object()
+        .expect("verifySiteDomain declares responses");
+    assert!(
+        declared.contains_key("400"),
+        "verifySiteDomain returns 400 when tenant_id is missing; declared = {:?}",
+        declared.keys().collect::<Vec<_>>()
+    );
+}

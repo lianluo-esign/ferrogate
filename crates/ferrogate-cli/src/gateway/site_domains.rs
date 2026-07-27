@@ -529,13 +529,7 @@ impl FerroGateway {
                 admin_verification.state, acme.enabled, acme.reload_triggered
             ),
         ));
-        // 202 says it plainly: the binding is recorded but NOT serving until
-        // the DNS challenge is completed.
-        let status = match (proven, existing.is_some()) {
-            (false, _) => StatusCode::ACCEPTED,
-            (true, true) => StatusCode::OK,
-            (true, false) => StatusCode::CREATED,
-        };
+        let status = site_domain_bind_status(proven, existing.is_some());
         write_json_response(
             session,
             status,
@@ -1000,6 +994,27 @@ fn admin_site_domain(
         serving: verification.is_some_and(|record| record.serves(now_unix)),
         created_at_unix: domain.created_at_unix,
         updated_at_unix: domain.updated_at_unix,
+    }
+}
+
+/// The three-way terminal of `POST /admin/v1/site-domains` (#530).
+///
+/// Extracted from the handler so the status set is enumerable by a test: the
+/// OpenAPI document declared only 200/201 while the handler could also answer
+/// **202**, and a generated client that switches on the declared set had no
+/// branch for the one case that matters -- a 2xx meaning "recorded but NOT
+/// serving".
+///
+/// * `202 Accepted` -- ownership unproven. The binding is recorded, the
+///   hostname is deliberately kept OUT of the ACME order set (#488), and it
+///   will not answer traffic until `POST .../{hostname}/verify` succeeds.
+/// * `200 OK` -- an already-proven binding re-bound within the same tenant.
+/// * `201 Created` -- a new binding whose ownership was already proven.
+fn site_domain_bind_status(proven: bool, existing: bool) -> StatusCode {
+    match (proven, existing) {
+        (false, _) => StatusCode::ACCEPTED,
+        (true, true) => StatusCode::OK,
+        (true, false) => StatusCode::CREATED,
     }
 }
 

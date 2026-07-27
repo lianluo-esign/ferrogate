@@ -11024,7 +11024,7 @@
         },
         "responses": {
           "201": {
-            "description": "Site domain bound.",
+            "description": "Site domain bound and serving: a newly created binding whose ownership was already proven, so the hostname is in the ACME order set and serves immediately.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11034,7 +11034,7 @@
             }
           },
           "200": {
-            "description": "Existing binding for the hostname updated (re-bound within the same tenant).",
+            "description": "Existing proven binding for the hostname updated (re-bound within the same tenant). Still serving; the ACME order set is unchanged.",
             "content": {
               "application/json": {
                 "schema": {
