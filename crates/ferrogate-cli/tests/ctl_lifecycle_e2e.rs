@@ -290,6 +290,8 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
     );
     assert_eq!(create.code(), 0, "create stderr: {}", create.stderr());
     let create_json = create.json();
+    assert_eq!(create_json["object"], "mutation_receipt");
+    let create_json = &create_json["response"];
     assert_eq!(create_json["object"], "guardrail_policy_revision");
     assert_eq!(
         create_json["policy"]["revision"], 1,
@@ -368,6 +370,8 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
     );
     assert_eq!(activate.code(), 0, "activate stderr: {}", activate.stderr());
     let activated = activate.json();
+    assert_eq!(activated["object"], "mutation_receipt");
+    let activated = &activated["response"];
     assert_eq!(activated["object"], "guardrail_policy_binding");
     assert_eq!(activated["policy_id"], policy_id);
     assert_eq!(
@@ -403,6 +407,8 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
     );
     assert_eq!(rollback.code(), 0, "rollback stderr: {}", rollback.stderr());
     let rolled_back = rollback.json();
+    assert_eq!(rolled_back["object"], "mutation_receipt");
+    let rolled_back = &rolled_back["response"];
     assert_eq!(rolled_back["object"], "guardrail_policy_binding");
     assert_eq!(
         rolled_back["active_revision"], 1,
@@ -521,6 +527,8 @@ fn agent_schedule_run_now_via_cli_records_run_evidence() {
     );
     assert_eq!(run_now.code(), 0, "run-now stderr: {}", run_now.stderr());
     let fire = run_now.json();
+    assert_eq!(fire["object"], "mutation_receipt");
+    let fire = &fire["response"];
     assert_eq!(fire["object"], "agent_schedule_fire");
     assert_eq!(fire["fire"]["schedule_id"], schedule_id);
     assert_eq!(
@@ -639,6 +647,8 @@ fn self_hosted_worker_identity_rotation_via_cli() {
     );
     assert_eq!(rotate.code(), 0, "rotate stderr: {}", rotate.stderr());
     let rotated = rotate.json();
+    assert_eq!(rotated["object"], "mutation_receipt");
+    let rotated = &rotated["response"];
     assert_eq!(rotated["object"], "self_hosted_worker_identity_rotation");
     assert_eq!(
         rotated["worker"]["identity_fingerprint"], "sha256:ctl-rotated",
@@ -864,6 +874,8 @@ fn tool_approval_decision_via_cli_records_audit_and_fails_closed() {
     );
     assert_eq!(approve.code(), 0, "approve stderr: {}", approve.stderr());
     let decision = approve.json();
+    assert_eq!(decision["object"], "mutation_receipt");
+    let decision = &decision["response"];
     assert_eq!(decision["id"], approval_id);
     assert_eq!(
         decision["status"], "approved",
