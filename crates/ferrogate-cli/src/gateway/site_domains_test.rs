@@ -88,7 +88,7 @@ fn every_bind_terminal_is_declared_in_the_openapi_document() {
         .flat_map(|proven| {
             [true, false]
                 .into_iter()
-                .map(move |existing| site_domain_bind_status(proven, existing).as_u16())
+                .map(move |existing| site_domain_bind_status(proven, existing).status().as_u16())
         })
         .collect();
     // The three-way terminal the issue names. If this changes, the spec below
@@ -112,15 +112,40 @@ fn every_bind_terminal_is_declared_in_the_openapi_document() {
             declared.keys().collect::<Vec<_>>()
         );
     }
+
+    // Direction (b), added on review: a declared SUCCESS status the runtime can
+    // never produce is drift too, and the first cut asserted only direction (a)
+    // -- adding `"203": {...}` to the spec left it green. Only 2xx is compared,
+    // because the error terminals come from shared `#/components/responses`
+    // refs raised by helpers (`storage_error` -> 503, the validation arms ->
+    // 400/404/409/413) rather than from `site_domain_bind_status`, so they are
+    // not derivable here; item 2 of this review declares them explicitly
+    // instead.
+    let declared_success: std::collections::BTreeSet<u16> = declared
+        .keys()
+        .filter_map(|code| code.parse::<u16>().ok())
+        .filter(|code| (200..300).contains(code))
+        .collect();
+    assert_eq!(
+        declared_success, produced,
+        "bindSiteDomain's declared 2xx set must equal what site_domain_bind_status \
+         can produce -- a declared-but-unreachable success code is drift in the \
+         other direction"
+    );
 }
 
-/// Sibling audit the issue asked for: `verifySiteDomain` answers `400
-/// invalid_site_domain` when the `tenant_id` query parameter is absent
-/// (`site_domains.rs`, the `None =>` arm of the tenant resolution), which the
-/// document did not declare either. Pinned here so the sibling gap does not
-/// silently reopen.
+/// Sibling audit: `verifySiteDomain` answers `400 invalid_site_domain` when
+/// the `tenant_id` query parameter is absent (`site_domains.rs`, the `None =>`
+/// arm of the tenant resolution), which the document did not declare.
+///
+/// NAMED FOR WHAT IT ACTUALLY PINS (#530 review): this asserts the
+/// DECLARATION only. It derives nothing from the verify handler, so deleting
+/// that `None =>` arm leaves it green and the runtime side of the gap can
+/// reopen. The earlier name claimed it stopped exactly that. Closing the
+/// runtime half needs the same newtype treatment the bind terminal got, or a
+/// derivation from the runtime contract; neither is done here.
 #[test]
-fn verify_declares_the_missing_tenant_bad_request() {
+fn verify_declares_a_400_for_the_missing_tenant_arm() {
     const SPEC: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs/openapi/admin-api.openapi.json"

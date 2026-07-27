@@ -529,10 +529,10 @@ impl FerroGateway {
                 admin_verification.state, acme.enabled, acme.reload_triggered
             ),
         ));
-        let status = site_domain_bind_status(proven, existing.is_some());
+        let terminal = site_domain_bind_status(proven, existing.is_some());
         write_json_response(
             session,
-            status,
+            terminal.status(),
             &AdminSiteDomainResponse {
                 object: "site_domain",
                 site_domain: admin_site_domain(&domain, Some(&verification), now),
@@ -1010,11 +1010,34 @@ fn admin_site_domain(
 ///   will not answer traffic until `POST .../{hostname}/verify` succeeds.
 /// * `200 OK` -- an already-proven binding re-bound within the same tenant.
 /// * `201 Created` -- a new binding whose ownership was already proven.
-fn site_domain_bind_status(proven: bool, existing: bool) -> StatusCode {
-    match (proven, existing) {
+fn site_domain_bind_status(proven: bool, existing: bool) -> BindTerminal {
+    BindTerminal(match (proven, existing) {
         (false, _) => StatusCode::ACCEPTED,
         (true, true) => StatusCode::OK,
         (true, false) => StatusCode::CREATED,
+    })
+}
+
+/// The bind handler's success status, constructible ONLY by
+/// [`site_domain_bind_status`] (#530 review finding 3).
+///
+/// The first cut of this coupling was a test that called the selector directly
+/// and compared its outputs against the OpenAPI document. That pinned a pure
+/// function, not the handler: replacing the handler's
+/// `let status = site_domain_bind_status(..)` with a literal
+/// `StatusCode::NO_CONTENT` left the test green while the gateway answered an
+/// undeclared 204 -- the sending-side/applying-side shape.
+///
+/// A newtype with a private field makes that mutation a COMPILE error instead
+/// of a silent pass: the bind response writer takes a `BindTerminal`, and the
+/// only way to obtain one is to run the selector. A test cannot substitute for
+/// this, because the property is "no other value can reach the writer", which
+/// is a statement about every possible caller.
+struct BindTerminal(StatusCode);
+
+impl BindTerminal {
+    fn status(&self) -> StatusCode {
+        self.0
     }
 }
 

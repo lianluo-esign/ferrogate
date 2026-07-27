@@ -11731,6 +11731,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "x-ferrogate-contract": {
@@ -11806,6 +11809,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "x-ferrogate-contract": {
@@ -11854,6 +11860,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "x-ferrogate-contract": {
@@ -11900,6 +11909,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "x-ferrogate-contract": {

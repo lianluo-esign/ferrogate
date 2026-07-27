@@ -13429,6 +13429,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     bindSiteDomain: {
@@ -13477,6 +13478,7 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     getSiteDomain: {
@@ -13502,6 +13504,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     unbindSiteDomain: {
@@ -13527,6 +13530,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     verifySiteDomain: {
