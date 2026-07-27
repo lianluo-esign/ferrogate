@@ -706,18 +706,12 @@ impl AppState {
     ///
     /// The run row is the one record every replica shares, so it is the only
     /// sound predicate -- but only if it is already THERE when a peer looks.
-    /// That is an ordering obligation on the cancel, not a property of this
-    /// function: `cancel_agent_job` settles the row through
-    /// [`AppState::record_agent_run_durably`] and refuses to go on unless the
-    /// write landed, BEFORE `cancel_agent_job_in_runtime` deletes the durable
-    /// dispatch row that a peer would otherwise still be stopped by. Written
-    /// the other way round (as it was until #551's rework) there is a window in
-    /// which the evidence is gone and its replacement is still queued in a
-    /// background writer that is allowed to drop it. Read durably
-    /// (`settled_agent_run_ids`) for the same reason. A run with NO row is not
-    /// settled -- absence of evidence never stops work, exactly as it never
-    /// releases a submit slot -- so dispatches created through non-job paths
-    /// lease unchanged.
+    /// That is an ordering obligation on the cancel, and the cancel discharges
+    /// it by evaluating THIS predicate (`settled_agent_run_ids`) before it
+    /// deletes the dispatch row a peer would otherwise still be stopped by. A
+    /// run with NO row is not settled -- absence of evidence never stops work,
+    /// exactly as it never releases a submit slot -- so dispatches created
+    /// through non-job paths lease unchanged.
     ///
     /// `CancelRun` is deliberately exempt: its run is terminal BY CONSTRUCTION
     /// (that is what the cancel wrote), and refusing to hand it out would
@@ -1608,28 +1602,25 @@ impl AppState {
         }
     }
 
-    /// Record `run` and return only once the row is DURABLY there -- or report
-    /// that it is not (#551 rework).
+    /// Write `run` as a settled record, waiting for the write rather than
+    /// firing it and forgetting it, and report whether it is KNOWN to have
+    /// failed (#551).
     ///
-    /// [`AppState::record_agent_run`] is fire-and-forget by design, and on the
-    /// durable backend that means two things this caller cannot live with: the
-    /// enqueue returns before the row is visible to anybody, and
-    /// `EvidenceWriter::enqueue` DROPS the job outright when the queue stays
-    /// full past its timeout, which `record_agent_run` cannot even observe
-    /// because it discards the returned `bool`. For telemetry that is the right
-    /// trade. For the cancel path it is not: the settled `agent_runs` row is
-    /// the ONLY predicate that stops a peer replica handing a cancelled job's
-    /// `start_run` to a worker (`AppState::start_run_lease_is_settled`), and
-    /// the cancel then DESTROYS the durable dispatch row that would otherwise
-    /// have carried a `cancel_run` as evidence. Deleting the evidence before
-    /// the replacement predicate is visible reopens #474's defect on exactly
-    /// the arm the withdrawal was supposed to close.
+    /// [`AppState::record_agent_run`] discards `EvidenceWriter::enqueue`'s
+    /// `bool`, so a row dropped under back-pressure is invisible to it. That is
+    /// the right trade for telemetry and the wrong one for a cancel, which is
+    /// about to destroy the dispatch row this record replaces.
     ///
-    /// So this is the ordered write: enqueue, then FLUSH, and answer whether
-    /// the row is now readable. `false` obliges the caller to destroy nothing
-    /// and fail the request -- a cancel that could not be recorded has not
-    /// happened.
-    pub(crate) fn record_agent_run_durably(&self, run: StoredAgentRun) -> bool {
+    /// `false` therefore means the row is definitely NOT in the store: dropped
+    /// at enqueue, still pending when the flush timed out, or an inline upsert
+    /// that returned `Err`. **`true` is weaker than it looks and is not proof.**
+    /// The writer counts a job as processed whether `upsert_agent_run`
+    /// succeeded or logged its error and returned (`state_evidence_writer.rs`),
+    /// so a transient Postgres failure reads back as a clean flush. Callers get
+    /// the proof by reading the row: `cancel_agent_job_in_runtime` refuses
+    /// unless `settled_agent_run_ids` answers, which is also the predicate a
+    /// peer replica is stopped by (#551 rework 2).
+    pub(crate) fn settle_agent_run_record(&self, run: StoredAgentRun) -> bool {
         if self.evidence_writes_deferred() {
             if !self
                 .evidence_writer

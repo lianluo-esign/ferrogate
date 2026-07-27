@@ -1013,27 +1013,21 @@ struct AgentJobCancelDecision {
 }
 
 /// Cancel `run`: settle it, then stop its work in the runtime. **In that
-/// order, and the order is the guarantee (#551 rework).**
+/// order, and the order is the guarantee (#551).**
 ///
-/// A cancel destroys evidence -- on the withdrawable arm it deletes the
-/// `self_hosted_run_dispatches` row outright, which is the only thing a PEER
-/// replica holding its own in-memory copy of that dispatch could ever have
-/// been superseded by. What replaces it is the settled `agent_runs` row, the
-/// one record every replica reads (`AppState::start_run_lease_is_settled`).
-/// Writing the run row AFTER the deletion, as this path did until now, leaves
-/// a window in which neither exists: on the durable backend `record_agent_run`
-/// hands the row to a background writer that returns immediately and is
-/// allowed to DROP it under back-pressure, so the window is not merely small,
-/// it can be unbounded. A peer that polls inside it hands a worker the
-/// cancelled job's `start_run` -- #474's defect, on the arm the withdrawal was
-/// introduced to close.
+/// The withdrawable arm DELETES the `self_hosted_run_dispatches` row, the only
+/// thing a peer replica's own in-memory copy of that dispatch could have been
+/// superseded by; what replaces it is the settled `agent_runs` row every
+/// replica reads (`AppState::start_run_lease_is_settled`). Destroying the first
+/// while the second is not yet readable reopens #474's defect on the very arm
+/// the withdrawal exists to close -- and on the durable backend that window is
+/// not small, because the run row goes through a background writer that may
+/// drop it or swallow its error.
 ///
-/// So: [`AppState::record_agent_run_durably`] first, and a failed write aborts
-/// the cancel having destroyed nothing (the caller sees 503 and may retry --
-/// and a retry, once some other route settles the run, lands in the repair
-/// branch below). [`cancel_agent_job_in_runtime`] then REFUSES a run that is
-/// not already terminal, so this ordering cannot be quietly inverted by a
-/// later edit: inverting it turns every cancel into a 503.
+/// So the settle runs first, and [`cancel_agent_job_in_runtime`] refuses until
+/// it can READ the settled row back. Both failures therefore cost a 503 having
+/// destroyed nothing: inverting these two statements, and a settle whose write
+/// was silently lost (#551 rework 2).
 fn cancel_agent_job(
     state: &AppState,
     run: &StoredAgentRun,
@@ -1064,7 +1058,7 @@ fn cancel_agent_job(
     let mut settled = run.clone();
     settled.status = "cancelled".to_string();
     settled.completed_at_unix = Some(now_unix);
-    if !state.record_agent_run_durably(settled.clone()) {
+    if !state.settle_agent_run_record(settled.clone()) {
         return Err(format!(
             "agent job {} could not be settled durably, so its work was left alone",
             run.id
@@ -1139,11 +1133,10 @@ fn cancel_agent_job(
 /// the one record every replica shares, and the one [`cancel_agent_job`] has
 /// already written, and flushed, BEFORE calling this.
 ///
-/// That ordering is a precondition, not a convention, so it is checked: `run`
-/// must already be terminal or this returns `Err` and touches nothing. A
-/// cancel that withdrew first would delete the peer's only supersedable
-/// evidence while the row meant to replace it was still queued in a background
-/// evidence writer that is permitted to drop it (#551 rework).
+/// That ordering is a precondition, not a convention, so it is checked by
+/// READING the settled row back (#551 rework 2): unless the store answers with
+/// a terminal `agent_runs` row for `run.id`, this returns `Err` and touches
+/// nothing.
 ///
 /// Residue, stated rather than left implied: a worker that is ALREADY
 /// executing the run is stopped only by collecting its `cancel_run`, so the
@@ -1160,10 +1153,22 @@ fn cancel_agent_job_in_runtime(
     request_id: &str,
     now_unix: u64,
 ) -> Result<bool, String> {
-    if !agent_job_status_is_terminal(&run.status) {
-        // The ordering guard. Failing here costs the caller a 503 on a cancel
-        // that has changed nothing; the alternative it prevents is a peer
-        // starting cancelled work with no evidence left anywhere to stop it.
+    if !state
+        .settled_agent_run_ids(std::slice::from_ref(&run.id))
+        .contains(&run.id)
+    {
+        // The ordering guard, read out of the STORE and never off `run` (#551
+        // rework 2). Reading `run.status` checked the caller's own struct,
+        // which `cancel_agent_job` has already stamped `cancelled` one line
+        // above the settle -- so the guard passed whichever order the two
+        // statements ran in, and passed identically when the settle's write was
+        // silently lost (the evidence writer counts an `upsert_agent_run` that
+        // returned `Err` as processed, so its flush still reports success).
+        // `settled_agent_run_ids` flushes and reads the shared `agent_runs`
+        // row: the exact predicate `start_run_lease_is_settled` stops a peer
+        // with, so nothing is destroyed until a peer could genuinely see the
+        // replacement. Failing here costs the caller a 503 on a cancel that has
+        // changed nothing.
         return Err(format!(
             "agent job {} must be settled before its queued work is withdrawn",
             run.id

@@ -307,11 +307,14 @@ fn stopping_the_work_before_its_run_row_is_settled_is_refused() {
     // back-pressure, so "write it afterwards" is a window a peer can poll
     // inside -- and did, in the arm the withdrawal exists to close.
     //
-    // `cancel_agent_job` therefore settles FIRST (durably, checked) and
-    // `cancel_agent_job_in_runtime` refuses a run that is not already terminal.
-    // Deleting that refusal at `agent_jobs.rs`'s guard, or swapping the two
-    // statements in `cancel_agent_job`, reddens this: the withdrawal would
-    // succeed on a `queued` run and the dispatch rows would be gone.
+    // `cancel_agent_job` therefore settles FIRST and `cancel_agent_job_in_runtime`
+    // refuses until it can READ the settled row back out of the store. Deleting
+    // that guard reddens the first half here (the withdrawal would succeed on a
+    // `queued` run and the dispatch rows would be gone); swapping the settle and
+    // the withdrawal in `cancel_agent_job` reddens the second, because the store
+    // still answers `queued` when the guard runs and the cancel 503s.
+    // `the_ordering_guard_reads_the_settled_row_not_the_callers_struct` is what
+    // holds the guard to reading the store rather than the struct it is handed.
     let state = AppState::new(Config::default());
     let run_id = agent_job_run_id("tenant-a", "settle-before-withdraw");
     state
@@ -347,6 +350,93 @@ fn stopping_the_work_before_its_run_row_is_settled_is_refused() {
     assert!(
         !durable_dispatch_ids(&state).contains(&agent_job_start_dispatch_id(&run_id)),
         "...and only then is the durable dispatch row withdrawn"
+    );
+}
+
+#[test]
+fn the_ordering_guard_reads_the_settled_row_not_the_callers_struct() {
+    // Two ways the withdrawal could still destroy a peer's only evidence while
+    // the row meant to replace it is unreadable, and the one guard that closes
+    // both.
+    //
+    // The guard used to test `run.status` -- the CALLER's struct, which
+    // `cancel_agent_job` stamps `cancelled` before either statement runs. It
+    // therefore passed whichever order the settle and the withdrawal ran in,
+    // and it passed just as happily when the settle's write never landed: on
+    // the durable backend `EvidenceWriter` counts an `upsert_agent_run` that
+    // returned `Err` as processed, so `flush()` reports success for a row that
+    // is not in the store.
+    //
+    // Reading the STORE separates all three states. Arm 1 is the reordering
+    // (struct says cancelled, the row still says queued); arm 2 is the lost
+    // write (struct says cancelled, there is no row at all -- which is exactly
+    // what a swallowed upsert leaves behind, and is reachable on the in-memory
+    // backend because absence and a failed write are the same state to a
+    // reader). Reverting the guard to `agent_job_status_is_terminal(&run.status)`
+    // reddens both arms.
+    let state = AppState::new(Config::default());
+
+    // Arm 1 -- reordered. The durable row is the `queued` one the submit wrote.
+    let reordered_id = agent_job_run_id("tenant-a", "guard-reads-the-store");
+    let reordered_dispatch_id = agent_job_start_dispatch_id(&reordered_id);
+    state
+        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&reordered_id, "tenant-a"))
+        .expect("submit enqueues the start dispatch");
+    state.record_agent_run(queued_run(&reordered_id, "tenant-a"));
+    let mut claims_settled = queued_run(&reordered_id, "tenant-a");
+    claims_settled.status = "cancelled".to_string();
+    claims_settled.completed_at_unix = Some(200);
+    let refusal = cancel_agent_job_in_runtime(&state, &claims_settled, "fg-cancel", 200)
+        .expect_err("a struct that says cancelled is not a row a peer can read");
+    assert!(
+        refusal.contains(&reordered_id),
+        "the refusal must name the job it protected: {refusal}"
+    );
+    assert!(
+        durable_dispatch_ids(&state).contains(&reordered_dispatch_id),
+        "a refused cancel must destroy nothing"
+    );
+    assert!(state.self_hosted_dispatch_unacked(&reordered_dispatch_id));
+
+    // Arm 2 -- the settle reported success and wrote nothing.
+    let lost_id = agent_job_run_id("tenant-a", "guard-survives-a-lost-write");
+    let lost_dispatch_id = agent_job_start_dispatch_id(&lost_id);
+    state
+        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&lost_id, "tenant-a"))
+        .expect("submit enqueues the start dispatch");
+    let mut never_written = queued_run(&lost_id, "tenant-a");
+    never_written.status = "cancelled".to_string();
+    never_written.completed_at_unix = Some(200);
+    assert!(
+        state.agent_run_record(&lost_id).is_none(),
+        "the premise of this arm is that the settle's write is not in the store"
+    );
+    let lost = cancel_agent_job_in_runtime(&state, &never_written, "fg-cancel", 200)
+        .expect_err("a settle whose write did not land must not license destroying evidence");
+    assert!(
+        lost.contains(&lost_id),
+        "the refusal must name the job it protected: {lost}"
+    );
+    assert!(
+        durable_dispatch_ids(&state).contains(&lost_dispatch_id),
+        "...so the row a peer could still be superseded by survives for the retry"
+    );
+
+    // The control. Once the row genuinely IS in the store, the same call on the
+    // same struct withdraws -- so neither refusal above is a guard that simply
+    // refuses everything, which is the shape #500 exists about.
+    assert!(
+        state.settle_agent_run_record(never_written.clone()),
+        "the in-memory settle must actually land, or the control proves nothing"
+    );
+    assert_eq!(
+        cancel_agent_job_in_runtime(&state, &never_written, "fg-cancel", 200),
+        Ok(false),
+        "an unleased job whose run row is genuinely settled is withdrawn, not dispatched at"
+    );
+    assert!(
+        !durable_dispatch_ids(&state).contains(&lost_dispatch_id),
+        "...and only then is the durable dispatch row gone"
     );
 }
 
