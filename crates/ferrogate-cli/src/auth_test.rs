@@ -1236,6 +1236,112 @@ fn config_load_names_every_key_that_relies_on_implicit_platform_root() {
     );
 }
 
+/// Captures everything written by `tracing` while `run` executes, on this
+/// thread only. Needed because the migration warning's only user-visible form
+/// IS a log line -- there is nothing else to assert on once you insist on
+/// driving the real caller.
+fn capture_tracing_output(run: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuffer {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buffer = SharedBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buffer.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    let captured = buffer.0.lock().expect("log buffer").clone();
+    String::from_utf8(captured).expect("tracing output is utf-8")
+}
+
+/// #515 finding 5: the warning above is the entire user-visible artifact of the
+/// migration window, and `Config::validate` is the ONLY thing that emits it in
+/// production. Asserting on `warn_implicit_platform_operators()` directly (as
+/// the two tests that cover it do) leaves the call site unpinned: delete the
+/// single line in `validate` and the warning silently disappears for every real
+/// deployment while every test stays green.
+///
+/// So drive the caller and assert on what it PRODUCED -- and on the guard
+/// inside it, by validating the same key list with the deprecated default
+/// turned off, where the key is refused at authentication instead and the
+/// warning must NOT fire.
+#[test]
+fn config_validate_is_what_emits_the_implicit_platform_root_warning() {
+    let mut bootstrap = decoy_yaml_key();
+    bootstrap.id = "bootstrap".into();
+    let mut declared = decoy_yaml_key();
+    declared.id = "declared-root".into();
+    declared.key = Some("declared-secret".into());
+    declared.platform_operator = Some(true);
+    let mut scoped = decoy_yaml_key();
+    scoped.id = "tenant-key".into();
+    scoped.key = Some("tenant-secret".into());
+    scoped.organization_id = Some("tenant-a".into());
+    let api_keys = vec![bootstrap, declared, scoped];
+
+    let legacy_default = Config {
+        api_keys: api_keys.clone(),
+        ..Config::default()
+    };
+    assert!(
+        legacy_default.tenancy.implicit_platform_operator,
+        "this test's premise is the deprecated default being on"
+    );
+    let warned = capture_tracing_output(|| {
+        legacy_default
+            .validate()
+            .expect("this config is otherwise valid");
+    });
+    assert!(
+        warned.contains("bootstrap"),
+        "Config::validate must name the key that holds platform root only by omission: {warned}"
+    );
+    assert!(
+        warned.contains("implicit_platform_operator"),
+        "the warning must point at the setting an operator has to flip: {warned}"
+    );
+    assert!(
+        !warned.contains("declared-root") && !warned.contains("tenant-key"),
+        "a key that declared either identity is not relying on the default: {warned}"
+    );
+
+    let opted_in = Config {
+        api_keys,
+        tenancy: crate::config::TenancyConfig {
+            implicit_platform_operator: false,
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    let silent = capture_tracing_output(|| {
+        opted_in.validate().expect("this config is otherwise valid");
+    });
+    assert!(
+        !silent.contains("bootstrap"),
+        "with the deprecated default off there is no implicit root left to warn about; the key \
+         is refused at authentication instead: {silent}"
+    );
+}
+
 /// Root and a tenant are mutually exclusive, and a blank tenant id is a typo
 /// rather than an identity -- both refused before the gateway ever starts.
 #[test]
@@ -1311,6 +1417,36 @@ fn tenant_scope_check_reads_the_declared_identity_not_a_missing_field() {
             .code,
         "platform_operator_required"
     );
+}
+
+/// #515 finding 2. Roughly a dozen admin reads take an `Option<&str>` tenant
+/// argument where `None` means "every tenant", and every one of them used to be
+/// fed `auth.organization_id.as_deref()` -- which hands the cross-tenant view to
+/// anything that merely omitted the field. `tenant_filter()` is that argument
+/// derived from the CLASSIFICATION, so `None` is reachable only by a declared
+/// operator; pin all three answers here, since the call sites are one-liners
+/// that a mutation can silently revert.
+#[test]
+fn tenant_filter_yields_the_cross_tenant_view_only_for_a_declared_operator() {
+    assert_eq!(
+        auth_with_identity(None, true).tenant_filter(),
+        None,
+        "a declared platform operator keeps the unfiltered, cross-tenant read"
+    );
+    assert_eq!(
+        auth_with_identity(Some("tenant-a"), false).tenant_filter(),
+        Some("tenant-a"),
+        "a tenant-scoped caller is pinned to its own tenant"
+    );
+    assert_eq!(
+        auth_with_identity(None, false).tenant_filter(),
+        Some(""),
+        "a credential that declared NEITHER identity must be narrowed to a tenant id no row can \
+         equal -- not handed None, which is the every-tenant view"
+    );
+    // ...and the two spellings agree, so a site converted to either one behaves
+    // the same for the unclassified shape.
+    assert!(!auth_with_identity(None, false).is_platform_operator());
 }
 
 /// The list filter: same three identities, same three answers -- and the

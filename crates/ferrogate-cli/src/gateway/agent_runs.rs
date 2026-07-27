@@ -638,8 +638,14 @@ async fn agent_workflow_use(
             }
         }
     }
+    // #515: the workflow-gate readers match a run's records on the caller's
+    // tenant EXACTLY, and `None` selects the platform operator's own records.
+    // Sourcing that argument from `tenant_filter()` rather than from
+    // `organization_id` keeps "operator" a declared classification here too, so
+    // a credential that declared no identity cannot gate its run off the
+    // operator's records.
     if let Some(message) = state
-        .workflow_edge_transition_error(workflow, run_id, node_id, auth.organization_id.as_deref())
+        .workflow_edge_transition_error(workflow, run_id, node_id, auth.tenant_filter())
         .await
     {
         return Err((StatusCode::FORBIDDEN, "workflow_edge_not_allowed", message));
@@ -688,12 +694,7 @@ async fn agent_workflow_use(
     }
     if let Some(timeout_millis) = workflow.timeout_millis {
         if let Some(started_at_unix) = state
-            .workflow_run_started_at(
-                &workflow.id,
-                workflow.version,
-                run_id,
-                auth.organization_id.as_deref(),
-            )
+            .workflow_run_started_at(&workflow.id, workflow.version, run_id, auth.tenant_filter())
             .await
         {
             let elapsed_millis = now_unix_seconds()

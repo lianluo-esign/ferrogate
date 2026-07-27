@@ -18,7 +18,7 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::{FerroGateway, ProxyContext};
 use crate::{
-    auth::{authenticate, AuthContext, AuthError},
+    auth::{authenticate, AuthContext, AuthError, CallerScope},
     responses::{write_json_error, write_json_error_and_close, write_json_response, AdminList},
     state::AppState,
 };
@@ -361,7 +361,10 @@ impl FerroGateway {
         if let Err(error) = authorize_guardrail_secret_refs(&auth, &revision) {
             return write_auth_error(session, ctx, error).await;
         }
-        if auth.organization_id.is_some() {
+        // #515: "not the platform operator", asked of the classification rather
+        // than of a missing field -- an unclassified credential must run this
+        // clobber check, not skip it.
+        if !auth.is_platform_operator() {
             match state.guardrail_policy_revision_views(Some(&revision.policy_id)) {
                 Ok(existing)
                     if existing
@@ -666,20 +669,26 @@ impl FerroGateway {
             }
             Err(error) => return write_guardrail_error(session, ctx, error).await,
         };
-        if let Some(organization_id) = auth.organization_id.as_deref() {
+        // #515: only a DECLARED platform operator may let the request body pick
+        // the tenant the policy is evaluated against. Read off
+        // `organization_id` this was "whoever omitted the field", so an
+        // unclassified credential could name any tenant it liked in the body
+        // and have that become the selection context.
+        let caller_scope = auth.caller_scope();
+        if let CallerScope::Tenant(tenant_id) = caller_scope {
             if request
                 .organization_id
                 .as_deref()
-                .is_some_and(|requested| requested != organization_id)
+                .is_some_and(|requested| requested != tenant_id)
             {
                 return write_auth_error(session, ctx, guardrail_scope_denied()).await;
             }
         }
         let selection = PolicySelectionContext {
-            organization_id: auth
-                .organization_id
-                .as_deref()
-                .or(request.organization_id.as_deref()),
+            organization_id: match caller_scope {
+                CallerScope::PlatformOperator => request.organization_id.as_deref(),
+                CallerScope::Tenant(tenant_id) => Some(tenant_id),
+            },
             project_id: request.project_id.as_deref(),
             workspace_id: request.workspace_id.as_deref(),
             api_key_id: request.api_key_id.as_deref(),
@@ -796,11 +805,20 @@ fn guardrail_view_is_visible(auth: &AuthContext, view: &PolicyRevisionView) -> b
     authorize_guardrail_scope(auth, &view.revision).is_ok()
 }
 
+/// The tenant-isolation chokepoint behind every guardrail read and write: a
+/// tenant-scoped caller may only see/author revisions explicitly scoped to its
+/// own tenant.
+///
+/// #515: the "who is unrestricted here" question is [`CallerScope`], not a
+/// missing `organization_id`. A credential that declared no identity at all
+/// lands in the `Tenant` arm with the unscoped tenant id, which no revision
+/// scope can equal, so it sees and writes nothing -- instead of taking the
+/// early `Ok(())` that means "platform operator, unrestricted".
 fn authorize_guardrail_scope(
     auth: &AuthContext,
     revision: &PolicyRevision,
 ) -> Result<(), AuthError> {
-    let Some(tenant_id) = auth.organization_id.as_deref() else {
+    let CallerScope::Tenant(tenant_id) = auth.caller_scope() else {
         return Ok(());
     };
     let organization_scopes = revision
@@ -855,13 +873,20 @@ fn detector_references_host_secret(detector: &DetectorDefinition) -> bool {
 /// dereference the host `VAULT_TOKEN`, a sibling tenant's provider key, or the
 /// admin JWT secret, and a `CustomHttp` detector would ship the resolved value
 /// as a `Bearer` token to a caller-controlled endpoint (arbitrary host/cross-
-/// tenant secret exfiltration). Only platform operators (no `organization_id`)
-/// may author detectors that carry a secret reference.
+/// tenant secret exfiltration). Only platform operators may author detectors
+/// that carry a secret reference.
+///
+/// #515: "platform operator" here is [`CallerScope::PlatformOperator`], i.e. a
+/// DECLARED `platform_operator`. It used to be `organization_id.is_none()`,
+/// which meant an unclassified credential -- one that never named a tenant and
+/// never claimed root -- was handed the host-secret exemption by default. That
+/// is the wrong direction for a check whose failure mode is exfiltrating the
+/// gateway's own `VAULT_TOKEN`.
 fn authorize_guardrail_secret_refs(
     auth: &AuthContext,
     revision: &PolicyRevision,
 ) -> Result<(), AuthError> {
-    if auth.organization_id.is_none() {
+    if auth.is_platform_operator() {
         return Ok(());
     }
     let references_host_secret = revision.checks.iter().any(|check| {
@@ -920,7 +945,10 @@ async fn require_guardrail_auth(
             return Ok(None);
         }
     };
-    if let Some(tenant_id) = auth.organization_id.as_deref() {
+    // #515: a tenant-scoped caller must clear its tenant's RBAC grant; only a
+    // declared platform operator skips it. An unclassified credential is a
+    // `Tenant` here, so it is checked (and denied) rather than waved through.
+    if let CallerScope::Tenant(tenant_id) = auth.caller_scope() {
         match state
             .tenant_has_permission_result(tenant_id, permission.key())
             .await

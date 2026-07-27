@@ -3610,8 +3610,10 @@ export interface components {
             allowed_providers: components["schemas"]["StringList"];
             denied_providers: components["schemas"]["StringList"];
             organization_id?: string | null;
-            /** @description Whether this key holds unrestricted, cross-tenant platform-root access (issue #515). Declared via the request body, never inferred from a null organization_id. */
-            platform_operator?: boolean;
+            /** @description What this key DECLARES about platform root (issue #515): true = declared root, false = explicitly refused root, null = declared nothing, so the answer comes from [tenancy] implicit_platform_operator. Nullable because PUT is a full replace with no merge: rendering the null state as false made a read-modify-write persist an explicit refusal on legacy operator keys and lock the admin API out. See effective_platform_operator for the resolved answer. */
+            platform_operator?: boolean | null;
+            /** @description Whether this key holds unrestricted, cross-tenant platform-root access RIGHT NOW (issue #515) -- platform_operator resolved against organization_id and this deployment's [tenancy] implicit_platform_operator setting. Read-only and derived; it is not accepted on the mutation payload. */
+            effective_platform_operator?: boolean;
             team_id?: string | null;
             project_id?: string | null;
             workspace_id?: string | null;

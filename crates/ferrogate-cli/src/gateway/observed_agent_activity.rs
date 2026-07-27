@@ -379,9 +379,11 @@ impl FerroGateway {
             Ok(auth) => {
                 // Tenant isolation BEFORE pagination/aggregation: a tenant-scoped
                 // caller only ever sees its own tenant's observed activity; the
-                // platform operator (organization_id == None) gets the
-                // cross-tenant view.
-                let rows = state.observed_agent_activity(auth.organization_id.as_deref());
+                // DECLARED platform operator (#515) gets the cross-tenant view.
+                // `tenant_filter()` is the classification, so a credential that
+                // merely omitted `organization_id` no longer lands in the
+                // unfiltered branch.
+                let rows = state.observed_agent_activity(auth.tenant_filter());
                 let pagination = state.admin_pagination(query);
                 let total = rows.len();
                 let data = rows

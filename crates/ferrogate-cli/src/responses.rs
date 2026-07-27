@@ -953,11 +953,38 @@ pub(crate) struct AdminApiKey {
     pub(crate) allowed_providers: Vec<String>,
     pub(crate) denied_providers: Vec<String>,
     pub(crate) organization_id: Option<String>,
-    /// #515: surfaced so an operator (and the console, when it catches up) can
-    /// SEE which keys hold platform root instead of inferring it from a null
-    /// `organization_id`. `false` here means "not root"; `true` means the key
-    /// declared it.
-    pub(crate) platform_operator: bool,
+    /// What the key DECLARES about platform root (issue #515), in all three of
+    /// its states: `true` = declared root, `false` = explicitly refused root,
+    /// `null` = said nothing, so the answer comes from `[tenancy]
+    /// implicit_platform_operator`.
+    ///
+    /// It has to be `Option<bool>` and not `bool` because
+    /// `PUT /admin/v1/api-keys/{id}` is a full replace with no merge: this
+    /// document is what an operator (or a generated SDK) reads, edits and
+    /// writes back. Rendering the `null` state as `false` -- which is what the
+    /// first cut of #515 did -- turned that round-trip into a silent
+    /// `platform_operator: false` on exactly the legacy bootstrap/operator keys
+    /// this issue exists for, and `resolve_platform_operator` then answers
+    /// "not root" for them under the default config, so `finalize_auth`
+    /// 403s every subsequent request with that key. Self-lockout of the admin
+    /// API, caused by reading a key and writing it back unchanged.
+    ///
+    /// Pairs with [`Self::effective_platform_operator`]: this field answers
+    /// "did someone write it down", that one answers "is this key root now".
+    pub(crate) platform_operator: Option<bool>,
+    /// Whether this key holds platform root RIGHT NOW (issue #515) -- the
+    /// answer [`crate::auth::resolve_platform_operator`] will give at
+    /// authentication time, i.e. [`Self::platform_operator`] resolved against
+    /// `organization_id` and this deployment's `[tenancy]
+    /// implicit_platform_operator` setting.
+    ///
+    /// Read-only and derived: it is deliberately NOT accepted on the mutation
+    /// payload, so writing a fetched document back can never persist a
+    /// deployment-wide default as a per-key declaration. It exists because
+    /// "which of my keys can read every tenant today" is the operational
+    /// question, and the declared field alone cannot answer it without the
+    /// reader also knowing the `[tenancy]` setting.
+    pub(crate) effective_platform_operator: bool,
     pub(crate) team_id: Option<String>,
     pub(crate) project_id: Option<String>,
     pub(crate) workspace_id: Option<String>,

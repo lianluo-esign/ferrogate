@@ -165,8 +165,11 @@ impl FerroGateway {
                 // to the caller's tenant (Some) or the platform operator's
                 // cross-tenant view (None) at the storage layer, so a
                 // tenant-scoped caller can never page into another tenant's burn.
+                // #515: which of the two it is comes from `tenant_filter()`, the
+                // declared classification -- not from a null `organization_id`,
+                // which also caught credentials that declared nothing.
                 let result = state
-                    .list_agent_cost_burn(auth.organization_id.as_deref(), &period)
+                    .list_agent_cost_burn(auth.tenant_filter(), &period)
                     .await
                     .map_err(|error| {
                         tracing::warn!(error = %error, "agent cost-burn list unavailable");

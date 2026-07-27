@@ -61,7 +61,21 @@ fn tenant_guardrail_scope_requires_explicit_single_tenant_boundary() {
     );
 }
 
+/// A DECLARED platform operator (#515): `platform_operator = true`, which is
+/// what `resolve_platform_operator` produces for a key that opted in or that
+/// inherited the deprecated `[tenancy] implicit_platform_operator` default.
 fn operator_auth() -> AuthContext {
+    let mut auth = tenant_auth("ignored");
+    auth.organization_id = None;
+    auth.platform_operator = true;
+    auth
+}
+
+/// The shape #515 exists to separate from the one above: a hand-built context
+/// that names no tenant and never declared platform root. `finalize_auth`
+/// refuses it at the door, so this is the defence-in-depth case -- it must land
+/// in `CallerScope::Tenant("")`, never in the operator branch.
+fn unclassified_auth() -> AuthContext {
     let mut auth = tenant_auth("ignored");
     auth.organization_id = None;
     auth
@@ -115,4 +129,50 @@ fn tenant_authors_cannot_reference_host_secrets_but_operators_can() {
     let operator = operator_auth();
     assert!(authorize_guardrail_secret_refs(&operator, &custom_http_secret).is_ok());
     assert!(authorize_guardrail_secret_refs(&operator, &local_fingerprint_secret).is_ok());
+}
+
+/// #515 finding 2. Both guardrail chokepoints used to ask
+/// `organization_id.is_none()`, so a credential that declared NEITHER a tenant
+/// nor platform root inherited the operator branch of each: unrestricted policy
+/// visibility, and permission to point a `CustomHttp` detector at the gateway's
+/// own `VAULT_TOKEN` and ship it to a caller-controlled endpoint. Asking
+/// `caller_scope()` instead puts it in `Tenant("")`, which no policy scope can
+/// match and which is not the operator.
+#[test]
+fn an_unclassified_credential_gets_neither_guardrail_operator_branch() {
+    let unclassified = unclassified_auth();
+
+    // Host-secret exfiltration guard: refused, exactly like any tenant author.
+    let custom_http_secret = revision_with_detector(serde_json::json!({
+        "kind": "custom_http",
+        "endpoint": "https://detector.example/scan",
+        "secret_ref": "env://VAULT_TOKEN"
+    }));
+    assert_eq!(
+        authorize_guardrail_secret_refs(&unclassified, &custom_http_secret)
+            .expect_err("a credential with no declared identity is not a platform operator")
+            .code,
+        "guardrail_secret_ref_forbidden",
+    );
+
+    // Tenant-isolation chokepoint: it sees no policy, not every policy. An
+    // unscoped revision (the one an operator reads) and a tenant-scoped one are
+    // both denied, because `Tenant("")` equals no tenant id that can be written.
+    assert!(authorize_guardrail_scope(&unclassified, &revision_with_scope(Vec::new())).is_err());
+    assert!(
+        authorize_guardrail_scope(&unclassified, &revision_with_scope(vec!["tenant-a"])).is_err()
+    );
+    assert!(!guardrail_view_is_visible(
+        &unclassified,
+        &PolicyRevisionView {
+            revision: revision_with_scope(vec!["tenant-a"]),
+            status: Default::default(),
+        }
+    ));
+
+    // The declared operator is unaffected: this is a narrowing of who counts as
+    // root, not a removal of root.
+    let operator = operator_auth();
+    assert!(authorize_guardrail_secret_refs(&operator, &custom_http_secret).is_ok());
+    assert!(authorize_guardrail_scope(&operator, &revision_with_scope(vec!["tenant-a"])).is_ok());
 }

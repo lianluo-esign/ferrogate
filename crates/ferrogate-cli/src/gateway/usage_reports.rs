@@ -31,7 +31,12 @@ impl FerroGateway {
                 let mut filter = UsageReportFilter::from_query(query);
                 let is_metadata_group_by =
                     matches!(filter.group_by, Some(UsageReportGroupBy::Metadata(_)));
-                if let Some(tenant_id) = auth.organization_id.clone() {
+                // #515: the scope narrowing below is what a NON-operator gets.
+                // Selecting it on `organization_id.is_some()` meant a credential
+                // that declared no identity skipped the narrowing entirely and
+                // read an unscoped, cross-tenant report.
+                if let crate::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() {
+                    let tenant_id = tenant_id.to_string();
                     // `group_by=metadata.<key>` is served from
                     // `usage_metadata_rollups`, which is NOT keyed on the
                     // tenant/project/workspace/key scope chain, so the
@@ -73,9 +78,10 @@ impl FerroGateway {
                     }
                 }
                 // Tenant-scoped callers see only their own metadata breakdown;
-                // platform operators (organization_id == None) keep the global
-                // cross-tenant view.
-                let report_organization_id = auth.organization_id.as_deref();
+                // a DECLARED platform operator (#515) keeps the global
+                // cross-tenant view. `tenant_filter()` renders exactly that
+                // distinction into the `None = every tenant` argument.
+                let report_organization_id = auth.tenant_filter();
                 match state.usage_report(&filter, report_organization_id).await {
                     Ok(rows) => {
                         let body = AdminList::new(rows);

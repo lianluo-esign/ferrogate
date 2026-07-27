@@ -206,6 +206,26 @@ impl AuthContext {
         matches!(self.caller_scope(), CallerScope::PlatformOperator)
     }
 
+    /// The tenant narrowing to hand a storage query whose `Option<&str>` tenant
+    /// argument treats `None` as "every tenant" -- the shape used by every
+    /// paged admin read (request logs, audit events, metering, usage
+    /// aggregates, worker records/sessions, observed activity, cost burn) and
+    /// by the control-plane overview aggregate.
+    ///
+    /// This is [`Self::caller_scope`] rendered into that argument, and it is
+    /// the reason those call sites must never pass `organization_id` straight
+    /// through: `auth.organization_id.as_deref()` collapses "declared platform
+    /// root" and "declared nothing at all" into the same `None`, i.e. into the
+    /// cross-tenant view. Here only a declared operator gets `None`; anything
+    /// else is pinned to its own tenant id, and an unclassified credential is
+    /// pinned to [`UNSCOPED_TENANT_ID`], which matches no row.
+    pub(crate) fn tenant_filter(&self) -> Option<&str> {
+        match self.caller_scope() {
+            CallerScope::PlatformOperator => None,
+            CallerScope::Tenant(tenant_id) => Some(tenant_id),
+        }
+    }
+
     pub(crate) fn service_account_id(&self) -> Option<&str> {
         match self.rbac_subject.as_ref() {
             Some(ferrogate_auth::PolicySubject::ServiceAccount { service_account_id }) => {
@@ -338,8 +358,9 @@ pub(crate) fn authorize_tenant_scope(
 /// The list-endpoint counterpart to [`authorize_tenant_scope`] (issue
 /// #185): rather than deny outright, a bulk `GET /admin/v1/<resource>`
 /// listing narrows down to the caller's own tenant when the key is
-/// tenant-scoped. A platform-operator key (no `organization_id`) sees
-/// every row unfiltered, same as before this existed.
+/// tenant-scoped. A platform-operator key sees every row unfiltered, same
+/// as before this existed -- but since #515 that means a key that DECLARED
+/// platform root, not merely one whose `organization_id` is absent.
 pub(crate) fn filter_by_tenant_scope<T>(
     auth: &AuthContext,
     rows: Vec<T>,

@@ -461,8 +461,13 @@ impl FerroGateway {
                 .await
             }
         };
+        // #515: the fallback is the caller's OWN tenant, and only a declared
+        // platform operator may leave it unset and reach the "resolve the owner
+        // from the attempt" arm below (which spans every tenant). Defaulting
+        // from `organization_id` handed that arm to any credential that simply
+        // never named a tenant.
         let requested_tenant =
-            query_value(query, "tenant_id").or_else(|| auth.organization_id.clone());
+            query_value(query, "tenant_id").or_else(|| auth.tenant_filter().map(ToOwned::to_owned));
         let tenant_id = match requested_tenant {
             Some(tenant_id) => {
                 if let Err(error) = authorize_tenant_scope(&auth, &tenant_id) {

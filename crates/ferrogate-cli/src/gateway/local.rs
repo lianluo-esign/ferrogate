@@ -164,7 +164,12 @@ pub(super) async fn tool_execution_entitlement_denial(
              role grants the extensions.execute permission",
         ),
     };
-    let tenant_id = auth.organization_id.as_deref()?;
+    // #515: only a declared platform operator is exempt from the tenant's plan/
+    // RBAC tool entitlement. Read off `organization_id` the exemption also fell
+    // to any credential that simply never named a tenant.
+    let crate::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() else {
+        return None;
+    };
     if state
         .tenant_tool_entitlement_denied(
             tenant_id.to_string(),
@@ -223,7 +228,9 @@ async fn require_guardrail_evidence_auth(
             return Ok(None);
         }
     };
-    if let Some(tenant_id) = auth.organization_id.as_deref() {
+    // #515: the RBAC grant is required of every tenant-scoped caller; only a
+    // declared platform operator skips it (see `require_guardrail_auth`).
+    if let crate::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() {
         match state
             .tenant_has_permission_result(tenant_id, "guardrails.evidence.read")
             .await
@@ -319,25 +326,29 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "models.read", &ctx.request_id).await {
             Ok(auth) => {
-                // A platform-operator key (organization_id: None) sees every
-                // enabled model; a tenant-scoped key sees only the models
-                // visible to its tenant/project, matching the invocation gate
+                // A platform-operator key sees every enabled model; a
+                // tenant-scoped key sees only the models visible to its
+                // tenant/project, matching the invocation gate
                 // (can_tenant_use_model). Without this the listing leaked other
                 // tenants' private model logical names and upstream provider
                 // mapping even though invocation was blocked downstream.
-                let is_operator = auth.organization_id.is_none();
+                //
+                // #515: "operator" is the DECLARED classification, not a null
+                // organization_id -- otherwise an unclassified credential got
+                // the unfiltered listing.
+                let caller_scope = auth.caller_scope();
                 let data = state
                     .config
                     .models
                     .iter()
                     .filter(|model| model.enabled)
-                    .filter(|model| {
-                        is_operator
-                            || state.can_tenant_use_model(
-                                &model.name,
-                                auth.organization_id.as_deref(),
-                                auth.project_id.as_deref(),
-                            )
+                    .filter(|model| match caller_scope {
+                        crate::auth::CallerScope::PlatformOperator => true,
+                        crate::auth::CallerScope::Tenant(tenant_id) => state.can_tenant_use_model(
+                            &model.name,
+                            Some(tenant_id),
+                            auth.project_id.as_deref(),
+                        ),
                     })
                     .map(|model| OpenAiModel {
                         id: model.name.clone(),
@@ -4101,10 +4112,8 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
-                let page = state.request_logs_page(
-                    state.admin_pagination(query),
-                    auth.organization_id.as_deref(),
-                );
+                let page =
+                    state.request_logs_page(state.admin_pagination(query), auth.tenant_filter());
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -4238,8 +4247,7 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                let Some(timeline) =
-                    state.self_hosted_run_timeline(run_id, auth.organization_id.as_deref())
+                let Some(timeline) = state.self_hosted_run_timeline(run_id, auth.tenant_filter())
                 else {
                     return write_json_error(
                         session,
@@ -4275,10 +4283,8 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
-                let page = state.audit_events_page(
-                    state.admin_pagination(query),
-                    auth.organization_id.as_deref(),
-                );
+                let page =
+                    state.audit_events_page(state.admin_pagination(query), auth.tenant_filter());
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -5103,7 +5109,7 @@ impl FerroGateway {
             Ok(auth) => {
                 let page = state.managed_worker_sessions_page(
                     state.admin_pagination(query),
-                    auth.organization_id.as_deref(),
+                    auth.tenant_filter(),
                 );
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -7193,7 +7199,7 @@ impl FerroGateway {
             Ok(auth) => {
                 let page = state.self_hosted_worker_records_page(
                     state.admin_pagination(query),
-                    auth.organization_id.as_deref(),
+                    auth.tenant_filter(),
                 );
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -8057,7 +8063,12 @@ impl FerroGateway {
                             .await;
                         }
                         let body = AdminList::new(
-                            state.config.api_keys.iter().map(admin_api_key).collect(),
+                            state
+                                .config
+                                .api_keys
+                                .iter()
+                                .map(|key| admin_api_key(key, &state.config.tenancy))
+                                .collect(),
                         );
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
@@ -8098,7 +8109,7 @@ impl FerroGateway {
                         };
                         let body = AdminApiKeyMutationResponse {
                             object: "api_key",
-                            key: admin_api_key(key),
+                            key: admin_api_key(key, &state.config.tenancy),
                         };
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
@@ -8430,7 +8441,7 @@ impl FerroGateway {
         }
 
         let key_id = key.id.clone();
-        let response_key = admin_api_key(&key);
+        let response_key = admin_api_key(&key, &state.config.tenancy);
         match self.state.upsert_api_key(key) {
             Ok(outcome) if outcome.committed => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -9020,10 +9031,8 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
-                let page = state.metering_events_page(
-                    state.admin_pagination(query),
-                    auth.organization_id.as_deref(),
-                );
+                let page =
+                    state.metering_events_page(state.admin_pagination(query), auth.tenant_filter());
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -9060,8 +9069,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
-                let body =
-                    AdminList::new(state.metering_export_status(auth.organization_id.as_deref()));
+                let body = AdminList::new(state.metering_export_status(auth.tenant_filter()));
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -9086,7 +9094,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
-                let body = AdminList::new(state.usage_aggregates(auth.organization_id.as_deref()));
+                let body = AdminList::new(state.usage_aggregates(auth.tenant_filter()));
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -10084,7 +10092,16 @@ fn api_key_source(key: &crate::config::ApiKey) -> &'static str {
     }
 }
 
-fn admin_api_key(key: &crate::config::ApiKey) -> AdminApiKey {
+/// #515. `tenancy` is threaded in (rather than reading `key` alone) because the
+/// response reports BOTH what the key declares and what that resolves to: the
+/// `implicit_platform_operator` default is the only thing that can turn an
+/// undeclared key into platform root, so an `effective_platform_operator`
+/// computed without it would be a guess. It is deliberately the same
+/// `resolve_platform_operator` the auth path runs, not a re-derivation.
+fn admin_api_key(
+    key: &crate::config::ApiKey,
+    tenancy: &crate::config::TenancyConfig,
+) -> AdminApiKey {
     AdminApiKey {
         id: key.id.clone(),
         name: key.name.clone(),
@@ -10096,7 +10113,15 @@ fn admin_api_key(key: &crate::config::ApiKey) -> AdminApiKey {
         allowed_providers: key.allowed_providers.clone(),
         denied_providers: key.denied_providers.clone(),
         organization_id: key.organization_id.clone(),
-        platform_operator: key.platform_operator.unwrap_or(false),
+        // Carried through verbatim, all three states. `unwrap_or(false)` here
+        // is what made GET -> PUT round-tripping a lockout; see
+        // `AdminApiKey::platform_operator`.
+        platform_operator: key.platform_operator,
+        effective_platform_operator: crate::auth::resolve_platform_operator(
+            tenancy.implicit_platform_operator,
+            key.platform_operator,
+            key.organization_id.as_deref(),
+        ),
         team_id: key.team_id.clone(),
         project_id: key.project_id.clone(),
         workspace_id: key.workspace_id.clone(),

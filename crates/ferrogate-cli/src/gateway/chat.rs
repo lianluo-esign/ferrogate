@@ -3311,11 +3311,15 @@ async fn enforce_ai_workflow_policy(
         });
     }
     if let Some(message) = state
+        // #515: same workflow-gate readers as `gateway/agent_runs.rs`, and the
+        // same reason for `tenant_filter()` -- `None` selects the platform
+        // operator's own run records, so it must be reachable only by a
+        // declared operator.
         .workflow_edge_transition_error(
             workflow,
             request.agent_run_id,
             node_id,
-            request.auth.organization_id.as_deref(),
+            request.auth.tenant_filter(),
         )
         .await
     {
@@ -3359,7 +3363,7 @@ async fn enforce_ai_workflow_policy(
                 &workflow.id,
                 workflow.version,
                 request.agent_run_id,
-                request.auth.organization_id.as_deref(),
+                request.auth.tenant_filter(),
             )
             .await
         {

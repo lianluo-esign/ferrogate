@@ -740,11 +740,12 @@ impl FerroGateway {
         // Durable inventory + usage aggregate, scoped to the caller's tenant so
         // a tenant-scoped console can never read another tenant's counts. A
         // failure surfaces as `unavailable`, never a fabricated zero.
+        // The SAME classification the `scope` label above was built from. Read
+        // off `organization_id` these two could disagree: an unclassified
+        // credential got labelled `Tenant("")` while the aggregate below was
+        // computed with `None`, i.e. over every tenant.
         let aggregate = state
-            .control_plane_overview_aggregate(
-                auth.organization_id.as_deref(),
-                &current_period_month,
-            )
+            .control_plane_overview_aggregate(auth.tenant_filter(), &current_period_month)
             .await
             .map_err(|error| {
                 tracing::warn!(error = %error, "control-plane overview aggregate failed");
