@@ -214,39 +214,39 @@ fn dns_json_replies_parse_authoritative_answers_and_reject_soft_failures() {
     let body = br#"{"Status":0,"Answer":[{"name":"_ferrogate-challenge.example.com.",
         "type":16,"TTL":60,"data":"\"ferrogate-site-verification=abc\""}]}"#;
     assert_eq!(
-        parse_dns_json_answers(body),
+        parse_dns_json_answers("_ferrogate-challenge.example.com", body),
         TxtLookup::Answers(vec!["ferrogate-site-verification=abc".to_string()]),
     );
 
     // A long TXT record arrives as adjacent quoted chunks that concatenate.
-    let body =
-        br#"{"Status":0,"Answer":[{"type":16,"data":"\"ferrogate-\" \"site-verification=abc\""}]}"#;
+    let body = br#"{"Status":0,"Answer":[{"name":"_ferrogate-challenge.example.com",
+        "type":16,"data":"\"ferrogate-\" \"site-verification=abc\""}]}"#;
     assert_eq!(
-        parse_dns_json_answers(body),
+        parse_dns_json_answers("_ferrogate-challenge.example.com", body),
         TxtLookup::Answers(vec!["ferrogate-site-verification=abc".to_string()]),
     );
 
     // NXDOMAIN is authoritative: the name does not exist -> empty answer set.
     assert_eq!(
-        parse_dns_json_answers(br#"{"Status":3}"#),
+        parse_dns_json_answers("_ferrogate-challenge.example.com", br#"{"Status":3}"#),
         TxtLookup::Answers(Vec::new()),
     );
 
     // SERVFAIL / REFUSED / a malformed body are outages, NOT empty answers.
     assert!(matches!(
-        parse_dns_json_answers(br#"{"Status":2}"#),
+        parse_dns_json_answers("_ferrogate-challenge.example.com", br#"{"Status":2}"#),
         TxtLookup::Unavailable(_)
     ));
     assert!(matches!(
-        parse_dns_json_answers(br#"{"Status":5}"#),
+        parse_dns_json_answers("_ferrogate-challenge.example.com", br#"{"Status":5}"#),
         TxtLookup::Unavailable(_)
     ));
     assert!(matches!(
-        parse_dns_json_answers(b"not json"),
+        parse_dns_json_answers("_ferrogate-challenge.example.com", b"not json"),
         TxtLookup::Unavailable(_)
     ));
     assert!(matches!(
-        parse_dns_json_answers(br#"{"Answer":[]}"#),
+        parse_dns_json_answers("_ferrogate-challenge.example.com", br#"{"Answer":[]}"#),
         TxtLookup::Unavailable(_)
     ));
 }
@@ -414,4 +414,90 @@ fn a_fresh_challenge_token_is_random_and_hex() {
     assert_eq!(first.len(), 32);
     assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_ne!(first, second, "tokens must not be predictable/reused");
+}
+
+/// #488 review item 3: an answer must be FOR the queried name and must be a
+/// TXT record. The previous parser accepted an entry with NO `type` field and
+/// never compared `name` at all, so a resolver that ignores the question --
+/// a fixed-response proxy, a misrouted endpoint, or a forged reply over the
+/// plaintext endpoint item 1 used to allow -- verified EVERY hostname with a
+/// single body.
+///
+/// Each case here is a body that USED to verify and now must not, plus the
+/// CNAME case that must still work so the tightening did not overreach.
+#[test]
+fn an_answer_for_another_name_or_without_a_txt_type_is_not_accepted() {
+    let queried = "_ferrogate-challenge.example.com";
+    let forged = "ferrogate-site-verification=abc";
+
+    // Answer for a DIFFERENT name: the fixed-response-proxy forgery.
+    let body = br#"{"Status":0,"Answer":[{"name":"_ferrogate-challenge.attacker.test",
+        "type":16,"data":"\"ferrogate-site-verification=abc\""}]}"#;
+    assert_eq!(
+        parse_dns_json_answers(queried, body),
+        TxtLookup::Answers(Vec::new()),
+        "an answer for another name must not satisfy this query"
+    );
+
+    // No `type` at all: previously defaulted to TXT.
+    let body = br#"{"Status":0,"Answer":[{"name":"_ferrogate-challenge.example.com",
+        "data":"\"ferrogate-site-verification=abc\""}]}"#;
+    assert_eq!(
+        parse_dns_json_answers(queried, body),
+        TxtLookup::Answers(Vec::new()),
+        "an untyped answer must not be assumed to be TXT"
+    );
+
+    // A non-TXT type carrying the value.
+    let body = br#"{"Status":0,"Answer":[{"name":"_ferrogate-challenge.example.com",
+        "type":5,"data":"\"ferrogate-site-verification=abc\""}]}"#;
+    assert_eq!(
+        parse_dns_json_answers(queried, body),
+        TxtLookup::Answers(Vec::new()),
+        "a CNAME record's data must not be read as a TXT value"
+    );
+
+    // Case and the trailing root dot must not matter -- resolvers disagree.
+    let body = br#"{"Status":0,"Answer":[{"name":"_FERROGATE-Challenge.Example.COM.",
+        "type":16,"data":"\"ferrogate-site-verification=abc\""}]}"#;
+    assert_eq!(
+        parse_dns_json_answers(queried, body),
+        TxtLookup::Answers(vec![forged.to_string()]),
+        "name comparison must fold case and the root dot"
+    );
+
+    // A real CNAME chain still resolves: the TXT answer arrives under the
+    // CNAME target, not under the queried name.
+    let body = br#"{"Status":0,"Answer":[
+        {"name":"_ferrogate-challenge.example.com","type":5,"data":"proof.vendor.test"},
+        {"name":"proof.vendor.test","type":16,"data":"\"ferrogate-site-verification=abc\""}]}"#;
+    assert_eq!(
+        parse_dns_json_answers(queried, body),
+        TxtLookup::Answers(vec![forged.to_string()]),
+        "a CNAME target's TXT answer must still be accepted"
+    );
+}
+
+/// #488 review item 1: a non-https DoH endpoint must not be used at all.
+#[test]
+fn a_plaintext_doh_endpoint_falls_back_to_the_unbound_resolver() {
+    let plaintext = SiteDomainResolverBackend::Doh {
+        endpoint: "http://internal-dns/dns-query".to_string(),
+        timeout_secs: 10,
+    };
+    assert_eq!(
+        plaintext.build_resolver().backend_name(),
+        "unbound",
+        "a plaintext endpoint must not be reported or used as a doh resolver"
+    );
+
+    let secure = SiteDomainResolverBackend::Doh {
+        endpoint: "https://cloudflare-dns.com/dns-query".to_string(),
+        timeout_secs: 10,
+    };
+    assert_eq!(
+        secure.build_resolver().backend_name(),
+        "doh",
+        "an https endpoint must still build the doh resolver"
+    );
 }

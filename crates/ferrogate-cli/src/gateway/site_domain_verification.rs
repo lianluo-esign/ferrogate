@@ -148,15 +148,22 @@ pub(super) struct DohTxtResolver {
 }
 
 impl DohTxtResolver {
-    pub(super) fn new(endpoint: impl Into<String>, timeout: Duration) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_default();
-        Self {
+    /// Returns `None` when the client cannot be built with the configured
+    /// timeout (#488 review item 2).
+    ///
+    /// This used to be `.build().unwrap_or_default()`, which silently dropped
+    /// the timeout: `reqwest::Client::default()` has NONE. On the one path
+    /// whose entire design principle is "unavailable is not verified", a
+    /// black-holed endpoint would then hang the admin request indefinitely
+    /// instead of failing at FERROGATE_SITE_DOMAIN_RESOLVER_TIMEOUT_SECS. The
+    /// caller falls back to the unbound resolver, so the failure is a refusal
+    /// to verify rather than a hang.
+    pub(super) fn new(endpoint: impl Into<String>, timeout: Duration) -> Option<Self> {
+        let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
+        Some(Self {
             endpoint: endpoint.into(),
             client,
-        }
+        })
     }
 }
 
@@ -192,7 +199,7 @@ impl SiteDomainTxtResolver for DohTxtResolver {
             ));
         }
         match response.bytes().await {
-            Ok(body) => parse_dns_json_answers(&body),
+            Ok(body) => parse_dns_json_answers(name, &body),
             Err(error) => TxtLookup::Unavailable(format!("DNS-over-HTTPS body error: {error}")),
         }
     }
@@ -276,9 +283,16 @@ fn is_query_safe_dns_name(name: &str) -> bool {
 /// Only `Status: 0` (NOERROR) and `Status: 3` (NXDOMAIN) are AUTHORITATIVE
 /// answers -- NXDOMAIN definitively means "no such name", which is a legitimate
 /// empty answer set. Every other RCODE (SERVFAIL, REFUSED, ...) is a resolver
+/// Case-folds a DNS name and drops the trailing root dot, so a reply's `name`
+/// can be compared with the queried name across resolvers that disagree about
+/// both (#488 review item 3).
+fn normalize_dns_name(name: &str) -> String {
+    name.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 /// failure and stays `Unavailable`, because "the resolver could not tell us"
 /// must never read as "the record is absent" and certainly not as "verified".
-pub(super) fn parse_dns_json_answers(body: &[u8]) -> TxtLookup {
+pub(super) fn parse_dns_json_answers(queried_name: &str, body: &[u8]) -> TxtLookup {
     let value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(error) => {
@@ -296,18 +310,54 @@ pub(super) fn parse_dns_json_answers(body: &[u8]) -> TxtLookup {
             )
         }
     }
+    // #488 review item 3: the answer must be FOR the name we asked about, and
+    // must actually be a TXT record.
+    //
+    // Before this, `type` was accepted when ABSENT (`is_none_or`) and the
+    // reply's `name` was never compared with the query at all. A resolver that
+    // ignores the question -- a fixed-response proxy, a cached or misrouted
+    // endpoint, or a forged reply over a plaintext endpoint (item 1) -- could
+    // verify EVERY hostname with a single body. On its own that is hardening;
+    // chained with item 1 it was the forgery.
+    //
+    // Names are compared case-insensitively with the trailing root dot
+    // normalised away, since resolvers differ on both. A CNAME chain is
+    // followed by accepting an answer whose name matches any CNAME target
+    // already seen in the same reply.
+    let mut accepted_names = vec![normalize_dns_name(queried_name)];
+    if let Some(entries) = value.get("Answer").and_then(serde_json::Value::as_array) {
+        for entry in entries {
+            let kind = entry.get("type").and_then(serde_json::Value::as_i64);
+            let name = entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_dns_name);
+            // Type 5 is CNAME: its target becomes an acceptable answer name.
+            if kind == Some(5)
+                && name.is_some_and(|name| accepted_names.iter().any(|seen| seen == &name))
+            {
+                if let Some(target) = entry.get("data").and_then(serde_json::Value::as_str) {
+                    accepted_names.push(normalize_dns_name(target));
+                }
+            }
+        }
+    }
     let answers = value
         .get("Answer")
         .and_then(serde_json::Value::as_array)
         .map(|entries| {
             entries
                 .iter()
-                // Type 16 is TXT; ignore CNAME/other records in the chain.
+                // Type 16 is TXT. An entry with NO `type` is no longer assumed
+                // to be one -- that default is what let an untyped forged
+                // answer through.
+                .filter(|entry| entry.get("type").and_then(serde_json::Value::as_i64) == Some(16))
                 .filter(|entry| {
                     entry
-                        .get("type")
-                        .and_then(serde_json::Value::as_i64)
-                        .is_none_or(|kind| kind == 16)
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(normalize_dns_name)
+                        .is_some_and(|name| accepted_names.iter().any(|seen| seen == &name))
                 })
                 .filter_map(|entry| entry.get("data").and_then(serde_json::Value::as_str))
                 .map(normalize_txt_value)
@@ -411,10 +461,45 @@ impl SiteDomainResolverBackend {
             SiteDomainResolverBackend::Doh {
                 endpoint,
                 timeout_secs,
-            } => Box::new(DohTxtResolver::new(
-                endpoint.clone(),
-                Duration::from_secs(*timeout_secs),
-            )),
+            } => {
+                // #488 review item 1: the module doc says DoH was chosen over a
+                // raw UDP resolver because it is "authenticated and
+                // integrity-protected by TLS". Nothing enforced the scheme, so
+                // FERROGATE_SITE_DOMAIN_RESOLVER_ENDPOINT=http://... silently
+                // downgraded the only ownership oracle to an unauthenticated
+                // channel -- an on-path attacker answers once and EVERY
+                // hostname verifies, while backend_name() still reports "doh"
+                // and the audit line still reads "verified via TXT (doh
+                // backend)". An operator typo must not be able to do that.
+                //
+                // Falling back to Unbound rather than panicking: a
+                // misconfigured resolver makes ownership UNPROVABLE, which is
+                // the safe direction (nothing verifies), and it keeps the
+                // gateway serving everything already proven.
+                if !endpoint.starts_with("https://") {
+                    tracing::error!(
+                        endpoint = %endpoint,
+                        "site-domain DoH resolver endpoint is not https; refusing to use it \
+                         and falling back to the unbound resolver -- no hostname can be \
+                         verified until this is corrected (#488)"
+                    );
+                    return Box::new(UnboundTxtResolver);
+                }
+                match DohTxtResolver::new(endpoint.clone(), Duration::from_secs(*timeout_secs)) {
+                    Some(resolver) => Box::new(resolver),
+                    None => {
+                        // #488 review item 2.
+                        tracing::error!(
+                            endpoint = %endpoint,
+                            timeout_secs = *timeout_secs,
+                            "could not build the site-domain DoH client with the configured \
+                             timeout; falling back to the unbound resolver rather than to a \
+                             client with NO timeout (#488)"
+                        );
+                        Box::new(UnboundTxtResolver)
+                    }
+                }
+            }
             SiteDomainResolverBackend::ZoneFile { path } => {
                 Box::new(ZoneFileTxtResolver::new(path.clone()))
             }

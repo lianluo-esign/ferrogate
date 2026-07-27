@@ -828,14 +828,34 @@ impl FerroGateway {
             Ok(true) => {
                 // The ownership proof goes with the binding: a later re-bind
                 // must re-prove control rather than inherit a stale proof.
+                //
+                // #488 review item 6: this used to be warn-only, so the
+                // sentence above was a statement of intent that nothing
+                // enforced. If the delete failed, the binding was gone and a
+                // `verified` record survived, so the NEXT bind hit
+                // `reusable_on_rebind` and the hostname was servable again
+                // immediately with no re-proof -- evidence diverging from
+                // intent, silently and unaudited, in the entity this issue
+                // exists to make authoritative. It is now a 503: the unbind
+                // has not happened, and the caller can retry.
                 if let Err(error) = state
                     .delete_site_domain_verification(&binding.tenant_id, &hostname)
                     .await
                 {
-                    tracing::warn!(
-                        hostname = %hostname,
-                        "failed to drop the site-domain ownership proof on unbind: {error}"
-                    );
+                    let message = error.to_string();
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "site_domain.unbind",
+                        &hostname,
+                        "rejected",
+                        format!(
+                            "refusing to unbind {hostname}: the ownership proof could not be \
+                             dropped, and leaving it behind would let a later re-bind inherit \
+                             it without re-proving control ({message})"
+                        ),
+                    ));
+                    return storage_error(session, ctx, message).await;
                 }
                 let acme = self.refresh_acme_after_domain_change(&state, &hostname, false);
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
