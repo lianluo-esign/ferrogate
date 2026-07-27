@@ -245,11 +245,21 @@ issue→item-id map `/tmp/item_ids.json`, so `pass`/`fail` need no board read.
 
 ### Fan-out
 
-Up to **3 review sub-agents in parallel**, one issue each, sharing this
-session's single worktree. They are read-only, are forbidden from touching the
+Up to **6 review sub-agents in parallel** (owner directive, 2026-07-27, raised
+from 3), one issue each. They are read-only, are forbidden from touching the
 board, and return a structured verdict (VERDICT / BOXES / DEFECTS / COMMITS /
 BOUNCE_COMMENT). The main session — never a sub-agent — posts comments, applies
 labels, and moves cards.
+
+6 is affordable here precisely because of the no-compiler directive: these agents
+read and grep, so they contend for nothing but tokens — unlike the test gate's
+fan-out, which is capped at 3 by disk and by the shared cargo target dir. Prefer
+filling the batch: with the lane routinely at 8+ items, a 3-wide batch is what
+lets arrivals outpace review.
+
+**Every sub-agent prompt must restate the no-compiler directive explicitly.** The
+default instinct is to build, and a prompt that merely says "review this" gets an
+agent that runs `cargo test`.
 
 ## Board handles
 
@@ -304,7 +314,7 @@ but do not change the lane or the edges.
 请读取 GitHub Project 看板中 In review 泳道的 issues 持续做代码评审。
 评审通过后把 issue 移动到 Testing 泳道；发现任何问题则把 issue 打回 In progress 泳道，
 并在 issue 评论中写明具体问题、影响与复现方式，交给 dev agent 返工。
-1- 最多 3 个 sub agent 并行评审。
+1- 最多 6 个 sub agent 并行评审（本 lane 不编译不跑测试，只读源码，所以并发只受 token 限制）。
 2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，三个 session 共用同一份配额）；
    只在关键节点读看板，其余一律用 REST (gh api) 与本地缓存。
 3- 你只负责代码评审：不写产品代码，不做编译，也不跑任何单元测试或端到端测试——
