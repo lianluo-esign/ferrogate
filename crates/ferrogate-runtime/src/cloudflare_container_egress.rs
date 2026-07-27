@@ -315,12 +315,19 @@ impl ContainerEgressPosture {
 
     /// The provider denylist applied alongside this posture.
     ///
-    /// Only carried for the tethered posture: a sealed container already denies
-    /// **everything**, and applying a denylist there would needlessly pull the
-    /// start onto Cloudflare's outbound-interception path (which requires the
-    /// `ContainerProxy` export and, for HTTPS, an in-image CA trust) for zero
-    /// added restriction. Keeping the sealed path interception-free is what makes
-    /// it fail closed even on an image that has no CA trust at all.
+    /// Only carried for the tethered posture: a sealed container's allowlist is
+    /// the empty set, which Cloudflare treats as a deny-by-default gate refusing
+    /// every host, so a denylist adds no restriction on top.
+    ///
+    /// This is NOT the same as "the sealed path touches nothing on the instance".
+    /// It used to be, and that was a defect: instance names are reused, and
+    /// `@cloudflare/containers` persists a runtime allowlist override to Durable
+    /// Object storage, so a name that was tethered and is then started sealed kept
+    /// the earlier grant while the Worker attested an empty allowlist. The Worker's
+    /// sealed path now applies `setAllowedHosts([])` and `setDeniedHosts([])`
+    /// explicitly. [`EgressPostureAttestation::verify`] compares the allowlist for
+    /// equality (so `Sealed` still requires an attested `[]`) and the denylist as a
+    /// superset (so a Worker denying more than we asked is accepted).
     pub fn denied_hosts(&self) -> &'static [&'static str] {
         match self {
             Self::Sealed => &[],

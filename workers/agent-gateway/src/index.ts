@@ -61,15 +61,35 @@ import type { BrokerRunRecord } from "./git-credential";
 // running inside — including model-authored code — cannot switch it back on.
 // Changing it, or binding CONTAINER_SANDBOX to a class that does not extend this
 // one, silently converts the whole tier from enforced to cooperative.
+//
+// HTTPS INTERCEPTION (#471 rework). `@cloudflare/containers@0.3.7` defaults
+// `interceptHttps = false` (dist/lib/container.js:329) and
+// `@cloudflare/sandbox@0.12.4` never assigns it — the single occurrence in that
+// package is a READ. With it off, `applyOutboundInterception` registers only
+// `interceptAllOutboundHttp`, so `setDeniedHosts` binds PLAINTEXT HTTP ONLY and
+// the provider denylist — whose entire purpose is stopping `https://api.anthropic.com`
+// — never sees a provider request. We pin it `true` so the denylist binds the
+// protocol every LLM provider actually speaks. The SDK then exports
+// `SANDBOX_INTERCEPT_HTTPS=1` into the container, which is how the official
+// sandbox image is told to trust `/etc/cloudflare/certs/cloudflare-containers-ca.crt`.
+//
+// FAILURE MODE IF THE IMAGE DOES NOT TRUST THE CA: TLS validation fails and
+// HTTPS from inside the container stops working — including to the governed
+// gateway. That is loud and fail-CLOSED (a broken run, not a silent bypass), but
+// it is a LIVE-CF question we cannot settle offline: workerd has no container
+// engine. See the LIVE-CF gate list in docs/cloudflare-container-isolation.md.
 export class AgentSandbox extends Sandbox {
   enableInternet = false;
+  interceptHttps = true;
 }
 
 // `ContainerProxy` MUST be exported from the Worker entrypoint: the Sandbox DO
 // constructs outbound-interception fetchers via `ctx.exports.ContainerProxy`
 // when a governed egress allowlist is applied (`setAllowedHosts`). Without this
 // export, allowlist configuration throws "ctx.exports.ContainerProxy is
-// undefined" at runtime. The sealed (no-allowlist) path never needs it.
+// undefined" at runtime. Since the #471 rework the SEALED path needs it too: it
+// applies `setAllowedHosts([])` / `setDeniedHosts([])` so a reused instance name
+// cannot carry a previous run's grant into a container attested as sealed.
 export { ContainerProxy };
 
 /**

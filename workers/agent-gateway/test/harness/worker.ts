@@ -14,9 +14,10 @@
 //   only provides it when a real container engine is attached. There is none here, by
 //   design (no Docker, no CF account). `ProbeSandbox` therefore attaches a stand-in
 //   `ctx.container` and OVERRIDES NOTHING ELSE: every field and method under test —
-//   `enableInternet`, `setAllowedHosts`, `setDeniedHosts`, `effectiveAllowedHosts`,
-//   `applyOutboundInterception` — is the real inherited one, so flipping
-//   `AgentSandbox { enableInternet = false }` flips what these probes observe.
+//   `enableInternet`, `interceptHttps`, `setAllowedHosts`, `setDeniedHosts`,
+//   `effectiveAllowedHosts`, `applyOutboundInterception` — is the real inherited one,
+//   so flipping `AgentSandbox { enableInternet = false }` flips what these probes
+//   observe, and so does dropping `AgentSandbox { interceptHttps = true }`.
 //
 //   The stand-in records the `Fetcher` the SDK registers as the container's outbound
 //   interceptor, and the props the SDK builds for it. That fetcher is a REAL
@@ -195,6 +196,14 @@ interface ContainerEgressState {
 /** The posture an instance is ACTUALLY in, read off the SDK's own accessors. */
 export interface AppliedPosture {
   enableInternet: boolean;
+  /**
+   * The SDK field that decides whether `applyOutboundInterception` registers
+   * `interceptOutboundHttps` at all. `@cloudflare/containers@0.3.7` defaults it
+   * FALSE, so with the default the provider denylist binds plaintext HTTP only —
+   * which is not the protocol any LLM provider speaks. Read off the live
+   * instance, so `AgentSandbox { interceptHttps = true }` is what this observes.
+   */
+  interceptHttps: boolean;
   allowedHosts: string[] | undefined;
   deniedHosts: string[] | undefined;
   interceptAll: boolean;
@@ -235,6 +244,7 @@ export class ProbeSandbox extends AgentSandbox {
     const state = this.egressState;
     return {
       enableInternet: this.enableInternet,
+      interceptHttps: this.interceptHttps,
       allowedHosts: state.effectiveAllowedHosts,
       deniedHosts: state.effectiveDeniedHosts,
       interceptAll: state.shouldInterceptAllOutbound(),

@@ -227,12 +227,16 @@ interface EgressAttestation {
  *
  * The Worker keeps its OWN copy rather than trusting the caller's `egressDenylist`:
  * a compromised or stale caller must not be able to shrink the denylist. The
- * caller's list is unioned in, never subtracted from. Mirrors
- * `PROVIDER_EGRESS_DENYLIST` in `crates/ferrogate-runtime/src/cloudflare_container_egress.rs`;
- * the Rust side verifies its entries are all present (superset allowed), so the
- * two lists may drift wider but never narrower.
+ * caller's list is unioned in, never subtracted from — see {@link mergeProviderDenylist}.
+ * Mirrors `PROVIDER_EGRESS_DENYLIST` in
+ * `crates/ferrogate-runtime/src/cloudflare_container_egress.rs`; the Rust side
+ * verifies its entries are all present (superset allowed), so the two lists may
+ * drift wider but never narrower.
+ *
+ * Exported so `test/container-egress.test.ts` can assert the APPLIED list is the
+ * union of this and the caller's, rather than restating 22 hostnames.
  */
-const PROVIDER_EGRESS_DENYLIST = [
+export const PROVIDER_EGRESS_DENYLIST: readonly string[] = [
   "api.anthropic.com",
   "api.openai.com",
   "*.openai.azure.com",
@@ -256,6 +260,43 @@ const PROVIDER_EGRESS_DENYLIST = [
   "dashscope.aliyuncs.com",
   "api.voyageai.com",
 ];
+
+/**
+ * Merge a caller-supplied `egressDenylist` into the Worker's own: **widen only,
+ * never shrink** (issue #471).
+ *
+ * The result ALWAYS starts from every entry of {@link PROVIDER_EGRESS_DENYLIST},
+ * so no caller — compromised, stale, or simply not the FerroGate client — can
+ * remove a provider from the list by sending a shorter one. `/container/start`
+ * is bearer-gated, but this route's contract is that it must not assume its
+ * caller is the FerroGate client, and this is the layer advertised to catch an
+ * over-broad allowlist: `docs/cloudflare-container-isolation.md` states that a
+ * caller-supplied denylist "can only widen it, never shrink it".
+ *
+ * Two mutations survived the previous rework's suite here, which is why the
+ * function exists as a named, separately assertable unit:
+ *   * replacing the Worker's list with the caller's (a shrink), and
+ *   * dropping the caller union entirely (a silent narrowing of what the
+ *     operator asked to deny).
+ * `test/container-egress.test.ts` asserts the APPLIED `deniedHosts` is exactly
+ * the union, so either mutation fails.
+ *
+ * Caller entries are normalized (trimmed, lower-cased, blanks dropped) and
+ * de-duplicated against the Worker's list, so a caller repeating a provider
+ * cannot pad the applied list either.
+ */
+export function mergeProviderDenylist(callerEntries: unknown): string[] {
+  const merged: string[] = [...PROVIDER_EGRESS_DENYLIST];
+  const caller = Array.isArray(callerEntries)
+    ? callerEntries.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  for (const raw of caller) {
+    const host = raw.trim().toLowerCase();
+    if (host.length === 0 || merged.includes(host)) continue;
+    merged.push(host);
+  }
+  return merged;
+}
 
 /** Bare-host shape: no scheme, path, port, credentials, wildcard or whitespace. */
 const HOST_PATTERN = /^[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?)*$/;
@@ -344,11 +385,38 @@ export function validateEgressAllowlist(
  *    `setDeniedHosts`, which Cloudflare evaluates first and which overrides the
  *    allowlist and all handlers.
  *
- * The sealed path deliberately calls NEITHER `setAllowedHosts` nor
- * `setDeniedHosts`: a sealed container already denies everything, and staying off
- * Cloudflare's outbound-interception path (which needs the `ContainerProxy`
- * export and, for HTTPS, in-image CA trust) is what keeps it failing closed on
- * any image.
+ * THE SEALED PATH RESETS BOTH LISTS (#471 rework). It used to call NEITHER
+ * setter, on the reasoning that a fresh sealed container already denies
+ * everything. That reasoning only holds for a FRESH instance, and instance names
+ * are reused: `fg.{tenant}.{session}.{run}` addresses a Durable Object by name,
+ * and `@cloudflare/containers` keeps `allowedHostsOverride` as a live DO field
+ * that it PERSISTS to storage (`dist/lib/container.js:1065-1071`), so it survives
+ * eviction. Two starts on one name — tethered, then sealed — therefore left the
+ * instance carrying the gateway host while the Worker attested
+ * `{"posture":"sealed","allowedHosts":[],"deniedHosts":[]}`. That is a FALSE
+ * ATTESTATION on the enforcement path, and `EgressPostureAttestation::verify`
+ * accepts it, so the Rust client had no way to notice. Bounded in impact — the
+ * stale host can only be the operator-authorized gateway — but #428's budget and
+ * tether reasoning is downstream of knowing which posture is actually live.
+ *
+ * There is no read-back to attest from instead: `effectiveAllowedHosts` /
+ * `effectiveDeniedHosts` are `private` on the SDK's `Container`
+ * (`dist/lib/container.d.ts:304-305`) and the Worker holds a DO stub, not the
+ * instance. So the Worker makes the attested state true by applying it.
+ *
+ * ORDER IS PER-POSTURE, AND EACH ORDER IS CLOSED AT EVERY INTERMEDIATE STEP:
+ *   * tethered — deny first. If `setAllowedHosts` then threw, the instance is
+ *     left with the provider denylist and no fresh grant, never
+ *     allowed-but-unfenced. It also matches Cloudflare's evaluation order.
+ *   * sealed — ALLOW first. `setAllowedHosts([])` is a deny-by-default gate that
+ *     refuses every host (`ContainerProxy` step 2 treats `[]` as a set
+ *     allowlist), so it closes a stale grant immediately; clearing the denylist
+ *     first would leave the stale host reachable for the width of one RPC.
+ *
+ * The cost is that a sealed start now needs `ctx.exports.ContainerProxy` too, so
+ * a deployment missing the `enable_ctx_exports` compatibility flag fails EVERY
+ * start rather than only tethered ones. That is fail-closed and loud, which is
+ * the right way for that misconfiguration to surface.
  */
 export async function containerStart(
   env: Env,
@@ -387,13 +455,10 @@ export async function containerStart(
     );
   }
   // The Worker's own denylist wins; a caller-supplied list can only WIDEN it.
-  const callerDenylist = Array.isArray(body.egressDenylist)
-    ? body.egressDenylist.filter((x): x is string => typeof x === "string")
-    : [];
-  const denylist =
-    posture === "sealed"
-      ? []
-      : [...PROVIDER_EGRESS_DENYLIST, ...callerDenylist.filter((h) => !PROVIDER_EGRESS_DENYLIST.includes(h))];
+  // A sealed container refuses every host through the empty allowlist, so it
+  // carries no denylist — and the Rust side compares denylists as a superset of
+  // what it asked for, which for `Sealed` is nothing.
+  const denylist = posture === "sealed" ? [] : mergeProviderDenylist(body.egressDenylist);
 
   const envVars: Record<string, string> = {};
   if (body.env && typeof body.env === "object" && !Array.isArray(body.env)) {
@@ -414,6 +479,16 @@ export async function containerStart(
       // matches the enforcement order.
       await sandbox.setDeniedHosts(denylist);
       await sandbox.setAllowedHosts(allowlist);
+    } else {
+      // SEALED. Both lists are applied (as `[]`), not skipped: the instance name
+      // may have been tethered by an earlier start and `allowedHostsOverride`
+      // outlives it. Allowlist FIRST — `[]` is a deny-by-default gate that closes
+      // any stale grant in one call, so there is no window in which the previous
+      // run's host is still reachable. These are the same `allowlist`/`denylist`
+      // values the attestation below reports, so the attestation cannot drift
+      // from what was applied.
+      await sandbox.setAllowedHosts(allowlist);
+      await sandbox.setDeniedHosts(denylist);
     }
     return {
       ok: true,

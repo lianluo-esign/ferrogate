@@ -26,12 +26,27 @@
 //     * the attestation the Worker returns is compared against that applied state, so a
 //       Worker that lies about what it configured fails.
 //
+//   WHAT THE REWORK ADDED (code review of the first rework). Three things the earlier
+//   pass asserted but did not hold:
+//     * INSTANCE NAMES ARE REUSED. Every attestation test used a FRESH name, so the one
+//       case where the Worker provably misreported — tether a name, then seal it, while
+//       `allowedHostsOverride` persists on the Durable Object — was the case no test
+//       constructed. It is constructed now.
+//     * NO TEST EVER SENT `egressDenylist`, so both directions of "a caller can widen
+//       the denylist but never shrink it" survived a green run.
+//     * THE PROBES NAMED THE WRONG MECHANISM. `interceptHttps` is FALSE by default in
+//       the pinned `@cloudflare/containers@0.3.7`, so `https://` probes were being
+//       attributed to an interceptor that only carried plaintext HTTP. `AgentSandbox`
+//       now pins it true and the suite asserts the HTTPS registration exists.
+//
 //   NOT PROVABLE HERE, AND NOT PRETENDED. `enableInternet = false` is enforced by the
-//   Cloudflare platform OUTSIDE the container; whether the platform honours it, and
-//   whether root inside the container can defeat it, are live-only questions (see the
-//   LIVE-CF gate list in docs/cloudflare-container-isolation.md). What this suite pins is
-//   everything up to that boundary: the value the platform is handed, and what
-//   Cloudflare's own decision function does with it.
+//   Cloudflare platform OUTSIDE the container; whether the platform honours it, whether
+//   root inside the container can defeat it, and whether the container image trusts the
+//   interception CA (without which HTTPS interception fails rather than filters) are
+//   live-only questions (see the LIVE-CF gate list in
+//   docs/cloudflare-container-isolation.md). What this suite pins is everything up to
+//   that boundary: the value the platform is handed, and what Cloudflare's own decision
+//   function does with it.
 
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { SELF, env, runInDurableObject } from "cloudflare:test";
@@ -42,7 +57,9 @@ import type { Env } from "../src/index";
 import {
   containerStart,
   governedEgressHosts,
+  mergeProviderDenylist,
   validateEgressAllowlist,
+  PROVIDER_EGRESS_DENYLIST,
 } from "../src/container";
 
 const TOKEN = "test-control-secret";
@@ -53,7 +70,19 @@ const GOVERNED_HOST = "gw.ferrogate.test";
 
 /** A denied provider, and a provider matched only by a wildcard denylist entry. */
 const PROVIDER = "api.anthropic.com";
+const SECOND_PROVIDER = "api.openai.com";
 const WILDCARD_PROVIDER = "gateway.openrouter.ai";
+
+/** A host only the CALLER asks to deny — the Worker's own list does not carry it. */
+const CALLER_DENIED_HOST = "extra.example.com";
+
+/**
+ * The size the Worker's own provider denylist must never fall below. Written as
+ * a literal on purpose: every other assertion about the union compares against
+ * the imported constant, and a constant compared to itself proves nothing about
+ * emptying it.
+ */
+const PROVIDER_DENYLIST_MIN = 22;
 
 interface StartResponse {
   ok?: boolean;
@@ -134,6 +163,18 @@ describe("the container class is sealed by the platform, not by convention", () 
     );
     expect(verdict).toEqual({ verdict: "denied", status: 520, body: "Origin is disallowed" });
   }, 30_000);
+
+  it("a real AgentSandbox instance carries interceptHttps = true", async () => {
+    // The SDK default is FALSE: `@cloudflare/containers@0.3.7` declares
+    // `interceptHttps = false` and `@cloudflare/sandbox@0.12.4` never assigns it
+    // (its one occurrence is a read). With the default, `applyOutboundInterception`
+    // registers `interceptAllOutboundHttp` ONLY, so `setDeniedHosts` binds
+    // PLAINTEXT HTTP and the provider denylist never sees an `https://api.anthropic.com`
+    // request — the exact traffic it exists to stop. Read off the live instance, so
+    // deleting the pin in src/index.ts reds this.
+    const posture = await appliedPosture("fg.tenant-a.sess-1.https-field");
+    expect(posture.interceptHttps).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -194,6 +235,11 @@ describe("the governed allowlist constrains what the container may reach", () =>
     // without this, nothing below is being decided by Cloudflare at all.
     expect(posture.interceptAll).toBe(true);
     expect(posture.interceptions).toContain("all-http:*");
+    // And an HTTPS interception, which only exists because `AgentSandbox` pins
+    // `interceptHttps = true`. Without it the SDK registers `all-http` ONLY, and
+    // every `https://` probe below would be attributed to a mechanism that is not
+    // acting on it. Pins src/index.ts `AgentSandbox { interceptHttps = true }`.
+    expect(posture.interceptions).toContain("https:*");
   });
 
   it("denies a host that is not on the applied allowlist", async () => {
@@ -202,10 +248,21 @@ describe("the governed allowlist constrains what the container may reach", () =>
     expect(verdict).toEqual({ verdict: "denied", status: 520, body: "Origin is disallowed" });
   }, 30_000);
 
-  it("denies an LLM provider through the applied denylist", async () => {
+  it("denies an LLM provider through the applied denylist, on both schemes", async () => {
     await tetheredStart();
-    const verdict = await decideInstalled(instance, `https://${PROVIDER}/v1/messages`);
-    expect(verdict).toEqual({ verdict: "denied", status: 520, body: "Origin is disallowed" });
+    // BOTH schemes on purpose. `interceptAllOutboundHttp` carries the plaintext
+    // request; the `https:*` registration carries the TLS one. Probing only
+    // `https://` while the class shipped `interceptHttps = false` was the previous
+    // suite's attribution error: the outcome was right, the mechanism named was
+    // not the one acting.
+    for (const url of [`https://${PROVIDER}/v1/messages`, `http://${PROVIDER}/v1/messages`]) {
+      const verdict = await decideInstalled(instance, url);
+      expect(verdict, `${url} must be refused`).toEqual({
+        verdict: "denied",
+        status: 520,
+        body: "Origin is disallowed",
+      });
+    }
   }, 30_000);
 
   it("lets the authorized host through — so the denials above are not vacuous", async () => {
@@ -281,6 +338,110 @@ describe("the governed allowlist constrains what the container may reach", () =>
 });
 
 // ---------------------------------------------------------------------------
+// INVARIANT 3b — a caller-supplied denylist WIDENS the Worker's, never shrinks it
+//
+// Nothing in the previous suite ever sent `egressDenylist`, so both directions of
+// this invariant survived a green run: the caller's list REPLACING the Worker's
+// (a shrink), and the union being dropped altogether. `container.ts` states the
+// rule ("a compromised or stale caller must not be able to shrink the denylist")
+// and docs/cloudflare-container-isolation.md makes it load-bearing ("a
+// caller-supplied denylist can only widen it, never shrink it … so an over-broad
+// allowlist still cannot reach a provider"). These tests hold it.
+// ---------------------------------------------------------------------------
+
+describe("a caller-supplied denylist can only widen the Worker's own", () => {
+  it("applies the UNION of the Worker's provider denylist and the caller's entry", async () => {
+    const instance = "fg.tenant-a.sess-1.deny-union";
+    const result = await start({
+      instance,
+      egressAllowlist: [GOVERNED_HOST],
+      egressDenylist: [CALLER_DENIED_HOST],
+    });
+    expect(result.status).toBe(200);
+    const posture = await appliedPosture(instance);
+
+    // The list the Durable Object is ACTUALLY carrying, not the JSON we sent.
+    // MUTATION M5b — drop the caller union (`denylist = PROVIDER_EGRESS_DENYLIST`):
+    // the caller's host is absent and this reds.
+    expect(posture.deniedHosts).toContain(CALLER_DENIED_HOST);
+    // MUTATION M5a — caller's list REPLACES the Worker's (`denylist = caller`):
+    // every provider is gone and these red.
+    expect(posture.deniedHosts).toContain(PROVIDER);
+    expect(posture.deniedHosts).toContain(SECOND_PROVIDER);
+    expect(posture.deniedHosts?.length ?? 0).toBeGreaterThanOrEqual(PROVIDER_DENYLIST_MIN + 1);
+    // Exactly the union, in the Worker's order then the caller's — so neither a
+    // reordering nor a silent extra entry passes.
+    expect(posture.deniedHosts).toEqual([...PROVIDER_EGRESS_DENYLIST, CALLER_DENIED_HOST]);
+    // And the attestation reports that union rather than the caller's request.
+    expect(result.body.egress?.deniedHosts).toEqual(posture.deniedHosts);
+  });
+
+  it("still denies every provider when the caller sends a SHORTER list", async () => {
+    // The shrink attempt: a stale or compromised caller sends one provider and
+    // nothing else, hoping the Worker takes its word for the whole list.
+    const instance = "fg.tenant-a.sess-1.deny-shrink";
+    const result = await start({
+      instance,
+      egressAllowlist: [GOVERNED_HOST],
+      egressDenylist: [PROVIDER],
+    });
+    expect(result.status).toBe(200);
+    const posture = await appliedPosture(instance);
+
+    // MUTATION M5a reds on the first provider the caller omitted.
+    for (const entry of PROVIDER_EGRESS_DENYLIST) {
+      expect(posture.deniedHosts, `the caller's short list dropped ${entry}`).toContain(entry);
+    }
+    // De-duplicated: repeating an entry the Worker already denies adds nothing.
+    expect(posture.deniedHosts).toEqual([...PROVIDER_EGRESS_DENYLIST]);
+    expect(posture.deniedHosts?.length ?? 0).toBeGreaterThanOrEqual(PROVIDER_DENYLIST_MIN);
+
+    // BEHAVIOURAL, not just structural: Cloudflare's own decision function is asked
+    // what the APPLIED denylist does, with the allowlist widened to `*` so the
+    // denylist is the only thing that can refuse. Under M5a the applied list is
+    // `["api.anthropic.com"]`, so a provider the caller omitted comes back
+    // `egress-attempted` and these red.
+    const verdicts = await runInDurableObject(sandbox(instance), async (probe) => {
+      const overBroad = {
+        enableInternet: false,
+        allowedHosts: ["*"],
+        deniedHosts: posture.deniedHosts,
+        interceptAll: true,
+      };
+      return [
+        await probe.decideWithProps(`https://${SECOND_PROVIDER}/v1/chat`, overBroad),
+        await probe.decideWithProps(`https://${WILDCARD_PROVIDER}/api/v1`, overBroad),
+      ];
+    });
+    for (const verdict of verdicts) {
+      expect(verdict).toEqual({ verdict: "denied", status: 520, body: "Origin is disallowed" });
+    }
+  }, 30_000);
+
+  it("merges as a pure function too: the union starts from the Worker's list, always", () => {
+    // The route tests above are the ones that matter; this pins the unit so a
+    // future caller of `mergeProviderDenylist` inherits the same guarantee.
+    expect(mergeProviderDenylist([CALLER_DENIED_HOST])).toEqual([
+      ...PROVIDER_EGRESS_DENYLIST,
+      CALLER_DENIED_HOST,
+    ]);
+    // Nothing a caller can send removes an entry: not an empty list, not a
+    // subset, not junk, not a non-array.
+    for (const requested of [[], [PROVIDER], undefined, "api.anthropic.com", [1, 2, 3], null]) {
+      const merged = mergeProviderDenylist(requested);
+      for (const entry of PROVIDER_EGRESS_DENYLIST) {
+        expect(merged, `${JSON.stringify(requested)} dropped ${entry}`).toContain(entry);
+      }
+      expect(merged.length).toBeGreaterThanOrEqual(PROVIDER_DENYLIST_MIN);
+    }
+    // Normalized and de-duplicated, so a caller cannot pad the applied list.
+    expect(mergeProviderDenylist(["  API.Anthropic.COM  ", "", "   "])).toEqual([
+      ...PROVIDER_EGRESS_DENYLIST,
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // INVARIANT 4 — the attestation reports what was APPLIED
 // ---------------------------------------------------------------------------
 
@@ -302,7 +463,7 @@ describe("the start attestation matches the applied posture", () => {
     expect(attested?.deniedHosts?.length).toBeGreaterThan(0);
   });
 
-  it("attests sealed only when the instance really was left alone", async () => {
+  it("attests sealed against the lists the instance is carrying, on a FRESH name", async () => {
     const instance = "fg.tenant-a.sess-1.attest-sealed";
     const result = await start({ instance });
     expect(result.status).toBe(200);
@@ -313,12 +474,98 @@ describe("the start attestation matches the applied posture", () => {
       deniedHosts: [],
     });
     const posture = await appliedPosture(instance);
-    // The sealed path deliberately stays off Cloudflare's interception path: no lists,
-    // no interceptor. `undefined` (never set) is not the same as `[]` (set to empty).
-    expect(posture.allowedHosts).toBeUndefined();
-    expect(posture.deniedHosts).toBeUndefined();
-    expect(posture.interceptions).toEqual([]);
+    // `[]`, not `undefined`: the sealed path APPLIES the empty lists rather than
+    // skipping the setters, because the attested `[]` has to be true of the
+    // instance and not merely true of the request. An empty allowlist is a
+    // deny-by-default gate in `ContainerProxy` — it refuses every host.
+    expect(posture.allowedHosts).toEqual([]);
+    expect(posture.deniedHosts).toEqual([]);
     expect(posture.enableInternet).toBe(false);
+    // Compared to the applied state, not to a literal, so a Worker returning a
+    // constant fails here as it does on the tethered path.
+    expect(result.body.egress?.allowedHosts).toEqual(posture.allowedHosts);
+    expect(result.body.egress?.deniedHosts).toEqual(posture.deniedHosts);
+  });
+
+  it("seals an instance a PREVIOUS start had tethered — the reused-name case", async () => {
+    // THE CASE THE PREVIOUS SUITE DID NOT CONSTRUCT, and the only one in which the
+    // Worker could misreport. Instance names are addresses, not identities:
+    // `fg.{tenant}.{session}.{run}` resolves a Durable Object by name, and
+    // `@cloudflare/containers` keeps `allowedHostsOverride` as a live DO field that
+    // it PERSISTS to storage, so it survives eviction. Tether, then seal the same
+    // name: with the old sealed branch (which called NEITHER setter) the instance
+    // still carried `["gw.ferrogate.test"]` and 22 provider denies while the Worker
+    // attested `{"posture":"sealed","allowedHosts":[],"deniedHosts":[]}` — a false
+    // attestation on the enforcement path, which `EgressPostureAttestation::verify`
+    // accepts because it only compares the attestation to the REQUEST.
+    const instance = "fg.tenant-a.sess-1.reused-tethered-then-sealed";
+
+    const tethered = await start({ instance, egressAllowlist: [GOVERNED_HOST] });
+    expect(tethered.status).toBe(200);
+    const afterTether = await appliedPosture(instance);
+    // The precondition has to be real, or the second half proves nothing.
+    expect(afterTether.allowedHosts).toEqual([GOVERNED_HOST]);
+    expect(afterTether.deniedHosts).toContain(PROVIDER);
+    const tetheredPropCount = afterTether.props.length;
+
+    const sealed = await start({ instance });
+    expect(sealed.status).toBe(200);
+    const posture = await appliedPosture(instance);
+
+    // Pins container.ts's sealed branch (`setAllowedHosts(allowlist)` /
+    // `setDeniedHosts(denylist)`). Delete either call and the instance keeps the
+    // previous run's lists while the attestation below claims `[]`.
+    expect(posture.allowedHosts).toEqual([]);
+    expect(posture.deniedHosts).toEqual([]);
+    expect(sealed.body.egress).toEqual({
+      directPublicEgress: false,
+      posture: "sealed",
+      allowedHosts: [],
+      deniedHosts: [],
+    });
+    // The attestation is checked against the APPLIED state, which is the property
+    // the suite claims to hold and the one that was false.
+    expect(sealed.body.egress?.allowedHosts).toEqual(posture.allowedHosts);
+    expect(sealed.body.egress?.deniedHosts).toEqual(posture.deniedHosts);
+
+    // BEHAVIOURAL: the host the previous run could reach is refused now, decided by
+    // Cloudflare's own function through the interceptor the SDK actually installed.
+    // Without the fix this comes back `egress-attempted`.
+    const verdict = await decideInstalled(instance, `https://${GOVERNED_HOST}/v1/chat`);
+    expect(verdict).toEqual({ verdict: "denied", status: 520, body: "Origin is disallowed" });
+
+    // ORDER: sealing closes the allowlist FIRST. Clearing the denylist first would
+    // leave the stale gateway grant reachable for the width of one RPC, and if the
+    // second call then threw the instance would stay tethered while the run was
+    // told it was sealed. The props the SDK published are a chronological record.
+    const sealingProps = posture.props.slice(tetheredPropCount);
+    expect(sealingProps.length, "the sealed start must publish two postures").toBe(2);
+    expect(
+      sealingProps[0].allowedHosts,
+      "the first posture the sealed start published must already allow nothing",
+    ).toEqual([]);
+    expect(sealingProps.at(-1)?.allowedHosts).toEqual([]);
+    expect(sealingProps.at(-1)?.deniedHosts).toEqual([]);
+    for (const props of sealingProps) {
+      expect(props.enableInternet).toBe(false);
+    }
+  }, 30_000);
+
+  it("re-tethers an instance a previous start had sealed, and attests the lists back", async () => {
+    // The mirror case, so the fix is not "sealed always wins" but "the attestation
+    // is what is applied". Seal first, then tether the same name.
+    const instance = "fg.tenant-a.sess-1.reused-sealed-then-tethered";
+    expect((await start({ instance })).status).toBe(200);
+    expect((await appliedPosture(instance)).allowedHosts).toEqual([]);
+
+    const tethered = await start({ instance, egressAllowlist: [GOVERNED_HOST] });
+    expect(tethered.status).toBe(200);
+    const posture = await appliedPosture(instance);
+    expect(posture.allowedHosts).toEqual([GOVERNED_HOST]);
+    expect(posture.deniedHosts).toContain(PROVIDER);
+    expect(tethered.body.egress?.allowedHosts).toEqual(posture.allowedHosts);
+    expect(tethered.body.egress?.deniedHosts).toEqual(posture.deniedHosts);
+    expect(tethered.body.egress?.posture).toBe("gateway-tethered");
   });
 
   it("never leaves the instance allowed-but-unfenced: deny is applied before allow", async () => {
@@ -359,6 +606,23 @@ describe("the start attestation matches the applied posture", () => {
     // And the instance is genuinely unfenced — which is exactly why it must not be run.
     const posture = await appliedPosture(instance);
     expect(posture.interceptions).toEqual([]);
+  });
+
+  it("reports a SEALED start whose reset failed as an error, never as sealed", async () => {
+    // Since the sealed path applies the empty lists, it can fail the same way — and
+    // a sealed start that could not clear a previous run's grant is precisely the
+    // false attestation this rework exists to remove. It must surface as an error.
+    const instance = "fg.tenant-a.sess-1.sealed-apply-fails";
+    expect((await start({ instance, egressAllowlist: [GOVERNED_HOST] })).status).toBe(200);
+    await runInDurableObject(sandbox(instance), async (probe) =>
+      probe.failNextInterception("container control plane unavailable"),
+    );
+    const result = await start({ instance });
+    expect(result.status).not.toBe(200);
+    expect(result.body.error).toBe("container_error");
+    expect(result.body.egress).toBeUndefined();
+    // The instance still carries the previous grant — which is why the run is refused.
+    expect((await appliedPosture(instance)).allowedHosts).toEqual([GOVERNED_HOST]);
   });
 });
 

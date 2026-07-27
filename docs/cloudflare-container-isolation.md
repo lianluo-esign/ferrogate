@@ -97,11 +97,12 @@ Sources:
 | Raw TCP/UDP on other ports? | Denied. "Traffic on ports other than `80` and `443` is never routed through `outbound`… If you set `enableInternet = false`, that traffic is denied." | **verified** |
 | Is there a host allowlist? | Yes, deny-by-default. "When `allowedHosts` is set, it becomes a deny-by-default allowlist"; "any host or IP not in the list is denied"; non-matching hosts "are blocked with HTTP 520". | **verified** |
 | Does the allowlist survive a wide/incorrect config? | `deniedHosts` does: matching hosts are "blocked unconditionally (HTTP 520)… This overrides everything else in the chain, including per-host handlers". | **verified** |
-| Where is it enforced? | Outside the container: handlers are "programmable egress proxies that run on the same machine as the container"; the local-dev emulation "spawn[s] a sidecar process … inside the container's network namespace" applying "`TPROXY` rules … mirroring production behavior". | **verified** |
+| Where is it enforced? | Outside the container: handlers are "programmable egress proxies that run on the same machine as the container"; the local-dev emulation "spawn[s] a sidecar process … inside the container's network namespace" applying "`TPROXY` rules … mirroring production behavior". | **verified for outbound handlers; assumed for the sealed path** — both quotes describe the *handler* mechanism (and the second describes local-dev emulation). Cloudflare does not separately document where a container with `enableInternet = false` and no handler is blocked; we infer it is the same off-container layer |
 | Can code *inside* the container turn egress back on? | No documented mechanism to. `enableInternet` is a Worker-side class field that "takes effect when the container starts", and enforcement is proxy-side. We treat in-container bypass of the flag as impossible. | **assumed** — Cloudflare does not state this in the negative |
 | Can wildcards/IPs be listed? | Both lists "support simple glob patterns where `*` matches any sequence of characters"; the Sandbox page accepts CIDR entries and says "any host **or IP**" is denied when unlisted. `egress.md` describes the lists as hostname patterns only. | **verified for Sandbox; ambiguous for the Container base** |
 | What happens to HTTPS from a client that does NOT trust the interception CA? | Undocumented. The docs only say trusting `/etc/cloudflare/certs/cloudflare-containers-ca.crt` is required "for HTTPS interception to work". We assume such a connection fails TLS validation (fail-closed) rather than passing through uninspected. | **assumed — unverified, and the most important open question** |
-| Does the allowlist match SNI or the decrypted request host? | Undocumented. The Sandbox class ships `interceptHttps = true` and "makes a best effort to trust this CA automatically", so in the Sandbox tier matching is on the intercepted request. | **assumed** |
+| Is HTTPS intercepted at all — i.e. does `deniedHosts` bind the protocol providers actually speak? | **Only if you turn it on.** Read out of the installed packages, not the docs: `@cloudflare/containers@0.3.7` declares `interceptHttps = false` (`dist/lib/container.js:329`) and `@cloudflare/sandbox@0.12.4` **never assigns it** — the one occurrence in that package is a *read*. With the default, `applyOutboundInterception` registers `interceptAllOutboundHttp` only, so the allow/deny lists bind **plaintext HTTP** and never see an `https://api.anthropic.com` request. FerroGate's `AgentSandbox` therefore pins `interceptHttps = true` (`workers/agent-gateway/src/index.ts`), which also makes the SDK export `SANDBOX_INTERCEPT_HTTPS=1` into the container. An earlier revision of this table asserted "the Sandbox class ships `interceptHttps = true`"; **that was false for what the lockfile deploys.** | **verified from the pinned packages** |
+| Does the allowlist match SNI or the decrypted request host? | Undocumented. With `interceptHttps` on, Cloudflare "makes a best effort to trust this CA automatically", so we infer matching is on the intercepted (decrypted) request. | **assumed** |
 | Is DNS constrained? | Partly. DNS remains available while sealed but "only go[es] to Cloudflare's DNS servers… That prevents using arbitrary DNS destinations for data exfiltration". | **verified** — note this bounds, but does not eliminate, DNS as a channel (see residual risk) |
 
 **Conclusion.** `direct_public_egress = false` is *enforceable* on this tier, at
@@ -144,9 +145,32 @@ produces an untethered agent:
    or empty ⇒ no host may be opened, i.e. sealed**), re-runs the wildcard /
    provider / host-shape checks, and applies its **own** provider denylist via
    `setDeniedHosts` before `setAllowedHosts` — a caller-supplied denylist can
-   only widen it, never shrink it. Cloudflare evaluates `deniedHosts` first and
-   it overrides everything, so an over-broad allowlist still cannot reach a
-   provider.
+   only widen it, never shrink it (`mergeProviderDenylist` always starts from the
+   Worker's list; `test/container-egress.test.ts` asserts the **applied** list is
+   the union, and that a shorter caller list still denies every provider —
+   structurally *and* through Cloudflare's own decision function). Cloudflare
+   evaluates `deniedHosts` first and it overrides everything, so an over-broad
+   allowlist still cannot reach a provider.
+
+   **The denylist only binds a protocol that is intercepted.** The pinned SDK
+   defaults `interceptHttps = false`, which would have left the provider denylist
+   bound to plaintext HTTP — useless against an HTTPS provider API. `AgentSandbox`
+   pins it `true`; see the HTTPS row in the table above and the residual risk
+   below.
+
+   **A sealed start resets both lists rather than skipping them.** Instance names
+   are addresses: `fg.{tenant}.{session}.{run}` resolves a Durable Object by name,
+   and `@cloudflare/containers` persists `allowedHostsOverride` to DO storage, so
+   it survives eviction. The earlier sealed branch called neither setter, so
+   tethering a name and then sealing it left the gateway host applied while the
+   Worker attested `allowedHosts: []` — a false attestation on the enforcement
+   path, which the Rust `verify` accepts because it compares the attestation to
+   the *request*. The sealed path now applies `setAllowedHosts([])` first (an
+   empty allowlist is a deny-by-default gate, so the stale grant closes in one
+   call) and `setDeniedHosts([])` second. The cost: a sealed start now needs
+   `ctx.exports.ContainerProxy` too, so a deployment missing the
+   `enable_ctx_exports` flag fails every start rather than only tethered ones —
+   fail-closed and loud.
 
    **Runtime prerequisite.** `setAllowedHosts` / `setDeniedHosts` resolve their
    outbound interceptor through `ctx.exports.ContainerProxy`, and `ctx.exports`
@@ -191,10 +215,12 @@ Two decisions matter more than the arithmetic:
 
 - **`Unattested` is a distinct verdict, and is never a pass.** Until a provider
   usage source is actually wired (explicitly *not* in this slice — each provider
-  has its own attribution key and reporting lag), every run reconciles to
-  `Unattested`. `TetherVerdict::is_proven_tethered()` is `true` only for
-  `Tethered`, so "we could not check" can never be rendered as "we checked and
-  it was clean".
+  has its own attribution key and reporting lag — and tracked as **#556**), every
+  run reconciles to `Unattested`, and nothing outside the module and its own
+  tests calls `TetherAuditor` at all. `TetherVerdict::is_proven_tethered()` is
+  `true` only for `Tethered`, so "we could not check" can never be rendered as
+  "we checked and it was clean" — but be clear that today this detection path is
+  **a typed seam, not a running detector**.
 - **Only provider excess is a breach.** The gateway legitimately meters more
   than the provider bills (guardrail-blocked requests, cache hits, gateway-side
   retries); the reverse — the provider served tokens the gateway never saw — is
@@ -208,12 +234,33 @@ manufacture a false breach *or* a false pass).
 
 ## Residual risk — read this before choosing this tier
 
-**Enforced.** With the shipped configuration (the `AgentSandbox` subclass
-pinning `enableInternet = false`, an allowlist that is empty or contains only
-the governed gateway host, and the provider denylist), Cloudflare blocks direct
-outbound connections from inside the container at the platform layer, including
-all non-80/443 ports. Model-authored code running in the container cannot
-re-enable it. This is a genuine network control, not a base-URL convention.
+**The honest headline.** The issue that opened this work asked us, if the
+platform cannot block direct egress, to *say so plainly and design the strongest
+available compensating control rather than asserting a guarantee we don't have*.
+Here is that statement, and it is deliberately weaker than "an agent cannot reach
+a provider directly":
+
+> **FerroGate does not have first-party proof that a process inside a Cloudflare
+> container cannot reach an LLM provider directly.** What FerroGate proves is one
+> link short of that: that the deny-by-default posture the operator asked for is
+> the posture actually applied to the live instance, and that Cloudflare's own
+> egress decision function refuses a provider under it. The last link — that the
+> platform then *honours* that decision against hostile code running as root
+> inside the container — rests on Cloudflare's documentation and on the
+> architectural fact that enforcement is off-container. It is **assumed, not
+> verified by us**, it cannot be verified in workerd (no container engine), and
+> the LIVE-CF gate items below exist to settle it. An operator choosing this tier
+> is choosing that assumption.
+
+**Enforced, and observed by tests.** With the shipped configuration (the
+`AgentSandbox` subclass pinning `enableInternet = false` and `interceptHttps =
+true`, an allowlist that is empty or contains only the governed gateway host, and
+the provider denylist), the Worker hands Cloudflare a posture under which
+Cloudflare's own `ContainerProxy` refuses every provider request on both schemes,
+and refuses every host that is not the governed gateway. The posture reported to
+the Rust client is the posture read back off the live Durable Object, on fresh
+and reused instance names alike. That much is a genuine network control rather
+than a base-URL convention, and it is where the suite stops.
 
 **Not enforced, and an operator must know it.** (1) The control is only as good
 as the deployment: binding `CONTAINER_SANDBOX` to a class that does not extend
@@ -233,7 +280,30 @@ constrains what the agent does *through* the gateway; guardrails and #428 spend
 caps own that. (6) The bypass **detection** path is a typed seam with no live
 provider usage source wired, so today every run is `Unattested`: FerroGate can
 prove the posture it applied and that the Worker attested it, but cannot yet
-prove from provider-side accounting that no bypass occurred.
+prove from provider-side accounting that no bypass occurred. **This is an
+explicit deferral, not an oversight** — see "Deferred, with issues" below.
+(7) `AgentSandbox` pins `interceptHttps = true` so the provider denylist binds
+HTTPS at all. If the deployed container image does **not** trust
+`/etc/cloudflare/certs/cloudflare-containers-ca.crt`, HTTPS from inside the
+container stops working — including to the governed gateway. That is loud and
+fail-closed (a broken run, not a silent bypass), but it is unverified by us and
+is a LIVE-CF gate item. (8) The claim in (1)–(7) that model-authored code cannot
+re-enable egress is the *assumed* row of the evidence table, not a verified one:
+`enableInternet` is a Worker-side field and enforcement is proxy-side, so there
+is no documented mechanism to flip it from inside — but Cloudflare does not state
+this in the negative, and we have not tried to break it.
+
+**Deferred, with issues.** Two of #471's obligations are explicitly deferred
+rather than quietly unmet, so nobody reading this has to guess which:
+
+- **#556 — the detection path is a type, not a wire.** `TetherAuditor` is
+  reachable only from its own tests and the `lib.rs` re-export; no provider usage
+  source exists, so every run reconciles to `Unattested`. Deferred because each
+  provider needs its own usage API, attribution key and reporting lag, and a stub
+  source would manufacture either a false breach or a false pass.
+- **#557 — the LIVE-CF gate.** Every claim about what the *platform* does, as
+  opposed to what FerroGate hands it, is unverified by us. #557 carries the list,
+  including the in-container bypass attempt and the interception-CA question.
 
 **Dependency to note in #428.** The cost-governance engine
 (`crates/ferrogate-runtime/src/cloudflare_agent_cost.rs`) only meters traffic
@@ -272,10 +342,13 @@ Error vocabulary (mapped to typed Rust errors by `ContainerControlClient`):
   therefore sealed by the platform. Any egress must ride a **governed
   allowlist** (mirroring the #117 function-egress broker), applied at runtime via
   `sandbox.setAllowedHosts(allowlist)` (the Container base grants those hosts
-  egress even while `enableInternet` stays false). The allowlist path needs the
+  egress even while `enableInternet` stays false). **Both** postures need the
   Worker to export `ContainerProxy` from `@cloudflare/sandbox` (done in
   `src/index.ts`) so the DO can build outbound-interception fetchers via
-  `ctx.exports.ContainerProxy`. Open internet is no longer expressible at all:
+  `ctx.exports.ContainerProxy` — the sealed path applies `setAllowedHosts([])` /
+  `setDeniedHosts([])` rather than skipping the setters, so a reused instance
+  name cannot carry a previous run's grant into a container attested as sealed.
+  Open internet is no longer expressible at all:
   see [Enforcing the posture](#enforcing-the-posture-issue-471) for the five
   layers and [Residual risk](#residual-risk--read-this-before-choosing-this-tier)
   for what is *not* covered.
@@ -377,6 +450,22 @@ agent-worker (environment):
   state; and `wrangler.toml` is asserted to bind `AgentSandbox` (the one failure
   mode attestation provably cannot detect). Each of these was verified by
   mutating the enforcing line and watching the suite fail.
+
+  **Code review found two survivors and one wrong attribution, and the suite now
+  covers them.** (a) No test ever sent `egressDenylist`, so *both* directions of
+  "a caller can widen the denylist, never shrink it" survived a green run —
+  replacing the Worker's list with the caller's, and dropping the union. There
+  are now route-level tests asserting the **applied** `deniedHosts` is exactly the
+  union, that a shorter caller list still denies every provider, and that
+  Cloudflare's decision function still refuses a provider the caller omitted.
+  (b) Every attestation test used a **fresh** instance name, so the one case
+  where the Worker provably misreported — tether a name, then seal it, while
+  `allowedHostsOverride` persists on the Durable Object — was the case no test
+  constructed; it is constructed now, on a reused name, in both orders. (c) The
+  probes attributed `https://` outcomes to an interceptor that, with the pinned
+  SDK's `interceptHttps = false`, only carried plaintext HTTP; `AgentSandbox` now
+  pins `interceptHttps = true` and the suite asserts the HTTPS registration
+  exists and probes both schemes.
 - **Not observable from any test (platform behaviour, LIVE-CF only).** Whether
   Cloudflare *honours* `enableInternet = false` outside the container, and
   whether root inside the container can defeat the filter, cannot be observed in
@@ -400,10 +489,10 @@ agent-worker (environment):
   60–90s); (6) sealed-by-default egress (`enableInternet=false`) blocks internet
   and a governed `egressAllowlist` opens only the allowed hosts (verify the
   container image trusts the interception CA so `setAllowedHosts` enforces).
-- **Not-tested (LIVE-CF, #471 — the acceptance proof the issue asks for).** The
-  claim "a process inside the container cannot reach a provider endpoint
-  directly" is **unverified by us**; only a live run can settle it. The gate must,
-  against a real CF sandbox: (a) start a **sealed** instance and exec
+- **Not-tested (LIVE-CF, #471 — the acceptance proof the issue asks for; tracked
+  as #557).** The claim "a process inside the container cannot reach a provider
+  endpoint directly" is **unverified by us**; only a live run can settle it. The
+  gate must, against a real CF sandbox: (a) start a **sealed** instance and exec
   `curl -sS https://api.anthropic.com/v1/models` — it must fail (HTTP 520 /
   connection refused), not return a provider response; (b) repeat on the
   **tethered** posture with `CONTAINER_GOVERNED_EGRESS_HOSTS` set to only the
@@ -412,13 +501,23 @@ agent-worker (environment):
   (e.g. port 8443 / a UDP send) and confirm it is denied; (d) confirm an HTTPS
   client that does **not** trust
   `/etc/cloudflare/certs/cloudflare-containers-ca.crt` fails closed rather than
-  passing through uninspected — this is the one assumption in the table above
-  that no Cloudflare doc confirms; (e) confirm `/container/start` with
+  passing through uninspected; (e) confirm `/container/start` with
   `enableInternet: true` returns 422; (f) confirm the start response carries the
-  `egress` attestation and that a Worker without it fails the Rust-side start.
+  `egress` attestation and that a Worker without it fails the Rust-side start;
+  (g) with `AgentSandbox { interceptHttps = true }` deployed, confirm the image
+  trusts the interception CA — HTTPS to the governed gateway host must still
+  work while HTTPS to a provider is refused, because if the image does not trust
+  the CA, HTTPS breaks entirely and takes the tether down with it; (h) **attempt
+  the in-container bypass**: as root inside the container, rewrite
+  `/etc/resolv.conf`, add routes, bind a raw socket, drop the injected CA, talk
+  to the proxy sidecar directly, and reach a provider IP literal without DNS.
+  (d), (g) and (h) correspond to the **three** rows the evidence table labels
+  `assumed` — in-container bypass, interception-CA behaviour, and SNI-vs-request
+  matching — plus the partially-assumed "where is it enforced?" row. None of them
+  is confirmed by any Cloudflare doc, and none is confirmed by us.
 - **Remaining (follow-up slice):** wiring the backend into the agent-worker
   management **remote-provisioning dispatch** (constructing it from a production
   `BlockingHttpControlTransport` and driving it from `lifecycle.rs` with
-  per-session storage in `state.rs`, mirroring `provision_docker`); and wiring a
-  real provider usage source into the #471 `TetherAuditor` so runs stop
+  per-session storage in `state.rs`, mirroring `provision_docker`); and **#556** —
+  wiring a real provider usage source into the #471 `TetherAuditor` so runs stop
   reconciling to `Unattested`.
