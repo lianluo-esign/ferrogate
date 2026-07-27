@@ -300,3 +300,86 @@ fn preflight_succeeds_on_healthy_account() {
         .block_on(cf.preflight(None))
         .expect("preflight should pass");
 }
+
+#[test]
+fn code_10013_at_400_reaches_the_caller_as_api_after_exactly_one_request() {
+    // Issue #493, consumer-level pin. `error_test.rs` proves the *mapping*
+    // in isolation; this proves what an R2 caller actually observes, and it
+    // is the assertion that records the real mechanism: the backoff loop is
+    // driven by HTTP status (`is_retryable_status` = 429|500|502|503|504),
+    // NOT by `CloudflareError::is_retryable`, which `from_response` output
+    // never reaches — `from_response` runs after the loop has returned.
+    // Hence a 400 is issued once and only once, no matter what code the
+    // envelope carries.
+    let transport = Arc::new(ScriptedTransport::new(vec![ok(
+        400,
+        None,
+        r#"{ "success": false, "errors": [{ "code": 10013, "message": "IncompleteBody" }] }"#,
+    )]));
+    let clock = Arc::new(FakeClock::default());
+    let cf = client(transport.clone(), clock.clone(), short_policy());
+
+    let err = runtime()
+        .block_on(cf.get_json::<serde_json::Value>("accounts/{account_id}", None))
+        .unwrap_err();
+
+    match err {
+        CloudflareError::Api { status, ref errors } => {
+            assert_eq!(status, 400, "got {err:?}");
+            assert_eq!(errors[0].code, 10013, "got {err:?}");
+        }
+        other => panic!("expected Api {{ status: 400 }}, got {other:?}"),
+    }
+    // The load-bearing half: one request, zero backoff sleeps. Restoring the
+    // old `code == 10013 => RateLimited` branch would change the variant
+    // above but NOT this count — which is exactly why the pre-#493 rationale
+    // ("retried until the backoff budget was burned") was wrong.
+    assert_eq!(*transport.calls.lock().unwrap(), 1, "400 must not be retried");
+    assert!(
+        clock.delays.lock().unwrap().is_empty(),
+        "400 must not back off, got {:?}",
+        clock.delays.lock().unwrap()
+    );
+}
+
+#[test]
+fn the_same_code_10013_at_500_is_retried_because_status_drives_the_loop() {
+    // Companion to the test above: identical envelope code, different HTTP
+    // status, opposite retry behaviour — so the file records that the status
+    // is the mechanism. In the general `client/v4` namespace 10013 surfaces
+    // as `workers.api.error.unknown` (HTTP 500), which IS retryable.
+    let retry = RetryPolicy {
+        max_retries: 2,
+        base_backoff: Duration::from_secs(1),
+        max_backoff: Duration::from_secs(60),
+    };
+    let body = r#"{ "success": false, "errors": [{ "code": 10013, "message": "workers.api.error.unknown" }] }"#;
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        ok(500, None, body),
+        ok(500, None, body),
+        ok(500, None, body),
+    ]));
+    let clock = Arc::new(FakeClock::default());
+    let cf = client(transport.clone(), clock.clone(), retry);
+
+    let err = runtime()
+        .block_on(cf.get_json::<serde_json::Value>("accounts/{account_id}", None))
+        .unwrap_err();
+
+    match err {
+        CloudflareError::Api { status, ref errors } => {
+            assert_eq!(status, 500, "got {err:?}");
+            assert_eq!(errors[0].code, 10013, "got {err:?}");
+        }
+        other => panic!("expected Api {{ status: 500 }}, got {other:?}"),
+    }
+    assert_eq!(
+        *transport.calls.lock().unwrap(),
+        3,
+        "500 must be retried max_retries times"
+    );
+    assert_eq!(
+        *clock.delays.lock().unwrap(),
+        vec![Duration::from_secs(1), Duration::from_secs(2)]
+    );
+}

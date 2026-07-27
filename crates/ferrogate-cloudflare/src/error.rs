@@ -49,10 +49,12 @@ impl fmt::Display for CloudflareApiError {
 /// Cross-namespace audit (issue #493): all three codes live in the
 /// account/token-auth namespace (`9xxx`), which every product shares — they
 /// are not re-used with a different meaning by R2 (whose codes are the
-/// disjoint S3-flavoured `1000x`-`10007x` range documented at
+/// disjoint S3-flavoured `1000x`-`10007x` range plus the outlier `100100`
+/// `EntityTooLarge`/400, documented at
 /// <https://developers.cloudflare.com/r2/api/error-codes/>, e.g. `10002`
 /// Unauthorized/401, `10003` AccessDenied/403, `10035`
-/// SignatureDoesNotMatch/403, `10042` NotEntitled/403) or by any other
+/// SignatureDoesNotMatch/403, `10042` NotEntitled/403 — none of which
+/// overlap the `9xxx`/`1000`/`10000` account-auth codes) or by any other
 /// Cloudflare product researched for that issue. No collision found, so the
 /// bare numeric match is kept as-is.
 pub const MISSING_SCOPE_CODES: &[i64] = &[9103, 9107, 9109];
@@ -63,7 +65,8 @@ pub const MISSING_SCOPE_CODES: &[i64] = &[9103, 9107, 9109];
 /// Cross-namespace audit (issue #493): same conclusion as
 /// [`MISSING_SCOPE_CODES`] — `1000`, `9106` and `10000` are general
 /// `client/v4` account-auth codes and none of them appear in R2's disjoint
-/// error-code range (R2 has no code `10000`; its own auth codes are
+/// error-code range (`1000x`-`10007x` plus `100100`; R2 has no code
+/// `1000` and no code `10000`; its own auth codes are
 /// `10002`/`10003`/`10035`/`10042`, none of which are listed here because
 /// `status == 401`/`403` in [`CloudflareError::from_response`] already
 /// classifies them as [`CloudflareError::Unauthorized`] without needing a
@@ -127,14 +130,28 @@ impl CloudflareError {
     /// 10013` as a rate limit regardless of namespace. That numeral is not a
     /// rate-limit code in *any* Cloudflare product: in R2 it is
     /// `IncompleteBody` (HTTP 400 — "request body terminated before expected
-    /// Content-Length", a non-retryable client-side truncation that can
-    /// never succeed by retrying), and in the general `client/v4` namespace
-    /// it surfaces as `workers.api.error.unknown` (HTTP 500), also unrelated
-    /// to rate limiting. Because R2 now routes through this mapper (`r2.rs`),
-    /// the collision was live: a truncated R2 upload body was reported as
-    /// `RateLimited` and retried until the backoff budget was burned on a
-    /// request that could never succeed. R2's real rate-limit code, `10058`
-    /// / `TooManyRequests`, always arrives with HTTP 429 per
+    /// Content-Length", a client-side truncation that can never succeed by
+    /// retrying), and in the general `client/v4` namespace it surfaces as
+    /// `workers.api.error.unknown` (HTTP 500), also unrelated to rate
+    /// limiting. Because R2 now routes through this mapper (`r2.rs`), the
+    /// collision was live.
+    ///
+    /// What the collision actually broke was the **operator-facing
+    /// classification**, not the retry behaviour. `from_response` runs
+    /// *after* the backoff loop has already returned
+    /// (`client.rs` `execute_with_retry` → `into_result` →
+    /// `envelope.rs`), and that loop retries on HTTP status only
+    /// (`is_retryable_status` = `429|500|502|503|504`) plus transport errors
+    /// — it never consults [`CloudflareError::is_retryable`]. So a
+    /// `400 + code 10013` response was issued exactly once, before and after
+    /// this change. The defect was that a truncated upload body was reported
+    /// to the operator as `RateLimited` ("cloudflare rate limit hit") instead
+    /// of a client-side `Api { status: 400 }`, and that any consumer matching
+    /// on the variant — e.g. the guardrails adapter's
+    /// `RateLimited → Overloaded` mapping — would decide from a false premise.
+    ///
+    /// R2's real rate-limit code, `10058` / `TooManyRequests`, always arrives
+    /// with HTTP 429 per
     /// <https://developers.cloudflare.com/r2/api/error-codes/>, so
     /// `status == 429` alone already classifies it correctly — no
     /// additional numeric-code branch is added, since a bare `code == 10058`

@@ -231,8 +231,11 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
   } catch (err) {
     // A failed statement rolled the WHOLE batch back — nothing was committed.
     // Code 5001 = D1 execution failure. Deliberately NOT a Cloudflare auth /
-    // scope / rate-limit code (1000/9103/9107/9109/9106/10000/10013), so the
-    // Rust client maps it to a plain API error, not a misclassified auth failure.
+    // scope code (1000/9103/9106/9107/9109/10000), so the Rust client maps it
+    // to a plain API error, not a misclassified auth failure. Rate-limit
+    // classification is by HTTP status 429 alone — no numeric code is special
+    // to it (issue #493 removed the 10013 branch; see
+    // crates/ferrogate-cloudflare/src/error.rs).
     return errEnvelope(5001, `d1 batch failed (rolled back): ${errorMessage(err)}`, 502);
   }
 }

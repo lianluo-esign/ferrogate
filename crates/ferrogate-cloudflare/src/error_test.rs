@@ -49,15 +49,36 @@ fn r2_incomplete_body_code_10013_is_not_misclassified_as_rate_limited() {
 }
 
 #[test]
-fn r2_too_many_requests_code_10058_maps_to_rate_limited() {
+fn r2_rate_limit_is_classified_by_status_429_not_by_code_10058() {
     // Issue #493: R2's actual rate-limit code is 10058 / `TooManyRequests`,
-    // which always arrives with HTTP 429.
-    let mapped = CloudflareError::from_response(429, None, vec![err(10058, "TooManyRequests")]);
+    // which always arrives with HTTP 429. There is deliberately NO numeric
+    // branch for 10058 in the mapper — a bare `code == 10058` match would
+    // reintroduce the very collision class #493 removed, because in
+    // Cloudflare's Lists/Bulk-Redirect namespace 10058 means "list items
+    // incompatible with list type" (HTTP 400). So both halves below are
+    // load-bearing: the status decides, the code does not.
+    let by_status =
+        CloudflareError::from_response(429, None, vec![err(10058, "TooManyRequests")]);
     assert!(
-        matches!(mapped, CloudflareError::RateLimited { .. }),
-        "got {mapped:?}"
+        matches!(by_status, CloudflareError::RateLimited { .. }),
+        "429 must classify as a rate limit, got {by_status:?}"
     );
-    assert!(mapped.is_retryable(), "rate limits must be retryable");
+    assert!(by_status.is_retryable(), "rate limits must be retryable");
+
+    // The half that makes the name true: the same code WITHOUT 429 must not
+    // become a rate limit. Adding a `code == 10058` branch reds this.
+    let by_code = CloudflareError::from_response(
+        400,
+        None,
+        vec![err(10058, "list items incompatible with list type")],
+    );
+    match by_code {
+        CloudflareError::Api { status, ref errors } => {
+            assert_eq!(status, 400, "got {by_code:?}");
+            assert_eq!(errors[0].code, 10058, "got {by_code:?}");
+        }
+        other => panic!("code 10058 without 429 must stay Api, got {other:?}"),
+    }
 }
 
 #[test]
