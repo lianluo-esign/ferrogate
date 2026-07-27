@@ -208,6 +208,103 @@ narrowest module that covers your change before pushing.
 
 ---
 
+## Assertions must be able to fail
+
+Picking the right layer is not enough. The layer can be right, the
+implementation correct, the suite fully green — and the load-bearing line still
+uncovered. In one session six items in a row failed this way (`#500`): break the
+logic on purpose and every suite stayed green. 14 surviving mutations on `#460`
+alone, 7 of 7 on `#471`'s Worker half.
+
+**The rule:** if you can break the thing a test names and the test stays green,
+the test does not cover it.
+
+### The one-minute review check
+
+Applied by hand, on a diff, without building anything:
+
+1. Name the one line the change exists for — the filter, the constant, the flag,
+   the seed value.
+2. Name a one-token edit to it: `false` → `true`, `1` → `0`, `&[…]` → `&[]`,
+   `Some` → `None`, delete the row, delete the call, swap the connection target.
+3. Find the assertion that goes red, and **read it**. Do not infer it from the
+   test's name or its comments.
+
+If step 3 takes longer than a minute, that is the finding — say so and move on.
+"There are 85 tests" is not an answer to step 3; on `#489`, all 85 stayed green
+while the defect the issue was filed to fix was restored.
+
+### Named anti-patterns
+
+Each of these reads as thorough. Each survived the mutation named beside it.
+
+| Anti-pattern | Seen in | Assert instead |
+|---|---|---|
+| **Text, not behaviour.** The SQL string is pinned as a substring while a mocked transport replays canned rows regardless of what was sent, so `enabled = 1`, `IS NOT NULL` and `<=` are never *filters*. | `#460` due scan; every boundary — exactly-due, disabled, null-next-fire, not-yet-due — was unpinned | The rows that come back across the boundary, one case per boundary. |
+| **Sending side, never applying side.** The client proves it *asked* for the sealed container; nothing proves the peer was ever told. | `#471` (the `#188`/`#397` write-succeeds/runtime-ignores shape, one layer up) | The request the dependency actually receives, or the state it actually reaches. |
+| **A conclusion pinned on an unguarded premise.** `!sql.contains("CAST")` is justified by "the columns are already INTEGER" — and nothing pins the columns as INTEGER. | `#460`; the portability test compares column *names* only, so flipping them to TEXT stays green | The premise, at the layer that owns it. |
+| **A comment carrying the invariant.** The comment says "VALUES seeds `request_count` literal 1"; the assertion covers `params`, and the literal is inline SQL. The mirror case: a regex window that matches the pin anywhere in the method, comments included. | `#460`; `#480` `search_path` | The value at the point it takes effect. A comment is not an assertion, and an assertion a comment can satisfy is not one either. |
+| **A vacuous fixture.** A re-sort asserted over rows that were already sorted; a truncate asserted over 2 rows with `limit = 10`. | `#460` fire-list | Input that is wrong in the direction the transform fixes. |
+| **A guard coarser than the rule it enforces.** One audit walked a single directory by filename prefix while its convention spanned three crates; another signed off on `(file, fn)`, so a *new* capture inside an already-blessed function was pre-approved. | `#495`; `#526`, fixed by keying on `(file, fn, idiom, exact count)` | Key the guard on the exact thing that must not change, and prove its reach covers the whole class it claims. |
+| **A count asserted as fact with no mechanism.** "236 transactions across 41 files", in a comment. It was 42 by the next slice. | `#480` | Either compute the count in the test, or delete the claim. |
+| **Green for an unrelated reason.** The schedule-count assertion passes on the broken implementation too, because `deleteAll()` wipes the tables and the constructor recreates them empty. | `#482` | A value that only the correct path can produce. |
+
+### Where mutation reasoning is not enough
+
+Two failures in the same session were invisible to "would a mutation red this?",
+because they are properties of the *unmutated* run:
+
+- **A test that reds on correct code.** `#471`'s `container-egress.test.ts:625`
+  asserted `allowedHosts == [GOVERNED_HOST]` after a failed reset; the SDK
+  assigns the field *before* the call that throws, so it is `[]`. Nobody
+  noticed, because nothing ran it. Only reading the dependency's source finds
+  this. An un-run test is an unverified claim — write it, then say so.
+- **A cross-check that shares the blind spot.** `#511`'s second reader was
+  line-oriented, so it agreed with the const parser's inability to see a
+  multi-row `VALUES`. Two readers only cross-check if they fail differently.
+
+### Who owns which half
+
+Under speed mode the dev lane writes tests it does not run, so "mutate it and
+watch it go red" is not currently a dev-lane proof step. It splits:
+
+- **Author (design obligation):** write the assertion so that mutating the line
+  *would* red it, and say in the commit which mutation it is aimed at. Claim
+  nothing about having observed it.
+- **Review and gate (proof obligation):** run the check above; the gate performs
+  the mutation and confirms the red. A surviving mutation on a load-bearing
+  surface — wallet/settlement, egress enforcement, the due-scan filter, any
+  deny/allow decision — is a bug, not a metric.
+
+### Precedent and tooling status
+
+`scripts/test_openapi_contract.py:413,462` already hand-rolls this technique:
+`test_real_spec_mutations_reject_…` mutates the real spec and asserts the
+validator rejects it. That shape generalises to any in-tree checker.
+
+`cargo-mutants` is **not adopted yet** and is not installed on the dev boxes.
+The intended first targets are the crates carrying money, security and
+scheduling logic — `crates/ferrogate-storage`, `crates/ferrogate-runtime`,
+`crates/ferrogate-cloudflare`, `crates/agent-worker` — one crate at a time,
+report-only, no score committed and no blocking gate until a baseline exists:
+
+```bash
+cargo mutants -p ferrogate-storage --list      # what would be mutated
+cargo mutants -p ferrogate-storage             # long; run one crate at a time
+```
+
+Deliberately unresolved until someone runs it: the per-mutant test timeout on a
+suite this slow, whether each mutant should run the whole workspace suite or
+only the owning crate's, and therefore whether a `.cargo/mutants.toml` is worth
+having at all. No config is committed, because a filter config nobody has run
+`--list` against can silently examine nothing — which is the exact defect class
+this section exists to prevent. Adding a CI job is also premature: repo
+workflows are `release: published` gates (see `AGENTS.md` → CI Workflow
+Structure), and a mutation run of unknown duration does not belong in one until
+its cost is measured.
+
+---
+
 ## The issue loop: tests feed continuous iteration
 
 The test system is wired to the GitHub issue queue on purpose. A test run is not
