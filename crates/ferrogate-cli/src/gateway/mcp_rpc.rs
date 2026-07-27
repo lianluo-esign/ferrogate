@@ -35,6 +35,14 @@ const ASSET_TENANT_REQUIRED_CODE: i64 = -32003;
 /// is intact and fetchable, just not through a surface that inlines it.
 const ASSET_TOO_LARGE_CODE: i64 = -32004;
 
+/// JSON-RPC application error code for a read shed by the gateway's aggregate
+/// buffering budget -- the `resources/read` analogue of the REST
+/// `503 gateway_buffer_budget_exhausted` (issue #529). Distinct from
+/// [`ASSET_TOO_LARGE_CODE`] (nothing is wrong with the object; the identical
+/// call succeeds once in-flight reads drain) and from the bucket-unavailable
+/// `-32002` (the bucket is healthy; the gateway is out of memory budget).
+const GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE: i64 = -32005;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct McpJsonRpcRequest {
     #[serde(default)]
@@ -357,6 +365,9 @@ async fn resources_read(
         // materialized (plus a ~1.33x base64 copy) for any caller holding
         // `assets.read`.
         Err(AssetReadError::TooLarge(message)) => error(id, ASSET_TOO_LARGE_CODE, message),
+        Err(AssetReadError::Overloaded(message)) => {
+            error(id, GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE, message)
+        }
         Err(AssetReadError::BucketUnavailable(message)) => error(id, -32002, message),
         Err(AssetReadError::Storage(message)) => {
             error(id, -32000, format!("asset storage unavailable: {message}"))

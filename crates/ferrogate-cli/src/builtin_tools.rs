@@ -262,6 +262,10 @@ pub(crate) async fn execute_fetch_asset(
         // base64 copy on top. It now gets the refusal and the endpoint that
         // does work without the gateway in the data path.
         Err(AssetReadError::TooLarge(message)) => Err(ToolExecutionError::Failed(message)),
+        // Issue #529: the aggregate budget was committed for the whole bounded
+        // wait. The message names the condition and says a retry is real
+        // advice, so an agent is not left guessing that the asset is broken.
+        Err(AssetReadError::Overloaded(message)) => Err(ToolExecutionError::Failed(message)),
         Err(AssetReadError::BucketUnavailable(message)) => Err(ToolExecutionError::Failed(message)),
         Err(AssetReadError::Storage(message)) => Err(ToolExecutionError::Failed(message)),
     }

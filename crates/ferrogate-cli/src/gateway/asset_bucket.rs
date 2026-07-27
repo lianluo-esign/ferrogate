@@ -344,6 +344,19 @@ pub(crate) enum BufferedReadRefusal {
     /// must be told to use the presigned direct download instead — never
     /// served a truncated body, and never quietly buffered anyway.
     TooLarge { size_bytes: u64, limit_bytes: u64 },
+    /// This object fits the per-operation budget, but the gateway's AGGREGATE
+    /// budget for buffered reads was fully committed and stayed committed for
+    /// the whole bounded admission wait (issue #529).
+    ///
+    /// Distinct from [`Self::TooLarge`] because the disposition is different in
+    /// kind: nothing is wrong with the object or the request, the gateway is
+    /// out of memory budget right now, and the same request will succeed on
+    /// retry. That is a 503 (with a `Retry-After`-shaped message), not a 413.
+    Overloaded {
+        requested_bytes: u64,
+        budget_bytes: u64,
+        waited_ms: u64,
+    },
     /// The bucket could not be reached or refused the read. The diagnostic
     /// detail has already been logged against the request id; the caller only
     /// ever sees [`BUCKET_READ_UNAVAILABLE_MESSAGE`].
@@ -390,6 +403,38 @@ pub(crate) fn asset_too_large_for_buffering_message(
     )
 }
 
+/// The error code every read surface returns when the gateway's AGGREGATE
+/// buffering budget is exhausted (issue #529). One constant, for the same
+/// reason [`ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE`] is one: four surfaces, one
+/// name for one condition.
+pub(crate) const GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE: &str = "gateway_buffer_budget_exhausted";
+
+/// The shed message: it names the condition, the enforced ceiling, how long the
+/// request actually waited, and the endpoint that does not consume the budget.
+///
+/// Deliberately explicit about being a load condition rather than a fault of
+/// the request: "retry" is real advice here (the same call succeeds once
+/// in-flight reads finish), which is not true of the 413 an over-large object
+/// earns.
+pub(crate) fn gateway_buffer_budget_exhausted_message(
+    asset_type: &str,
+    name: &str,
+    version: &str,
+    requested_bytes: u64,
+    budget_bytes: u64,
+    waited_ms: u64,
+) -> String {
+    format!(
+        "the gateway's aggregate in-memory budget for bucket-backed reads \
+         ([asset_bucket].max_total_gateway_buffer_bytes = {budget_bytes} bytes) is fully \
+         committed; this {requested_bytes}-byte read of {asset_type}/{name}/{version} waited \
+         {waited_ms}ms for capacity and was shed rather than queued indefinitely or truncated. \
+         Retry, or fetch the object with GET \
+         /v1/assets/presign/download/{asset_type}/{name}/{version}, which streams from the \
+         bucket and does not use this budget"
+    )
+}
+
 fn object_over_buffer_budget(size_bytes: u64, limit_bytes: u64) -> String {
     format!(
         "asset bucket GET refused: the object is at least {size_bytes} bytes, above the \
@@ -416,22 +461,55 @@ fn object_over_buffer_budget(size_bytes: u64, limit_bytes: u64) -> String {
 ///
 /// The transport's error never reaches the caller; it is logged against
 /// `request_id` and collapsed to [`BufferedReadRefusal::Transport`].
+///
+/// Issue #529 added the third step this function now performs: the read is
+/// **admitted** against the process-wide aggregate budget before it starts, and
+/// the permit it takes travels back inside the returned [`BufferedObject`], so
+/// it is held for as long as the bytes are. A per-operation bound with no
+/// aggregate bound made peak memory `max_gateway_buffer_bytes x in-flight
+/// reads`; this is what bounds the second factor.
+///
+/// Note that the transport's ceiling is the *declared* size, not the
+/// per-operation budget. It has to be: the budget arithmetic is only exact if
+/// the bytes a read may hold are the bytes it was charged for. A bucket whose
+/// object exceeds what its registry row claims is refused here rather than
+/// being allowed to hold up to the (larger) per-operation bound uncharged.
 pub(crate) async fn read_object_bounded(
     bucket: &dyn AssetObjectStore,
     key: &str,
     declared_size_bytes: u64,
     max_buffer_bytes: u64,
+    admission: &super::asset_admission::GatewayBufferBudget,
     asset_id: &str,
     request_id: &str,
-) -> Result<Vec<u8>, BufferedReadRefusal> {
+) -> Result<super::asset_admission::BufferedObject, BufferedReadRefusal> {
     if declared_size_bytes > max_buffer_bytes {
         return Err(BufferedReadRefusal::TooLarge {
             size_bytes: declared_size_bytes,
             limit_bytes: max_buffer_bytes,
         });
     }
-    match bucket.get_object(key, max_buffer_bytes).await {
-        Ok(bytes) => Ok(bytes),
+    let permit = match admission.admit(declared_size_bytes).await {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            tracing::warn!(
+                request_id = %request_id,
+                asset_id = %asset_id,
+                requested_bytes = refusal.requested_bytes,
+                budget_bytes = refusal.budget_bytes,
+                waited_ms = refusal.waited_ms,
+                "shed a bucket-backed asset read: the gateway's aggregate buffering budget is \
+                 exhausted"
+            );
+            return Err(BufferedReadRefusal::Overloaded {
+                requested_bytes: refusal.requested_bytes,
+                budget_bytes: refusal.budget_bytes,
+                waited_ms: refusal.waited_ms,
+            });
+        }
+    };
+    match bucket.get_object(key, declared_size_bytes).await {
+        Ok(bytes) => Ok(super::asset_admission::BufferedObject::new(bytes, permit)),
         Err(error) => {
             tracing::warn!(
                 request_id = %request_id,
@@ -1939,9 +2017,17 @@ mod tests {
             reads: Arc::clone(&reads),
         };
 
-        let refusal = read_object_bounded(&store, "any-key", 100 * 1024 * 1024, 1024, "id", "req")
-            .await
-            .expect_err("an over-budget object must be refused");
+        let refusal = read_object_bounded(
+            &store,
+            "any-key",
+            100 * 1024 * 1024,
+            1024,
+            super::super::asset_admission::GatewayBufferBudget::disabled(),
+            "id",
+            "req",
+        )
+        .await
+        .expect_err("an over-budget object must be refused");
         assert!(matches!(
             refusal,
             BufferedReadRefusal::TooLarge {
@@ -1965,9 +2051,17 @@ mod tests {
             reads: Arc::new(Mutex::new(0)),
         };
 
-        let refusal = read_object_bounded(&store, "any-key", 10, 1024, "id", "req")
-            .await
-            .expect_err("a failing bucket cannot produce bytes");
+        let refusal = read_object_bounded(
+            &store,
+            "any-key",
+            10,
+            1024,
+            super::super::asset_admission::GatewayBufferBudget::disabled(),
+            "id",
+            "req",
+        )
+        .await
+        .expect_err("a failing bucket cannot produce bytes");
         assert!(
             matches!(refusal, BufferedReadRefusal::Transport),
             "the caller gets an opaque transport refusal, not the bucket's words"
@@ -2031,6 +2125,32 @@ mod tests {
             error.to_string().contains("in-memory budget"),
             "unexpected error: {error}"
         );
+    }
+
+    /// The #529 shed message is a contract, not prose: an operator reading it
+    /// must learn which knob refused them, and a client must learn which
+    /// endpoint still works. Both are asserted here so a reword cannot quietly
+    /// drop either -- the e2e burst test asserts the same two fragments over
+    /// the wire.
+    #[test]
+    fn the_aggregate_shed_message_names_the_knob_and_the_endpoint_that_works() {
+        let message = gateway_buffer_budget_exhausted_message(
+            "cli_tool", "rg", "1.0.0", 4_194_304, 8_388_608, 250,
+        );
+
+        assert!(
+            message.contains("max_total_gateway_buffer_bytes"),
+            "{message}"
+        );
+        assert!(
+            message.contains("/v1/assets/presign/download/cli_tool/rg/1.0.0"),
+            "{message}"
+        );
+        assert!(
+            message.contains("4194304") && message.contains("8388608"),
+            "{message}"
+        );
+        assert!(message.contains("250ms"), "{message}");
     }
 
     /// The structural half of the #259 round-2 fix, and the answer to "what
@@ -2105,6 +2225,87 @@ mod tests {
              through asset_bucket::read_object_bounded (or AppState::read_asset_content / \
              FerroGateway::load_asset_content, which do) so they inherit the gateway memory \
              bound instead of adding a copy of the check:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The #529 counterpart of the guard above, closing the escape hatch the
+    /// aggregate budget would otherwise have.
+    ///
+    /// `read_object_bounded` charges every bucket read, but a new surface could
+    /// still mint an UNCHARGED buffer by calling
+    /// `BufferedObject::unbudgeted(...)` -- which exists for genuinely
+    /// uncharged bytes (inline `stored_assets.content`, which is resident
+    /// because the registry row is). This names any other caller by file and
+    /// line, so "the aggregate ceiling is enforced" cannot quietly become "the
+    /// aggregate ceiling is enforced except over there".
+    #[test]
+    fn uncharged_buffers_are_only_minted_on_the_inline_content_paths() {
+        /// Files allowed to mint an uncharged buffer.
+        ///
+        /// - `asset_admission.rs` defines it.
+        /// - `assets.rs` (`load_asset_content`) and `state_assets.rs`
+        ///   (`read_asset_content`) return inline registry content through it,
+        ///   which never came from the bucket.
+        /// - `asset_bucket.rs` hosts this scan, whose own source carries the
+        ///   needle it searches for.
+        const ALLOWED: [&str; 4] = [
+            "gateway/asset_admission.rs",
+            "gateway/asset_bucket.rs",
+            "gateway/assets.rs",
+            "state_assets.rs",
+        ];
+
+        let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut scanned = 0_usize;
+        let mut pending = vec![source_root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("readable source directory") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !name.ends_with(".rs")
+                    || name.ends_with("_test.rs")
+                    || name.ends_with("_tests.rs")
+                {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&source_root)
+                    .expect("path under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if ALLOWED.contains(&relative.as_str()) {
+                    continue;
+                }
+                scanned += 1;
+                let body = std::fs::read_to_string(&path).expect("readable source file");
+                for (index, line) in body.lines().enumerate() {
+                    if line.contains("BufferedObject::unbudgeted(")
+                        || line.contains("BufferPermit::unbudgeted(")
+                    {
+                        offenders.push(format!("{relative}:{}: {}", index + 1, line.trim()));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            scanned > 50,
+            "the scan found only {scanned} source files, so it is not actually looking at the \
+             crate and would pass vacuously"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these mint an asset buffer that is never charged against \
+             [asset_bucket].max_total_gateway_buffer_bytes -- take the bytes through \
+             asset_bucket::read_object_bounded, which charges them:\n{}",
             offenders.join("\n")
         );
     }

@@ -64,6 +64,10 @@ struct BucketState {
     /// or an object-lock policy -- and the abort surface must report the
     /// reclamation it actually achieved, not the one it attempted.
     refuse_delete_paths: std::collections::HashSet<String>,
+    /// #529: how long a GET stalls before its body is written. A real bucket's
+    /// reads take time; without that, concurrent gateway reads never actually
+    /// overlap and an admission-control test would be measuring nothing.
+    get_delay: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -198,7 +202,13 @@ fn handle_bucket_connection(mut stream: TcpStream, server_state: Arc<Mutex<Bucke
             // against the GET connection's, which is the bucket-side analogue of
             // the bug this whole change is about.
             let object = state.objects.get(path).cloned();
+            let delay = state.get_delay;
             drop(state);
+            // #529: stall AFTER releasing the lock, so concurrent GETs overlap
+            // in the gateway rather than serializing on the mock.
+            if let Some(delay) = delay {
+                std::thread::sleep(delay);
+            }
             match object {
                 Some(bytes) => write_http_response(&mut stream, "200 OK", &bytes, None),
                 None => write_http_response(&mut stream, "404 Not Found", b"", None),
@@ -2354,6 +2364,312 @@ fn a_100mb_object_completes_the_presigned_lifecycle_with_flat_gateway_rss() {
             .count(),
         2,
         "expected exactly the gateway's verification GET and the client's download GET"
+    );
+}
+
+// ---- Aggregate admission control with a measured RSS ceiling (issue #529) ----
+
+/// The object every concurrent reader in the burst below pulls. Exactly the
+/// per-operation budget, so each read is individually legal -- the point of
+/// #529 is that a pile of individually-legal reads was collectively unbounded.
+const BURST_OBJECT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The per-operation bound for the burst run.
+const BURST_BUFFER_BYTES: usize = BURST_OBJECT_BYTES;
+
+/// The AGGREGATE bound: two concurrent full-size reads. Everything past that
+/// must be shed, not buffered.
+const BURST_TOTAL_BUFFER_BYTES: usize = 2 * BURST_OBJECT_BYTES;
+
+/// How long a shed read is willing to wait for capacity. Short enough that 24
+/// readers resolve quickly, long enough to prove the queue-then-shed shape
+/// rather than shed-immediately.
+const BURST_ADMISSION_WAIT_MS: u64 = 150;
+
+/// Concurrent readers driven at the gateway. Six times the aggregate budget's
+/// capacity, so the ceiling has to do real work.
+const BURST_READERS: usize = 24;
+
+/// How much resident memory the gateway may gain across the whole burst.
+///
+/// Argued, not tuned. Without admission control the burst's floor is
+/// `BURST_READERS x BURST_OBJECT_BYTES` = 96 MiB of asset buffers alone (each
+/// read holds its object through the hash re-verification and the response
+/// write), and in practice more, since the response path holds the bytes while
+/// they drain to a client that is reading 24 sockets. With it, the resident
+/// asset bytes are capped at `BURST_TOTAL_BUFFER_BYTES` = 8 MiB. 40 MiB sits
+/// far above the enforced ceiling plus the runtime's own growth under 24
+/// concurrent connections, and far below the unbounded floor: there is no
+/// scheduling order that lets the unbounded code pass, and no plausible
+/// allocator behavior that makes the bounded code fail.
+const BURST_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
+
+fn write_admission_config(path: &std::path::Path, gateway_addr: &str, bucket_endpoint: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[asset_bucket]
+enabled = true
+endpoint = "{bucket_endpoint}"
+bucket = "{BUCKET}"
+region = "{REGION}"
+access_key_id = "{ACCESS_KEY_ID}"
+secret_access_key_env = "{SECRET_ENV}"
+presign_ttl_secs = {PRESIGN_TTL_SECS}
+presign_max_object_bytes = {}
+max_gateway_buffer_bytes = {BURST_BUFFER_BYTES}
+max_total_gateway_buffer_bytes = {BURST_TOTAL_BUFFER_BYTES}
+buffer_admission_wait_ms = {BURST_ADMISSION_WAIT_MS}
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "asset-client"
+name = "Asset client"
+key = "asset-secret"
+scopes = ["assets.read", "assets.write", "tools.read", "tools.execute"]
+organization_id = "tenant-presign-e2e"
+"#,
+            BURST_OBJECT_BYTES * 4
+        ),
+    )
+    .unwrap();
+}
+
+/// #529 acceptance: more concurrent over-budget readers than the ceiling
+/// allows, and the enforced behavior asserted with a measured memory ceiling.
+///
+/// What "over-budget" means here is deliberately NOT "too large an object" --
+/// that is #259's 413, already proven. Every read below is individually inside
+/// `max_gateway_buffer_bytes`. What they exceed, collectively, is
+/// `max_total_gateway_buffer_bytes`. Before this change nothing looked at that
+/// sum, so 24 legal reads held 24 buffers and the documented "peak memory =
+/// per-op bound x concurrency" was a sizing hint with no enforcement behind it.
+///
+/// Three things are asserted, and each one is a separate way the feature could
+/// be fake:
+///
+/// 1. **No truncation.** Every `200` carries the whole object, hash-verified.
+///    A ceiling implemented by cutting bodies short would pass a status-code
+///    assertion and fail this one.
+/// 2. **A typed, named refusal.** Every non-`200` is
+///    `503 gateway_buffer_budget_exhausted` -- not a generic 500, not a
+///    `asset_bucket_unavailable` that blames a healthy bucket, and not a
+///    timeout the caller experiences as a hang.
+/// 3. **A measured ceiling.** Sampled RSS across the burst stays under a bound
+///    the unbounded implementation cannot meet.
+///
+/// Progress is asserted too (at least one `200`): a "ceiling" that admits
+/// nothing would satisfy 1-3 vacuously, and that is the exact dangerous
+/// default this knob had to avoid.
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_over_budget_reads_are_shed_with_a_typed_refusal_and_a_flat_rss() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_admission_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let gateway_pid = gateway.id();
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+    let quota = http_request(
+        &gateway_addr,
+        "PUT",
+        "/admin/v1/quota-policies/tenant/tenant-presign-e2e",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"asset_storage_quota_bytes":{},"enabled":true}}"#,
+            BURST_OBJECT_BYTES * 8
+        ),
+    );
+    assert_status(&quota, 200);
+
+    // Printable ASCII so the response body survives a text-shaped comparison,
+    // and deterministic so the hash is stable.
+    let content: Vec<u8> = (0..BURST_OBJECT_BYTES)
+        .map(|index| b'!' + (index % 90) as u8)
+        .collect();
+    let sha256 = sha256_hex(&content);
+
+    let intent_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/burst-object/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(r#"{{"size_bytes":{BURST_OBJECT_BYTES},"sha256":"{sha256}"}}"#),
+    );
+    assert_status(&intent_response, 200);
+    let intent = response_json(&intent_response);
+    let upload_id = intent["upload_id"].as_str().expect("upload_id").to_string();
+    let upload_url = intent["upload_url"]
+        .as_str()
+        .expect("upload_url")
+        .to_string();
+    let upload = direct_bucket_request(
+        "PUT",
+        &upload_url,
+        &content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "direct upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+
+    let commit_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/burst-object/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"upload_id":"{upload_id}","size_bytes":{BURST_OBJECT_BYTES},"sha256":"{sha256}","content_type":"text/plain"}}"#
+        ),
+    );
+    assert_status(&commit_response, 200);
+
+    // Slow the bucket down so the concurrent reads genuinely overlap inside the
+    // gateway. Without this the reads complete faster than they arrive and the
+    // budget is never contended -- the test would pass with no admission
+    // control at all.
+    bucket_state.lock().unwrap().get_delay = Some(Duration::from_millis(400));
+
+    let baseline_rss = resident_bytes(gateway_pid);
+    assert!(
+        baseline_rss > 8 * 1024 * 1024,
+        "refusing to trust an RSS reading of {baseline_rss} bytes for pid {gateway_pid}: \
+         that is not a running gateway, so the ceiling below would pass vacuously"
+    );
+    let sampler = RssSampler::start(gateway_pid);
+    let readers: Vec<_> = (0..BURST_READERS)
+        .map(|_| {
+            let addr = gateway_addr.clone();
+            std::thread::spawn(move || {
+                support::http_request_bytes(
+                    &addr,
+                    "GET",
+                    "/v1/assets/cli_tool/burst-object/1.0.0",
+                    &["Authorization: Bearer asset-secret"],
+                    b"",
+                )
+            })
+        })
+        .collect();
+    let responses: Vec<Vec<u8>> = readers
+        .into_iter()
+        .map(|reader| reader.join().expect("reader thread"))
+        .collect();
+    let peak_rss = sampler.finish();
+
+    let mut served = 0_usize;
+    let mut shed = 0_usize;
+    for response in &responses {
+        let head = String::from_utf8_lossy(&response[..response.len().min(4096)]).to_string();
+        let status = status_code(&head);
+        let body = raw_response_body(response);
+        if status == 200 {
+            served += 1;
+            // No truncation: an admitted read serves the WHOLE object.
+            assert_eq!(
+                body.len(),
+                BURST_OBJECT_BYTES,
+                "an admitted read must serve the whole object, not a truncated body"
+            );
+            assert_eq!(
+                sha256_hex(body),
+                sha256,
+                "an admitted read must serve the exact bytes that were pushed"
+            );
+            continue;
+        }
+        shed += 1;
+        assert_eq!(
+            status, 503,
+            "an over-budget read must be shed with a 503, not {status}: {head}"
+        );
+        let error = String::from_utf8_lossy(body).to_string();
+        assert!(
+            error.contains("gateway_buffer_budget_exhausted"),
+            "the shed must be typed and named, not a generic failure: {error}"
+        );
+        assert!(
+            error.contains("max_total_gateway_buffer_bytes"),
+            "the shed must name the knob that caused it: {error}"
+        );
+        assert!(
+            error.contains("/v1/assets/presign/download/"),
+            "the shed must name the endpoint that does not use this budget: {error}"
+        );
+    }
+
+    assert!(
+        shed > 0,
+        "{BURST_READERS} concurrent {BURST_OBJECT_BYTES}-byte reads against a \
+         {BURST_TOTAL_BUFFER_BYTES}-byte aggregate budget must shed at least one; none were, so \
+         the ceiling is not enforced"
+    );
+    assert!(
+        served > 0,
+        "the ceiling must SHED excess load, not close the door: every one of \
+         {BURST_READERS} reads was refused"
+    );
+
+    let growth = peak_rss.saturating_sub(baseline_rss);
+    assert!(
+        growth < BURST_RSS_CEILING_BYTES,
+        "{BURST_READERS} concurrent {BURST_OBJECT_BYTES}-byte reads grew gateway RSS by {growth} \
+         bytes (baseline {baseline_rss}, peak {peak_rss}); the ceiling is \
+         {BURST_RSS_CEILING_BYTES}, and the aggregate budget is {BURST_TOTAL_BUFFER_BYTES}. A \
+         growth near {BURST_READERS} x {BURST_OBJECT_BYTES} means the reads are being admitted \
+         without regard to the aggregate budget."
+    );
+
+    // The shed reads never touched the bucket: admission happens before the
+    // GET, so an overloaded gateway does not also hammer the object store.
+    let bucket_gets = bucket_state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|request| request.method == "GET")
+        .count();
+    assert!(
+        bucket_gets <= served + 1,
+        "shed reads must not issue a bucket GET: {bucket_gets} GETs for {served} served reads"
     );
 }
 

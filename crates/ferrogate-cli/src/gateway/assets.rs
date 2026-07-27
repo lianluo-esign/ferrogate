@@ -22,9 +22,11 @@ use ferrogate_storage::{
 };
 
 use super::admin_list_query::{list_response, matches_search, query_value};
+use super::asset_admission::BufferedObject;
 use super::asset_bucket::{
-    asset_too_large_for_buffering_message, read_object_bounded, BufferedReadRefusal,
-    ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE, BUCKET_READ_UNAVAILABLE_MESSAGE,
+    asset_too_large_for_buffering_message, gateway_buffer_budget_exhausted_message,
+    read_object_bounded, BufferedReadRefusal, ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE,
+    BUCKET_READ_UNAVAILABLE_MESSAGE, GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE,
 };
 use super::asset_inline_publish;
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
@@ -99,9 +101,12 @@ impl AssetError {
 /// without one; a read surface added later inherits it rather than needing its
 /// own copy.
 ///
-/// Not covered: aggregate concurrency. Peak asset-read memory is
-/// `max_gateway_buffer_bytes x in-flight requests`, and nothing caps the
-/// multiplier yet.
+/// Aggregate concurrency is covered too, since issue #529: every one of those
+/// reads is charged its declared size against
+/// `[asset_bucket].max_total_gateway_buffer_bytes` and holds the charge until
+/// its bytes are dropped, so peak asset-read memory is that ceiling rather than
+/// this constant times an unbounded in-flight count. Over-budget concurrency is
+/// shed with a typed `503 gateway_buffer_budget_exhausted`.
 ///
 /// The tenant's cumulative `asset_storage_quota_bytes` is enforced separately,
 /// on top of this.
@@ -1878,6 +1883,11 @@ impl FerroGateway {
             last_modified_unix: asset.updated_at_unix,
             cache_control: DEFAULT_ASSET_CACHE_CONTROL,
         };
+        // #529: the admission permit is held until this function returns, i.e.
+        // across the response write, because that is how long these bytes are
+        // resident. Releasing it when the bucket read returned would let the
+        // budget admit a fresh read for every buffer still being written out.
+        let (content, _budget) = content.into_parts();
         write_cacheable_response(
             session,
             req_headers,
@@ -1913,9 +1923,12 @@ impl FerroGateway {
         &self,
         asset: &StoredAsset,
         request_id: &str,
-    ) -> Result<Vec<u8>, AssetError> {
+    ) -> Result<BufferedObject, AssetError> {
         let Some(storage_uri) = asset.storage_uri.as_deref() else {
-            return Ok(asset.content.clone());
+            // Inline content is resident because the registry row is; it never
+            // went near the bucket, so it is not charged the buffering budget
+            // (issue #529).
+            return Ok(BufferedObject::unbudgeted(asset.content.clone()));
         };
         let state = self.state.current();
         let buffer_limit = state.asset_max_gateway_buffer_bytes();
@@ -1945,6 +1958,7 @@ impl FerroGateway {
             storage_uri,
             asset.size_bytes,
             buffer_limit,
+            state.asset_buffer_admission(),
             &asset.id,
             request_id,
         )
@@ -1967,6 +1981,25 @@ impl FerroGateway {
                     &asset.version,
                     size_bytes,
                     limit_bytes,
+                ),
+            },
+            // #529: a load condition, not a fault of the object or the caller
+            // -- so a 503 that says so, with the numbers that explain it and
+            // the endpoint that does not draw on this budget.
+            BufferedReadRefusal::Overloaded {
+                requested_bytes,
+                budget_bytes,
+                waited_ms,
+            } => AssetError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE,
+                message: gateway_buffer_budget_exhausted_message(
+                    &asset.asset_type,
+                    &asset.name,
+                    &asset.version,
+                    requested_bytes,
+                    budget_bytes,
+                    waited_ms,
                 ),
             },
             BufferedReadRefusal::Transport => AssetError {

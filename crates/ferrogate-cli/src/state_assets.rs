@@ -24,6 +24,14 @@ pub(crate) enum AssetReadError {
     /// materialize it (issue #259). The caller is pointed at the presigned
     /// direct download, which does not put the gateway in the data path.
     TooLarge(String),
+    /// The gateway's aggregate buffering budget
+    /// (`[asset_bucket].max_total_gateway_buffer_bytes`) was exhausted for the
+    /// whole bounded admission wait, so this read was shed (issue #529).
+    /// Separate from [`Self::TooLarge`] because it is a transient load
+    /// condition the same request recovers from, and separate from
+    /// [`Self::BucketUnavailable`] because the bucket is fine -- collapsing it
+    /// into either would send an operator hunting the wrong problem.
+    Overloaded(String),
     /// The asset is bucket-backed but the bucket is unconfigured or unreachable.
     BucketUnavailable(String),
     /// The registry (Postgres/in-memory) itself was unavailable.
@@ -67,7 +75,8 @@ impl AppState {
         &self,
         id: &str,
         request_id: &str,
-    ) -> Result<(StoredAsset, Vec<u8>), AssetReadError> {
+    ) -> Result<(StoredAsset, crate::gateway::asset_admission::BufferedObject), AssetReadError>
+    {
         let asset = match self.get_asset(id).await {
             Ok(Some(asset)) => asset,
             Ok(None) => return Err(AssetReadError::NotFound),
@@ -108,6 +117,7 @@ impl AppState {
                 storage_uri,
                 asset.size_bytes,
                 buffer_limit,
+                self.asset_buffer_admission(),
                 id,
                 request_id,
             )
@@ -128,6 +138,22 @@ impl AppState {
                         ),
                     ))
                 }
+                Err(crate::gateway::asset_bucket::BufferedReadRefusal::Overloaded {
+                    requested_bytes,
+                    budget_bytes,
+                    waited_ms,
+                }) => {
+                    return Err(AssetReadError::Overloaded(
+                        crate::gateway::asset_bucket::gateway_buffer_budget_exhausted_message(
+                            &asset.asset_type,
+                            &asset.name,
+                            &asset.version,
+                            requested_bytes,
+                            budget_bytes,
+                            waited_ms,
+                        ),
+                    ))
+                }
                 Err(crate::gateway::asset_bucket::BufferedReadRefusal::Transport) => {
                     return Err(AssetReadError::BucketUnavailable(
                         crate::gateway::asset_bucket::BUCKET_READ_UNAVAILABLE_MESSAGE.to_string(),
@@ -135,7 +161,9 @@ impl AppState {
                 }
             }
         } else {
-            asset.content.clone()
+            // Inline content is not charged the buffering budget (issue #529):
+            // it is resident because the registry row is.
+            crate::gateway::asset_admission::BufferedObject::unbudgeted(asset.content.clone())
         };
         if sha256_hex(&content) != asset.content_hash {
             return Err(AssetReadError::Integrity);
@@ -406,16 +434,77 @@ impl AppState {
     /// `resources/read`, and the static-site serve -- because all of them now
     /// route their bucket read through
     /// [`read_object_bounded`](crate::gateway::asset_bucket::read_object_bounded),
-    /// and the transport cannot be called without a budget. It does NOT bound
-    /// aggregate concurrency: peak gateway memory for asset reads is this
-    /// value times the number of in-flight requests, and nothing yet caps that
-    /// multiplier (honestly disclosed on the issue; admission control is a
-    /// follow-up, not a claim made here).
+    /// and the transport cannot be called without a budget. The *aggregate* of
+    /// these per-operation bounds is capped separately, by
+    /// [`Self::asset_total_gateway_buffer_bytes`] (issue #529) -- until that
+    /// landed, peak asset-read memory was this value times an unbounded
+    /// in-flight count.
     pub(crate) fn asset_max_gateway_buffer_bytes(&self) -> u64 {
         self.config
             .asset_bucket
             .max_gateway_buffer_bytes
             .unwrap_or(crate::gateway::assets::INLINE_ASSET_MAX_BYTES)
+    }
+
+    /// The aggregate ceiling on in-flight buffered asset bytes (issue #529),
+    /// read from `[asset_bucket].max_total_gateway_buffer_bytes`.
+    ///
+    /// Resolution, spelled out because the failure mode of getting it wrong is
+    /// a gateway that serves nothing:
+    ///
+    /// - unset -> [`DEFAULT_CONCURRENT_BUFFERED_READS`] x the per-operation
+    ///   bound. Bounded, but far above any realistic concurrency, so an
+    ///   unconfigured deployment behaves as it did before #529.
+    /// - `0` -> disabled: no admission control at all, the literal pre-#529
+    ///   behavior. An operator has to ask for this.
+    /// - any other value -> enforced as written (raised to the per-operation
+    ///   bound by [`GatewayBufferBudget::new`] if it is below it).
+    ///
+    /// "Unset" and "0" deliberately do NOT collapse to the same thing, and
+    /// neither of them means "admit nothing".
+    pub(crate) fn asset_total_gateway_buffer_bytes(&self) -> u64 {
+        use crate::gateway::asset_admission::DEFAULT_CONCURRENT_BUFFERED_READS;
+        match self.config.asset_bucket.max_total_gateway_buffer_bytes {
+            Some(configured) => configured,
+            None => self
+                .asset_max_gateway_buffer_bytes()
+                .saturating_mul(DEFAULT_CONCURRENT_BUFFERED_READS),
+        }
+    }
+
+    /// The bounded wait a buffering read spends queued for aggregate budget
+    /// before it is shed (issue #529), from
+    /// `[asset_bucket].buffer_admission_wait_ms`.
+    pub(crate) fn asset_buffer_admission_wait(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.config
+                .asset_bucket
+                .buffer_admission_wait_ms
+                .unwrap_or(crate::gateway::asset_admission::DEFAULT_ADMISSION_WAIT_MS),
+        )
+    }
+
+    /// The process-wide admission controller for buffering bucket-backed reads
+    /// (issue #529).
+    ///
+    /// Process-wide, not per-`AppState`, on purpose: `AppState` is rebuilt on
+    /// every config reload, and a budget rebuilt with it would let a reload
+    /// briefly double the ceiling (old in-flight reads holding the old
+    /// semaphore's permits while new reads draw on a fresh one). The cost is
+    /// that changing the two knobs takes a restart, which is documented in the
+    /// runbook next to the knobs themselves.
+    pub(crate) fn asset_buffer_admission(
+        &self,
+    ) -> &'static crate::gateway::asset_admission::GatewayBufferBudget {
+        use crate::gateway::asset_admission::GatewayBufferBudget;
+        static ADMISSION: std::sync::OnceLock<GatewayBufferBudget> = std::sync::OnceLock::new();
+        ADMISSION.get_or_init(|| {
+            GatewayBufferBudget::new(
+                self.asset_total_gateway_buffer_bytes(),
+                self.asset_max_gateway_buffer_bytes(),
+                self.asset_buffer_admission_wait(),
+            )
+        })
     }
 
     /// Resolves the object-storage backend for `/v1/assets/*` content behind

@@ -454,6 +454,9 @@ impl FerroGateway {
             last_modified_unix: asset.updated_at_unix,
             cache_control,
         };
+        // #529: hold the admission permit across the response write -- these
+        // bytes stay resident until this function returns.
+        let (content, _budget) = content.into_parts();
         write_cacheable_response(
             session,
             headers,

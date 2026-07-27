@@ -747,14 +747,20 @@ impl FerroGateway {
                     auth.effective_quota.asset_storage_quota_bytes,
                 ),
                 buffer_limit: state.asset_max_gateway_buffer_bytes(),
+                admission: state.asset_buffer_admission(),
             },
         )
         .await;
         let verified = match verification {
-            Ok(CommitVerification::Verified { bytes, sha256 }) => VerifiedCommit::Buffered {
+            Ok(CommitVerification::Verified {
+                bytes,
+                sha256,
+                budget,
+            }) => VerifiedCommit::Buffered {
                 actual_size: bytes.len() as u64,
                 bytes,
                 sha256,
+                budget,
             },
             Ok(CommitVerification::VerifiedStreamed {
                 size_bytes,
@@ -900,6 +906,41 @@ impl FerroGateway {
                         )
                         .await;
                     }
+                    // #529: the aggregate buffering budget was exhausted. A
+                    // typed 503 that names the condition -- not the
+                    // bucket-unavailable 503 above, which would send an
+                    // operator to look at a bucket that is perfectly healthy.
+                    Ok(CommitVerification::Overloaded {
+                        requested_bytes,
+                        budget_bytes,
+                        waited_ms,
+                    }) => {
+                        tracing::warn!(
+                            request_id = %ctx.request_id,
+                            asset_id = %id,
+                            upload_id = %commit.upload_id,
+                            requested_bytes,
+                            budget_bytes,
+                            waited_ms,
+                            "shed a presigned commit: the gateway's aggregate buffering budget \
+                             is exhausted; staging is preserved for the retry"
+                        );
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            super::asset_bucket::GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE,
+                            format!(
+                                "the gateway's aggregate in-memory budget for buffered asset \
+                                 work ([asset_bucket].max_total_gateway_buffer_bytes = \
+                                 {budget_bytes} bytes) is fully committed; this \
+                                 {requested_bytes}-byte commit waited {waited_ms}ms for capacity \
+                                 and was shed rather than queued indefinitely. The staged object \
+                                 is preserved -- retry with the same upload_id"
+                            ),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                     Ok(CommitVerification::Verified { .. })
                     | Ok(CommitVerification::VerifiedStreamed { .. }) => unreachable!(),
                 }
@@ -992,7 +1033,11 @@ impl FerroGateway {
         let now = now_unix_seconds();
         // The buffered path still owes the final PUT; the streamed path already
         // wrote it from the same pass that verified it.
-        if let VerifiedCommit::Buffered { bytes, .. } = verified {
+        // `budget` is bound (not `..`-ed away) so the #529 admission permit
+        // lives until the bytes have been handed to the final PUT -- the whole
+        // window in which they are resident.
+        if let VerifiedCommit::Buffered { bytes, budget, .. } = verified {
+            let _budget = budget;
             if let Err(error) = bucket
                 .put_object_owned(&final_key, bytes, &content_type)
                 .await
@@ -1805,6 +1850,10 @@ enum VerifiedCommit {
         bytes: Vec<u8>,
         actual_size: u64,
         sha256: String,
+        /// The aggregate-budget permit (issue #529), carried so it is released
+        /// when the bytes are consumed by the final PUT rather than when the
+        /// verification returned.
+        budget: super::asset_admission::BufferPermit,
     },
     /// Above the budget: verified and copied to the final key in one bounded
     /// pass, so the gateway holds facts about the object rather than the object.
@@ -1865,7 +1914,22 @@ struct CommitRejection {
 enum CommitVerification {
     /// The object fit the gateway's in-memory budget: the verified bytes are
     /// in hand and the caller still owes the final PUT.
-    Verified { bytes: Vec<u8>, sha256: String },
+    Verified {
+        bytes: Vec<u8>,
+        sha256: String,
+        /// The aggregate-budget permit these bytes were admitted under (issue
+        /// #529). Held, not dropped, until the final PUT has consumed them.
+        budget: super::asset_admission::BufferPermit,
+    },
+    /// The object fit the per-operation budget, but the gateway's aggregate
+    /// buffering budget was committed for the whole bounded wait (issue #529).
+    /// Nothing was fetched and staging is untouched, so the same `upload_id`
+    /// retries cleanly.
+    Overloaded {
+        requested_bytes: u64,
+        budget_bytes: u64,
+        waited_ms: u64,
+    },
     /// The object exceeded the in-memory budget: it was verified AND copied to
     /// the final key in a single bounded pass, so the caller owes no PUT. The
     /// gateway never held it, which is why the screening evidence travels here
@@ -1994,6 +2058,17 @@ struct CommitVerificationRequest<'a> {
     /// object is buffered and screened at full fidelity; above it, it is
     /// verified and copied in a single bounded-memory pass.
     buffer_limit: u64,
+    /// The process-wide aggregate buffering budget (issue #529).
+    ///
+    /// Only the **buffered** leg draws on it, and it draws exactly what it will
+    /// hold. The streamed leg is deliberately not admitted: its resident cost
+    /// is one HTTP chunk regardless of object size, so charging it the object's
+    /// size would reserve memory it never uses and would let large commits
+    /// crowd out the reads that do buffer. This is the "confirm the streaming
+    /// commit path does not consume the buffering budget" decision, made here
+    /// rather than left implicit -- see
+    /// `the_streaming_commit_leg_consumes_no_buffering_budget`.
+    admission: &'a super::asset_admission::GatewayBufferBudget,
 }
 
 /// Verifies a presigned-uploaded staging object against its registered intent
@@ -2043,15 +2118,38 @@ async fn verify_committed_object(
     }
 
     if actual_size > request.buffer_limit {
+        // The streamed leg holds one chunk, so it takes no admission permit at
+        // all (issue #529). Returning here, above the `admit` call below, is
+        // that decision in code.
         return verify_and_copy_committed_object(bucket, request).await;
     }
 
-    // 2. Fetch to verify sha256 and run built-in content checks on real bytes.
+    // 2a. Admit the buffer against the gateway's aggregate budget (issue #529)
+    // before asking for the bytes. The permit is held for as long as the
+    // verified buffer is -- it travels out on `CommitVerification::Verified`
+    // and is only dropped after the final PUT has consumed the bytes.
+    let budget = match request.admission.admit(actual_size).await {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            // Staging is left INTACT: this commit never started, and the
+            // client's retry with the same upload_id must still find its
+            // object. Deleting here would turn a load shed into data loss.
+            return Ok(CommitVerification::Overloaded {
+                requested_bytes: refusal.requested_bytes,
+                budget_bytes: refusal.budget_bytes,
+                waited_ms: refusal.waited_ms,
+            });
+        }
+    };
+
+    // 2b. Fetch to verify sha256 and run built-in content checks on real bytes.
     // The branch above already established `actual_size <= buffer_limit`; the
-    // limit is handed to the transport too (issue #259 round 2) so a bucket
-    // whose GET body disagrees with its own HEAD cannot buffer past the budget.
+    // HEAD-confirmed size is handed to the transport too (issue #259 round 2,
+    // tightened by #529 from the budget to the size actually admitted) so a
+    // bucket whose GET body disagrees with its own HEAD cannot buffer past what
+    // this commit was charged for.
     let Some(content) = bucket
-        .get_object_if_present(request.staging_key, request.buffer_limit)
+        .get_object_if_present(request.staging_key, actual_size)
         .await?
     else {
         return Ok(CommitVerification::NotUploaded);
@@ -2080,6 +2178,7 @@ async fn verify_committed_object(
     Ok(CommitVerification::Verified {
         bytes: content,
         sha256: actual_sha256,
+        budget,
     })
 }
 

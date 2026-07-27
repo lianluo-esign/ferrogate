@@ -117,13 +117,57 @@ surfaces ignored it.
 
 ### Sizing a box
 
-Peak gateway memory for asset work is
-`max_gateway_buffer_bytes x expected concurrent asset operations` — commits and
-reads alike, since each in-flight request may hold up to the bound. There is
-**no admission control**: nothing caps the concurrency multiplier, so this is a
-sizing input, not an enforced limit. Size for the concurrency you expect plus
-headroom, and keep `max_gateway_buffer_bytes` at the default unless you have a
-specific reason to buy back whole-file controls for larger objects.
+Peak gateway memory for buffered asset work is
+**`max_total_gateway_buffer_bytes`** — an enforced ceiling, not a
+multiplication you have to estimate.
+
+`max_gateway_buffer_bytes` bounds one operation; `max_total_gateway_buffer_bytes`
+bounds their sum. Every buffering read is admitted against the total before it
+starts, is charged the size its registry row declares, and holds that charge
+until its bytes are dropped (through the hash re-verification and the response
+write, not just the bucket GET). When the budget is committed a read waits up to
+`buffer_admission_wait_ms` for capacity and is then **shed**, not queued
+indefinitely and never truncated:
+
+| Surface | Aggregate budget exhausted |
+|---|---|
+| `GET /v1/assets/{asset_type}/{name}/{version}` | `503 gateway_buffer_budget_exhausted` |
+| `fetch_asset` built-in tool | tool error naming the condition and the presigned download |
+| MCP `resources/read` | JSON-RPC error `-32005` |
+| Static-site serve (`serve_site_file`) | `503 gateway_buffer_budget_exhausted` |
+| Presigned commit, **buffered** leg (object ≤ `max_gateway_buffer_bytes`) | `503 gateway_buffer_budget_exhausted`; the staged object is preserved, so retrying with the same `upload_id` succeeds |
+| Presigned commit, **streaming** leg (object > `max_gateway_buffer_bytes`) | Not affected — it never draws on this budget |
+
+The message names the ceiling, the size requested, how long the request waited,
+and `GET /v1/assets/presign/download/...`, which streams from the bucket and
+does not use the budget at all. A shed is a load condition, not a fault of the
+request: the identical call succeeds once in-flight reads drain.
+
+The streaming commit path is deliberately **outside** the budget. Its resident
+cost is one HTTP chunk regardless of object size, so charging it the object's
+size would reserve memory it never touches and let large commits crowd out the
+reads that genuinely buffer. Presigned upload and download legs are outside it
+too — the gateway is not in the data path for either.
+
+Sizing, then, is: pick the resident memory you are willing to give asset reads,
+set `max_total_gateway_buffer_bytes` to it, and add the gateway's own baseline
+plus headroom. Concurrency above that ceiling shows up as `503`s, not as an
+OOM. Keep `max_gateway_buffer_bytes` at the default unless you have a specific
+reason to buy back whole-file controls for larger objects.
+
+Two defaults worth knowing:
+
+- **Unset** `max_total_gateway_buffer_bytes` resolves to
+  `32 x max_gateway_buffer_bytes` (320 MiB at the defaults) — bounded, but far
+  above any concurrency a healthy box reaches, so an unconfigured gateway
+  behaves as it did before this ceiling existed.
+- **`0`** disables admission control entirely and restores the old unbounded
+  behavior. Unset and `0` are not the same thing, and neither one means "admit
+  nothing".
+
+Both knobs are read once per process: changing them takes a restart, not a
+config reload. (A reload-rebuilt budget would briefly permit twice the ceiling,
+with old reads holding the old budget and new reads drawing on a fresh one.)
 
 ### Error bodies
 
@@ -187,7 +231,18 @@ authorized download URL encapsulates final-object access.
   cap, so an inline-stored asset is never affected). This is the bound
   `presign_max_object_bytes` is **not**: the ceiling caps how large an object
   may be, this caps how much of one a single commit or read may hold. It is a
-  per-operation bound, not a process-wide one — see "Sizing a box" above.
+  per-operation bound; the process-wide one is the next knob.
+- `max_total_gateway_buffer_bytes` — the **enforced** ceiling on everything the
+  gateway is holding for buffering asset work at one instant. Unset defaults to
+  `32 x max_gateway_buffer_bytes`; `0` disables admission control (the old
+  unbounded behavior). See "Sizing a box" above.
+- `buffer_admission_wait_ms` — how long a read waits for aggregate budget
+  before it is shed with `503 gateway_buffer_budget_exhausted`; defaults to
+  `250`. `0` sheds immediately. The wait is bounded in every case, so overload
+  never becomes an unbounded queue.
+
+Both aggregate knobs are read once per process; changing them requires a
+restart.
 
 `presign_ttl_secs` is the **URL expiry**: it is signed into `X-Amz-Expires`, so
 the bucket itself refuses a late `PUT` and the client must register a new

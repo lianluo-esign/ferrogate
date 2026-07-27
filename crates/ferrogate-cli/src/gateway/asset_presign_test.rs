@@ -191,13 +191,14 @@ async fn commit_verify_accepts_a_matching_object_without_deleting_it() {
             content_type: "text/plain",
             max_object_bytes: 10 * 1024 * 1024,
             buffer_limit: DEFAULT_BUFFER_LIMIT,
+            admission: crate::gateway::asset_admission::GatewayBufferBudget::disabled(),
         },
     )
     .await
     .unwrap();
 
     match verification {
-        CommitVerification::Verified { bytes, sha256 } => {
+        CommitVerification::Verified { bytes, sha256, .. } => {
             assert_eq!(bytes, content);
             assert_eq!(sha256, sha);
         }
@@ -226,6 +227,7 @@ async fn commit_verify_rejects_and_deletes_on_sha256_mismatch() {
             content_type: "text/plain",
             max_object_bytes: 10 * 1024 * 1024,
             buffer_limit: DEFAULT_BUFFER_LIMIT,
+            admission: crate::gateway::asset_admission::GatewayBufferBudget::disabled(),
         },
     )
     .await
@@ -258,6 +260,7 @@ async fn commit_verify_rejects_and_deletes_on_size_mismatch_without_downloading(
             content_type: "text/plain",
             max_object_bytes: 10 * 1024 * 1024,
             buffer_limit: DEFAULT_BUFFER_LIMIT,
+            admission: crate::gateway::asset_admission::GatewayBufferBudget::disabled(),
         },
     )
     .await
@@ -291,6 +294,7 @@ async fn commit_verify_enforces_the_per_object_ceiling() {
             content_type: "text/plain",
             max_object_bytes: 1_000,
             buffer_limit: DEFAULT_BUFFER_LIMIT,
+            admission: crate::gateway::asset_admission::GatewayBufferBudget::disabled(),
         },
     )
     .await
@@ -323,6 +327,7 @@ async fn commit_verify_runs_built_in_content_checks_on_the_committed_object() {
             content_type: "text/plain",
             max_object_bytes: 10 * 1024 * 1024,
             buffer_limit: DEFAULT_BUFFER_LIMIT,
+            admission: crate::gateway::asset_admission::GatewayBufferBudget::disabled(),
         },
     )
     .await
@@ -353,6 +358,7 @@ async fn commit_verify_reports_not_uploaded_when_the_object_is_absent() {
             content_type: "text/plain",
             max_object_bytes: 10 * 1024 * 1024,
             buffer_limit: DEFAULT_BUFFER_LIMIT,
+            admission: crate::gateway::asset_admission::GatewayBufferBudget::disabled(),
         },
     )
     .await
@@ -514,6 +520,22 @@ fn streamed_request<'a>(
     expected_sha256: &'a str,
     asset_type: &'a str,
 ) -> CommitVerificationRequest<'a> {
+    streamed_request_with_budget(
+        expected_size,
+        expected_sha256,
+        asset_type,
+        crate::gateway::asset_admission::GatewayBufferBudget::disabled(),
+    )
+}
+
+/// The same streamed request against a caller-supplied aggregate budget -- the
+/// seam the #529 "the streaming leg costs no budget" test needs.
+fn streamed_request_with_budget<'a>(
+    expected_size: u64,
+    expected_sha256: &'a str,
+    asset_type: &'a str,
+    admission: &'a crate::gateway::asset_admission::GatewayBufferBudget,
+) -> CommitVerificationRequest<'a> {
     CommitVerificationRequest {
         staging_key: STREAM_STAGING_KEY,
         final_key: STREAM_FINAL_KEY,
@@ -524,6 +546,7 @@ fn streamed_request<'a>(
         max_object_bytes: 10 * 1024 * 1024,
         // Far below every payload here, so the streamed branch is taken.
         buffer_limit: 4096,
+        admission,
     }
 }
 
@@ -571,6 +594,106 @@ async fn a_large_object_is_verified_and_copied_without_the_gateway_holding_it() 
     assert_eq!(
         store.object(STREAM_FINAL_KEY).as_deref(),
         Some(&payload[..])
+    );
+}
+
+/// #529 acceptance: the streaming commit leg must NOT consume the buffering
+/// budget it does not need.
+///
+/// The budget here is fully committed before the commit runs -- a buffering
+/// read of any size would be shed. The streamed leg completes anyway, and the
+/// budget's free capacity is unchanged on the way through, which is the
+/// difference between "it happens not to be charged" and "it cannot be
+/// charged". Its resident cost is one HTTP chunk, so charging it the object's
+/// size would reserve memory it never touches and let large commits crowd out
+/// the reads that genuinely buffer.
+#[tokio::test]
+async fn the_streaming_commit_leg_consumes_no_buffering_budget() {
+    use crate::gateway::asset_admission::GatewayBufferBudget;
+
+    let payload = large_payload(256 * 1024);
+    let sha = sha256_hex(&payload);
+    let store = RecordingStreamStore::with_staged(&payload);
+    // 64 KiB of budget, all of it already taken, and a wait long enough that a
+    // shed would be unmistakable in the elapsed time if this path waited at all.
+    let budget = GatewayBufferBudget::new(64 * 1024, 4096, std::time::Duration::from_secs(30));
+    let _committed = budget
+        .admit(64 * 1024)
+        .await
+        .map_err(|_| ())
+        .expect("the whole budget is taken by this permit");
+    assert_eq!(budget.available_bytes(), 0);
+
+    let started = std::time::Instant::now();
+    let verification = verify_committed_object(
+        &store,
+        &streamed_request_with_budget(payload.len() as u64, &sha, "cli_tool", &budget),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(verification, CommitVerification::VerifiedStreamed { .. }),
+        "the streamed leg must complete while the buffering budget is exhausted"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the streamed leg must not queue on a budget it does not use"
+    );
+    assert_eq!(
+        budget.available_bytes(),
+        0,
+        "the streamed leg must neither take nor release aggregate budget"
+    );
+}
+
+/// The buffered commit leg is the one that DOES draw on the aggregate budget
+/// (issue #529), and when the budget is committed it sheds with a typed
+/// verdict rather than buffering anyway -- leaving the staged object intact so
+/// the same `upload_id` retries cleanly.
+#[tokio::test]
+async fn the_buffered_commit_leg_is_shed_when_the_aggregate_budget_is_exhausted() {
+    use crate::gateway::asset_admission::GatewayBufferBudget;
+
+    let content = b"a reasonably sized committed object payload";
+    let sha = sha256_hex(content);
+    let (endpoint, methods) = spawn_scripted_mock(vec![head_ok(content.len())]);
+    let bucket = test_bucket(endpoint);
+    let budget = GatewayBufferBudget::new(64 * 1024, 1024, std::time::Duration::from_millis(20));
+    let _committed = budget
+        .admit(64 * 1024)
+        .await
+        .map_err(|_| ())
+        .expect("the whole budget is taken by this permit");
+
+    let verification = verify_committed_object(
+        &bucket,
+        &CommitVerificationRequest {
+            staging_key: "tenant-a:cli_tool:hello:1.0.0",
+            final_key: UNUSED_FINAL_KEY,
+            expected_size: content.len() as u64,
+            expected_sha256: &sha,
+            asset_type: "cli_tool",
+            content_type: "text/plain",
+            max_object_bytes: 10 * 1024 * 1024,
+            buffer_limit: DEFAULT_BUFFER_LIMIT,
+            admission: &budget,
+        },
+    )
+    .await
+    .unwrap();
+
+    match verification {
+        CommitVerification::Overloaded { budget_bytes, .. } => {
+            assert_eq!(budget_bytes, 64 * 1024);
+        }
+        _ => panic!("an exhausted aggregate budget must shed the buffered commit leg"),
+    }
+    assert_eq!(
+        *methods.lock().unwrap(),
+        vec!["HEAD"],
+        "the shed happens before the object is fetched, and the staged object is \
+         NOT deleted -- a load shed must never become data loss"
     );
 }
 

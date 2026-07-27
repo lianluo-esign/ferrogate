@@ -578,6 +578,33 @@ pub(crate) struct AssetBucketConfig {
     /// objects at a proportional, explicitly-accepted memory cost.
     #[serde(default)]
     pub(crate) max_gateway_buffer_bytes: Option<u64>,
+    /// The aggregate ceiling (bytes) on everything the gateway is holding for
+    /// buffering, bucket-backed reads at one instant (issue #529).
+    ///
+    /// `max_gateway_buffer_bytes` bounds ONE operation; this bounds their sum,
+    /// which is what an operator actually sizes a box from. A read is charged
+    /// the size its registry row declares and holds that charge until its bytes
+    /// are dropped; when the budget is committed a read waits at most
+    /// `buffer_admission_wait_ms` and is then refused with a typed
+    /// `503 gateway_buffer_budget_exhausted` -- never truncated, never queued
+    /// indefinitely.
+    ///
+    /// Unset defaults to `32 x max_gateway_buffer_bytes` (320 MiB at the
+    /// defaults), which is above any concurrency a healthy box reaches, so an
+    /// unconfigured deployment is bounded without changing what it serves.
+    /// `0` disables admission control entirely, restoring the pre-#529
+    /// unbounded behavior; it never means "admit nothing". A value below
+    /// `max_gateway_buffer_bytes` is raised to it, since a budget that cannot
+    /// admit one legal read is a deadlock, not a limit.
+    #[serde(default)]
+    pub(crate) max_total_gateway_buffer_bytes: Option<u64>,
+    /// How long (milliseconds) a buffering read waits for aggregate budget
+    /// before it is shed (issue #529). Unset defaults to 250 ms -- long enough
+    /// to absorb the sub-second overlap of a burst, short enough that the shed
+    /// is a fast answer rather than something a caller experiences as a hang.
+    /// `0` sheds immediately with no queueing.
+    #[serde(default)]
+    pub(crate) buffer_admission_wait_ms: Option<u64>,
     /// Cloudflare account id for the `workers-static-assets` backend (#411).
     /// Ignored by the default S3 backend.
     #[serde(default)]

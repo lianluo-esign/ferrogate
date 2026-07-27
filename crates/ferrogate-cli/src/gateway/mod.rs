@@ -16,6 +16,9 @@ mod api_contract;
 /// cascade -- the tenancy invariant a native api-key's
 /// `organization_id`/`project_id`/`workspace_id` triple must satisfy.
 mod api_key_tenancy;
+/// #529: the aggregate in-flight-byte budget that turns the per-operation
+/// memory bound into a process-wide one.
+pub(crate) mod asset_admission;
 pub(crate) mod asset_bucket;
 mod asset_egress;
 mod asset_inline_publish;

@@ -388,5 +388,5 @@ fn an_inline_asset_is_never_refused_by_the_bucket_memory_bound() {
             error.message
         ),
     };
-    assert_eq!(content, b"inline bytes");
+    assert_eq!(&*content, b"inline bytes");
 }
