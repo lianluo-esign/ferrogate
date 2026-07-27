@@ -98,35 +98,156 @@ fn local_supabase_compatible_storage_keeps_short_readiness_timeout() {
 /// this test can disagree with the storage crate rather than echo it.
 const CONTROL_PLANE_INIT_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
 
-/// Last `(version, name)` recorded by the migration ledger in the SQL file --
-/// the answer the harness must be expecting, computed without consulting the
+/// Maximum `(version, name)` recorded by the migration ledger in `sql` -- the
+/// answer the harness must be expecting, computed without consulting the
 /// harness or `ferrogate_storage`.
-fn init_sql_head_migration() -> (u64, String) {
+///
+/// This used to be a LINE-oriented reader: it required the whole-line anchor
+/// `INSERT INTO storage_schema_migrations (version, name)` and read only the
+/// first tuple of the following clause. `ferrogate-storage` widened its parser
+/// to statements in the #511 rework, and review pointed out that this reader --
+/// a fourth one, in another crate -- was left behind, so the first ledger row
+/// written in a shape that rework legitimised would red the test below FALSELY.
+/// Loud rather than silent, but "the scenario is blocked on its own
+/// bookkeeping" is the exact ergonomics #511 exists to end.
+fn head_of_ledger(sql: &str) -> (u64, String) {
     let mut head: Option<(u64, String)> = None;
-    let mut lines = CONTROL_PLANE_INIT_SQL.lines();
-    while let Some(line) = lines.next() {
-        if line.trim() != "INSERT INTO storage_schema_migrations (version, name)" {
+    // Comments are not statements: a migration parked inside `/* ... */` is one
+    // the database does not have, so reading it would put the harness ahead of
+    // every deployment it tests.
+    let code = strip_sql_comments(sql);
+    let upper = code.to_ascii_uppercase();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    for (at, _) in upper.match_indices("INSERT") {
+        if at > 0 && word(code.as_bytes()[at - 1]) {
             continue;
         }
-        let values = lines
-            .find(|candidate| !candidate.trim().is_empty())
-            .expect("a migration ledger INSERT must be followed by its VALUES clause");
-        let body = values
+        let Some(after_into) = after_keyword(&code[at..], "INSERT")
+            .and_then(|rest| after_keyword(rest.trim_start(), "INTO"))
+        else {
+            continue;
+        };
+        let after_only = after_keyword(after_into.trim_start(), "ONLY").unwrap_or(after_into);
+        let Some((reference, after_table)) = after_only.trim_start().split_once('(') else {
+            continue;
+        };
+        let table = reference
             .trim()
-            .strip_prefix("VALUES (")
-            .and_then(|rest| rest.split(')').next())
-            .and_then(|body| body.split_once(", "))
-            .unwrap_or_else(|| panic!("unparsable migration ledger VALUES clause: {values}"));
-        let version: u64 = body
-            .0
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
             .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("unparsable migration version: {values}"));
-        if head.as_ref().is_none_or(|(seen, _)| version > *seen) {
-            head = Some((version, body.1.trim().trim_matches('\'').to_string()));
+            .trim_matches('"');
+        if !table.eq_ignore_ascii_case("storage_schema_migrations") {
+            continue;
+        }
+        let mut clause = after_table
+            .split_once(')')
+            .and_then(|(_, rest)| {
+                let rest = rest.trim_start();
+                rest.get(.."VALUES".len())
+                    .filter(|keyword| keyword.eq_ignore_ascii_case("VALUES"))
+                    .map(|_| &rest["VALUES".len()..])
+            })
+            .unwrap_or_else(|| panic!("unparsable migration ledger statement at byte {at}"));
+        // EVERY tuple, not just the first: `VALUES (59, '059_a'), (60, '060_b')`
+        // records two migrations and the harness must expect the later one.
+        loop {
+            let (tuple, tail) = clause
+                .trim_start()
+                .strip_prefix('(')
+                .and_then(|body| body.split_once(')'))
+                .unwrap_or_else(|| panic!("unparsable migration ledger VALUES clause: {clause}"));
+            let (version, name) = tuple
+                .split_once(',')
+                .unwrap_or_else(|| panic!("unparsable migration ledger tuple: {tuple}"));
+            let version: u64 = version
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("unparsable migration version: {tuple}"));
+            if head.as_ref().is_none_or(|(seen, _)| version > *seen) {
+                head = Some((version, name.trim().trim_matches('\'').to_string()));
+            }
+            clause = tail.trim_start();
+            match clause.strip_prefix(',') {
+                Some(next_tuple) => clause = next_tuple,
+                None => break,
+            }
         }
     }
-    head.expect("sql/001_init_postgres.sql must record migrations")
+    head.expect("the control-plane SQL must record migrations")
+}
+
+/// `keyword` at the front of `text`, case-insensitively and as a whole word;
+/// returns what follows it.
+fn after_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    if !text.get(..keyword.len())?.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &text[keyword.len()..];
+    (!rest.starts_with(|char: char| char.is_ascii_alphanumeric() || char == '_')).then_some(rest)
+}
+
+/// Drop `--` to end-of-line and nested `/* ... */`, keeping `'...'` literals
+/// (a migration name lives in one). ONE left-to-right pass, earliest marker
+/// first: `sql/001_init_postgres.sql:1205` reads `-- Gates /v1/assets/* ...` and
+/// the file contains no `*/` at all, so stripping block comments in a pass of
+/// their own would swallow the file.
+fn strip_sql_comments(sql: &str) -> String {
+    let mut code = String::new();
+    let mut rest = sql;
+    while !rest.is_empty() {
+        let Some((at, marker)) = ["--", "/*", "'"]
+            .into_iter()
+            .filter_map(|marker| rest.find(marker).map(|at| (at, marker)))
+            .min()
+        else {
+            code.push_str(rest);
+            break;
+        };
+        code.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let bytes = rest.as_bytes();
+        match marker {
+            "--" => rest = rest.find('\n').map_or("", |end| &rest[end..]),
+            "/*" => {
+                let (mut depth, mut end) = (0usize, 0usize);
+                while end < bytes.len() {
+                    if bytes[end..].starts_with(b"/*") {
+                        depth += 1;
+                        end += 2;
+                    } else if bytes[end..].starts_with(b"*/") {
+                        depth -= 1;
+                        end += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        end += 1;
+                    }
+                }
+                assert_eq!(depth, 0, "a `/* ... */` comment is never closed");
+                rest = &rest[end..];
+            }
+            _ => {
+                let mut scan = 1usize;
+                let end = loop {
+                    assert!(scan < bytes.len(), "a `'...'` literal is never closed");
+                    if bytes[scan] == b'\'' {
+                        if bytes.get(scan + 1) == Some(&b'\'') {
+                            scan += 2;
+                            continue;
+                        }
+                        break scan + 1;
+                    }
+                    scan += 1;
+                };
+                code.push_str(&rest[..end]);
+                rest = &rest[end..];
+            }
+        }
+    }
+    code
 }
 
 /// The `supabase-restart` migration assertion must expect the head of the SQL
@@ -137,10 +258,65 @@ fn init_sql_head_migration() -> (u64, String) {
 /// place of the derived head. Because the expected value is recomputed here from
 /// the SQL, ANY divergence between the harness's expectation and the file reds,
 /// including the harness simply falling behind a new migration.
+///
+/// Does NOT catch: a ledger row written by `COPY`, `UPDATE`, `MERGE` or SQL
+/// assembled at runtime. Like the three readers in `ferrogate-storage`, this one
+/// anchors on `INSERT`, so on that dimension they all go quiet together. It also
+/// does not skip `'...'` literals when hunting for the anchor, so a literal
+/// containing the words `INSERT INTO storage_schema_migrations` would be read
+/// here and not by the const parser -- a divergence that reds this test rather
+/// than hiding anything.
 #[test]
 fn the_supabase_restart_migration_expectation_is_the_head_of_the_applied_sql() {
-    let (version, name) = init_sql_head_migration();
+    let (version, name) = head_of_ledger(CONTROL_PLANE_INIT_SQL);
     assert_eq!(expected_head_migration(), format!("{version}:{name}"));
+}
+
+/// The harness's own reader must read every shape `ferrogate-storage` certifies.
+///
+/// Pins `head_of_ledger` and `strip_sql_comments` against the four shapes the
+/// #511 rework legitimised on the storage side: a second tuple in one `VALUES`
+/// clause, a schema-qualified table, keywords in any case with `ONLY`, and a
+/// row parked inside a comment.
+///
+/// Catches: leaving this reader line-oriented, which is where review found it.
+/// Under the old whole-line anchor plus `body.split(')').next()`, the first
+/// ledger row written in any of these shapes made
+/// `the_supabase_restart_migration_expectation_is_the_head_of_the_applied_sql`
+/// red FALSELY -- the scenario blocked on its own bookkeeping again -- and a
+/// parked row would have pushed the harness's expectation ABOVE the database.
+#[test]
+fn the_harness_ledger_reader_reads_every_shape_the_storage_parser_certifies() {
+    assert_eq!(
+        head_of_ledger(
+            "INSERT INTO storage_schema_migrations (version, name)\n\
+             VALUES (59, '059_first_tuple'), (60, '060_second_tuple');\n"
+        ),
+        (60, "060_second_tuple".to_string()),
+        "a first-tuple-only reader reports 59 here"
+    );
+    assert_eq!(
+        head_of_ledger(
+            "insert into only ferrogate_control . storage_schema_migrations ( version , name )\n\
+             values (60, '060_qualified');\n"
+        ),
+        (60, "060_qualified".to_string()),
+        "a whole-line, case-exact anchor reads nothing here"
+    );
+    assert_eq!(
+        head_of_ledger(
+            "INSERT INTO storage_schema_migrations (version, name)\n\
+             VALUES (59, '059_applied');\n\
+             /*\n\
+             INSERT INTO storage_schema_migrations (version, name)\n\
+             VALUES (60, '060_parked');\n\
+             */\n\
+             -- INSERT INTO storage_schema_migrations (version, name)\n\
+             -- VALUES (61, '061_also_parked');\n"
+        ),
+        (59, "059_applied".to_string()),
+        "a comment-blind reader would put the harness one migration ahead of the database"
+    );
 }
 
 /// No second hard-coded migration identity may live in the scenario file.
