@@ -134,9 +134,9 @@ CF 相关已有资产：`crates/ferrogate-cloudflare/`（D1/R2/Secrets Store，*
 | `TelemetryBackend` trait —— 后端扩展点 | `crates/ferrogate-observability/src/backend.rs` |
 | `OtlpBackend`（原有行为，改为一等后端，导出循环里不再有特例） | 同上 |
 | `CloudflareBackend`（bearer 鉴权 + 租户回退头 + 凭据脱敏 Debug） | `crates/ferrogate-observability/src/cloudflare.rs` |
-| `ObservabilityProvider::Cloudflare` + `cloudflare_collector_token_ref` / `cloudflare_default_tenant` | `crates/ferrogate-cli/src/config/types.rs` |
+| `ObservabilityProvider::Cloudflare` + `cloudflare_collector_token_ref` / `cloudflare_default_tenant` | `crates/ferrogate-config/src/config/types.rs` |
 | 后端构造（token 经 `SecretResolverRegistry`，解析失败**失败关闭**而非降级为无凭据发送） | `crates/ferrogate-cli/src/state_observability.rs` `telemetry_backend()` |
-| 启动期配置校验（缺 token ref / 明文外发凭据 → 启动即报错） | `crates/ferrogate-cli/src/config/validate.rs` |
+| 启动期配置校验（缺 token ref / 明文外发凭据 → 启动即报错） | `crates/ferrogate-config/src/config/validate.rs` |
 | collector Worker（OTLP 三路 ingest → AE + Workers Logs，含全部硬限制的强制执行） | `workers/telemetry-collector/` |
 
 设计要点：`ferrogate-observability` 保持**零 I/O**（依赖只有 `serde_json` + `tracing`），所以 `TelemetryBackend` 的方法**构造** `OtlpHttpRequest` 而不发送它；传输仍然只在 `ferrogate-cli` 的 `dispatch_otlp_request` 一处。因此每个后端都能在没有网络、没有 runtime、没有 mock server 的情况下被单测覆盖。

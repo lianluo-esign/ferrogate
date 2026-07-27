@@ -17,11 +17,11 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 #[test]
 fn prometheus_metrics_snapshot_aggregates_request_logs_and_distinct_attempts() {
     let config = Config {
-        telemetry: crate::config::TelemetryConfig {
+        telemetry: ferrogate_config::TelemetryConfig {
             service_name: "ferrogate-test".into(),
             log_bodies: false,
             otlp_endpoint: None,
-            ..crate::config::TelemetryConfig::default()
+            ..ferrogate_config::TelemetryConfig::default()
         },
         models: vec![Model {
             name: "fast-chat".into(),

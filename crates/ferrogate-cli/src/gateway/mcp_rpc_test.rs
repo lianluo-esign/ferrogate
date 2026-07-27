@@ -8,7 +8,7 @@ use super::*;
 
 use ferrogate_storage::{sha256_hex, StoredAsset};
 
-use crate::config::{ApiKey, Config};
+use ferrogate_config::{ApiKey, Config};
 
 #[test]
 fn missing_method_scope_mapping_fails_closed() {

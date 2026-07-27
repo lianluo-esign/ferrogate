@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use ferrogate_billing::BillingEvent;
 
-use crate::{config::BillingServiceConfig, metering};
+use crate::metering;
+use ferrogate_config::BillingServiceConfig;
 
 const CHARGE_PATH: &str = "/v1/billing/charge";
 

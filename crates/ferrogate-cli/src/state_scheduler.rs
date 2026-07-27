@@ -566,8 +566,8 @@ impl ScheduleFireResult {
 /// interactively-created runs are attributed to the same provider.
 fn scheduled_agent_run_provider(config: &Config) -> &'static str {
     match config.agent_runtime.provider {
-        crate::config::AgentRuntimeProvider::ManagedWorker => "ferrogate.agent-worker",
-        crate::config::AgentRuntimeProvider::External => "ferrogate.external",
+        ferrogate_config::AgentRuntimeProvider::ManagedWorker => "ferrogate.agent-worker",
+        ferrogate_config::AgentRuntimeProvider::External => "ferrogate.external",
     }
 }
 

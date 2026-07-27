@@ -20,7 +20,7 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 
 fn unreachable_billing_config() -> Config {
     Config {
-        billing_service: crate::config::BillingServiceConfig {
+        billing_service: ferrogate_config::BillingServiceConfig {
             enabled: true,
             // Port 1 requires privileges nothing in a test sandbox has, so the
             // connection is refused immediately and deterministically.

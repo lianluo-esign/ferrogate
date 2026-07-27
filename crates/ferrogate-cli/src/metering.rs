@@ -19,7 +19,7 @@ use ferrogate_billing::BillingEvent;
 use serde::Serialize;
 use tokio::task;
 
-use crate::config::{MeteringConfig, MeteringExportProvider, MeteringExportSubject};
+use ferrogate_config::{MeteringConfig, MeteringExportProvider, MeteringExportSubject};
 
 #[derive(Debug, Clone)]
 pub(crate) struct MeteringExporter {

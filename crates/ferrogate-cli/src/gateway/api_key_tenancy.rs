@@ -8,7 +8,7 @@
 
 use http::StatusCode;
 
-use crate::config::ApiKey;
+use ferrogate_config::ApiKey;
 use ferrogate_storage::{StoredProject, StoredTenantAccount, StoredWorkspace};
 
 /// Why an api-key upsert's `organization_id`/`project_id`/`workspace_id`

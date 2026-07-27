@@ -112,12 +112,12 @@ use crate::{
         ensure_certificate, start_renewal_scheduler, AcmeCertificatePaths, AcmeCertificateReloader,
         AcmeRenewalHandle, SharedAcmeRenewalState,
     },
-    config::{Config, Upstream},
     lifecycle::execute_graceful_upgrade_reload,
-    routing::UpstreamEndpoint,
     state::{RuntimeRoute, SharedAppState},
     telemetry::{start_analytics_background_sender, start_otlp_background_sender},
 };
+use ferrogate_config::UpstreamEndpoint;
+use ferrogate_config::{Config, Upstream};
 
 use self::external_actions::{
     serve_gateway_external_action_authorizer_unix, GatewayExternalActionAuthorizerService,
@@ -369,7 +369,7 @@ fn start_external_action_authorizer_if_configured(
 ) -> Option<JoinHandle<()>> {
     let current = state.current();
     let config = &current.config.agent_runtime;
-    if !config.enabled || config.provider != crate::config::AgentRuntimeProvider::ManagedWorker {
+    if !config.enabled || config.provider != ferrogate_config::AgentRuntimeProvider::ManagedWorker {
         return None;
     }
     let max_requests = config
@@ -398,7 +398,7 @@ fn start_external_action_authorizer_if_configured(
 }
 
 fn managed_worker_capability_policy(
-    config: &crate::config::AgentRuntimeManagedWorkerConfig,
+    config: &ferrogate_config::AgentRuntimeManagedWorkerConfig,
 ) -> ferrogate_runtime::CapabilityPolicy {
     ferrogate_runtime::CapabilityPolicy {
         allowed_actions: config
@@ -752,7 +752,7 @@ fn start_x402_settlement_reconciler(state: &SharedAppState) -> X402ReconcilerHan
 }
 
 fn start_acme_renewal_if_configured(
-    tls: &crate::config::TlsConfig,
+    tls: &ferrogate_config::TlsConfig,
     paths: Option<&AcmeCertificatePaths>,
     state: Option<Arc<SharedAcmeRenewalState>>,
     app_state: &SharedAppState,
@@ -798,7 +798,7 @@ impl AcmeCertificateReloader for GracefulUpgradeAcmeReloader {
 }
 
 fn resolve_tls_certificate_paths(
-    tls: &crate::config::TlsConfig,
+    tls: &ferrogate_config::TlsConfig,
 ) -> AnyResult<Option<AcmeCertificatePaths>> {
     if !tls.is_enabled() {
         return Ok(None);
@@ -842,7 +842,7 @@ fn pingora_server_conf(config: &Config) -> ServerConf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
+    use ferrogate_config::{
         AgentRuntimeManagedWorkerConfig, ManagedWorkerCapabilityActionConfig, ReliabilityConfig,
     };
 

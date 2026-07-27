@@ -537,7 +537,7 @@ impl AppState {
     ) -> Option<Box<dyn crate::gateway::asset_bucket::AssetObjectStore>> {
         let bucket = &self.config.asset_bucket;
         match bucket.backend {
-            crate::config::AssetBucketBackend::S3 => {
+            ferrogate_config::AssetBucketBackend::S3 => {
                 // The S3-only load-time guards (`validate_asset_bucket`'s
                 // credential rules, `validate_asset_bucket_r2`'s host/region
                 // rules) gate on this same predicate (issue #485) rather than
@@ -565,7 +565,7 @@ impl AppState {
                     ),
                 ))
             }
-            crate::config::AssetBucketBackend::WorkersStaticAssets => {
+            ferrogate_config::AssetBucketBackend::WorkersStaticAssets => {
                 if !bucket.enabled {
                     return None;
                 }

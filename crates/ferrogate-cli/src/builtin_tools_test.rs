@@ -12,8 +12,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ferrogate_storage::{sha256_hex, StoredAsset};
 use serde_json::json;
 
-use crate::config::{ApiKey, Config};
 use crate::state::AppState;
+use ferrogate_config::{ApiKey, Config};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()

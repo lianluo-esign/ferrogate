@@ -23,11 +23,22 @@ use crate::approval::{
     ToolApprovalDecisionRequest, ToolApprovalDraft, ToolApprovalRecord,
 };
 use crate::billing_client::BillingReporter;
-use crate::config::signed_snapshot::{
+use crate::extensions::{
+    ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
+    ToolExecutionResponse,
+};
+use crate::metering::{MeteringExportStatus, MeteringExporter};
+use ferrogate_billing::{
+    BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
+    ProviderAttempt, TokenUsage as BillingTokenUsage,
+};
+use ferrogate_cloudflare::CloudflareClient;
+use ferrogate_config::parse_upstream_endpoint;
+use ferrogate_config::{
     build_snapshot_crypto, SignedSnapshotEnvelope, SignedSnapshotPayload, SnapshotCrypto,
     SnapshotSigner,
 };
-use crate::config::{
+use ferrogate_config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, AgentWorkflowPolicy,
     AnalyticsConfig, AnalyticsProvider, ApiKey, CacheMode, Config, GatewayConfigProfile,
     GuardrailEffect, GuardrailProviderErrorMode, GuardrailProviderKind, GuardrailRule,
@@ -35,18 +46,7 @@ use crate::config::{
     PromptTemplateStatus, Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode,
     Upstream,
 };
-use crate::extensions::{
-    ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
-    ToolExecutionResponse,
-};
-use crate::metering::{MeteringExportStatus, MeteringExporter};
-use crate::network_access::{resolve_client_ip, IpCidr, UnauthenticatedIpRateLimiter};
-use crate::routing::parse_upstream_endpoint;
-use ferrogate_billing::{
-    BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
-    ProviderAttempt, TokenUsage as BillingTokenUsage,
-};
-use ferrogate_cloudflare::CloudflareClient;
+use ferrogate_config::{resolve_client_ip, IpCidr, UnauthenticatedIpRateLimiter};
 use ferrogate_core::{RequestContext, WorkspaceScope};
 use ferrogate_guardrails::{
     apply_content_patches_to_document, validate_content_patch_permissions,
@@ -620,7 +620,7 @@ impl SharedAppState {
 
     pub(crate) fn upsert_plugin_registration(
         &self,
-        plugin: crate::config::PluginConfig,
+        plugin: ferrogate_config::PluginConfig,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
         let result = (|| {
@@ -673,7 +673,7 @@ impl SharedAppState {
 
     pub(crate) fn upsert_mcp_server(
         &self,
-        server: crate::config::McpServerConfig,
+        server: ferrogate_config::McpServerConfig,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
         let result = (|| {
@@ -720,7 +720,7 @@ impl SharedAppState {
 
     pub(crate) fn upsert_agent_upstream(
         &self,
-        upstream: crate::config::AgentUpstreamConfig,
+        upstream: ferrogate_config::AgentUpstreamConfig,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
         let result = (|| {
@@ -1196,7 +1196,7 @@ impl SharedAppState {
 
     pub(crate) fn upsert_agent_workflow(
         &self,
-        workflow: crate::config::AgentWorkflowPolicy,
+        workflow: ferrogate_config::AgentWorkflowPolicy,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
         let result = (|| {
@@ -1848,7 +1848,7 @@ fn deserialize_control_plane_documents<T: for<'de> Deserialize<'de>>(
         })
 }
 
-fn workflow_resource_id(workflow: &crate::config::AgentWorkflowPolicy) -> String {
+fn workflow_resource_id(workflow: &ferrogate_config::AgentWorkflowPolicy) -> String {
     format!("{}@{}", workflow.id, workflow.version)
 }
 
@@ -1866,10 +1866,10 @@ fn record_latest_workflow_node(
 }
 
 pub(crate) fn select_agent_workflow<'a>(
-    workflows: &'a [crate::config::AgentWorkflowPolicy],
+    workflows: &'a [ferrogate_config::AgentWorkflowPolicy],
     id: &str,
     version: Option<u32>,
-) -> Option<&'a crate::config::AgentWorkflowPolicy> {
+) -> Option<&'a ferrogate_config::AgentWorkflowPolicy> {
     workflows
         .iter()
         .filter(|workflow| workflow.id == id)
@@ -1911,8 +1911,8 @@ fn apply_tenant_refs_to_api_keys(
 }
 
 fn upsert_or_replace_plugin_registration(
-    plugins: &mut Vec<crate::config::PluginConfig>,
-    plugin: crate::config::PluginConfig,
+    plugins: &mut Vec<ferrogate_config::PluginConfig>,
+    plugin: ferrogate_config::PluginConfig,
 ) {
     if let Some(existing) = plugins.iter_mut().find(|existing| existing.id == plugin.id) {
         *existing = plugin;
@@ -1922,8 +1922,8 @@ fn upsert_or_replace_plugin_registration(
 }
 
 fn upsert_or_replace_mcp_server(
-    servers: &mut Vec<crate::config::McpServerConfig>,
-    server: crate::config::McpServerConfig,
+    servers: &mut Vec<ferrogate_config::McpServerConfig>,
+    server: ferrogate_config::McpServerConfig,
 ) {
     if let Some(existing) = servers
         .iter_mut()
@@ -1936,8 +1936,8 @@ fn upsert_or_replace_mcp_server(
 }
 
 fn upsert_or_replace_agent_upstream(
-    upstreams: &mut Vec<crate::config::AgentUpstreamConfig>,
-    upstream: crate::config::AgentUpstreamConfig,
+    upstreams: &mut Vec<ferrogate_config::AgentUpstreamConfig>,
+    upstream: ferrogate_config::AgentUpstreamConfig,
 ) {
     if let Some(existing) = upstreams
         .iter_mut()
@@ -2001,7 +2001,7 @@ pub(crate) struct RuntimeUpstream {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeUpstreamEndpoint {
-    pub(crate) endpoint: crate::routing::UpstreamEndpoint,
+    pub(crate) endpoint: ferrogate_config::UpstreamEndpoint,
 }
 
 pub(crate) struct ToolInjectionContext<'a> {
@@ -5257,7 +5257,7 @@ struct ListenerRuntimeConfig {
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     tls_http2: bool,
-    tls_acme: crate::config::TlsAcmeConfig,
+    tls_acme: ferrogate_config::TlsAcmeConfig,
 }
 
 impl ListenerRuntimeConfig {
@@ -7191,13 +7191,13 @@ mod tests {
                 id: "template-added".into(),
                 name: "Template added".into(),
                 status: PromptTemplateStatus::Active,
-                target: crate::config::PromptTemplateTarget::ChatCompletions,
+                target: ferrogate_config::PromptTemplateTarget::ChatCompletions,
                 model: "fast-chat".into(),
                 variables: Vec::new(),
-                versions: vec![crate::config::PromptTemplateVersion {
+                versions: vec![ferrogate_config::PromptTemplateVersion {
                     revision: 1,
-                    status: crate::config::PromptTemplateVersionStatus::Active,
-                    messages: vec![crate::config::PromptTemplateMessage {
+                    status: ferrogate_config::PromptTemplateVersionStatus::Active,
+                    messages: vec![ferrogate_config::PromptTemplateMessage {
                         role: "user".into(),
                         content: "hello".into(),
                     }],
@@ -7419,12 +7419,12 @@ mod tests {
     fn listener_runtime_config_rejects_tls_listener_changes() {
         let active = Config::default();
         let candidate = Config {
-            tls: crate::config::TlsConfig {
+            tls: ferrogate_config::TlsConfig {
                 enabled: true,
                 cert_path: Some("cert.pem".into()),
                 key_path: Some("key.pem".into()),
                 http2: true,
-                acme: crate::config::TlsAcmeConfig::default(),
+                acme: ferrogate_config::TlsAcmeConfig::default(),
             },
             ..Config::default()
         };

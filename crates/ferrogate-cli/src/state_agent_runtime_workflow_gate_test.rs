@@ -10,7 +10,7 @@
 // outside business logic per the testing-architecture layout.
 
 use super::*;
-use crate::config::{AgentWorkflowEdge, AgentWorkflowNode, AgentWorkflowNodeKind};
+use ferrogate_config::{AgentWorkflowEdge, AgentWorkflowNode, AgentWorkflowNodeKind};
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()

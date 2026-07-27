@@ -7,7 +7,7 @@
 
 use super::*;
 
-use crate::config::{CanaryRoute, Model, Provider};
+use ferrogate_config::{CanaryRoute, Model, Provider};
 
 fn provider(name: &str, region: Option<&str>, enabled: bool) -> Provider {
     Provider {

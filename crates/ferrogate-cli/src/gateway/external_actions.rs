@@ -37,8 +37,8 @@ use ferrogate_storage::StoredAgentRunEvent;
 use super::managed_action_guardrail::{
     evaluate_managed_action_guardrail, ManagedActionGuardrailBinding, ManagedActionGuardrailRequest,
 };
-use crate::config::GuardrailStage;
 use crate::state::{AppState, GuardrailMatch, SharedAppState, WorkspaceAttribution};
+use ferrogate_config::GuardrailStage;
 
 const EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -1030,7 +1030,7 @@ mod tests {
 
     #[test]
     fn gateway_external_action_authorizer_allows_and_records_timeline_event() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         // #519: `workspace-1` belongs to `project-1`; the timeline row must be
         // attributed to that project, not to the workspace id.
         register_workspace(&state, "workspace-1", "project-1", "tenant-1");
@@ -1143,7 +1143,7 @@ mod tests {
     /// looked up -- must not.
     #[test]
     fn external_action_resolved_project_is_the_scope_a_quota_lookup_binds() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         register_workspace(&state, "workspace-1", "project-1", "tenant-1");
         // A decoy at (Project, "workspace-1"): the id the old code put in the
         // project slot. It is tighter, so if it ever bound it would win the
@@ -1182,7 +1182,7 @@ mod tests {
     /// lookup to `(Project, "workspace-1")`.
     #[test]
     fn external_action_attribution_has_no_project_scope_when_workspace_is_unknown() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         ferrogate_sync_bridge::block_on_sync_bridge(
             state.upsert_quota_policy(project_budget_policy("workspace-1", 1.0)),
         )
@@ -1214,7 +1214,7 @@ mod tests {
     /// contract) and whose decision matches the authorization decision.
     #[test]
     fn timeline_row_action_fingerprint_equals_authorizer_evidence_fingerprint() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             mcp_allowing_capability_policy(),
@@ -1270,7 +1270,7 @@ mod tests {
     /// record) instead of hard-coding None.
     #[test]
     fn timeline_row_inherits_trace_id_from_the_dispatching_runs_record() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         state.record_agent_run(ferrogate_storage::StoredAgentRun {
             id: "run-1".to_string(),
             request_id: "fg-dispatch-1".to_string(),
@@ -1317,7 +1317,7 @@ mod tests {
     /// id stays None — nothing is fabricated.
     #[test]
     fn timeline_row_trace_id_stays_none_for_unknown_runs() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
@@ -1342,7 +1342,7 @@ mod tests {
 
     #[test]
     fn gateway_external_action_authorizer_denies_and_records_timeline_event() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy::default(),
@@ -1447,7 +1447,7 @@ mod tests {
 
     #[test]
     fn managed_action_input_guardrail_blocks_a_capability_allowed_mcp_action() {
-        let shared = SharedAppState::with_source_path(crate::config::Config::default(), None);
+        let shared = SharedAppState::with_source_path(ferrogate_config::Config::default(), None);
         shared
             .create_guardrail_policy_revision(managed_mcp_block_policy("exfiltrate"))
             .unwrap();
@@ -1501,7 +1501,7 @@ mod tests {
 
     #[test]
     fn managed_action_input_guardrail_allows_a_clean_mcp_action() {
-        let shared = SharedAppState::with_source_path(crate::config::Config::default(), None);
+        let shared = SharedAppState::with_source_path(ferrogate_config::Config::default(), None);
         shared
             .create_guardrail_policy_revision(managed_mcp_block_policy("exfiltrate"))
             .unwrap();
@@ -1544,7 +1544,7 @@ mod tests {
     }
 
     fn activated_mcp_guard(policy: ferrogate_guardrails::PolicyRevision) -> SharedAppState {
-        let shared = SharedAppState::with_source_path(crate::config::Config::default(), None);
+        let shared = SharedAppState::with_source_path(ferrogate_config::Config::default(), None);
         shared.create_guardrail_policy_revision(policy).unwrap();
         shared
             .activate_guardrail_policy_revision("mcp-guard", 1, "test-admin", 1, false)
@@ -1683,7 +1683,7 @@ mod tests {
 
     #[test]
     fn gateway_external_action_authorizer_uses_configured_approval_policy() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
@@ -1722,7 +1722,7 @@ mod tests {
 
     #[test]
     fn gateway_external_action_authorizer_can_allow_direct_network_egress_by_policy() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn gateway_external_action_authorizer_rejects_mismatched_request_id_without_timeline_event() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
@@ -1790,7 +1790,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = temp.path().join("gateway-external-action-authorizer.sock");
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
@@ -1831,7 +1831,7 @@ mod tests {
 
     #[test]
     fn gateway_external_action_authorizer_serves_shared_http_transport_contract() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {

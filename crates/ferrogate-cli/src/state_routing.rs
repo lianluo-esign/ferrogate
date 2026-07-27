@@ -179,10 +179,10 @@ impl AppState {
             .and_then(|reference| resolve_cloudflare_aig_token(&provider.name, reference));
 
         let mode = match routing.mode {
-            crate::config::ProviderCloudflareAiGatewayMode::Compat => {
+            ferrogate_config::ProviderCloudflareAiGatewayMode::Compat => {
                 ferrogate_providers::CloudflareAiGatewayMode::Compat
             }
-            crate::config::ProviderCloudflareAiGatewayMode::Unified => {
+            ferrogate_config::ProviderCloudflareAiGatewayMode::Unified => {
                 ferrogate_providers::CloudflareAiGatewayMode::Unified
             }
         };
@@ -672,7 +672,7 @@ impl AppState {
     /// #312: single resolver for request-body size caps. Handlers must go
     /// through `state.limits().<surface>_body_max_bytes()` instead of
     /// hard-coding literals at `read_request_body` call sites.
-    pub(crate) fn limits(&self) -> &crate::config::LimitsConfig {
+    pub(crate) fn limits(&self) -> &ferrogate_config::LimitsConfig {
         &self.config.limits
     }
 

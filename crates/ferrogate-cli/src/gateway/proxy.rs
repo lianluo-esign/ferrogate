@@ -175,7 +175,7 @@ impl ProxyHttp for FerroGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routing::UpstreamEndpoint;
+    use ferrogate_config::UpstreamEndpoint;
     use pingora::ErrorType;
 
     // `HttpPeer::new` resolves non-IP hosts via DNS, so use a literal

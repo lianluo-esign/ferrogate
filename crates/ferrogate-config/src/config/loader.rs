@@ -4,10 +4,10 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use anyhow::{bail, Context, Result as AnyResult};
-use ferrogate_config::{
+use crate::{
     is_caddyfile_path, load_caddyfile, parse_caddyfile, GatewayConfig, GatewayTlsAcmeConfig,
 };
+use anyhow::{bail, Context, Result as AnyResult};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -17,7 +17,7 @@ use super::{
 };
 
 impl Config {
-    pub(crate) fn load(path: &PathBuf) -> AnyResult<Self> {
+    pub fn load(path: &PathBuf) -> AnyResult<Self> {
         if !path.exists() {
             warn!(
                 config = %path.display(),
@@ -49,7 +49,7 @@ impl Config {
         Ok(config)
     }
 
-    pub(crate) fn from_toml_str(raw: &str) -> AnyResult<Self> {
+    pub fn from_toml_str(raw: &str) -> AnyResult<Self> {
         let mut config: Self = toml::from_str(raw).context("failed to parse TOML config")?;
         config.migrate_control_plane_aliases()?;
         config.materialize_skill_package_resources();
@@ -57,7 +57,7 @@ impl Config {
         Ok(config)
     }
 
-    pub(crate) fn from_yaml_str(raw: &str) -> AnyResult<Self> {
+    pub fn from_yaml_str(raw: &str) -> AnyResult<Self> {
         let mut config: Self = serde_yaml::from_str(raw).context("failed to parse YAML config")?;
         config.migrate_control_plane_aliases()?;
         config.materialize_skill_package_resources();
@@ -65,7 +65,7 @@ impl Config {
         Ok(config)
     }
 
-    pub(crate) fn from_caddyfile_str(raw: &str, file: &str) -> AnyResult<Self> {
+    pub fn from_caddyfile_str(raw: &str, file: &str) -> AnyResult<Self> {
         let mut config = Self::from_gateway_config(parse_caddyfile(raw, file)?);
         config.migrate_control_plane_aliases()?;
         config.materialize_skill_package_resources();
@@ -88,7 +88,7 @@ impl Config {
     /// Idempotent: after resolution both raw inputs are cleared, so re-running
     /// it (or running it on a cloned/already-resolved config) is a no-op that
     /// never wipes the resolved value.
-    pub(crate) fn migrate_control_plane_aliases(&mut self) -> AnyResult<()> {
+    pub fn migrate_control_plane_aliases(&mut self) -> AnyResult<()> {
         match (self.control_api.take(), self.admin_api_alias.take()) {
             (Some(_), Some(_)) => bail!(
                 "conflicting control-plane API configuration: both the canonical [control_api] \

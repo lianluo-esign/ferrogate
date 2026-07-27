@@ -6,7 +6,7 @@
 
 use super::Config;
 
-pub(crate) fn config_snapshot_id(config: &Config) -> String {
+pub fn config_snapshot_id(config: &Config) -> String {
     let bytes = serde_json::to_vec(config).expect("config serialization should not fail");
     format!("{:016x}", fnv1a64(&bytes))
 }

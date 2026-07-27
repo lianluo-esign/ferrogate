@@ -623,7 +623,7 @@ fn workers_static_assets_backend_with_an_r2_endpoint_skips_the_r2_rules() {
 /// rejects would have signed something else (issue #485).
 #[test]
 fn r2_config_validation_matches_the_runtime_signed_host() {
-    use crate::gateway::asset_bucket::{parse_endpoint, R2_ENDPOINT_SUFFIX};
+    use super::asset_endpoint::{parse_endpoint, R2_ENDPOINT_SUFFIX};
 
     for (endpoint, accepted) in [
         ("https://abc123def456.r2.cloudflarestorage.com", true),
@@ -4647,9 +4647,9 @@ fn default_config_declares_no_x402_spend_policy_so_payments_are_off() {
         .validate()
         .expect("the default config must pass x402 validation");
 
-    let effective = ferrogate_config::resolve_effective_x402_spend_policy(
+    let effective = crate::resolve_effective_x402_spend_policy(
         &config.x402_spend_policies,
-        &ferrogate_config::X402ScopeChain::tenant("tenant-1"),
+        &crate::X402ScopeChain::tenant("tenant-1"),
     );
     assert!(!effective.is_declared());
     assert!(!effective.policy.enabled);
@@ -4667,9 +4667,9 @@ fn loads_scoped_x402_spend_policies_from_a_toml_document() {
     assert_eq!(config.x402_spend_policies.len(), 2);
 
     // The narrowest declared scope is what the runtime resolves.
-    let effective = ferrogate_config::resolve_effective_x402_spend_policy(
+    let effective = crate::resolve_effective_x402_spend_policy(
         &config.x402_spend_policies,
-        &ferrogate_config::X402ScopeChain {
+        &crate::X402ScopeChain {
             tenant_id: "compliance-tenant",
             project_id: Some("compliance-project"),
             workspace_id: None,

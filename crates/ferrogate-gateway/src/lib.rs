@@ -56,9 +56,11 @@
 //! * `admin_list_query` needs `crate::responses::AdminList` and
 //!   `crate::state::AdminPagination` -- the admin pagination vocabulary, which
 //!   belongs with the Admin API surface in stage 3.
-//! * `api_key_tenancy` needs `crate::config::ApiKey`, which is
-//!   `ferrogate-cli`'s own config type (`config/types.rs`), not a re-export of
-//!   the `ferrogate-config` crate.
+//! * `api_key_tenancy` needed `crate::config::ApiKey`, which was
+//!   `ferrogate-cli`'s own config type rather than anything from the
+//!   `ferrogate-config` crate. #553 stage 3a moved that type into
+//!   `ferrogate-config`, so this one is now unblocked: `api_key_tenancy` can
+//!   come here as soon as a slice picks it up.
 //!
 //! Several further modules (`a2a`, `asset_admission`, `agent_cost_burn`) are
 //! themselves clean but have `_test.rs` siblings that build a `Config` or an

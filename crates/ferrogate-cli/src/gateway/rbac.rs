@@ -21,7 +21,6 @@ use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
     auth::{authenticate, AuthContext, CallerScope},
-    config::{AgentUpstreamConfig, GatewayConfigProfile, Model, PolicyRule, SkillPackage},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, AdminDeleteResponse,
         AdminList, AdminPermission, AdminPermissionMutation, AdminPermissionMutationResponse,
@@ -29,6 +28,9 @@ use crate::{
         AdminTenantRoleBindingRequest,
     },
     state::AppState,
+};
+use ferrogate_config::{
+    AgentUpstreamConfig, GatewayConfigProfile, Model, PolicyRule, SkillPackage,
 };
 
 impl FerroGateway {
@@ -1169,7 +1171,7 @@ async fn write_rbac_scope_denied(session: &mut Session, request_id: &str) -> Pin
 /// leak one, whatever its handler does. The complete basis is
 ///
 /// ```text
-/// git grep -nE 'pub\(crate\) [a-z_]*(id|ids)\s*:' crates/ferrogate-cli/src/config/types.rs
+/// git grep -nE 'pub\(crate\) [a-z_]*(id|ids)\s*:' crates/ferrogate-config/src/config/types.rs
 /// ```
 ///
 /// filtered to the ids that name a *tenant principal*. That yields eight
@@ -1188,7 +1190,7 @@ async fn write_rbac_scope_denied(session: &mut Session, request_id: &str) -> Pin
 ///
 /// Two further id-shaped config fields were examined and are *not* tenant
 /// selectors: `ClusterConfig::snapshot_tenant_id` (one deployment's own
-/// identity, consumed only by `config::signed_snapshot`, never serialised)
+/// identity, consumed only by `ferrogate-config`'s `signed_snapshot`, never serialised)
 /// and `ManagedWorkerCapabilityTargetGrantConfig::selector_id` (names a
 /// capability *target*, i.e. a host/tool, not a principal).
 ///

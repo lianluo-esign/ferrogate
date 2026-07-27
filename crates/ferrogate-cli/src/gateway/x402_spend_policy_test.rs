@@ -814,8 +814,8 @@ fn the_response_states_whether_the_ledger_figures_were_supplied() {
 // payee allowlist and policy revision are a competitor-visible spend profile;
 // an access control nobody tests is an access control nobody has.
 
-use crate::config::ApiKey;
 use crate::state::AppState;
+use ferrogate_config::ApiKey;
 use ferrogate_storage::{StoredProject, StoredWorkspace};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -857,12 +857,12 @@ fn admin_key(id: &str, secret: &str, tenant: Option<&str>) -> ApiKey {
 /// Two tenants, each owning one project and one workspace, plus a tenant-scoped
 /// `admin.read` key for tenant-1 and an unscoped platform-operator key.
 fn tenancy_state() -> AppState {
-    let state = AppState::new(crate::config::Config {
+    let state = AppState::new(ferrogate_config::Config {
         api_keys: vec![
             admin_key("tenant-reader", "tenant-secret", Some("tenant-1")),
             admin_key("operator", "operator-secret", None),
         ],
-        ..crate::config::Config::default()
+        ..ferrogate_config::Config::default()
     });
     for (project, workspace, tenant) in [
         ("project-1", "workspace-1", "tenant-1"),

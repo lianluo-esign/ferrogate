@@ -7,7 +7,7 @@
 use super::Upstream;
 
 impl Upstream {
-    pub(crate) fn endpoint_urls(&self) -> Vec<&str> {
+    pub fn endpoint_urls(&self) -> Vec<&str> {
         let mut endpoints = Vec::new();
         if let Some(url) = self.url.as_deref().filter(|url| !url.trim().is_empty()) {
             endpoints.push(url);

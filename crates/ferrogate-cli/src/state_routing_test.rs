@@ -106,7 +106,7 @@ fn matches_runtime_route_with_precompiled_headers() {
             upstream: "pool".into(),
             hosts: vec!["api.example.com".into()],
             path_prefixes: vec!["/v1".into()],
-            match_headers: vec![crate::config::HeaderMatcher {
+            match_headers: vec![ferrogate_config::HeaderMatcher {
                 name: "x-tier".into(),
                 value: "gold".into(),
             }],
@@ -208,7 +208,7 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
             canary: None,
             shadow: None,
             fallbacks: vec![
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "backup-a".into(),
                     provider_model: "gpt-4.1-mini".into(),
                     input_price_per_1m: Some(2.0),
@@ -217,7 +217,7 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
                     weight: Some(1),
                     enabled: true,
                 },
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "backup-b".into(),
                     provider_model: "gpt-4.1".into(),
                     input_price_per_1m: Some(1.0),
@@ -326,7 +326,7 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
             canary: None,
             shadow: None,
             fallbacks: vec![
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "us-fallback".into(),
                     provider_model: "gpt-4.1-mini".into(),
                     input_price_per_1m: Some(1.0),
@@ -335,7 +335,7 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
                     weight: Some(1),
                     enabled: true,
                 },
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "no-region-fallback".into(),
                     provider_model: "gpt-4.1".into(),
                     input_price_per_1m: Some(0.5),
@@ -483,7 +483,7 @@ fn orders_lowest_cost_routes_by_estimated_price() {
             canary: None,
             shadow: None,
             fallbacks: vec![
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "backup-a".into(),
                     provider_model: "gpt-4.1-mini".into(),
                     input_price_per_1m: Some(2.0),
@@ -492,7 +492,7 @@ fn orders_lowest_cost_routes_by_estimated_price() {
                     weight: Some(1),
                     enabled: true,
                 },
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "backup-b".into(),
                     provider_model: "gpt-4.1".into(),
                     input_price_per_1m: Some(1.0),
@@ -624,10 +624,10 @@ fn balanced_routing_combines_cost_latency_and_failures() {
 #[test]
 fn provider_circuit_opens_after_configured_failures_and_resets_on_success() {
     let config = Config {
-        reliability: crate::config::ReliabilityConfig {
+        reliability: ferrogate_config::ReliabilityConfig {
             provider_circuit_breaker_failure_threshold: Some(2),
             provider_circuit_breaker_cooldown_secs: Some(60),
-            ..crate::config::ReliabilityConfig::default()
+            ..ferrogate_config::ReliabilityConfig::default()
         },
         providers: vec![Provider {
             region: None,
@@ -773,7 +773,7 @@ fn provider_health_reports_disabled_provider_without_probe() {
 #[test]
 fn api_key_request_window_rejects_after_configured_limit() {
     let state = AppState::new(Config {
-        api_keys: vec![crate::config::ApiKey {
+        api_keys: vec![ferrogate_config::ApiKey {
             region_allowlist: Vec::new(),
             id: "key_dev".into(),
             name: "Development key".into(),
@@ -851,7 +851,7 @@ fn routing_strategy_test_config(
             canary: None,
             shadow: None,
             fallbacks: vec![
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "backup-a".into(),
                     provider_model: "gpt-4.1-mini".into(),
                     input_price_per_1m: Some(2.0),
@@ -860,7 +860,7 @@ fn routing_strategy_test_config(
                     weight: Some(1),
                     enabled: true,
                 },
-                crate::config::ModelFallback {
+                ferrogate_config::ModelFallback {
                     provider: "backup-b".into(),
                     provider_model: "gpt-4.1".into(),
                     input_price_per_1m: Some(1.0),
@@ -1162,8 +1162,8 @@ effect = "redact"
 /// A `[cloudflare]` block with non-default base URLs, so tests can prove the
 /// account id + base URLs flow through from `[cloudflare]` (not the per-provider
 /// block).
-fn cloudflare_test_config() -> crate::config::CloudflareConfig {
-    let mut cloudflare = crate::config::CloudflareConfig::new("acct-406", "env://CF_API_TOKEN");
+fn cloudflare_test_config() -> ferrogate_config::CloudflareConfig {
+    let mut cloudflare = ferrogate_config::CloudflareConfig::new("acct-406", "env://CF_API_TOKEN");
     cloudflare.ai_gateway_base_url = "https://gateway.example.test".into();
     cloudflare.api_base_url = "https://api.example.test/client/v4".into();
     cloudflare
@@ -1175,10 +1175,10 @@ fn provider_config_populates_cloudflare_ai_gateway_when_provider_and_block_prese
     // provider key.
     std::env::set_var("FERROGATE_TEST_AIG_TOKEN_406", "aig-token-value");
     let mut provider = test_provider();
-    provider.cloudflare_ai_gateway = Some(crate::config::ProviderCloudflareAiGatewayConfig {
+    provider.cloudflare_ai_gateway = Some(ferrogate_config::ProviderCloudflareAiGatewayConfig {
         gateway_id: "prod-gateway".into(),
         aig_token_secret_ref: Some("env://FERROGATE_TEST_AIG_TOKEN_406".into()),
-        mode: crate::config::ProviderCloudflareAiGatewayMode::Unified,
+        mode: ferrogate_config::ProviderCloudflareAiGatewayMode::Unified,
         provider_slug: Some("openai".into()),
     });
     let config = Config {
@@ -1219,10 +1219,10 @@ fn provider_config_populates_cloudflare_ai_gateway_when_provider_and_block_prese
 fn provider_config_defaults_cloudflare_mode_to_compat_and_allows_unauthenticated_gateway() {
     let mut provider = test_provider();
     // Default mode (compat), no token ref -> unauthenticated gateway, no slug.
-    provider.cloudflare_ai_gateway = Some(crate::config::ProviderCloudflareAiGatewayConfig {
+    provider.cloudflare_ai_gateway = Some(ferrogate_config::ProviderCloudflareAiGatewayConfig {
         gateway_id: "open-gateway".into(),
         aig_token_secret_ref: None,
-        mode: crate::config::ProviderCloudflareAiGatewayMode::default(),
+        mode: ferrogate_config::ProviderCloudflareAiGatewayMode::default(),
         provider_slug: None,
     });
     let config = Config {
@@ -1264,10 +1264,10 @@ fn provider_config_leaves_cloudflare_ai_gateway_none_when_cloudflare_block_absen
     // (Validation rejects this combination at load time; provider_config stays
     // fail-safe rather than panicking.)
     let mut provider = test_provider();
-    provider.cloudflare_ai_gateway = Some(crate::config::ProviderCloudflareAiGatewayConfig {
+    provider.cloudflare_ai_gateway = Some(ferrogate_config::ProviderCloudflareAiGatewayConfig {
         gateway_id: "prod-gateway".into(),
         aig_token_secret_ref: None,
-        mode: crate::config::ProviderCloudflareAiGatewayMode::Compat,
+        mode: ferrogate_config::ProviderCloudflareAiGatewayMode::Compat,
         provider_slug: None,
     });
     let state = AppState::new(Config::default());

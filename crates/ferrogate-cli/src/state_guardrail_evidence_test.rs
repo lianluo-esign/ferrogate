@@ -277,7 +277,7 @@ fn investigation_by_agent_run_id_excludes_approvals_bound_to_other_runs() {
 /// back-fill and this investigation returned nothing.
 #[test]
 fn full_investigation_by_agent_run_id_finds_the_approval_directly() {
-    let state = AppState::new(crate::config::Config::default());
+    let state = AppState::new(ferrogate_config::Config::default());
     state
         .create_tool_approval(crate::state::ToolApprovalCreateRequest {
             tool: &crate::state::ToolExecutionRequest {

@@ -9,7 +9,7 @@ use http::{HeaderName, HeaderValue};
 use pingora::tls::load_certs_and_key_files;
 use std::collections::{BTreeMap, HashSet};
 
-use crate::routing::parse_upstream_endpoint;
+use super::routing::parse_upstream_endpoint;
 use ferrogate_providers::RoutingStrategy;
 
 use super::types::{x402_confirmation_window_secs, x402_hold_ttl_floor_secs};
@@ -27,11 +27,11 @@ impl WorkflowToolNames {
 }
 
 impl Config {
-    pub(crate) fn materialize_skill_package_resources(&mut self) {
+    pub fn materialize_skill_package_resources(&mut self) {
         self.materialize_skill_package_resources_with_previous(&[]);
     }
 
-    pub(crate) fn materialize_skill_package_resources_with_previous(
+    pub fn materialize_skill_package_resources_with_previous(
         &mut self,
         previous_packages: &[super::SkillPackage],
     ) {
@@ -86,7 +86,7 @@ impl Config {
         }
     }
 
-    pub(crate) fn validate(&self) -> AnyResult<()> {
+    pub fn validate(&self) -> AnyResult<()> {
         self.listen
             .parse::<std::net::SocketAddr>()
             .with_context(|| format!("field listen: invalid listen address {}", self.listen))?;
@@ -206,8 +206,8 @@ impl Config {
     ///      account id and no `:port` or path suffix, and
     ///   2. `region` is `auto`.
     ///
-    /// Both rules are expressed against `crate::gateway::asset_bucket`'s shared
-    /// [`parse_endpoint`](crate::gateway::asset_bucket::parse_endpoint)
+    /// Both rules are expressed against `super::asset_endpoint`'s shared
+    /// [`parse_endpoint`](super::asset_endpoint::parse_endpoint)
     /// decomposition, which is the same one the runtime signer uses -- issue
     /// #485 was this guard using a *different*, more forgiving decomposition
     /// (port and path suffix silently dropped, host compared case-sensitively),
@@ -219,7 +219,7 @@ impl Config {
     /// existence and the public-serving custom-domain requirement are runtime
     /// concerns, not config-load invariants.
     fn validate_asset_bucket_r2(&self) -> AnyResult<()> {
-        use crate::gateway::asset_bucket::{
+        use super::asset_endpoint::{
             endpoint_targets_r2, parse_endpoint, parse_r2_endpoint, R2_REGION,
         };
 
@@ -357,7 +357,7 @@ impl Config {
     /// The default (no declarations) always passes: every scope then resolves to
     /// the disabled deny-all policy.
     fn validate_x402_spend_policies(&self) -> AnyResult<()> {
-        ferrogate_config::validate_scoped_x402_spend_policies(&self.x402_spend_policies)
+        crate::validate_scoped_x402_spend_policies(&self.x402_spend_policies)
             .map_err(|error| anyhow::anyhow!("field x402_spend_policies: {error}"))
     }
 
@@ -1480,7 +1480,7 @@ impl Config {
 
     fn validate_network_access(&self) -> AnyResult<()> {
         for (index, entry) in self.network_access.ip_allowlist.iter().enumerate() {
-            crate::network_access::IpCidr::parse(entry).map_err(|error| {
+            super::network_access::IpCidr::parse(entry).map_err(|error| {
                 anyhow::anyhow!(
                     "field network_access.ip_allowlist[{index}]: {error} (value: {entry:?})"
                 )
@@ -1898,7 +1898,7 @@ impl Config {
     ///
     /// Returns the ids it warned about so the behaviour is assertable without
     /// scraping a log.
-    pub(crate) fn warn_implicit_platform_operators(&self) -> Vec<&str> {
+    pub fn warn_implicit_platform_operators(&self) -> Vec<&str> {
         if !self.tenancy.implicit_platform_operator {
             return Vec::new();
         }
@@ -2886,7 +2886,7 @@ impl Config {
         Ok(())
     }
 
-    pub(crate) fn plugin_registrations(&self) -> Vec<super::PluginConfig> {
+    pub fn plugin_registrations(&self) -> Vec<super::PluginConfig> {
         let mut plugins = self.plugins.clone();
         plugins.extend(self.extensions.clone());
         plugins

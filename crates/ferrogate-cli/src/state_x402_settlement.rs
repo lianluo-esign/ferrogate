@@ -72,7 +72,7 @@ use ferrogate_storage::{
 };
 
 use super::AppState;
-use crate::config::{x402_hold_ttl_floor_secs, X402ReconcilerConfig};
+use ferrogate_config::{x402_hold_ttl_floor_secs, X402ReconcilerConfig};
 
 /// A durable success/failure classification produced by the injected settlement
 /// verifier/reconciler BEFORE any database mutation (no external work runs

@@ -1281,11 +1281,30 @@ name = "ferrogate-config"
 version = "2026.7.9"
 dependencies = [
  "anyhow",
+ "base64",
+ "ed25519-dalek",
+ "ferrogate-cloudflare",
+ "ferrogate-core",
+ "ferrogate-guardrails",
+ "ferrogate-mcp",
+ "ferrogate-observability",
  "ferrogate-policy",
+ "ferrogate-providers",
+ "ferrogate-runtime",
+ "ferrogate-secrets",
+ "ferrogate-storage",
+ "http",
+ "pingora",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]

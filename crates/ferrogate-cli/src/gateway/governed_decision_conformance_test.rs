@@ -43,7 +43,8 @@ use super::{
     },
     ProxyContext,
 };
-use crate::{config::Config, state::SharedAppState};
+use crate::state::SharedAppState;
+use ferrogate_config::Config;
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()

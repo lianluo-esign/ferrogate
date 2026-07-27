@@ -66,16 +66,16 @@ use super::types::{ApiKey, PolicyRule};
 
 /// Schema version this build knows how to verify. Bump only alongside a
 /// documented change to the envelope/canonical-encoding shape.
-pub(crate) const SIGNED_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const SIGNED_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 /// The signable payload: a serializable clone of `state::SharedFileSnapshot`'s
 /// `version` + `api_keys` + `policies` fields. Kept structurally identical so a
 /// snapshot produced from a `SharedFileSnapshot` can round-trip through here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SignedSnapshotPayload {
-    pub(crate) version: u32,
-    pub(crate) api_keys: Vec<ApiKey>,
-    pub(crate) policies: Vec<PolicyRule>,
+pub struct SignedSnapshotPayload {
+    pub version: u32,
+    pub api_keys: Vec<ApiKey>,
+    pub policies: Vec<PolicyRule>,
 }
 
 /// A signed, self-describing snapshot envelope.
@@ -84,36 +84,36 @@ pub(crate) struct SignedSnapshotPayload {
 /// 64-byte Ed25519 signature over [`canonical_signing_bytes`] of every OTHER
 /// field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SignedSnapshotEnvelope {
-    pub(crate) schema_version: u32,
-    pub(crate) tenant_id: String,
-    pub(crate) deployment_id: String,
-    pub(crate) key_id: String,
+pub struct SignedSnapshotEnvelope {
+    pub schema_version: u32,
+    pub tenant_id: String,
+    pub deployment_id: String,
+    pub key_id: String,
     /// Monotonic revision counter; verification requires it to strictly exceed
     /// the currently active revision to block replay/downgrade.
-    pub(crate) revision: u64,
+    pub revision: u64,
     /// Unix seconds after which the snapshot must be rejected as expired.
-    pub(crate) not_after_unix: u64,
-    pub(crate) payload: SignedSnapshotPayload,
-    pub(crate) signature: String,
+    pub not_after_unix: u64,
+    pub payload: SignedSnapshotPayload,
+    pub signature: String,
 }
 
 /// A snapshot whose signature and metadata have passed every check in
 /// [`verify_snapshot`]. Ownership of this type is proof of verification.
 #[derive(Debug, Clone)]
-pub(crate) struct VerifiedSnapshot {
-    pub(crate) key_id: String,
-    pub(crate) tenant_id: String,
-    pub(crate) deployment_id: String,
-    pub(crate) revision: u64,
-    pub(crate) not_after_unix: u64,
-    pub(crate) payload: SignedSnapshotPayload,
+pub struct VerifiedSnapshot {
+    pub key_id: String,
+    pub tenant_id: String,
+    pub deployment_id: String,
+    pub revision: u64,
+    pub not_after_unix: u64,
+    pub payload: SignedSnapshotPayload,
 }
 
 /// Typed, exhaustive reasons [`verify_snapshot`] can reject an envelope. Every
 /// verification failure maps to one of these; none is ever turned into `Ok`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RejectReason {
+pub enum RejectReason {
     /// The signature field is empty/whitespace.
     MissingSignature,
     /// No trusted verifying key is registered under the envelope's `key_id`
@@ -157,7 +157,7 @@ impl std::error::Error for RejectReason {}
 /// practice) case of a canonical-serialization failure so the producer path
 /// never `unwrap`/`expect`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SignError {
+pub enum SignError {
     Canonicalization,
 }
 
@@ -176,7 +176,7 @@ impl std::error::Error for SignError {}
 /// The envelope's `schema_version` is fixed to [`SIGNED_SNAPSHOT_SCHEMA_VERSION`]
 /// and the signature is computed over [`canonical_signing_bytes`] of all fields
 /// except the signature itself.
-pub(crate) fn sign_snapshot(
+pub fn sign_snapshot(
     payload: SignedSnapshotPayload,
     tenant_id: &str,
     deployment_id: &str,
@@ -226,7 +226,7 @@ pub(crate) fn sign_snapshot(
 ///
 /// The signature covers the identity, schema, revision and expiry fields, so
 /// they are only inspected AFTER the signature has authenticated them.
-pub(crate) fn verify_snapshot(
+pub fn verify_snapshot(
     envelope: &SignedSnapshotEnvelope,
     trusted_keys: &BTreeMap<String, VerifyingKey>,
     expected_tenant: &str,
@@ -309,7 +309,7 @@ const ED25519_KEY_LEN: usize = 32;
 /// config-validation time and at runtime construction (they share
 /// [`build_snapshot_crypto`], so validation and the live gate never diverge).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SnapshotConfigError {
+pub enum SnapshotConfigError {
     /// A base64 key field did not decode.
     InvalidBase64 { field: &'static str },
     /// A key decoded but was not 32 bytes.
@@ -373,7 +373,7 @@ fn decode_ed25519_bytes(
 }
 
 /// Parse a base64 (standard) 32-byte Ed25519 seed into a [`SigningKey`].
-pub(crate) fn parse_signing_key(
+pub fn parse_signing_key(
     b64_seed: &str,
     field: &'static str,
 ) -> Result<SigningKey, SnapshotConfigError> {
@@ -383,7 +383,7 @@ pub(crate) fn parse_signing_key(
 }
 
 /// Parse a base64 (standard) 32-byte Ed25519 public key into a [`VerifyingKey`].
-pub(crate) fn parse_verifying_key(
+pub fn parse_verifying_key(
     b64_public: &str,
     field: &'static str,
 ) -> Result<VerifyingKey, SnapshotConfigError> {
@@ -396,7 +396,7 @@ pub(crate) fn parse_verifying_key(
 }
 
 /// Producer-side signing material for file-backed control-plane snapshots (#206).
-pub(crate) struct SnapshotSigner {
+pub struct SnapshotSigner {
     signing_key: SigningKey,
     key_id: String,
     tenant_id: String,
@@ -419,7 +419,7 @@ impl fmt::Debug for SnapshotSigner {
 
 impl SnapshotSigner {
     /// Sign `payload` for `revision`, stamping expiry `now_unix + max_age_secs`.
-    pub(crate) fn sign(
+    pub fn sign(
         &self,
         payload: SignedSnapshotPayload,
         revision: u64,
@@ -439,7 +439,7 @@ impl SnapshotSigner {
 }
 
 /// Consumer-side verification material for file-backed control-plane snapshots.
-pub(crate) struct SnapshotVerifier {
+pub struct SnapshotVerifier {
     trusted_keys: BTreeMap<String, VerifyingKey>,
     expected_tenant: String,
     expected_deployment: String,
@@ -461,7 +461,7 @@ impl fmt::Debug for SnapshotVerifier {
 impl SnapshotVerifier {
     /// Verify `envelope` against the configured trust map/identity, requiring
     /// `revision > active_revision` and an unexpired `not_after_unix`.
-    pub(crate) fn verify(
+    pub fn verify(
         &self,
         envelope: &SignedSnapshotEnvelope,
         active_revision: u64,
@@ -483,9 +483,9 @@ impl SnapshotVerifier {
 /// `Some` when this node must verify snapshots before activating them. Either,
 /// both, or neither may be enabled.
 #[derive(Debug)]
-pub(crate) struct SnapshotCrypto {
-    pub(crate) signer: Option<SnapshotSigner>,
-    pub(crate) verifier: Option<SnapshotVerifier>,
+pub struct SnapshotCrypto {
+    pub signer: Option<SnapshotSigner>,
+    pub verifier: Option<SnapshotVerifier>,
 }
 
 impl SnapshotCrypto {
@@ -495,7 +495,7 @@ impl SnapshotCrypto {
     /// built from the same `cluster.snapshot_tenant_id`/`_deployment_id`
     /// fields), so either side is authoritative. Used as the durable
     /// replay-floor key (#206).
-    pub(crate) fn identity(&self) -> Option<(&str, &str)> {
+    pub fn identity(&self) -> Option<(&str, &str)> {
         if let Some(verifier) = &self.verifier {
             return Some((
                 verifier.expected_tenant.as_str(),
@@ -513,7 +513,7 @@ impl SnapshotCrypto {
 /// (result discarded) and at runtime construction, so a config that validates
 /// is guaranteed to build. When neither signing nor verification is configured,
 /// returns a crypto with both fields `None` (legacy unsigned behavior).
-pub(crate) fn build_snapshot_crypto(
+pub fn build_snapshot_crypto(
     cluster: &super::types::ClusterConfig,
 ) -> Result<SnapshotCrypto, SnapshotConfigError> {
     let signing_enabled = cluster
@@ -691,7 +691,7 @@ fn write_canonical(value: &serde_json::Value, out: &mut Vec<u8>) -> Result<(), R
 
 /// Outcome of feeding an envelope to a [`SignedSnapshotStore`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SnapshotIngestOutcome {
+pub enum SnapshotIngestOutcome {
     /// The envelope verified and became the new last-known-good at `revision`.
     Activated { revision: u64 },
     /// The envelope failed verification; the prior last-known-good is retained
@@ -704,7 +704,7 @@ pub(crate) enum SnapshotIngestOutcome {
 /// snapshot and the current clock (issue #206 acceptance: continue on the last
 /// valid snapshot until expiry, then fail closed).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OfflineStatus {
+pub enum OfflineStatus {
     /// No snapshot has ever been accepted -- the data plane has no policy to
     /// serve and must fail closed for security-critical controls.
     NoSnapshot,
@@ -731,7 +731,7 @@ pub(crate) enum OfflineStatus {
 ///
 /// This is the pure decision core; the outbound-only sync transport that feeds
 /// it envelopes and the activation wiring are separate (network/infra) steps.
-pub(crate) struct SignedSnapshotStore {
+pub struct SignedSnapshotStore {
     trusted_keys: BTreeMap<String, VerifyingKey>,
     expected_tenant: String,
     expected_deployment: String,
@@ -741,7 +741,7 @@ pub(crate) struct SignedSnapshotStore {
 impl SignedSnapshotStore {
     /// A store trusting `trusted_keys`, bound to a single tenant/deployment
     /// identity, with no snapshot yet (so it fails closed until one arrives).
-    pub(crate) fn new(
+    pub fn new(
         trusted_keys: BTreeMap<String, VerifyingKey>,
         expected_tenant: impl Into<String>,
         expected_deployment: impl Into<String>,
@@ -756,7 +756,7 @@ impl SignedSnapshotStore {
 
     /// The currently-active revision (0 when no snapshot has been accepted),
     /// used as the replay/downgrade floor for the next envelope.
-    pub(crate) fn active_revision(&self) -> u64 {
+    pub fn active_revision(&self) -> u64 {
         self.last_known_good
             .as_ref()
             .map(|snapshot| snapshot.revision)
@@ -766,7 +766,7 @@ impl SignedSnapshotStore {
     /// Verify `envelope` against the current active revision and, only if it
     /// passes every check, adopt it as the new last-known-good. A rejected
     /// envelope leaves the prior last-known-good untouched.
-    pub(crate) fn ingest(
+    pub fn ingest(
         &mut self,
         envelope: &SignedSnapshotEnvelope,
         now_unix: u64,
@@ -789,7 +789,7 @@ impl SignedSnapshotStore {
     }
 
     /// The offline serving status at `now_unix`.
-    pub(crate) fn status(&self, now_unix: u64) -> OfflineStatus {
+    pub fn status(&self, now_unix: u64) -> OfflineStatus {
         match &self.last_known_good {
             None => OfflineStatus::NoSnapshot,
             Some(snapshot) if now_unix <= snapshot.not_after_unix => OfflineStatus::Active {
@@ -808,7 +808,7 @@ impl SignedSnapshotStore {
     /// payload while it is unexpired, or `None` once expired (fail closed) or if
     /// none has ever been accepted. Security-critical controls must treat `None`
     /// as deny.
-    pub(crate) fn active_payload(&self, now_unix: u64) -> Option<&SignedSnapshotPayload> {
+    pub fn active_payload(&self, now_unix: u64) -> Option<&SignedSnapshotPayload> {
         match &self.last_known_good {
             Some(snapshot) if now_unix <= snapshot.not_after_unix => Some(&snapshot.payload),
             _ => None,

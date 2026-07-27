@@ -17,7 +17,7 @@
 //! dispatch, and a peer replica whose rebuilt queue holds its own copy.
 
 use super::*;
-use crate::config::Config;
+use ferrogate_config::Config;
 use ferrogate_core::TenantContext;
 
 fn tenant(organization_id: &str) -> TenantContext {

@@ -1118,7 +1118,7 @@ fn presign_outcomes_land_in_separate_operator_counters() {
     // `staging_missing` class and assert nothing bleeds across.
     use crate::state::{AppState, AssetPresignOutcome};
 
-    let state = AppState::new(crate::config::Config::default());
+    let state = AppState::new(ferrogate_config::Config::default());
     state.record_asset_presign_outcome(AssetPresignOutcome::IntentIssued);
     state.record_asset_presign_outcome(AssetPresignOutcome::IntentIssued);
     state.record_asset_presign_outcome(AssetPresignOutcome::IntentRejected);

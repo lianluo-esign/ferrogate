@@ -1488,10 +1488,8 @@ fn sanitized_request_log_json(log: &StoredRequestLog) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::Config,
-        state::{AppState, BillingEventDraft},
-    };
+    use crate::state::{AppState, BillingEventDraft};
+    use ferrogate_config::Config;
     use ferrogate_core::TenantContext;
     use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
     use std::{

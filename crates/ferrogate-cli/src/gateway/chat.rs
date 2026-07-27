@@ -18,9 +18,6 @@ use tracing::{info, warn};
 
 use crate::{
     auth::{authenticate, authorize_external_rbac, AuthContext},
-    config::{
-        AgentWorkflowNodeKind, AgentWorkflowPolicy, GuardrailEffect, GuardrailStage, Provider,
-    },
     responses::{
         streaming_body_channel, write_json_error, write_json_error_and_close, write_json_response,
         write_raw_response, write_streaming_bytes_response, write_streaming_response,
@@ -32,6 +29,9 @@ use crate::{
     },
 };
 use ferrogate_billing::{ProviderAttempt, TokenUsage as BillingTokenUsage};
+use ferrogate_config::{
+    AgentWorkflowNodeKind, AgentWorkflowPolicy, GuardrailEffect, GuardrailStage, Provider,
+};
 use ferrogate_core::{RequestContext, TenantContext};
 use ferrogate_guardrails::{
     normalize_request as normalize_guardrail_request,
@@ -3747,7 +3747,7 @@ mod provider_attempt_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ApiKey, Config, GatewayConfigProfile, Model, Provider};
+    use ferrogate_config::{ApiKey, Config, GatewayConfigProfile, Model, Provider};
     use std::time::Duration;
 
     // Round-12 audit regression: a streaming /v1/responses request to a

@@ -16,8 +16,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{config::ApiKey, state::AppState};
+use crate::state::AppState;
 use ferrogate_auth::ApiKeyAuthenticator;
+use ferrogate_config::ApiKey;
 use ferrogate_core::TenantContext;
 
 /// Explicit "all scopes" marker. An operator-authored static config key (or
@@ -653,7 +654,7 @@ async fn authenticate_with_admission(
     }
 
     for configured_key in &state.config.api_keys {
-        if configured_key.matches_presented_key(&provided_key) {
+        if api_key_matches_presented_key(configured_key, &provided_key) {
             if !configured_key.enabled {
                 return Err(AuthError {
                     status: StatusCode::FORBIDDEN,
@@ -661,7 +662,7 @@ async fn authenticate_with_admission(
                     message: "API key is disabled".into(),
                 });
             }
-            if configured_key.is_expired(now_unix_seconds()) {
+            if api_key_is_expired(configured_key, now_unix_seconds()) {
                 return Err(AuthError {
                     status: StatusCode::FORBIDDEN,
                     code: "api_key_expired",
@@ -746,7 +747,7 @@ async fn authenticate_with_admission(
 ///   those (defense in depth, not a second implementation that could
 ///   drift).
 pub(crate) fn authenticate_admin_gate(
-    auth_service: &crate::config::AuthServiceConfig,
+    auth_service: &ferrogate_config::AuthServiceConfig,
     api_keys: &[ApiKey],
     durable_authenticator: Option<&dyn ApiKeyAuthenticator>,
     presented_key: Option<&str>,
@@ -795,7 +796,7 @@ pub(crate) fn authenticate_admin_gate(
     }
 
     for configured_key in api_keys {
-        if configured_key.matches_presented_key(provided_key) {
+        if api_key_matches_presented_key(configured_key, provided_key) {
             if !configured_key.enabled {
                 return Err(AuthError {
                     status: StatusCode::FORBIDDEN,
@@ -803,7 +804,7 @@ pub(crate) fn authenticate_admin_gate(
                     message: "API key is disabled".into(),
                 });
             }
-            if configured_key.is_expired(now_unix_seconds()) {
+            if api_key_is_expired(configured_key, now_unix_seconds()) {
                 return Err(AuthError {
                     status: StatusCode::FORBIDDEN,
                     code: "api_key_expired",
@@ -1099,7 +1100,7 @@ pub(crate) fn authorize_external_rbac(
 }
 
 fn authenticate_external(
-    service: &crate::config::AuthServiceConfig,
+    service: &ferrogate_config::AuthServiceConfig,
     implicit_platform_operator: bool,
     provided_key: &str,
     required_scope: &str,
@@ -1206,7 +1207,7 @@ fn sanitize_auth_error_body(body: &str) -> String {
 }
 
 fn auth_service_post_json<T, R>(
-    service: &crate::config::AuthServiceConfig,
+    service: &ferrogate_config::AuthServiceConfig,
     path: &str,
     payload: &T,
 ) -> std::result::Result<R, AuthServiceClientError>
@@ -1371,31 +1372,34 @@ impl std::fmt::Display for AuthServiceClientError {
     }
 }
 
-impl ApiKey {
-    fn matches_presented_key(&self, presented_key: &str) -> bool {
-        if let Some(secret) = self.secret_value() {
-            if constant_time_eq(presented_key.as_bytes(), secret.as_bytes()) {
-                return true;
-            }
+// These three were an inherent `impl ApiKey` until #553 stage 3a moved
+// `ApiKey` itself into `ferrogate-config`. An inherent impl must live in the
+// crate that defines the type, and the credential comparison below is this
+// crate's Blake2b hasher, not config vocabulary -- so they became free
+// functions here rather than travelling with the type. Bodies are unchanged.
+pub(crate) fn api_key_matches_presented_key(key: &ApiKey, presented_key: &str) -> bool {
+    if let Some(secret) = api_key_secret_value(key) {
+        if constant_time_eq(presented_key.as_bytes(), secret.as_bytes()) {
+            return true;
         }
-        self.key_hash
-            .as_deref()
-            .is_some_and(|hash| verify_api_key_secret(presented_key, hash))
     }
+    key.key_hash
+        .as_deref()
+        .is_some_and(|hash| verify_api_key_secret(presented_key, hash))
+}
 
-    fn secret_value(&self) -> Option<String> {
-        if let Some(env_name) = &self.key_env {
-            if let Ok(value) = std::env::var(env_name) {
-                return Some(value);
-            }
+fn api_key_secret_value(key: &ApiKey) -> Option<String> {
+    if let Some(env_name) = &key.key_env {
+        if let Ok(value) = std::env::var(env_name) {
+            return Some(value);
         }
-        self.key.clone()
     }
+    key.key.clone()
+}
 
-    fn is_expired(&self, now_unix_seconds: u64) -> bool {
-        self.expires_at_unix
-            .is_some_and(|expires_at| expires_at <= now_unix_seconds)
-    }
+fn api_key_is_expired(key: &ApiKey, now_unix_seconds: u64) -> bool {
+    key.expires_at_unix
+        .is_some_and(|expires_at| expires_at <= now_unix_seconds)
 }
 
 pub(crate) fn hash_api_key_secret(secret: &str) -> String {

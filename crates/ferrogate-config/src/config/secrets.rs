@@ -6,7 +6,7 @@
 
 use anyhow::{bail, Result as AnyResult};
 
-pub(crate) fn resolve_env_placeholders(value: &str) -> AnyResult<String> {
+pub fn resolve_env_placeholders(value: &str) -> AnyResult<String> {
     let mut resolved = String::new();
     let mut rest = value;
 

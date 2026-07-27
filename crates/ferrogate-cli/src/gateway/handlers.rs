@@ -9,9 +9,9 @@ use pingora::{proxy::Session, Result as PingoraResult};
 
 use crate::{
     responses::{cors_allowed_origin, write_cors_preflight_response, write_json_error},
-    routing::{build_target_uri, normalize_host},
     state::NetworkAccessDecision,
 };
+use ferrogate_config::{build_target_uri, normalize_host};
 
 use super::route_groups::{RequestParts, RouteGroup};
 use super::{FerroGateway, ProxyContext};

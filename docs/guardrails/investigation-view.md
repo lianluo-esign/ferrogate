@@ -119,6 +119,6 @@ limitation). Until strict validation lands, after editing a guardrail:
 
 1. Re-read the field names against
    [`config/ferrogate.example.toml`](../../config/ferrogate.example.toml) or the
-   `GuardrailRule` struct in `crates/ferrogate-cli/src/config/types.rs`.
+   `GuardrailRule` struct in `crates/ferrogate-config/src/config/types.rs`.
 2. Confirm the rule actually fired by sending a probe request that should trip
    it and checking `guardrail_evaluations[]` in the investigation view.

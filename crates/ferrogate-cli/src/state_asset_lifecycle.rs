@@ -129,7 +129,7 @@ impl AppState {
     /// delete the pruned versions' rows + bucket blobs.
     async fn apply_asset_retention(
         &self,
-        config: &crate::config::AssetLifecycleConfig,
+        config: &ferrogate_config::AssetLifecycleConfig,
         report: &mut AssetLifecycleSweepReport,
     ) {
         let assets = match self.repositories.list_all_assets().await {
@@ -281,7 +281,7 @@ impl AppState {
     /// blobs to collect.
     async fn run_asset_blob_gc(
         &self,
-        config: &crate::config::AssetLifecycleConfig,
+        config: &ferrogate_config::AssetLifecycleConfig,
         report: &mut AssetLifecycleSweepReport,
     ) {
         let Some(bucket) = self.asset_bucket_client() else {
@@ -356,7 +356,7 @@ impl AppState {
     /// purge itself. `dry_run` reports what WOULD be pruned without deleting.
     async fn apply_compliance_retention(
         &self,
-        config: &crate::config::AssetLifecycleConfig,
+        config: &ferrogate_config::AssetLifecycleConfig,
         report: &mut AssetLifecycleSweepReport,
     ) {
         self.apply_request_log_retention(config, report).await;
@@ -371,7 +371,7 @@ impl AppState {
     /// rule selects it.
     async fn apply_request_log_retention(
         &self,
-        config: &crate::config::AssetLifecycleConfig,
+        config: &ferrogate_config::AssetLifecycleConfig,
         report: &mut AssetLifecycleSweepReport,
     ) {
         let logs = self.repositories.request_logs().await;
@@ -453,7 +453,7 @@ impl AppState {
     /// audit_events' (typically longer) legal floor and no response-body scope.
     async fn apply_audit_event_retention(
         &self,
-        config: &crate::config::AssetLifecycleConfig,
+        config: &ferrogate_config::AssetLifecycleConfig,
         report: &mut AssetLifecycleSweepReport,
     ) {
         let events = self.repositories.audit_events().await;
@@ -502,7 +502,7 @@ impl AppState {
     /// batch-delete (capped per tick) and audit the purge as its own evidence.
     async fn commit_request_log_prune(
         &self,
-        config: &crate::config::AssetLifecycleConfig,
+        config: &ferrogate_config::AssetLifecycleConfig,
         report: &mut AssetLifecycleSweepReport,
         mut ids: Vec<String>,
     ) {
@@ -542,7 +542,7 @@ impl AppState {
     /// Apply a planned `audit_events` prune (mirrors the request_logs commit).
     async fn commit_audit_event_prune(
         &self,
-        config: &crate::config::AssetLifecycleConfig,
+        config: &ferrogate_config::AssetLifecycleConfig,
         report: &mut AssetLifecycleSweepReport,
         mut ids: Vec<String>,
     ) {
@@ -690,7 +690,7 @@ fn resolve_retention_policy(
     policies: &[ferrogate_storage::StoredRetentionPolicy],
     asset_type: &str,
     name: &str,
-    config: &crate::config::AssetLifecycleConfig,
+    config: &ferrogate_config::AssetLifecycleConfig,
 ) -> RetentionPolicy {
     let exact_scope = format!("{asset_type}/{name}");
     if let Some(policy) = policies.iter().find(|policy| policy.scope == exact_scope) {

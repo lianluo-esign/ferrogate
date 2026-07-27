@@ -16,7 +16,7 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 
 fn match_guardrail_for_test<'a>(
     state: &AppState,
-    stage: crate::config::GuardrailStage,
+    stage: ferrogate_config::GuardrailStage,
     tenant: &'a ferrogate_core::TenantContext,
     model: Option<&'a str>,
     provider: Option<&'a str>,
@@ -27,7 +27,7 @@ fn match_guardrail_for_test<'a>(
 
 fn match_guardrail_for_test_with_streaming<'a>(
     state: &AppState,
-    stage: crate::config::GuardrailStage,
+    stage: ferrogate_config::GuardrailStage,
     tenant: &'a ferrogate_core::TenantContext,
     model: Option<&'a str>,
     provider: Option<&'a str>,
@@ -35,11 +35,11 @@ fn match_guardrail_for_test_with_streaming<'a>(
     streaming: bool,
 ) -> Option<GuardrailMatch> {
     let detector_stage = match stage {
-        crate::config::GuardrailStage::Request => DetectorStage::Request,
-        crate::config::GuardrailStage::Response => DetectorStage::Response,
+        ferrogate_config::GuardrailStage::Request => DetectorStage::Request,
+        ferrogate_config::GuardrailStage::Response => DetectorStage::Response,
     };
     let envelope = match stage {
-        crate::config::GuardrailStage::Request => {
+        ferrogate_config::GuardrailStage::Request => {
             ferrogate_guardrails::GuardrailEnvelope::from_text(
                 ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
                 detector_stage,
@@ -48,7 +48,7 @@ fn match_guardrail_for_test_with_streaming<'a>(
                 body,
             )
         }
-        crate::config::GuardrailStage::Response => {
+        ferrogate_config::GuardrailStage::Response => {
             let response = serde_json::json!({
                 "choices": [{"message": {"role": "assistant", "content": body}}]
             });
@@ -186,7 +186,7 @@ fn guardrail_evidence_records_sanitized_overall_and_per_check_decisions() {
     let state = shared.current();
     assert!(match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &tenant,
         Some("fast-chat"),
         Some("openai"),
@@ -370,7 +370,7 @@ fn shadow_revision_records_evidence_then_promotes_by_scope_and_rolls_back() {
     )
     .expect("the enforced revision must block");
     assert_eq!(blocked.policy_revision, 2);
-    assert_eq!(blocked.effect, crate::config::GuardrailEffect::Deny);
+    assert_eq!(blocked.effect, ferrogate_config::GuardrailEffect::Deny);
 
     // Rollback to the prior (shadow) revision -> enforcement stops again.
     shared
@@ -1035,11 +1035,11 @@ fn matches_request_guardrail_by_tenant_model_provider_and_keyword() {
             enabled: true,
             cache_enabled: None,
         }],
-        guardrails: vec![crate::config::GuardrailRule {
+        guardrails: vec![ferrogate_config::GuardrailRule {
             id: "block-secret".into(),
             name: "Block secret".into(),
             enabled: true,
-            stage: crate::config::GuardrailStage::Request,
+            stage: ferrogate_config::GuardrailStage::Request,
             sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec!["org_demo".into()],
             project_ids: vec!["project_demo".into()],
@@ -1057,7 +1057,7 @@ fn matches_request_guardrail_by_tenant_model_provider_and_keyword() {
             provider_fingerprint_secret_ref: None,
             provider_timeout_ms: 2_000,
             provider_runtime: Default::default(),
-            effect: crate::config::GuardrailEffect::Deny,
+            effect: ferrogate_config::GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),
         }],
@@ -1073,7 +1073,7 @@ fn matches_request_guardrail_by_tenant_model_provider_and_keyword() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &tenant,
         Some("fast-chat"),
         Some("openai"),
@@ -1083,7 +1083,7 @@ fn matches_request_guardrail_by_tenant_model_provider_and_keyword() {
 
     assert_eq!(matched.rule_id, "block-secret");
     assert_eq!(matched.rule_name, "Block secret");
-    assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+    assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Deny);
     assert_eq!(matched.code, "guardrail_blocked");
     assert_eq!(matched.message, "blocked by guardrail");
 }
@@ -1125,11 +1125,11 @@ fn ignores_disabled_guardrails() {
             enabled: true,
             cache_enabled: None,
         }],
-        guardrails: vec![crate::config::GuardrailRule {
+        guardrails: vec![ferrogate_config::GuardrailRule {
             id: "block-secret".into(),
             name: "Block secret".into(),
             enabled: false,
-            stage: crate::config::GuardrailStage::Request,
+            stage: ferrogate_config::GuardrailStage::Request,
             sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
@@ -1147,7 +1147,7 @@ fn ignores_disabled_guardrails() {
             provider_fingerprint_secret_ref: None,
             provider_timeout_ms: 2_000,
             provider_runtime: Default::default(),
-            effect: crate::config::GuardrailEffect::Deny,
+            effect: ferrogate_config::GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),
         }],
@@ -1157,7 +1157,7 @@ fn ignores_disabled_guardrails() {
 
     assert!(match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1203,11 +1203,11 @@ fn matches_response_guardrail_with_redact_effect() {
             enabled: true,
             cache_enabled: None,
         }],
-        guardrails: vec![crate::config::GuardrailRule {
+        guardrails: vec![ferrogate_config::GuardrailRule {
             id: "redact-secret".into(),
             name: "Redact secret".into(),
             enabled: true,
-            stage: crate::config::GuardrailStage::Response,
+            stage: ferrogate_config::GuardrailStage::Response,
             sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
@@ -1225,7 +1225,7 @@ fn matches_response_guardrail_with_redact_effect() {
             provider_fingerprint_secret_ref: None,
             provider_timeout_ms: 2_000,
             provider_runtime: Default::default(),
-            effect: crate::config::GuardrailEffect::Redact,
+            effect: ferrogate_config::GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
         }],
@@ -1235,7 +1235,7 @@ fn matches_response_guardrail_with_redact_effect() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Response,
+        ferrogate_config::GuardrailStage::Response,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1244,7 +1244,7 @@ fn matches_response_guardrail_with_redact_effect() {
     .expect("response guardrail should match");
 
     assert_eq!(matched.rule_id, "redact-secret");
-    assert_eq!(matched.effect, crate::config::GuardrailEffect::Redact);
+    assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Redact);
     state.record_guardrail_match(&matched);
     let snapshot = state.prometheus_metrics_snapshot();
     assert_eq!(snapshot.guardrail_match_total, 1);
@@ -1257,12 +1257,12 @@ fn matches_response_guardrail_with_redact_effect() {
 // mutable match makes the patch set non-empty. Otherwise redaction runs on the
 // mutable segment only while the immutable secret is returned verbatim and the
 // audit records a successful redaction.
-fn redact_secret_response_rule() -> crate::config::GuardrailRule {
-    crate::config::GuardrailRule {
+fn redact_secret_response_rule() -> ferrogate_config::GuardrailRule {
+    ferrogate_config::GuardrailRule {
         id: "redact-secret".into(),
         name: "Redact secret".into(),
         enabled: true,
-        stage: crate::config::GuardrailStage::Response,
+        stage: ferrogate_config::GuardrailStage::Response,
         sources: ferrogate_guardrails::all_content_sources(),
         organization_ids: vec![],
         project_ids: vec![],
@@ -1280,7 +1280,7 @@ fn redact_secret_response_rule() -> crate::config::GuardrailRule {
         provider_fingerprint_secret_ref: None,
         provider_timeout_ms: 2_000,
         provider_runtime: Default::default(),
-        effect: crate::config::GuardrailEffect::Redact,
+        effect: ferrogate_config::GuardrailEffect::Redact,
         code: "guardrail_redacted".into(),
         message: "redacted by guardrail".into(),
     }
@@ -1294,7 +1294,7 @@ fn match_guardrail_for_response_envelope(
     tokio::runtime::Runtime::new()
         .expect("test runtime")
         .block_on(state.match_guardrail(
-            crate::config::GuardrailStage::Response,
+            ferrogate_config::GuardrailStage::Response,
             GuardrailEvaluationContext {
                 request_id: "test-request",
                 trace_id: Some("test-trace"),
@@ -1351,7 +1351,7 @@ fn response_redact_denies_when_a_finding_lands_in_an_immutable_tool_call_segment
     }));
     let matched =
         match_guardrail_for_response_envelope(&state, &envelope).expect("guardrail should match");
-    assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+    assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Deny);
     assert_eq!(matched.code, "guardrail_invalid_redaction");
     state.record_guardrail_match(&matched);
     let snapshot = state.prometheus_metrics_snapshot();
@@ -1380,17 +1380,17 @@ fn response_redact_still_redacts_when_every_match_is_in_a_mutable_segment() {
     );
     let matched =
         match_guardrail_for_response_envelope(&state, &envelope).expect("guardrail should match");
-    assert_eq!(matched.effect, crate::config::GuardrailEffect::Redact);
+    assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Redact);
     assert!(!matched.content_patches.is_empty());
 }
 
 #[test]
 fn later_block_marks_an_earlier_redaction_as_not_enforced() {
-    let base = crate::config::GuardrailRule {
+    let base = ferrogate_config::GuardrailRule {
         id: "redact-secret".into(),
         name: "Redact secret".into(),
         enabled: true,
-        stage: crate::config::GuardrailStage::Response,
+        stage: ferrogate_config::GuardrailStage::Response,
         sources: ferrogate_guardrails::all_content_sources(),
         organization_ids: vec![],
         project_ids: vec![],
@@ -1408,14 +1408,14 @@ fn later_block_marks_an_earlier_redaction_as_not_enforced() {
         provider_fingerprint_secret_ref: None,
         provider_timeout_ms: 2_000,
         provider_runtime: Default::default(),
-        effect: crate::config::GuardrailEffect::Redact,
+        effect: ferrogate_config::GuardrailEffect::Redact,
         code: "guardrail_redacted".into(),
         message: "redacted by guardrail".into(),
     };
     let mut block = base.clone();
     block.id = "block-secret".into();
     block.name = "Block secret".into();
-    block.effect = crate::config::GuardrailEffect::Deny;
+    block.effect = ferrogate_config::GuardrailEffect::Deny;
     block.code = "guardrail_blocked".into();
     let state = AppState::new(Config {
         providers: vec![test_provider()],
@@ -1426,7 +1426,7 @@ fn later_block_marks_an_earlier_redaction_as_not_enforced() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Response,
+        ferrogate_config::GuardrailStage::Response,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1507,12 +1507,12 @@ fn spawn_guardrail_provider_mock(
     (endpoint, captured)
 }
 
-fn custom_http_guardrail_rule(provider_endpoint: String) -> crate::config::GuardrailRule {
-    crate::config::GuardrailRule {
+fn custom_http_guardrail_rule(provider_endpoint: String) -> ferrogate_config::GuardrailRule {
+    ferrogate_config::GuardrailRule {
         id: "pii-detector".into(),
         name: "External PII detector".into(),
         enabled: true,
-        stage: crate::config::GuardrailStage::Request,
+        stage: ferrogate_config::GuardrailStage::Request,
         sources: ferrogate_guardrails::all_content_sources(),
         organization_ids: vec![],
         project_ids: vec![],
@@ -1529,11 +1529,11 @@ fn custom_http_guardrail_rule(provider_endpoint: String) -> crate::config::Guard
         provider_entities: None,
         provider_fingerprint_secret_ref: None,
         provider_timeout_ms: 2_000,
-        provider_runtime: crate::config::GuardrailProviderRuntimeConfig {
+        provider_runtime: ferrogate_config::GuardrailProviderRuntimeConfig {
             provider_allow_private_network: true,
             ..Default::default()
         },
-        effect: crate::config::GuardrailEffect::Deny,
+        effect: ferrogate_config::GuardrailEffect::Deny,
         code: "guardrail_pii_detected".into(),
         message: "blocked by external PII detector".into(),
     }
@@ -1559,7 +1559,7 @@ fn matches_guardrail_via_custom_http_provider_and_sends_request_context() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &tenant,
         Some("fast-chat"),
         Some("openai"),
@@ -1568,7 +1568,7 @@ fn matches_guardrail_via_custom_http_provider_and_sends_request_context() {
     .expect("custom_http provider should report a match");
 
     assert_eq!(matched.rule_id, "pii-detector");
-    assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+    assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Deny);
     assert_eq!(
         matched.redact_text("my email is john@example.com"),
         "[REDACTED]"
@@ -1596,7 +1596,7 @@ fn custom_http_provider_no_match_returns_none() {
 
     assert!(match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1614,7 +1614,7 @@ fn custom_http_provider_failure_fails_closed_regardless_of_configured_effect() {
     drop(listener);
 
     let mut rule = custom_http_guardrail_rule(endpoint);
-    rule.effect = crate::config::GuardrailEffect::Redact;
+    rule.effect = ferrogate_config::GuardrailEffect::Redact;
     let config = Config {
         providers: vec![test_provider()],
         models: vec![test_model()],
@@ -1625,7 +1625,7 @@ fn custom_http_provider_failure_fails_closed_regardless_of_configured_effect() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1633,7 +1633,7 @@ fn custom_http_provider_failure_fails_closed_regardless_of_configured_effect() {
     )
     .expect("unreachable provider must fail closed with a match");
 
-    assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+    assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Deny);
     assert_eq!(matched.code, "guardrail_provider_unavailable");
     assert!(matched.message.contains("External PII detector"));
     assert_eq!(
@@ -1683,7 +1683,7 @@ fn custom_http_provider_record_mode_audits_and_allows_on_error() {
 
     assert!(match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1731,7 +1731,7 @@ fn custom_http_provider_fallback_mode_runs_local_detector_on_error() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1769,8 +1769,8 @@ fn custom_http_provider_applies_typed_redaction_patches() {
         .to_string(),
     );
     let mut rule = custom_http_guardrail_rule(endpoint);
-    rule.stage = crate::config::GuardrailStage::Response;
-    rule.effect = crate::config::GuardrailEffect::Redact;
+    rule.stage = ferrogate_config::GuardrailStage::Response;
+    rule.effect = ferrogate_config::GuardrailEffect::Redact;
     let state = AppState::new(Config {
         providers: vec![test_provider()],
         models: vec![test_model()],
@@ -1780,7 +1780,7 @@ fn custom_http_provider_applies_typed_redaction_patches() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Response,
+        ferrogate_config::GuardrailStage::Response,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1838,11 +1838,11 @@ fn matches_regex_and_redacts_with_compiled_pattern() {
             enabled: true,
             cache_enabled: None,
         }],
-        guardrails: vec![crate::config::GuardrailRule {
+        guardrails: vec![ferrogate_config::GuardrailRule {
             id: "redact-token".into(),
             name: "Redact token".into(),
             enabled: true,
-            stage: crate::config::GuardrailStage::Response,
+            stage: ferrogate_config::GuardrailStage::Response,
             sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
@@ -1860,7 +1860,7 @@ fn matches_regex_and_redacts_with_compiled_pattern() {
             provider_fingerprint_secret_ref: None,
             provider_timeout_ms: 2_000,
             provider_runtime: Default::default(),
-            effect: crate::config::GuardrailEffect::Redact,
+            effect: ferrogate_config::GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
         }],
@@ -1870,7 +1870,7 @@ fn matches_regex_and_redacts_with_compiled_pattern() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Response,
+        ferrogate_config::GuardrailStage::Response,
         &ferrogate_core::TenantContext::default(),
         Some("fast-chat"),
         Some("openai"),
@@ -1899,11 +1899,11 @@ fn matches_regex_and_redacts_with_compiled_pattern() {
 #[test]
 fn matches_request_max_input_bytes() {
     let config = Config {
-        guardrails: vec![crate::config::GuardrailRule {
+        guardrails: vec![ferrogate_config::GuardrailRule {
             id: "max-input".into(),
             name: "Max input".into(),
             enabled: true,
-            stage: crate::config::GuardrailStage::Request,
+            stage: ferrogate_config::GuardrailStage::Request,
             sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
@@ -1921,7 +1921,7 @@ fn matches_request_max_input_bytes() {
             provider_fingerprint_secret_ref: None,
             provider_timeout_ms: 2_000,
             provider_runtime: Default::default(),
-            effect: crate::config::GuardrailEffect::Deny,
+            effect: ferrogate_config::GuardrailEffect::Deny,
             code: "guardrail_input_too_large".into(),
             message: "input is too large".into(),
         }],
@@ -1931,7 +1931,7 @@ fn matches_request_max_input_bytes() {
 
     let matched = match_guardrail_for_test(
         &state,
-        crate::config::GuardrailStage::Request,
+        ferrogate_config::GuardrailStage::Request,
         &ferrogate_core::TenantContext::default(),
         None,
         None,
@@ -1940,7 +1940,7 @@ fn matches_request_max_input_bytes() {
     .expect("length guardrail should match");
 
     assert_eq!(matched.rule_id, "max-input");
-    assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+    assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Deny);
 }
 
 #[test]
@@ -2155,7 +2155,7 @@ fn managed_action_context_selects_managed_action_scoped_policy() {
 
     let eval = |managed: Option<ferrogate_guardrails::ManagedActionContext<'_>>| {
         runtime.block_on(state.match_guardrail(
-            crate::config::GuardrailStage::Request,
+            ferrogate_config::GuardrailStage::Request,
             GuardrailEvaluationContext {
                 request_id: "managed-req",
                 trace_id: None,
@@ -2304,7 +2304,7 @@ fn activating_guardrail_policy_bumps_shared_control_plane_revision_for_peers() {
     );
 }
 
-fn signed_snapshot_test_api_key(id: &str) -> crate::config::ApiKey {
+fn signed_snapshot_test_api_key(id: &str) -> ferrogate_config::ApiKey {
     serde_json::from_value(serde_json::json!({
         "id": id,
         "name": id,
@@ -2334,7 +2334,7 @@ fn signed_shared_snapshot_verifies_activates_and_rejects_forgery() {
     let path_str = state_path.to_string_lossy().into_owned();
 
     let trusted = || {
-        vec![crate::config::ClusterSnapshotKey {
+        vec![ferrogate_config::ClusterSnapshotKey {
             key_id: "k1".to_string(),
             public_key: public_b64.clone(),
         }]
@@ -2457,7 +2457,7 @@ fn signed_snapshot_replay_floor_advances_on_local_publish() {
     cfg.cluster.file_state_path = Some(path_str.clone());
     cfg.cluster.snapshot_signing_key = Some(seed_b64);
     cfg.cluster.snapshot_signing_key_id = Some("k1".to_string());
-    cfg.cluster.snapshot_trusted_keys = vec![crate::config::ClusterSnapshotKey {
+    cfg.cluster.snapshot_trusted_keys = vec![ferrogate_config::ClusterSnapshotKey {
         key_id: "k1".to_string(),
         public_key: public_b64,
     }];
@@ -2531,7 +2531,7 @@ fn signed_snapshot_replay_floor_persists_across_restart() {
         cfg.cluster.file_state_path = Some(path_str.clone());
         cfg.cluster.snapshot_signing_key = Some(seed_b64.clone());
         cfg.cluster.snapshot_signing_key_id = Some("k1".to_string());
-        cfg.cluster.snapshot_trusted_keys = vec![crate::config::ClusterSnapshotKey {
+        cfg.cluster.snapshot_trusted_keys = vec![ferrogate_config::ClusterSnapshotKey {
             key_id: "k1".to_string(),
             public_key: public_b64.clone(),
         }];

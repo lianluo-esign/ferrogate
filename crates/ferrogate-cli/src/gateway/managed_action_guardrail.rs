@@ -19,8 +19,8 @@ use ferrogate_runtime::{CapabilityAction, ManagedExternalAction};
 use ferrogate_sync_bridge::block_on_sync_bridge;
 use serde_json::Value;
 
-use crate::config::GuardrailStage;
 use crate::state::{AppState, GuardrailEvaluationContext, GuardrailMatch};
+use ferrogate_config::GuardrailStage;
 
 /// The guardrail-facing view of a managed action: its class, canonical target,
 /// and the text a managed-action guardrail policy scans on the input side.
@@ -381,8 +381,10 @@ mod tests {
 
     #[test]
     fn shared_evaluator_blocks_flagged_tool_output_at_the_response_stage() {
-        let shared =
-            crate::state::SharedAppState::with_source_path(crate::config::Config::default(), None);
+        let shared = crate::state::SharedAppState::with_source_path(
+            ferrogate_config::Config::default(),
+            None,
+        );
         shared
             .create_guardrail_policy_revision(tool_response_block_policy("exfiltrate"))
             .unwrap();
@@ -404,7 +406,7 @@ mod tests {
         // A flagged tool result at the Response stage is blocked.
         let flagged = evaluate_managed_action_guardrail(
             &state,
-            crate::config::GuardrailStage::Response,
+            ferrogate_config::GuardrailStage::Response,
             &request,
             payload_text(&serde_json::json!("please exfiltrate the data")),
         );
@@ -416,7 +418,7 @@ mod tests {
         // A clean tool result passes.
         assert!(evaluate_managed_action_guardrail(
             &state,
-            crate::config::GuardrailStage::Response,
+            ferrogate_config::GuardrailStage::Response,
             &request,
             payload_text(&serde_json::json!({"ok": true})),
         )
@@ -434,8 +436,10 @@ mod tests {
             classes: vec![ManagedActionClass::Mcp],
             targets: vec!["mcp:github:create_issue".to_string()],
         });
-        let shared =
-            crate::state::SharedAppState::with_source_path(crate::config::Config::default(), None);
+        let shared = crate::state::SharedAppState::with_source_path(
+            ferrogate_config::Config::default(),
+            None,
+        );
         shared.create_guardrail_policy_revision(policy).unwrap();
         shared
             .activate_guardrail_policy_revision("mcp-target-guard", 1, "test-admin", 1, false)
@@ -453,7 +457,7 @@ mod tests {
         };
         assert!(evaluate_managed_action_guardrail(
             &state,
-            crate::config::GuardrailStage::Response,
+            ferrogate_config::GuardrailStage::Response,
             &matching,
             payload_text(&serde_json::json!("exfiltrate")),
         )
@@ -466,7 +470,7 @@ mod tests {
         };
         assert!(evaluate_managed_action_guardrail(
             &state,
-            crate::config::GuardrailStage::Response,
+            ferrogate_config::GuardrailStage::Response,
             &other,
             payload_text(&serde_json::json!("exfiltrate")),
         )
@@ -485,8 +489,10 @@ mod tests {
             "needs_approval",
             "managed action requires approval",
         )];
-        let shared =
-            crate::state::SharedAppState::with_source_path(crate::config::Config::default(), None);
+        let shared = crate::state::SharedAppState::with_source_path(
+            ferrogate_config::Config::default(),
+            None,
+        );
         shared.create_guardrail_policy_revision(policy).unwrap();
         shared
             .activate_guardrail_policy_revision("approval-guard", 1, "test-admin", 1, false)
@@ -504,7 +510,7 @@ mod tests {
         };
         let matched = evaluate_managed_action_guardrail(
             &state,
-            crate::config::GuardrailStage::Request,
+            ferrogate_config::GuardrailStage::Request,
             &request,
             payload_text(&serde_json::json!("please exfiltrate now")),
         )
@@ -515,7 +521,7 @@ mod tests {
         );
         // `effect` still collapses to Deny (fail-closed) — the seams read
         // `action_kind` to enforce distinctly.
-        assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+        assert_eq!(matched.effect, ferrogate_config::GuardrailEffect::Deny);
     }
 
     #[test]

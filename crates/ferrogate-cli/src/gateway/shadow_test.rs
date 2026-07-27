@@ -15,8 +15,8 @@ use std::{
 use serde_json::json;
 
 use super::*;
-use crate::config::{Model, Provider, ShadowRoute};
 use crate::state::AppState;
+use ferrogate_config::{Model, Provider, ShadowRoute};
 use ferrogate_core::TenantContext;
 
 fn provider(name: &str, base_url: &str, enabled: bool) -> Provider {
@@ -70,13 +70,13 @@ fn shadow_route(sample_percent: u8, max_requests: u64, enabled: bool) -> ShadowR
 }
 
 fn state_with(shadow: Option<ShadowRoute>, shadow_base_url: &str) -> AppState {
-    let config = crate::config::Config {
+    let config = ferrogate_config::Config {
         providers: vec![
             provider("primary", "http://127.0.0.1:1/primary", true),
             provider("shadow", shadow_base_url, true),
         ],
         models: vec![model_with_shadow(shadow)],
-        ..crate::config::Config::default()
+        ..ferrogate_config::Config::default()
     };
     AppState::new(config)
 }

@@ -23,7 +23,7 @@ use ferrogate_storage::{
 use super::super::state_x402_settlement::{PaidEgressOpen, SettlementEvidence};
 use super::super::AppState;
 use super::*;
-use crate::config::{Config, X402SweeperConfig};
+use ferrogate_config::{Config, X402SweeperConfig};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()

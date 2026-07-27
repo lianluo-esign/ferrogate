@@ -13,8 +13,8 @@ use super::*;
 
 use ferrogate_storage::StoredAgentCostBurn;
 
-use crate::config::Config;
 use crate::state::AppState;
+use ferrogate_config::Config;
 use ferrogate_sync_bridge::block_on_sync_bridge;
 
 fn stored(tenant: &str, agent: &str, period: &str, usd: f64, updated: i64) -> StoredAgentCostBurn {

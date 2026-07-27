@@ -250,7 +250,7 @@ impl FerroGateway {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
-        let hostname = crate::routing::normalize_host(raw_hostname);
+        let hostname = ferrogate_config::normalize_host(raw_hostname);
         let binding = match state.get_site_domain(&hostname).await {
             Ok(Some(binding)) => binding,
             Ok(None) => return domain_not_found(session, ctx, &hostname).await,
@@ -567,7 +567,7 @@ impl FerroGateway {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
-        let hostname = crate::routing::normalize_host(raw_hostname);
+        let hostname = ferrogate_config::normalize_host(raw_hostname);
 
         // WHOSE challenge is being redeemed. A tenant-scoped key is pinned to
         // its own tenant and cannot name another (its pin wins over any
@@ -814,7 +814,7 @@ impl FerroGateway {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
-        let hostname = crate::routing::normalize_host(raw_hostname);
+        let hostname = ferrogate_config::normalize_host(raw_hostname);
         let binding = match state.get_site_domain(&hostname).await {
             Ok(Some(binding)) => binding,
             Ok(None) => return domain_not_found(session, ctx, &hostname).await,
@@ -1116,7 +1116,7 @@ fn validate_site_domain_hostname(raw: Option<&str>) -> Result<String, String> {
     if raw.is_empty() {
         return Err("hostname is required".to_string());
     }
-    let hostname = crate::routing::normalize_host(raw);
+    let hostname = ferrogate_config::normalize_host(raw);
     if hostname.len() > 253 {
         return Err(format!("hostname {hostname} exceeds 253 characters"));
     }

@@ -4,9 +4,9 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use crate::config::{config_snapshot_id, Config};
 use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_config::is_caddyfile_path;
+use ferrogate_config::{config_snapshot_id, Config};
 use ferrogate_runtime::{ReloadCoordinator, ReloadOutcome};
 use serde_json::Value;
 use std::{

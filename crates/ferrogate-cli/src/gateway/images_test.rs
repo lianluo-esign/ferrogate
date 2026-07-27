@@ -7,7 +7,7 @@
 // retry/fallback attempt decision.
 
 use super::*;
-use crate::config::{ApiKey, Config, Model, Provider};
+use ferrogate_config::{ApiKey, Config, Model, Provider};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()

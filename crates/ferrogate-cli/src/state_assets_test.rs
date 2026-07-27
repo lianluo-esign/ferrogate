@@ -28,9 +28,9 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 /// mask it.
 fn state_with_budget(max_gateway_buffer_bytes: u64) -> AppState {
     AppState::new(Config {
-        asset_bucket: crate::config::AssetBucketConfig {
+        asset_bucket: ferrogate_config::AssetBucketConfig {
             max_gateway_buffer_bytes: Some(max_gateway_buffer_bytes),
-            ..crate::config::AssetBucketConfig::default()
+            ..ferrogate_config::AssetBucketConfig::default()
         },
         ..Config::default()
     })
@@ -128,7 +128,7 @@ fn a_bucket_read_failure_never_serializes_the_object_key_or_endpoint() {
     };
     let endpoint = format!("http://127.0.0.1:{dead_port}");
     let state = AppState::new(Config {
-        asset_bucket: crate::config::AssetBucketConfig {
+        asset_bucket: ferrogate_config::AssetBucketConfig {
             enabled: true,
             endpoint: Some(endpoint.clone()),
             bucket: Some("ferrogate-private".to_string()),
@@ -136,7 +136,7 @@ fn a_bucket_read_failure_never_serializes_the_object_key_or_endpoint() {
             access_key_id: Some("AKIAEXAMPLE".to_string()),
             secret_access_key_env: Some(SECRET_ENV.to_string()),
             max_gateway_buffer_bytes: Some(8 * 1024 * 1024),
-            ..crate::config::AssetBucketConfig::default()
+            ..ferrogate_config::AssetBucketConfig::default()
         },
         ..Config::default()
     });
@@ -171,9 +171,9 @@ fn a_bucket_read_failure_never_serializes_the_object_key_or_endpoint() {
 /// configured value and the enforced bound can be probed independently.
 fn state_with_presign_ttl(presign_ttl_secs: Option<u64>) -> AppState {
     AppState::new(Config {
-        asset_bucket: crate::config::AssetBucketConfig {
+        asset_bucket: ferrogate_config::AssetBucketConfig {
             presign_ttl_secs,
-            ..crate::config::AssetBucketConfig::default()
+            ..ferrogate_config::AssetBucketConfig::default()
         },
         ..Config::default()
     })

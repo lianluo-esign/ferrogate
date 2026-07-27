@@ -745,7 +745,7 @@ pub(crate) struct AdminGatewayConfigMutationResponse {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminAgentWorkflow {
-    pub(crate) workflow: crate::config::AgentWorkflowPolicy,
+    pub(crate) workflow: ferrogate_config::AgentWorkflowPolicy,
     pub(crate) counters: AdminAgentWorkflowCounters,
 }
 
@@ -771,10 +771,10 @@ pub(crate) struct AdminSkillPackage {
     pub(crate) version: String,
     pub(crate) description: Option<String>,
     pub(crate) enabled: bool,
-    pub(crate) compatibility: crate::config::SkillPackageCompatibility,
-    pub(crate) permissions: crate::config::ExtensionPermissions,
-    pub(crate) capabilities: Vec<crate::config::SkillPackageCapability>,
-    pub(crate) resources: crate::config::SkillPackageResources,
+    pub(crate) compatibility: ferrogate_config::SkillPackageCompatibility,
+    pub(crate) permissions: ferrogate_config::ExtensionPermissions,
+    pub(crate) capabilities: Vec<ferrogate_config::SkillPackageCapability>,
+    pub(crate) resources: ferrogate_config::SkillPackageResources,
     pub(crate) api_key_ids: Vec<String>,
     pub(crate) metadata: BTreeMap<String, toml::Value>,
 }
@@ -791,10 +791,10 @@ pub(crate) struct AdminAgentUpstream {
     pub(crate) name: String,
     pub(crate) description: Option<String>,
     pub(crate) enabled: bool,
-    pub(crate) protocol: crate::config::AgentUpstreamProtocol,
+    pub(crate) protocol: ferrogate_config::AgentUpstreamProtocol,
     pub(crate) endpoint: String,
     pub(crate) tenant_ids: Vec<String>,
-    pub(crate) capabilities: Vec<crate::config::AgentUpstreamCapability>,
+    pub(crate) capabilities: Vec<ferrogate_config::AgentUpstreamCapability>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -807,14 +807,14 @@ pub(crate) struct AdminAgentUpstreamMutation {
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
     #[serde(default)]
-    pub(crate) protocol: Option<crate::config::AgentUpstreamProtocol>,
+    pub(crate) protocol: Option<ferrogate_config::AgentUpstreamProtocol>,
     pub(crate) endpoint: Option<String>,
     #[serde(default)]
-    pub(crate) auth: Option<crate::config::AgentUpstreamAuth>,
+    pub(crate) auth: Option<ferrogate_config::AgentUpstreamAuth>,
     #[serde(default)]
     pub(crate) tenant_ids: Option<Vec<String>>,
     #[serde(default)]
-    pub(crate) capabilities: Option<Vec<crate::config::AgentUpstreamCapability>>,
+    pub(crate) capabilities: Option<Vec<ferrogate_config::AgentUpstreamCapability>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -829,9 +829,9 @@ pub(crate) struct AgentUpstreamDiscovery<'a> {
     pub(crate) id: &'a str,
     pub(crate) name: &'a str,
     pub(crate) description: Option<&'a str>,
-    pub(crate) protocol: crate::config::AgentUpstreamProtocol,
+    pub(crate) protocol: ferrogate_config::AgentUpstreamProtocol,
     pub(crate) endpoint: &'a str,
-    pub(crate) capabilities: &'a [crate::config::AgentUpstreamCapability],
+    pub(crate) capabilities: &'a [ferrogate_config::AgentUpstreamCapability],
 }
 
 #[derive(Debug, Serialize)]
@@ -840,22 +840,22 @@ pub(crate) struct AgentSkillPackage {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) description: Option<String>,
-    pub(crate) capabilities: Vec<crate::config::SkillPackageCapability>,
-    pub(crate) compatibility: crate::config::SkillPackageCompatibility,
+    pub(crate) capabilities: Vec<ferrogate_config::SkillPackageCapability>,
+    pub(crate) compatibility: ferrogate_config::SkillPackageCompatibility,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminPlugin {
     pub(crate) id: String,
-    pub(crate) kind: crate::config::ExtensionKind,
+    pub(crate) kind: ferrogate_config::ExtensionKind,
     pub(crate) version: String,
-    pub(crate) manifest: crate::config::PluginManifest,
-    pub(crate) compatibility: crate::config::PluginCompatibility,
+    pub(crate) manifest: ferrogate_config::PluginManifest,
+    pub(crate) compatibility: ferrogate_config::PluginCompatibility,
     pub(crate) enabled: bool,
     pub(crate) source: String,
     pub(crate) order: u32,
     pub(crate) approval_policy: ferrogate_core::ApprovalPolicy,
-    pub(crate) permissions: crate::config::ExtensionPermissions,
+    pub(crate) permissions: ferrogate_config::ExtensionPermissions,
     pub(crate) config: BTreeMap<String, toml::Value>,
     pub(crate) capabilities: Vec<String>,
     pub(crate) tools: Vec<String>,
@@ -869,13 +869,13 @@ pub(crate) struct AdminPlugin {
 #[serde(deny_unknown_fields)]
 pub(crate) struct AdminPluginMutation {
     pub(crate) id: Option<String>,
-    pub(crate) kind: crate::config::ExtensionKind,
+    pub(crate) kind: ferrogate_config::ExtensionKind,
     #[serde(default)]
     pub(crate) version: Option<String>,
     #[serde(default)]
-    pub(crate) manifest: Option<crate::config::PluginManifest>,
+    pub(crate) manifest: Option<ferrogate_config::PluginManifest>,
     #[serde(default)]
-    pub(crate) compatibility: Option<crate::config::PluginCompatibility>,
+    pub(crate) compatibility: Option<ferrogate_config::PluginCompatibility>,
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
     #[serde(default)]
@@ -885,7 +885,7 @@ pub(crate) struct AdminPluginMutation {
     #[serde(default)]
     pub(crate) approval_policy: Option<ferrogate_core::ApprovalPolicy>,
     #[serde(default)]
-    pub(crate) permissions: Option<crate::config::ExtensionPermissions>,
+    pub(crate) permissions: Option<ferrogate_config::ExtensionPermissions>,
     #[serde(default)]
     pub(crate) config: Option<BTreeMap<String, toml::Value>>,
 }
@@ -900,12 +900,12 @@ pub(crate) struct AdminPluginMutationResponse {
 pub(crate) struct AdminPromptTemplate {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) status: crate::config::PromptTemplateStatus,
-    pub(crate) target: crate::config::PromptTemplateTarget,
+    pub(crate) status: ferrogate_config::PromptTemplateStatus,
+    pub(crate) target: ferrogate_config::PromptTemplateTarget,
     pub(crate) model: String,
-    pub(crate) variables: Vec<crate::config::PromptTemplateVariable>,
+    pub(crate) variables: Vec<ferrogate_config::PromptTemplateVariable>,
     pub(crate) active_revision: Option<u32>,
-    pub(crate) versions: Vec<crate::config::PromptTemplateVersion>,
+    pub(crate) versions: Vec<ferrogate_config::PromptTemplateVersion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -914,17 +914,17 @@ pub(crate) struct AdminPromptTemplateMutation {
     pub(crate) id: Option<String>,
     pub(crate) name: Option<String>,
     #[serde(default)]
-    pub(crate) status: Option<crate::config::PromptTemplateStatus>,
+    pub(crate) status: Option<ferrogate_config::PromptTemplateStatus>,
     #[serde(default)]
-    pub(crate) target: Option<crate::config::PromptTemplateTarget>,
+    pub(crate) target: Option<ferrogate_config::PromptTemplateTarget>,
     #[serde(default)]
     pub(crate) model: Option<String>,
     #[serde(default)]
-    pub(crate) variables: Option<Vec<crate::config::PromptTemplateVariable>>,
+    pub(crate) variables: Option<Vec<ferrogate_config::PromptTemplateVariable>>,
     #[serde(default)]
-    pub(crate) version: Option<crate::config::PromptTemplateVersion>,
+    pub(crate) version: Option<ferrogate_config::PromptTemplateVersion>,
     #[serde(default)]
-    pub(crate) versions: Option<Vec<crate::config::PromptTemplateVersion>>,
+    pub(crate) versions: Option<Vec<ferrogate_config::PromptTemplateVersion>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1022,7 +1022,7 @@ pub(crate) struct AdminApiKeyMutation {
     #[serde(default)]
     pub(crate) organization_id: Option<String>,
     /// Explicit platform-root opt-in (issue #515), mirroring
-    /// [`crate::config::ApiKey::platform_operator`]. Mutually exclusive with
+    /// [`ferrogate_config::ApiKey::platform_operator`]. Mutually exclusive with
     /// `organization_id`; omitted leaves the key on the deployment-wide
     /// `[tenancy] implicit_platform_operator` answer.
     #[serde(default)]

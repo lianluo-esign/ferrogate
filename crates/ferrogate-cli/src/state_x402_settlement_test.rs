@@ -20,7 +20,7 @@ use ferrogate_storage::{
 use proptest::prelude::*;
 
 use super::*;
-use crate::config::{x402_hold_ttl_floor_secs, Config, X402ReconcilerConfig};
+use ferrogate_config::{x402_hold_ttl_floor_secs, Config, X402ReconcilerConfig};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()

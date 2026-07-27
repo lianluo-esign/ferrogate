@@ -172,7 +172,7 @@ value) points the console at it.
   (`control_api_command_and_config_section_start_and_gate`), the deprecated
   `admin-api serve` fail-closed path, and the conflicting-`[control_api]`+
   `[admin_api]` startup rejection.
-- `crates/ferrogate-cli/src/config/validation_tests.rs` — `[control_api]`
+- `crates/ferrogate-config/src/config/validation_tests.rs` — `[control_api]`
   (new-only), `[admin_api]` alias (old-only, maps identically), the
   both-present conflict rejection, and migration idempotency.
 - `crates/ferrogate-cli/src/cli.rs` (`cli_parse_tests`) — the canonical

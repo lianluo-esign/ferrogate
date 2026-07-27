@@ -151,7 +151,7 @@ for local servers — `crates/ferrogate-mcp/src/config.rs:25`).
 
 Registering a Cloudflare-hosted MCP server is done by adding an `McpServerConfig`;
 there is even a dedicated `validate_cloudflare_mcp_servers` validation pass
-(`crates/ferrogate-cli/src/config/validate.rs:155`).
+(`crates/ferrogate-config/src/config/validate.rs:155`).
 
 ---
 
@@ -575,7 +575,7 @@ provider-adapter routing seam (§10.7).
   `crates/ferrogate-mcp/src/config.rs:80` (transport `McpTransport` at `:25`,
   `McpOauthConfig` at `:60`); Cloudflare-specific validation
   `validate_cloudflare_mcp_servers` —
-  `crates/ferrogate-cli/src/config/validate.rs:155` (general
+  `crates/ferrogate-config/src/config/validate.rs:155` (general
   `validate_mcp_servers` at `:2769`); registration `upsert_mcp_server` —
   `crates/ferrogate-cli/src/state.rs:674`.
 - **Fit:** a Cloudflare managed (`*.mcp.cloudflare.com`) or self-hosted MCP server
@@ -603,9 +603,9 @@ provider-adapter routing seam (§10.7).
   builds the request, via `apply_cloudflare_ai_gateway_routing` —
   `crates/ferrogate-providers/src/cloudflare.rs:191`.
 - **Config + wiring:** file-config `ProviderCloudflareAiGatewayConfig` —
-  `crates/ferrogate-cli/src/config/types.rs:1055`; validated by
+  `crates/ferrogate-config/src/config/types.rs:1055`; validated by
   `validate_cloudflare_ai_gateway_providers` (requires a `[cloudflare]` block, #405)
-  — `crates/ferrogate-cli/src/config/validate.rs:244`; resolved to routing at
+  — `crates/ferrogate-config/src/config/validate.rs:244`; resolved to routing at
   `cloudflare_ai_gateway_routing` — `crates/ferrogate-cli/src/state_routing.rs:158`.
 - **Fit:** opt-in per-provider URL rewrite + `cf-aig-*` headers on the existing
   `ProviderHttpRequest` (§1); body and BYOK auth preserved, so it is a transparent

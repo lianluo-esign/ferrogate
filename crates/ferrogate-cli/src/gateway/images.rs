@@ -277,7 +277,7 @@ impl FerroGateway {
 
             if let Some(guardrail) = state
                 .match_guardrail(
-                    crate::config::GuardrailStage::Request,
+                    ferrogate_config::GuardrailStage::Request,
                     GuardrailEvaluationContext {
                         request_id: &ctx.request_id,
                         trace_id: ctx.trace_id.as_deref(),

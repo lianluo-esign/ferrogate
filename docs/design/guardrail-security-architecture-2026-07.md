@@ -491,7 +491,7 @@ Portkey：
 
 FerroGate：
 
-- [`crates/ferrogate-cli/src/config/types.rs`](../../crates/ferrogate-cli/src/config/types.rs)
+- [`crates/ferrogate-config/src/config/types.rs`](../../crates/ferrogate-config/src/config/types.rs)
 - [`crates/ferrogate-cli/src/state_quota_and_policy.rs`](../../crates/ferrogate-cli/src/state_quota_and_policy.rs)
 - [`crates/ferrogate-cli/src/gateway/chat.rs`](../../crates/ferrogate-cli/src/gateway/chat.rs)
 - [`crates/ferrogate-cli/src/state.rs`](../../crates/ferrogate-cli/src/state.rs)

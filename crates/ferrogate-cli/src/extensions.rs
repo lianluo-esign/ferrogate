@@ -18,15 +18,15 @@ use http::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::config::{ExtensionConfig, ExtensionKind};
+use ferrogate_config::{ExtensionConfig, ExtensionKind};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct ExtensionStatus {
     pub(crate) id: String,
     pub(crate) kind: ExtensionKind,
     pub(crate) version: String,
-    pub(crate) manifest: crate::config::PluginManifest,
-    pub(crate) compatibility: crate::config::PluginCompatibility,
+    pub(crate) manifest: ferrogate_config::PluginManifest,
+    pub(crate) compatibility: ferrogate_config::PluginCompatibility,
     pub(crate) source: String,
     pub(crate) capabilities: Vec<String>,
     pub(crate) tools: Vec<String>,
@@ -1070,15 +1070,15 @@ fn parse_http_target(raw: &str) -> AnyResult<HttpTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ExtensionPermissions;
+    use ferrogate_config::ExtensionPermissions;
 
     fn extension(id: &str, kind: ExtensionKind) -> ExtensionConfig {
         ExtensionConfig {
             id: id.into(),
             kind,
             version: "0.1.0".into(),
-            manifest: crate::config::PluginManifest::default(),
-            compatibility: crate::config::PluginCompatibility::default(),
+            manifest: ferrogate_config::PluginManifest::default(),
+            compatibility: ferrogate_config::PluginCompatibility::default(),
             enabled: true,
             source: "builtin".into(),
             order: 10,

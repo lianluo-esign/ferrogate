@@ -6,7 +6,7 @@
 
 use super::*;
 
-use crate::config::ObservabilityProvider;
+use ferrogate_config::ObservabilityProvider;
 use ferrogate_observability::{CloudflareBackend, OtlpBackend, TelemetryBackend};
 
 impl AppState {

@@ -312,12 +312,12 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 fn gateway_with_buffer_budget(max_gateway_buffer_bytes: u64) -> FerroGateway {
     FerroGateway {
         state: crate::state::SharedAppState::with_source_path(
-            crate::config::Config {
-                asset_bucket: crate::config::AssetBucketConfig {
+            ferrogate_config::Config {
+                asset_bucket: ferrogate_config::AssetBucketConfig {
                     max_gateway_buffer_bytes: Some(max_gateway_buffer_bytes),
-                    ..crate::config::AssetBucketConfig::default()
+                    ..ferrogate_config::AssetBucketConfig::default()
                 },
-                ..crate::config::Config::default()
+                ..ferrogate_config::Config::default()
             },
             None,
         ),

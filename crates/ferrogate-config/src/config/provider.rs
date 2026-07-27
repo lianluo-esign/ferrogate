@@ -7,7 +7,7 @@
 use super::Provider;
 
 impl Provider {
-    pub(crate) fn api_key_value(&self) -> Option<String> {
+    pub fn api_key_value(&self) -> Option<String> {
         let env_name = self.api_key_env.as_deref()?;
         std::env::var(env_name)
             .ok()

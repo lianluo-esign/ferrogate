@@ -30,7 +30,7 @@ use std::{
 };
 use tracing::{info, warn};
 
-use crate::config::TlsAcmeConfig;
+use ferrogate_config::TlsAcmeConfig;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AcmeCertificatePaths {
@@ -1469,7 +1469,7 @@ fn write_private_file(path: &Path, bytes: &[u8], mode: u32) -> AnyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TlsAcmeConfig;
+    use ferrogate_config::TlsAcmeConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]

@@ -20,13 +20,13 @@ use serde_json::Value;
 
 use crate::{
     auth::{authenticate, AuthContext},
-    config::{
-        AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider, AgentWorkflowNode,
-        AgentWorkflowNodeKind, AgentWorkflowPolicy,
-    },
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AgentRunAdmission, AppState, UNATTRIBUTED_AGENT_KEY},
+};
+use ferrogate_config::{
+    AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider, AgentWorkflowNode,
+    AgentWorkflowNodeKind, AgentWorkflowPolicy,
 };
 use ferrogate_policy::{resolve_workflow_budget_envelope, WorkflowBudgetCaps};
 use ferrogate_storage::{
@@ -1556,7 +1556,7 @@ mod tests {
 
     #[test]
     fn audit_sink_records_managed_framework_capability_event_into_timeline() {
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let sink = AuditEventSink {
             state: state.clone(),
             request_id: "fg-1".to_string(),
@@ -1672,7 +1672,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        let state = AppState::new(crate::config::Config::default());
+        let state = AppState::new(ferrogate_config::Config::default());
         let caps = WorkflowRunBudgetCaps {
             tool_call_budget: Some(2),
             ..WorkflowRunBudgetCaps::default()

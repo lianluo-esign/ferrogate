@@ -21,7 +21,7 @@ separately.
 
 Gateway authentication is **required by default and stated, never inferred**
 (issue #542). Whether a request must present a credential is one field,
-`[auth] disabled` (`crates/ferrogate-cli/src/config/types.rs`
+`[auth] disabled` (`crates/ferrogate-config/src/config/types.rs`
 `Config::auth_required`); the open posture — every request admitted as an
 unrestricted platform operator — is reachable only by writing
 `[auth] disabled = true`. It used to be derived from
@@ -141,7 +141,7 @@ Every request-level limit (rate limits, token budgets) is keyed off an
 authenticated virtual API key. In addition, an optional pre-authentication
 IP/CIDR allowlist and a per-IP unauthenticated-request rate limiter are
 enforced as the first check on every request, before any credential is
-parsed (`crates/ferrogate-cli/src/network_access.rs`,
+parsed (`crates/ferrogate-config/src/config/network_access.rs`,
 `AppState::check_network_access`). Operators without `network_access`
 configured should still place FerroGate behind a network-level control
 (security group, WAF, or reverse-proxy rate limiting) as defense in depth.
@@ -150,7 +150,7 @@ configured should still place FerroGate behind a network-level control
 
 The built-in guardrail engine supports keyword, regex, and max-input-length
 rules with deny or redact effects, scoped by tenant/model/provider
-(`crates/ferrogate-cli/src/config/types.rs` `GuardrailRule`,
+(`crates/ferrogate-config/src/config/types.rs` `GuardrailRule`,
 `crates/ferrogate-cli/src/state_quota_and_policy.rs` `match_guardrail`). A rule can instead
 delegate detection to an external HTTP endpoint (`provider: custom_http`) —
 e.g. a dedicated PII/jailbreak/toxicity classifier that can't be expressed as

@@ -9,25 +9,20 @@ use http::Uri;
 #[cfg(test)]
 use http::{HeaderMap, HeaderName};
 
-use crate::config::RouteRule;
+use super::RouteRule;
 
 #[derive(Debug, Clone)]
-pub(crate) struct UpstreamEndpoint {
-    pub(crate) scheme: String,
-    pub(crate) host: String,
-    pub(crate) port: u16,
-    pub(crate) authority: String,
-    pub(crate) base_path: String,
+pub struct UpstreamEndpoint {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub authority: String,
+    pub base_path: String,
 }
 
 impl RouteRule {
     #[cfg(test)]
-    pub(crate) fn matches_request(
-        &self,
-        host: Option<&str>,
-        path: &str,
-        headers: &HeaderMap,
-    ) -> bool {
+    pub fn matches_request(&self, host: Option<&str>, path: &str, headers: &HeaderMap) -> bool {
         if !self.hosts.is_empty() {
             let Some(host) = host else {
                 return false;
@@ -58,7 +53,7 @@ impl RouteRule {
         })
     }
 
-    pub(crate) fn rewrite_path(&self, original_path: &str) -> String {
+    pub fn rewrite_path(&self, original_path: &str) -> String {
         let mut path = original_path.to_string();
         if let Some(strip_prefix) = &self.strip_prefix {
             if path == *strip_prefix {
@@ -75,7 +70,7 @@ impl RouteRule {
     }
 }
 
-pub(crate) fn normalize_host(host: &str) -> String {
+pub fn normalize_host(host: &str) -> String {
     host.split(':')
         .next()
         .unwrap_or(host)
@@ -83,7 +78,7 @@ pub(crate) fn normalize_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(crate) fn parse_upstream_endpoint(raw: &str) -> AnyResult<UpstreamEndpoint> {
+pub fn parse_upstream_endpoint(raw: &str) -> AnyResult<UpstreamEndpoint> {
     let uri: Uri = raw
         .parse()
         .with_context(|| format!("invalid upstream URL {raw}"))?;
@@ -118,7 +113,7 @@ pub(crate) fn parse_upstream_endpoint(raw: &str) -> AnyResult<UpstreamEndpoint> 
 }
 
 #[cfg(test)]
-pub(crate) fn build_target_url(
+pub fn build_target_url(
     upstream_url: &str,
     route: &RouteRule,
     original_path: &str,
@@ -133,7 +128,7 @@ pub(crate) fn build_target_url(
 }
 
 #[cfg(test)]
-pub(crate) fn build_target_path_query(
+pub fn build_target_path_query(
     upstream_url: &str,
     route: &RouteRule,
     original_path: &str,
@@ -144,7 +139,7 @@ pub(crate) fn build_target_path_query(
     Ok(build_target_uri(&endpoint, &rewritten, query)?.to_string())
 }
 
-pub(crate) fn build_target_uri(
+pub fn build_target_uri(
     endpoint: &UpstreamEndpoint,
     rewritten_path: &str,
     query: Option<&str>,

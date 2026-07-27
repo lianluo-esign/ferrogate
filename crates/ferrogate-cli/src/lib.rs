@@ -16,6 +16,15 @@
 //! go to `ferrogate-gateway` rather than here, effective now -- that rule is
 //! worth more than any single stage, because the extraction competes with
 //! feature work for time and the rule does not.
+//!
+//! Stage 3a moved `config/` -- the operator-facing `Config`, its loader and its
+//! validation -- out to `ferrogate-config`, which had been holding only the
+//! Caddyfile compatibility layer while the configuration it is named after
+//! lived here. `routing.rs` and `network_access.rs` went with it: the first
+//! carries inherent impls on `RouteRule`, the second is what makes
+//! `ip_allowlist` a load-time error, and either left behind would have meant
+//! `ferrogate-config -> ferrogate-cli`. There is deliberately NO
+//! `ferrogate_cli::config` shim; call sites name the new home.
 
 mod acme;
 mod admin_api;
@@ -29,7 +38,6 @@ mod builtin_tools;
 mod cli;
 mod command_tree;
 mod completions;
-mod config;
 mod ctl;
 mod dashboard;
 mod extensions;
@@ -37,14 +45,10 @@ mod gateway;
 mod lifecycle;
 mod lifecycle_gate;
 mod metering;
-mod network_access;
 mod plans_cli;
 #[cfg(test)]
 mod reference;
 mod responses;
-mod routing;
-#[cfg(test)]
-mod routing_tests;
 mod service_storage;
 mod state;
 mod storage;
@@ -59,7 +63,6 @@ use std::sync::Arc;
 
 use crate::{
     cli::{AdminApiCommands, AuthCommands, BillingCommands, Cli, Commands, ControlApiCommands},
-    config::Config,
     gateway::serve,
     lifecycle::{
         execute_admin_reload, execute_graceful_upgrade_reload, format_reload_report,
@@ -67,6 +70,7 @@ use crate::{
     },
     service_storage::{build_supabase_repositories, SupabaseConnection},
 };
+use ferrogate_config::Config;
 
 /// The binary's entire behaviour, moved here from `main()` verbatim (#553
 /// stage 1).

@@ -112,7 +112,7 @@ Secrets to provision before boot (never in config files):
    ```
 
    Exact field validation lives in
-   `crates/ferrogate-cli/src/config/signed_snapshot.rs`; a config that
+   `crates/ferrogate-config/src/config/signed_snapshot.rs`; a config that
    validates always constructs. Offline behavior: on publisher outage,
    replicas serve the last verified snapshot until `not_after`, then fail
    closed — there is no silent operation on expired security policy.

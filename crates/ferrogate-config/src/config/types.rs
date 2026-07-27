@@ -7,28 +7,28 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(crate) use ferrogate_cloudflare::CloudflareConfig;
-pub(crate) use ferrogate_config::X402ScopedSpendPolicy;
-pub(crate) use ferrogate_core::ApprovalPolicy;
+pub use crate::X402ScopedSpendPolicy;
+pub use ferrogate_cloudflare::CloudflareConfig;
+pub use ferrogate_core::ApprovalPolicy;
 use ferrogate_guardrails::{all_content_sources, ContentSource};
-pub(crate) use ferrogate_mcp::{
+pub use ferrogate_mcp::{
     McpAuthType, McpHeaderConfig, McpOauthConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
 use ferrogate_providers::RoutingStrategy;
 use ferrogate_storage::{PostgresTlsMode, StorageProviderKind};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Config {
+pub struct Config {
     #[serde(default = "default_listen")]
-    pub(crate) listen: String,
+    pub listen: String,
     #[serde(default)]
-    pub(crate) admin: AdminConfig,
+    pub admin: AdminConfig,
     #[serde(default)]
-    pub(crate) tls: TlsConfig,
+    pub tls: TlsConfig,
     #[serde(default)]
-    pub(crate) auth_service: AuthServiceConfig,
+    pub auth_service: AuthServiceConfig,
     #[serde(default)]
-    pub(crate) billing_service: BillingServiceConfig,
+    pub billing_service: BillingServiceConfig,
     /// #359: effective FerroGate Control Plane API service config
     /// (`ferrogate control-api serve`), resolved at load from the canonical
     /// `[control_api]` section or the deprecated `[admin_api]` alias below
@@ -38,96 +38,96 @@ pub(crate) struct Config {
     /// (`skip_deserializing`) and serializes under the canonical
     /// `control_api` key.
     #[serde(rename = "control_api", skip_deserializing)]
-    pub(crate) admin_api: AdminApiConfig,
+    pub admin_api: AdminApiConfig,
     /// #359: raw canonical `[control_api]` input section. Resolved into
     /// `admin_api` by `migrate_control_plane_aliases` at load; never
     /// serialized (the effective config round-trips through `admin_api`).
     #[serde(default, skip_serializing)]
-    pub(crate) control_api: Option<AdminApiConfig>,
+    pub control_api: Option<AdminApiConfig>,
     /// #359: raw deprecated `[admin_api]` alias section, retained for the
     /// migration window. Resolved into `admin_api` at load (with a
     /// deprecation notice); rejected when `[control_api]` is also present.
     #[serde(rename = "admin_api", default, skip_serializing)]
-    pub(crate) admin_api_alias: Option<AdminApiConfig>,
+    pub admin_api_alias: Option<AdminApiConfig>,
     #[serde(default)]
-    pub(crate) providers: Vec<Provider>,
+    pub providers: Vec<Provider>,
     #[serde(default)]
-    pub(crate) models: Vec<Model>,
+    pub models: Vec<Model>,
     #[serde(default)]
-    pub(crate) api_keys: Vec<ApiKey>,
+    pub api_keys: Vec<ApiKey>,
     #[serde(default)]
-    pub(crate) policies: Vec<PolicyRule>,
+    pub policies: Vec<PolicyRule>,
     #[serde(default)]
-    pub(crate) gateway_configs: Vec<GatewayConfigProfile>,
+    pub gateway_configs: Vec<GatewayConfigProfile>,
     #[serde(default)]
-    pub(crate) agent_workflows: Vec<AgentWorkflowPolicy>,
+    pub agent_workflows: Vec<AgentWorkflowPolicy>,
     #[serde(default)]
-    pub(crate) skill_packages: Vec<SkillPackage>,
+    pub skill_packages: Vec<SkillPackage>,
     #[serde(default)]
-    pub(crate) prompt_templates: Vec<PromptTemplate>,
+    pub prompt_templates: Vec<PromptTemplate>,
     #[serde(default)]
-    pub(crate) guardrails: Vec<GuardrailRule>,
+    pub guardrails: Vec<GuardrailRule>,
     #[serde(default)]
-    pub(crate) plugins: Vec<PluginConfig>,
+    pub plugins: Vec<PluginConfig>,
     #[serde(default)]
-    pub(crate) extensions: Vec<ExtensionConfig>,
+    pub extensions: Vec<ExtensionConfig>,
     #[serde(default)]
-    pub(crate) mcp_servers: Vec<McpServerConfig>,
+    pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
-    pub(crate) agent_upstreams: Vec<AgentUpstreamConfig>,
+    pub agent_upstreams: Vec<AgentUpstreamConfig>,
     #[serde(default)]
-    pub(crate) telemetry: TelemetryConfig,
+    pub telemetry: TelemetryConfig,
     #[serde(default)]
-    pub(crate) billing_alerts: BillingAlertsConfig,
+    pub billing_alerts: BillingAlertsConfig,
     #[serde(default)]
-    pub(crate) observability: ObservabilityConfig,
+    pub observability: ObservabilityConfig,
     #[serde(default)]
-    pub(crate) analytics: AnalyticsConfig,
+    pub analytics: AnalyticsConfig,
     #[serde(default)]
-    pub(crate) metering: MeteringConfig,
+    pub metering: MeteringConfig,
     #[serde(default)]
-    pub(crate) cache: CacheConfig,
+    pub cache: CacheConfig,
     #[serde(default)]
-    pub(crate) storage: StorageConfig,
+    pub storage: StorageConfig,
     #[serde(default)]
-    pub(crate) reliability: ReliabilityConfig,
+    pub reliability: ReliabilityConfig,
     #[serde(default)]
-    pub(crate) limits: LimitsConfig,
+    pub limits: LimitsConfig,
     #[serde(default)]
-    pub(crate) agent_runtime: AgentRuntimeConfig,
+    pub agent_runtime: AgentRuntimeConfig,
     #[serde(default)]
-    pub(crate) cluster: ClusterConfig,
+    pub cluster: ClusterConfig,
     #[serde(default)]
-    pub(crate) upstreams: Vec<Upstream>,
+    pub upstreams: Vec<Upstream>,
     #[serde(default)]
-    pub(crate) routes: Vec<RouteRule>,
+    pub routes: Vec<RouteRule>,
     #[serde(default)]
-    pub(crate) network_access: NetworkAccessConfig,
+    pub network_access: NetworkAccessConfig,
     #[serde(default)]
-    pub(crate) asset_bucket: AssetBucketConfig,
+    pub asset_bucket: AssetBucketConfig,
     #[serde(default)]
-    pub(crate) scheduler: SchedulerConfig,
+    pub scheduler: SchedulerConfig,
     /// #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
     #[serde(default)]
-    pub(crate) asset_lifecycle: AssetLifecycleConfig,
+    pub asset_lifecycle: AssetLifecycleConfig,
     /// #354: background TTL sweeper that releases the wallet hold of an overdue
     /// pre-submission x402 payment attempt.
     #[serde(default)]
-    pub(crate) x402_sweeper: X402SweeperConfig,
+    pub x402_sweeper: X402SweeperConfig,
     /// #354: background on-chain settlement reconciler that drives left-behind
     /// `submitted`/`outcome_unknown` attempts to a definite terminal from
     /// on-chain evidence (or keeps them `outcome_unknown` with bounded backoff).
     #[serde(default)]
-    pub(crate) x402_reconciler: X402ReconcilerConfig,
+    pub x402_reconciler: X402ReconcilerConfig,
     /// #351: typed, disabled-by-default Solana x402 spend policies, each pinned
     /// to one scope of the `tenant -> project -> workspace -> key -> run` chain.
     /// Empty (the default) means every scope resolves to the disabled deny-all
     /// policy, so x402 spending is never on by accident. Validated at load by
-    /// [`ferrogate_config::validate_scoped_x402_spend_policies`], which delegates
+    /// [`crate::validate_scoped_x402_spend_policies`], which delegates
     /// to the policy crate's own `validate()` so a config that loads is exactly
     /// a config the runtime can evaluate.
     #[serde(default)]
-    pub(crate) x402_spend_policies: Vec<X402ScopedSpendPolicy>,
+    pub x402_spend_policies: Vec<X402ScopedSpendPolicy>,
     /// #262: asset-egress (download bandwidth) rate in USD per GB used to
     /// settle per-download metering events. `None` (the default) leaves
     /// egress metered + audited but unpriced (cost_usd = None, no wallet
@@ -135,22 +135,22 @@ pub(crate) struct Config {
     /// so this is purely additive for a deployment that hasn't opted into
     /// egress billing. Mirrors `PriceBook.egress_price_per_gb`.
     #[serde(default)]
-    pub(crate) asset_egress_price_per_gb: Option<f64>,
+    pub asset_egress_price_per_gb: Option<f64>,
     /// #405: shared Cloudflare API client credentials/config. Absent = every
     /// Cloudflare integration is disabled; present = validated for account
     /// id/token presence and base-URL well-formedness. Non-breaking (serde
     /// default `None`).
     #[serde(default)]
-    pub(crate) cloudflare: Option<CloudflareConfig>,
+    pub cloudflare: Option<CloudflareConfig>,
     /// #515: how this deployment spells the two tenant-identity defaults that
     /// used to be implicit (platform-root, and whether `organization_id` is a
     /// checked foreign key). See [`TenancyConfig`].
     #[serde(default)]
-    pub(crate) tenancy: TenancyConfig,
+    pub tenancy: TenancyConfig,
     /// #542: whether this deployment authenticates at all. See [`AuthConfig`];
     /// the default requires authentication.
     #[serde(default)]
-    pub(crate) auth: AuthConfig,
+    pub auth: AuthConfig,
 }
 
 /// Deployment-wide authentication posture (issue #542).
@@ -170,7 +170,7 @@ pub(crate) struct Config {
 /// otherwise BY NAME, in one field that means exactly one thing.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AuthConfig {
+pub struct AuthConfig {
     /// `false` (the default): every request must present a credential, which is
     /// then resolved against the external auth service, the durable/virtual key
     /// store, and `[[api_keys]]` -- in that order. A request with no credential
@@ -190,7 +190,7 @@ pub(crate) struct AuthConfig {
     /// an error naming this field, so the posture is chosen rather than
     /// inherited.
     #[serde(default)]
-    pub(crate) disabled: bool,
+    pub disabled: bool,
 }
 
 impl Config {
@@ -206,7 +206,7 @@ impl Config {
     /// static keys switched it on, durable/virtual keys in the control plane did
     /// not, and an empty `[[api_keys]]` section switched it off. The posture is
     /// now stated, not inferred, and the safe answer is the default.
-    pub(crate) fn auth_required(&self) -> bool {
+    pub fn auth_required(&self) -> bool {
         !self.auth.disabled
     }
 
@@ -224,7 +224,7 @@ impl Config {
     /// [`Config::auth_required`] alone; this only decides whether a deployment
     /// that requires authentication has any way to perform it, and is checked
     /// once, at startup, by `gateway::serve` and `execute_control_api_serve`.
-    pub(crate) fn has_credential_source(&self) -> bool {
+    pub fn has_credential_source(&self) -> bool {
         !self.api_keys.is_empty()
             || self.auth_service.enabled
             || matches!(
@@ -258,7 +258,7 @@ impl Config {
 /// a subsequent release once operators have written the intent down.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TenancyConfig {
+pub struct TenancyConfig {
     /// DEPRECATED (#515 stage 1). `true` (the legacy default) keeps the
     /// pre-#515 behaviour: an API key that declares neither `organization_id`
     /// nor `platform_operator` is treated as a platform-root credential.
@@ -272,7 +272,7 @@ pub(crate) struct TenancyConfig {
     /// `[[api_keys]]` entries first (that is accepted under both settings),
     /// then flip this to `false`.
     #[serde(default = "default_true")]
-    pub(crate) implicit_platform_operator: bool,
+    pub implicit_platform_operator: bool,
     /// `false` (the legacy default) keeps an `organization_id` that resolves to
     /// no `tenants` row acceptable on `POST`/`PUT /admin/v1/api-keys`; the
     /// dangling reference is reported in the gateway log and the admin audit
@@ -284,7 +284,7 @@ pub(crate) struct TenancyConfig {
     /// silently create a tenancy island that no console, quota policy or RBAC
     /// binding will ever match.
     #[serde(default)]
-    pub(crate) require_registered_tenant: bool,
+    pub require_registered_tenant: bool,
 }
 
 impl Default for TenancyConfig {
@@ -305,20 +305,20 @@ impl Default for TenancyConfig {
 /// at-most-once per (schedule, slot) with minute-level precision; the tick
 /// interval only bounds detection latency.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct SchedulerConfig {
+pub struct SchedulerConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Seconds between due-schedule scans. Default 5s -- far below the
     /// minute-level firing contract so a due schedule is picked up promptly.
     #[serde(default = "default_scheduler_tick_interval_secs")]
-    pub(crate) tick_interval_secs: u64,
+    pub tick_interval_secs: u64,
     /// Upper bound on catch-up fires processed per schedule in a single tick
     /// after downtime, so a long outage can never replay an unbounded backlog.
     #[serde(default = "default_scheduler_max_catchup_fires")]
-    pub(crate) max_catchup_fires: u64,
+    pub max_catchup_fires: u64,
     /// IANA timezone applied to a cron schedule that does not set its own.
     #[serde(default = "default_scheduler_default_timezone")]
-    pub(crate) default_timezone: String,
+    pub default_timezone: String,
 }
 
 fn default_scheduler_tick_interval_secs() -> u64 {
@@ -354,64 +354,64 @@ impl Default for SchedulerConfig {
 /// still-within-grace version is never pruned; and GC only deletes a bucket
 /// object no `stored_assets` row references, after `gc_grace_secs`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct AssetLifecycleConfig {
+pub struct AssetLifecycleConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Seconds between reconcile passes. Default 3600 (hourly) -- lifecycle is
     /// housekeeping, not a hot path.
     #[serde(default = "default_asset_lifecycle_tick_interval_secs")]
-    pub(crate) tick_interval_secs: u64,
+    pub tick_interval_secs: u64,
     /// Report-only mode: log/audit what would be pruned or GC'd without
     /// deleting anything. Defaults to `true` so enabling the sweeper is
     /// observably safe until the operator opts into live deletes.
     #[serde(default = "default_asset_lifecycle_dry_run")]
-    pub(crate) dry_run: bool,
+    pub dry_run: bool,
     /// Tenant/plan default: keep the newest N versions of every asset line that
     /// has no more specific `retention_policies` row. `None` disables the
     /// count-based default.
     #[serde(default)]
-    pub(crate) default_keep_last_n: Option<u64>,
+    pub default_keep_last_n: Option<u64>,
     /// Tenant/plan default max-age (seconds) for versions without a specific
     /// policy. `None` disables the age-based default.
     #[serde(default)]
-    pub(crate) default_max_age_secs: Option<i64>,
+    pub default_max_age_secs: Option<i64>,
     /// Retention grace window (seconds): never prune a version younger than
     /// this, even when a rule selects it. Default 86400 (1 day).
     #[serde(default = "default_asset_lifecycle_grace_secs")]
-    pub(crate) retention_min_age_secs: i64,
+    pub retention_min_age_secs: i64,
     /// Whether unreferenced-blob GC runs. Requires a configured `[asset_bucket]`
     /// -- inline-only deployments have no blobs to collect. Default false.
     #[serde(default)]
-    pub(crate) gc_enabled: bool,
+    pub gc_enabled: bool,
     /// GC grace window (seconds): an unreferenced bucket object younger than
     /// this is kept (it may be an in-flight presigned commit). Default 86400.
     #[serde(default = "default_asset_lifecycle_grace_secs")]
-    pub(crate) gc_grace_secs: i64,
+    pub gc_grace_secs: i64,
     /// Upper bound on blob deletes per GC pass so one tick can never issue an
     /// unbounded number of bucket DELETEs. Default 100.
     #[serde(default = "default_asset_lifecycle_max_gc_deletes")]
-    pub(crate) max_gc_deletes_per_tick: usize,
+    pub max_gc_deletes_per_tick: usize,
     /// #284: tenant/plan default max-age (seconds) for `request_logs` rows
     /// without a more specific `retention_policies` row. `None` disables the
     /// request-log TTL default (no pruning unless a tenant policy opts in).
     #[serde(default)]
-    pub(crate) default_request_log_max_age_secs: Option<i64>,
+    pub default_request_log_max_age_secs: Option<i64>,
     /// #284: tenant/plan default max-age (seconds) for `audit_events` rows.
     /// Audit rows carry a LONGER legal floor than request logs, so this is
     /// typically larger (or `None` -- never purge -- while request logs do).
     #[serde(default)]
-    pub(crate) default_audit_event_max_age_secs: Option<i64>,
+    pub default_audit_event_max_age_secs: Option<i64>,
     /// #284: shortest default TTL, applied to `request_logs` rows that captured
     /// a response body (`response_recorded`). Data-minimization for the
     /// highest-sensitivity captures; `None` falls back to the request-log
     /// default. A response-body row is pruned as soon as EITHER this or the
     /// general request-log rule selects it.
     #[serde(default)]
-    pub(crate) default_response_body_max_age_secs: Option<i64>,
+    pub default_response_body_max_age_secs: Option<i64>,
     /// #284: upper bound on operational-log row deletes per table per tick, so
     /// one pass can never issue an unbounded DELETE. Default 5000.
     #[serde(default = "default_asset_lifecycle_max_log_deletes")]
-    pub(crate) max_log_deletes_per_tick: usize,
+    pub max_log_deletes_per_tick: usize,
 }
 
 fn default_asset_lifecycle_tick_interval_secs() -> u64 {
@@ -470,24 +470,24 @@ impl Default for AssetLifecycleConfig {
 /// a `submitted` attempt whose stablecoin may have moved on-chain is never
 /// released.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct X402SweeperConfig {
+pub struct X402SweeperConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Seconds between due-attempt scans. Default 30s -- holds are minute-scale,
     /// and expiry is housekeeping, not a hot path.
     #[serde(default = "default_x402_sweeper_tick_interval_secs")]
-    pub(crate) tick_interval_secs: u64,
+    pub tick_interval_secs: u64,
     /// Upper bound on attempts expired per tick, so one pass can never issue an
     /// unbounded number of releases / table scan. Default 100.
     #[serde(default = "default_x402_sweeper_max_expiries_per_tick")]
-    pub(crate) max_expiries_per_tick: usize,
+    pub max_expiries_per_tick: usize,
     /// Extra grace (seconds) added to a hold's TTL before the sweeper considers
     /// it due: an attempt is swept only once `hold_expires_at + grace <= now`.
     /// A defensive delay so the sweeper never races a hold that only just
     /// elapsed while an in-flight finalize is still landing. Default 0 (expire
     /// exactly at the hold's own TTL, matching `expire_if_due`).
     #[serde(default)]
-    pub(crate) hold_ttl_grace_secs: i64,
+    pub hold_ttl_grace_secs: i64,
 }
 
 fn default_x402_sweeper_tick_interval_secs() -> u64 {
@@ -535,17 +535,17 @@ impl Default for X402SweeperConfig {
 /// `generation` token), so it is money-safe to run on every gateway instance
 /// concurrently.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct X402ReconcilerConfig {
+pub struct X402ReconcilerConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Seconds between reconcile scans. Default 30s -- settlement latency is
     /// second-to-minute scale; reconciliation is housekeeping, not a hot path.
     #[serde(default = "default_x402_reconciler_tick_interval_secs")]
-    pub(crate) tick_interval_secs: u64,
+    pub tick_interval_secs: u64,
     /// Upper bound on attempts reconciled per tick, so one pass can never issue
     /// an unbounded number of on-chain RPC queries / edge drives. Default 100.
     #[serde(default = "default_x402_reconciler_max_reconciles_per_tick")]
-    pub(crate) max_reconciles_per_tick: usize,
+    pub max_reconciles_per_tick: usize,
     /// Minimum age (seconds) since an attempt's last state update before it is
     /// eligible for an on-chain re-check: an attempt is reconciled only once
     /// `updated_at_unix + reconcile_check_delay_secs <= now`. This both gives a
@@ -553,7 +553,7 @@ pub(crate) struct X402ReconcilerConfig {
     /// the bounded-backoff interval -- re-parking a still-pending attempt bumps
     /// `updated_at_unix`, deferring its next check by this delay. Default 60s.
     #[serde(default = "default_x402_reconciler_check_delay_secs")]
-    pub(crate) reconcile_check_delay_secs: i64,
+    pub reconcile_check_delay_secs: i64,
     /// Confirmation deadline (seconds since `submitted_at_unix`) after which a
     /// transfer the chain reports ABSENT (never landed) is treated as a definite
     /// FAIL and its hold released. Before the deadline, an absent signature stays
@@ -562,7 +562,7 @@ pub(crate) struct X402ReconcilerConfig {
     /// deadline; a pending (seen but unconfirmed) transfer NEVER fails on this
     /// deadline (its money may still confirm). Default 900s (15 min).
     #[serde(default = "default_x402_reconciler_confirmation_deadline_secs")]
-    pub(crate) confirmation_deadline_secs: i64,
+    pub confirmation_deadline_secs: i64,
     /// Operator-declared TTL (seconds) of the wallet hold a paid-egress attempt
     /// reserves at settlement-open time (`X402SettlementLoop::open` sets the
     /// hold's `expires_at = opened_at + hold_ttl_secs`). This exists here so the
@@ -585,7 +585,7 @@ pub(crate) struct X402ReconcilerConfig {
     /// every requested TTL up to [`x402_hold_ttl_floor_secs`], the same floor
     /// `validate()` enforces here (issue #401 box 3).
     #[serde(default = "default_x402_reconciler_hold_ttl_secs")]
-    pub(crate) hold_ttl_secs: i64,
+    pub hold_ttl_secs: i64,
 }
 
 /// The settlement confirmation window (seconds) a wallet hold must survive:
@@ -602,7 +602,7 @@ pub(crate) struct X402ReconcilerConfig {
 /// Saturating throughout: an operator-supplied `u64` tick larger than `i64::MAX`
 /// (or component sums that overflow) must produce an absurdly LARGE window --
 /// which rejects/clamps conservatively -- never a wrapped small one.
-pub(crate) fn x402_confirmation_window_secs(reconciler: &X402ReconcilerConfig) -> i64 {
+pub fn x402_confirmation_window_secs(reconciler: &X402ReconcilerConfig) -> i64 {
     let slack_secs = i64::try_from(reconciler.tick_interval_secs).unwrap_or(i64::MAX);
     reconciler
         .confirmation_deadline_secs
@@ -623,7 +623,7 @@ pub(crate) fn x402_confirmation_window_secs(reconciler: &X402ReconcilerConfig) -
 /// A hold shorter than this can auto-release before the reconciler is able to
 /// capture a payment that IS confirmed on-chain: the stablecoin is delivered but
 /// the wallet is never charged.
-pub(crate) fn x402_hold_ttl_floor_secs(reconciler: &X402ReconcilerConfig) -> i64 {
+pub fn x402_hold_ttl_floor_secs(reconciler: &X402ReconcilerConfig) -> i64 {
     x402_confirmation_window_secs(reconciler).saturating_add(1)
 }
 
@@ -675,7 +675,7 @@ impl Default for X402ReconcilerConfig {
 /// it uses the `cf_*` fields below rather than the S3 credential pieces.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum AssetBucketBackend {
+pub enum AssetBucketBackend {
     /// The S3-compatible SigV4 backend (AWS S3 / Supabase / MinIO / R2). The
     /// historical and default behavior — unchanged by #411.
     #[default]
@@ -685,39 +685,39 @@ pub(crate) enum AssetBucketBackend {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub(crate) struct AssetBucketConfig {
+pub struct AssetBucketConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Selects the object-storage backend (issue #411). Defaults to the
     /// S3-compatible client, so existing `[asset_bucket]` configs are
     /// unchanged.
     #[serde(default)]
-    pub(crate) backend: AssetBucketBackend,
+    pub backend: AssetBucketBackend,
     /// `scheme://host[:port]`, no trailing slash, no bucket/key suffix --
     /// e.g. `https://<project>.supabase.co/storage/v1/s3`.
     #[serde(default)]
-    pub(crate) endpoint: Option<String>,
+    pub endpoint: Option<String>,
     #[serde(default)]
-    pub(crate) bucket: Option<String>,
+    pub bucket: Option<String>,
     #[serde(default)]
-    pub(crate) region: Option<String>,
+    pub region: Option<String>,
     /// Not a secret itself -- paired with `secret_access_key_env` for the
     /// actual secret, mirroring `Provider::aws_access_key_id`'s split.
     #[serde(default)]
-    pub(crate) access_key_id: Option<String>,
+    pub access_key_id: Option<String>,
     #[serde(default)]
-    pub(crate) secret_access_key_env: Option<String>,
+    pub secret_access_key_env: Option<String>,
     /// TTL (seconds) for gateway-issued presigned upload/download URLs
     /// (issue #259). Bounded to S3's 7-day maximum and defaulted to 15
     /// minutes when unset -- short-lived by design so a leaked URL expires
     /// quickly.
     #[serde(default)]
-    pub(crate) presign_ttl_secs: Option<u64>,
+    pub presign_ttl_secs: Option<u64>,
     /// Per-object size ceiling (bytes) for the presigned large-file path
     /// (issue #259). Independent of the cumulative, tenant-wide
     /// `asset_storage_quota_bytes` cap. Defaults to 5 GiB when unset.
     #[serde(default)]
-    pub(crate) presign_max_object_bytes: Option<u64>,
+    pub presign_max_object_bytes: Option<u64>,
     /// The largest object the gateway will ever hold in memory for an asset
     /// operation (issue #259). Objects at or below it keep the buffered,
     /// full-fidelity path (whole-file signature verification, out-of-process
@@ -729,7 +729,7 @@ pub(crate) struct AssetBucketConfig {
     /// is never affected. Raising it re-enables whole-file controls for larger
     /// objects at a proportional, explicitly-accepted memory cost.
     #[serde(default)]
-    pub(crate) max_gateway_buffer_bytes: Option<u64>,
+    pub max_gateway_buffer_bytes: Option<u64>,
     /// The aggregate ceiling (bytes) on everything the gateway is holding for
     /// buffering, bucket-backed reads at one instant (issue #529).
     ///
@@ -760,28 +760,28 @@ pub(crate) struct AssetBucketConfig {
     /// `max_gateway_buffer_bytes` is raised to it, since a budget that cannot
     /// admit one legal read is a deadlock, not a limit.
     #[serde(default)]
-    pub(crate) max_total_gateway_buffer_bytes: Option<u64>,
+    pub max_total_gateway_buffer_bytes: Option<u64>,
     /// How long (milliseconds) a buffering read waits for aggregate budget
     /// before it is shed (issue #529). Unset defaults to 250 ms -- long enough
     /// to absorb the sub-second overlap of a burst, short enough that the shed
     /// is a fast answer rather than something a caller experiences as a hang.
     /// `0` sheds immediately with no queueing.
     #[serde(default)]
-    pub(crate) buffer_admission_wait_ms: Option<u64>,
+    pub buffer_admission_wait_ms: Option<u64>,
     /// Cloudflare account id for the `workers-static-assets` backend (#411).
     /// Ignored by the default S3 backend.
     #[serde(default)]
-    pub(crate) cf_account_id: Option<String>,
+    pub cf_account_id: Option<String>,
     /// Cloudflare API token *reference* for the `workers-static-assets`
     /// backend (#411) — an `env://VAR` reference or an inline token, resolved
     /// via [`ferrogate_cloudflare::EnvTokenResolver`]. Ignored by the S3
     /// backend.
     #[serde(default)]
-    pub(crate) cf_api_token: Option<String>,
+    pub cf_api_token: Option<String>,
     /// The Worker script name the uploaded static assets attach to for the
     /// `workers-static-assets` backend (#411). Ignored by the S3 backend.
     #[serde(default)]
-    pub(crate) cf_script_name: Option<String>,
+    pub cf_script_name: Option<String>,
 }
 
 impl AssetBucketConfig {
@@ -795,7 +795,7 @@ impl AssetBucketConfig {
     /// section carrying leftover S3 fields hard-fails config load for a client
     /// that is never built. Both the runtime accessor and the validators call
     /// this so the condition cannot drift.
-    pub(crate) fn builds_s3_client(&self) -> bool {
+    pub fn builds_s3_client(&self) -> bool {
         self.enabled && matches!(self.backend, AssetBucketBackend::S3)
     }
 }
@@ -804,12 +804,12 @@ impl AssetBucketConfig {
 /// request before virtual-key/storage lookups. All fields are additive and
 /// default to the pre-#166 behavior (no allowlist, no pre-auth throttling).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub(crate) struct NetworkAccessConfig {
+pub struct NetworkAccessConfig {
     /// CIDR ranges (or bare IPs) allowed to reach the gateway. Empty means
     /// "no restriction" — every source IP is allowed, matching prior
     /// behavior.
     #[serde(default)]
-    pub(crate) ip_allowlist: Vec<String>,
+    pub ip_allowlist: Vec<String>,
     /// Whether to trust `X-Forwarded-For`/`X-Real-IP` over the raw TCP peer
     /// address when resolving the client IP for allowlist/rate-limit
     /// decisions. Only enable this when FerroGate sits behind trusted reverse
@@ -817,7 +817,7 @@ pub(crate) struct NetworkAccessConfig {
     /// spoof its apparent source IP. Defaults to `false` (trust only the raw
     /// peer address).
     #[serde(default)]
-    pub(crate) trust_forwarded_for: bool,
+    pub trust_forwarded_for: bool,
     /// Number of trusted reverse proxies in front of the gateway. When
     /// `trust_forwarded_for` is set, the client IP is taken this many entries
     /// from the RIGHT of `X-Forwarded-For` (each trusted proxy appends exactly
@@ -825,17 +825,17 @@ pub(crate) struct NetworkAccessConfig {
     /// IP. Defaults to `1` (a single fronting load balancer) when trusting
     /// forwarded headers; set higher for a chain of N proxies.
     #[serde(default)]
-    pub(crate) trusted_proxy_hops: Option<u32>,
+    pub trusted_proxy_hops: Option<u32>,
     /// Maximum requests per source IP per minute before authentication is
     /// even attempted. `None` (the default) disables pre-auth throttling.
     #[serde(default)]
-    pub(crate) unauthenticated_rate_limit_per_minute: Option<u64>,
+    pub unauthenticated_rate_limit_per_minute: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub(crate) struct AdminConfig {
+pub struct AdminConfig {
     #[serde(default)]
-    pub(crate) listen: Option<String>,
+    pub listen: Option<String>,
     /// Origin reflected back as `Access-Control-Allow-Origin` on every
     /// locally-handled admin API response (including an `OPTIONS` preflight),
     /// so a separately-deployed admin console frontend can call `/admin/v1/*`
@@ -843,7 +843,7 @@ pub(crate) struct AdminConfig {
     /// Unset disables CORS headers entirely. Applied once at process start;
     /// changing it requires a restart (not picked up by `/admin/v1/config/reload`).
     #[serde(default)]
-    pub(crate) cors_allowed_origin: Option<String>,
+    pub cors_allowed_origin: Option<String>,
 }
 
 /// `[control_api]` (canonical; deprecated alias `[admin_api]`) -- the
@@ -855,10 +855,10 @@ pub(crate) struct AdminConfig {
 /// over `gateway_url`, so control-plane traffic never rides the AI
 /// data-plane listener.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AdminApiConfig {
+pub struct AdminApiConfig {
     /// Address the Control Plane API service listens on.
     #[serde(default = "default_admin_api_listen")]
-    pub(crate) listen: String,
+    pub listen: String,
     /// Internal base URL of the running gateway the admin surface is
     /// proxied to. `http://` only: this is a private service-to-service
     /// hop (same trust posture as `auth_service.endpoint` /
@@ -866,22 +866,22 @@ pub(crate) struct AdminApiConfig {
     /// service's own listener via `tls_cert_path`/`tls_key_path` or at an
     /// Ingress in front of it.
     #[serde(default = "default_admin_api_gateway_url")]
-    pub(crate) gateway_url: String,
+    pub gateway_url: String,
     /// Per-attempt connect/read/write timeout for the proxied hop.
     #[serde(default = "default_admin_api_upstream_timeout_millis")]
-    pub(crate) upstream_timeout_millis: u64,
+    pub upstream_timeout_millis: u64,
     /// Origin reflected as `Access-Control-Allow-Origin` on locally
     /// generated responses (the OPTIONS preflight and auth-gate errors);
     /// proxied responses carry the gateway's own CORS headers, so set the
     /// gateway's `admin.cors_allowed_origin` to the same origin.
     #[serde(default)]
-    pub(crate) cors_allowed_origin: Option<String>,
+    pub cors_allowed_origin: Option<String>,
     /// Optional TLS for the admin-api listener (PEM certificate chain +
     /// private key). Both must be set together; unset serves plain HTTP.
     #[serde(default)]
-    pub(crate) tls_cert_path: Option<String>,
+    pub tls_cert_path: Option<String>,
     #[serde(default)]
-    pub(crate) tls_key_path: Option<String>,
+    pub tls_key_path: Option<String>,
 }
 
 impl Default for AdminApiConfig {
@@ -910,17 +910,17 @@ fn default_admin_api_upstream_timeout_millis() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AuthServiceConfig {
+pub struct AuthServiceConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_auth_service_endpoint")]
-    pub(crate) endpoint: String,
+    pub endpoint: String,
     #[serde(default = "default_auth_service_timeout_millis")]
-    pub(crate) timeout_millis: u64,
+    pub timeout_millis: u64,
     #[serde(default)]
-    pub(crate) max_retries: u32,
+    pub max_retries: u32,
     #[serde(default = "default_auth_service_retry_backoff_millis")]
-    pub(crate) retry_backoff_millis: u64,
+    pub retry_backoff_millis: u64,
 }
 
 /// Gateway-side client config for the standalone billing service (issue #131).
@@ -928,19 +928,19 @@ pub(crate) struct AuthServiceConfig {
 /// service's `POST /v1/billing/charge` over REST (fire-and-forget, so the hot
 /// path is never blocked on the billing round-trip).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct BillingServiceConfig {
+pub struct BillingServiceConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_billing_service_endpoint")]
-    pub(crate) endpoint: String,
+    pub endpoint: String,
     #[serde(default = "default_billing_service_timeout_millis")]
-    pub(crate) timeout_millis: u64,
+    pub timeout_millis: u64,
     /// Optional service-to-service bearer token sent to the billing service.
     #[serde(default)]
-    pub(crate) token: Option<String>,
+    pub token: Option<String>,
     /// Optional env var name holding the billing service bearer token.
     #[serde(default)]
-    pub(crate) token_env: Option<String>,
+    pub token_env: Option<String>,
 }
 
 impl Default for BillingServiceConfig {
@@ -964,42 +964,42 @@ fn default_billing_service_timeout_millis() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct ClusterConfig {
+pub struct ClusterConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_cluster_id")]
-    pub(crate) cluster_id: String,
+    pub cluster_id: String,
     #[serde(default = "default_cluster_node_id")]
-    pub(crate) node_id: String,
+    pub node_id: String,
     #[serde(default)]
-    pub(crate) node_region: Option<String>,
+    pub node_region: Option<String>,
     #[serde(default)]
-    pub(crate) node_zone: Option<String>,
+    pub node_zone: Option<String>,
     #[serde(default = "default_cluster_state_backend")]
-    pub(crate) state_backend: String,
+    pub state_backend: String,
     #[serde(default)]
-    pub(crate) file_state_path: Option<String>,
+    pub file_state_path: Option<String>,
     #[serde(default = "default_cluster_counter_backend")]
-    pub(crate) counter_backend: String,
+    pub counter_backend: String,
     #[serde(default)]
-    pub(crate) redis_url: Option<String>,
+    pub redis_url: Option<String>,
     #[serde(default = "default_cluster_counter_timeout_millis")]
-    pub(crate) counter_timeout_millis: u64,
+    pub counter_timeout_millis: u64,
     #[serde(default = "default_cluster_heartbeat_interval_secs")]
-    pub(crate) heartbeat_interval_secs: u64,
+    pub heartbeat_interval_secs: u64,
     #[serde(default = "default_cluster_config_poll_interval_secs")]
-    pub(crate) config_poll_interval_secs: u64,
+    pub config_poll_interval_secs: u64,
     /// Ed25519 signing key (base64 standard, 32-byte seed) THIS node uses to
     /// sign the file-backed control-plane snapshots it publishes. When set,
     /// `publish_from_config` embeds a signed envelope in the snapshot; when
     /// unset, snapshots are published unsigned (legacy behavior). Issue #206.
     #[serde(default)]
-    pub(crate) snapshot_signing_key: Option<String>,
+    pub snapshot_signing_key: Option<String>,
     /// Key id advertised in signed snapshots this node publishes; peers look it
     /// up in their `snapshot_trusted_keys`. Required when `snapshot_signing_key`
     /// is set.
     #[serde(default)]
-    pub(crate) snapshot_signing_key_id: Option<String>,
+    pub snapshot_signing_key_id: Option<String>,
     /// Trusted Ed25519 verifying keys (key_id -> base64 standard 32-byte public
     /// key). When non-empty, a loaded file-backed snapshot MUST carry a valid
     /// signature from one of these keys (matching identity + a strictly newer
@@ -1007,83 +1007,83 @@ pub(crate) struct ClusterConfig {
     /// verification is rejected and the running config (last known good) is
     /// retained. Empty = verification disabled (legacy behavior).
     #[serde(default)]
-    pub(crate) snapshot_trusted_keys: Vec<ClusterSnapshotKey>,
+    pub snapshot_trusted_keys: Vec<ClusterSnapshotKey>,
     /// Tenant identity the snapshot signature must bind to. Required when
     /// signing or verification is enabled.
     #[serde(default)]
-    pub(crate) snapshot_tenant_id: Option<String>,
+    pub snapshot_tenant_id: Option<String>,
     /// Deployment identity the snapshot signature must bind to. Required when
     /// signing or verification is enabled.
     #[serde(default)]
-    pub(crate) snapshot_deployment_id: Option<String>,
+    pub snapshot_deployment_id: Option<String>,
     /// TTL (seconds) applied to signed snapshots this node publishes:
     /// `not_after_unix = now + this`. Peers reject a snapshot once expired.
     #[serde(default = "default_cluster_snapshot_max_age_secs")]
-    pub(crate) snapshot_max_age_secs: u64,
+    pub snapshot_max_age_secs: u64,
 }
 
 /// A trusted Ed25519 verifying key for signed control-plane snapshots (#206).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct ClusterSnapshotKey {
-    pub(crate) key_id: String,
+pub struct ClusterSnapshotKey {
+    pub key_id: String,
     /// Base64 (standard alphabet) of the 32-byte Ed25519 public key.
-    pub(crate) public_key: String,
+    pub public_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AgentRuntimeConfig {
+pub struct AgentRuntimeConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) provider: AgentRuntimeProvider,
+    pub provider: AgentRuntimeProvider,
     #[serde(default = "default_agent_runtime_max_turns")]
-    pub(crate) max_turns: u32,
+    pub max_turns: u32,
     #[serde(default = "default_agent_runtime_timeout_millis")]
-    pub(crate) timeout_millis: u64,
+    pub timeout_millis: u64,
     #[serde(default)]
-    pub(crate) external: AgentRuntimeExternalConfig,
+    pub external: AgentRuntimeExternalConfig,
     #[serde(default)]
-    pub(crate) managed_worker: AgentRuntimeManagedWorkerConfig,
+    pub managed_worker: AgentRuntimeManagedWorkerConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AgentRuntimeProvider {
+pub enum AgentRuntimeProvider {
     #[default]
     ManagedWorker,
     External,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AgentRuntimeExternalConfig {
+pub struct AgentRuntimeExternalConfig {
     #[serde(default)]
-    pub(crate) command: String,
+    pub command: String,
     #[serde(default)]
-    pub(crate) args: Vec<String>,
+    pub args: Vec<String>,
     #[serde(default)]
-    pub(crate) timeout_millis: Option<u64>,
+    pub timeout_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AgentRuntimeManagedWorkerConfig {
+pub struct AgentRuntimeManagedWorkerConfig {
     #[serde(default)]
-    pub(crate) external_action_authorizer_http_listen: Option<String>,
+    pub external_action_authorizer_http_listen: Option<String>,
     #[serde(default)]
-    pub(crate) external_action_authorizer_socket: Option<String>,
+    pub external_action_authorizer_socket: Option<String>,
     #[serde(default)]
-    pub(crate) external_action_authorizer_max_requests: Option<usize>,
+    pub external_action_authorizer_max_requests: Option<usize>,
     #[serde(default)]
-    pub(crate) allowed_actions: Vec<ManagedWorkerCapabilityActionConfig>,
+    pub allowed_actions: Vec<ManagedWorkerCapabilityActionConfig>,
     #[serde(default)]
-    pub(crate) approval_required_actions: Vec<ManagedWorkerCapabilityActionConfig>,
+    pub approval_required_actions: Vec<ManagedWorkerCapabilityActionConfig>,
     #[serde(default)]
-    pub(crate) allow_direct_network_egress: bool,
+    pub allow_direct_network_egress: bool,
     #[serde(default)]
-    pub(crate) target_grants: Vec<ManagedWorkerCapabilityTargetGrantConfig>,
+    pub target_grants: Vec<ManagedWorkerCapabilityTargetGrantConfig>,
     #[serde(default)]
-    pub(crate) class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode,
+    pub class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode,
     #[serde(default = "default_managed_worker_policy_revision")]
-    pub(crate) policy_revision: String,
+    pub policy_revision: String,
 }
 
 impl Default for AgentRuntimeManagedWorkerConfig {
@@ -1107,16 +1107,16 @@ fn default_managed_worker_policy_revision() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct ManagedWorkerCapabilityTargetGrantConfig {
-    pub(crate) selector_id: String,
-    pub(crate) permission_key: String,
-    pub(crate) action: ManagedWorkerCapabilityActionConfig,
-    pub(crate) selector: ferrogate_runtime::CapabilityTargetSelector,
+pub struct ManagedWorkerCapabilityTargetGrantConfig {
+    pub selector_id: String,
+    pub permission_key: String,
+    pub action: ManagedWorkerCapabilityActionConfig,
+    pub selector: ferrogate_runtime::CapabilityTargetSelector,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ManagedWorkerCapabilityActionConfig {
+pub enum ManagedWorkerCapabilityActionConfig {
     Tool,
     McpTool,
     Cli,
@@ -1131,11 +1131,11 @@ pub(crate) enum ManagedWorkerCapabilityActionConfig {
 }
 
 impl ManagedWorkerCapabilityActionConfig {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         self.as_policy_action().as_str()
     }
 
-    pub(crate) fn as_policy_action(self) -> ferrogate_runtime::CapabilityAction {
+    pub fn as_policy_action(self) -> ferrogate_runtime::CapabilityAction {
         match self {
             Self::Tool => ferrogate_runtime::CapabilityAction::Tool,
             Self::McpTool => ferrogate_runtime::CapabilityAction::McpTool,
@@ -1153,65 +1153,65 @@ impl ManagedWorkerCapabilityActionConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct TlsConfig {
+pub struct TlsConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) cert_path: Option<String>,
+    pub cert_path: Option<String>,
     #[serde(default)]
-    pub(crate) key_path: Option<String>,
+    pub key_path: Option<String>,
     #[serde(default)]
-    pub(crate) http2: bool,
+    pub http2: bool,
     #[serde(default)]
-    pub(crate) acme: TlsAcmeConfig,
+    pub acme: TlsAcmeConfig,
 }
 
 impl TlsConfig {
-    pub(crate) fn is_enabled(&self) -> bool {
+    pub fn is_enabled(&self) -> bool {
         self.enabled || self.cert_path.is_some() || self.key_path.is_some() || self.acme.enabled
     }
 
-    pub(crate) fn manual_cert_and_key(&self) -> Option<(&str, &str)> {
+    pub fn manual_cert_and_key(&self) -> Option<(&str, &str)> {
         Some((self.cert_path.as_deref()?, self.key_path.as_deref()?))
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct TlsAcmeConfig {
+pub struct TlsAcmeConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) domains: Vec<String>,
+    pub domains: Vec<String>,
     #[serde(default)]
-    pub(crate) email: Option<String>,
+    pub email: Option<String>,
     #[serde(default = "default_acme_directory_url")]
-    pub(crate) directory_url: String,
+    pub directory_url: String,
     #[serde(default = "default_acme_challenge")]
-    pub(crate) challenge: String,
+    pub challenge: String,
     #[serde(default = "default_http_challenge_listen")]
-    pub(crate) http_challenge_listen: String,
+    pub http_challenge_listen: String,
     #[serde(default = "default_acme_storage_dir")]
-    pub(crate) storage_dir: String,
+    pub storage_dir: String,
     #[serde(default)]
-    pub(crate) terms_agreed: bool,
+    pub terms_agreed: bool,
     #[serde(default)]
-    pub(crate) dns_provider: Option<String>,
+    pub dns_provider: Option<String>,
     #[serde(default)]
-    pub(crate) dns_config: BTreeMap<String, String>,
+    pub dns_config: BTreeMap<String, String>,
     #[serde(default)]
-    pub(crate) dns_hook_set: Option<String>,
+    pub dns_hook_set: Option<String>,
     #[serde(default)]
-    pub(crate) dns_hook_cleanup: Option<String>,
+    pub dns_hook_cleanup: Option<String>,
     #[serde(default = "default_dns_propagation_delay_secs")]
-    pub(crate) dns_propagation_delay_secs: u64,
+    pub dns_propagation_delay_secs: u64,
     #[serde(default = "default_acme_renewal_window_secs")]
-    pub(crate) renewal_window_secs: u64,
+    pub renewal_window_secs: u64,
     #[serde(default = "default_acme_renewal_check_interval_secs")]
-    pub(crate) renewal_check_interval_secs: u64,
+    pub renewal_check_interval_secs: u64,
     #[serde(default = "default_acme_renewal_retry_interval_secs")]
-    pub(crate) renewal_retry_interval_secs: u64,
+    pub renewal_retry_interval_secs: u64,
     #[serde(default = "default_true")]
-    pub(crate) auto_graceful_reload: bool,
+    pub auto_graceful_reload: bool,
 }
 
 impl Default for TlsAcmeConfig {
@@ -1239,25 +1239,25 @@ impl Default for TlsAcmeConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Provider {
-    pub(crate) name: String,
+pub struct Provider {
+    pub name: String,
     #[serde(default = "default_provider_kind")]
-    pub(crate) kind: String,
-    pub(crate) base_url: String,
+    pub kind: String,
+    pub base_url: String,
     #[serde(default)]
-    pub(crate) api_key_env: Option<String>,
+    pub api_key_env: Option<String>,
     /// Secret-manager reference (`env://NAME` or `vault://mount/path#field`,
     /// issue #163), resolved once at config load/reload time and cached —
     /// see `AppState::resolved_provider_secrets`. Takes precedence over
     /// `api_key_env` when both are set and resolution succeeds.
     #[serde(default)]
-    pub(crate) secret_ref: Option<String>,
+    pub secret_ref: Option<String>,
     #[serde(default)]
-    pub(crate) openrouter_http_referer: Option<String>,
+    pub openrouter_http_referer: Option<String>,
     #[serde(default)]
-    pub(crate) openrouter_x_title: Option<String>,
+    pub openrouter_x_title: Option<String>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Physical region this provider is hosted in (issue #173), e.g.
     /// "eu-west-1" -- additive and `#[serde(default)]` so existing configs
     /// deserialize unchanged. Enforced against a tenant's region
@@ -1265,7 +1265,7 @@ pub(crate) struct Provider {
     /// `AppState::candidate_model_routes`; unset means the provider isn't
     /// eligible for a region-constrained tenant (fails closed, not open).
     #[serde(default)]
-    pub(crate) region: Option<String>,
+    pub region: Option<String>,
     /// AWS access key id for the `bedrock` provider kind (issue #172) --
     /// not a secret itself (safe to store in plain config), paired with
     /// `aws_secret_access_key_env` for the actual secret. `region` above
@@ -1273,7 +1273,7 @@ pub(crate) struct Provider {
     /// AWS region a Bedrock provider targets, rather than adding a
     /// duplicate field.
     #[serde(default)]
-    pub(crate) aws_access_key_id: Option<String>,
+    pub aws_access_key_id: Option<String>,
     /// Environment variable holding the AWS secret access key. This
     /// resolves AWS credentials from the environment only (not through
     /// the vault-backed `secret_ref` mechanism `api_key_env` has), since
@@ -1282,19 +1282,19 @@ pub(crate) struct Provider {
     /// mechanism was built for -- a deliberate scope-narrowing for
     /// issue #172's first cut, not a design dead-end.
     #[serde(default)]
-    pub(crate) aws_secret_access_key_env: Option<String>,
+    pub aws_secret_access_key_env: Option<String>,
     /// Environment variable holding a temporary AWS session token (STS
     /// assumed-role credentials). Omit for long-lived IAM user access
     /// keys.
     #[serde(default)]
-    pub(crate) aws_session_token_env: Option<String>,
+    pub aws_session_token_env: Option<String>,
     /// GCP project id for the `vertex` provider kind (issue #172). Like
     /// `aws_access_key_id`, not a secret -- safe to store in plain
     /// config. `region` above doubles as the GCP location (e.g.
     /// `us-central1`) a Vertex AI provider targets, the same reuse
     /// `aws_access_key_id`'s doc comment already established for AWS.
     #[serde(default)]
-    pub(crate) gcp_project_id: Option<String>,
+    pub gcp_project_id: Option<String>,
     /// Environment variable holding a pre-minted GCP OAuth2 access token
     /// (scope `cloud-platform`). FerroGate does not mint or refresh this
     /// token itself -- see `GcpProviderCredentials`'s doc comment in
@@ -1302,7 +1302,7 @@ pub(crate) struct Provider {
     /// external process (e.g. a `gcloud auth application-default
     /// print-access-token` cron, or an ADC-aware sidecar).
     #[serde(default)]
-    pub(crate) gcp_access_token_env: Option<String>,
+    pub gcp_access_token_env: Option<String>,
     /// Per-provider Cloudflare AI Gateway routing (issue #406). When set (and
     /// a top-level `[cloudflare]` block is configured, issue #405), the
     /// provider's already-prepared upstream request is rewritten onto the
@@ -1312,7 +1312,7 @@ pub(crate) struct Provider {
     /// `account_id` and the gateway/api base URLs come from `[cloudflare]`, so
     /// they are never repeated here.
     #[serde(default)]
-    pub(crate) cloudflare_ai_gateway: Option<ProviderCloudflareAiGatewayConfig>,
+    pub cloudflare_ai_gateway: Option<ProviderCloudflareAiGatewayConfig>,
 }
 
 /// Per-provider Cloudflare AI Gateway routing block (issue #406).
@@ -1323,24 +1323,24 @@ pub(crate) struct Provider {
 /// per-provider gateway id, the optional AI-Gateway auth-token reference, the
 /// surface mode, and an optional Cloudflare provider-slug override live here.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct ProviderCloudflareAiGatewayConfig {
+pub struct ProviderCloudflareAiGatewayConfig {
     /// AI Gateway id (the `{gateway_id}` path segment / `cf-aig-gateway-id`
     /// header). Required.
-    pub(crate) gateway_id: String,
+    pub gateway_id: String,
     /// Optional secret reference (`env://…`, `vault://…`, or `cf://…`) for the
     /// AI Gateway auth token, resolved through the same secret path as a
     /// provider key. Absent/empty = an unauthenticated gateway (no
     /// `cf-aig-authorization` header injected).
     #[serde(default)]
-    pub(crate) aig_token_secret_ref: Option<String>,
+    pub aig_token_secret_ref: Option<String>,
     /// Which Cloudflare surface to route through. Defaults to `compat`.
     #[serde(default)]
-    pub(crate) mode: ProviderCloudflareAiGatewayMode,
+    pub mode: ProviderCloudflareAiGatewayMode,
     /// Explicit Cloudflare provider-slug override (the path segment in compat
     /// mode / the `author` prefix in unified mode). Absent = derived from the
     /// provider family (`openai`/`anthropic`).
     #[serde(default)]
-    pub(crate) provider_slug: Option<String>,
+    pub provider_slug: Option<String>,
 }
 
 /// The Cloudflare AI Gateway surface a provider routes through -- the
@@ -1350,7 +1350,7 @@ pub(crate) struct ProviderCloudflareAiGatewayConfig {
 /// `state_routing.rs`.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ProviderCloudflareAiGatewayMode {
+pub enum ProviderCloudflareAiGatewayMode {
     /// Per-provider passthrough surface. Default -- forwards the provider
     /// request shape verbatim.
     #[default]
@@ -1361,17 +1361,17 @@ pub(crate) enum ProviderCloudflareAiGatewayMode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Model {
+pub struct Model {
     /// Logical model name exposed by FerroGate clients.
-    pub(crate) name: String,
+    pub name: String,
     /// Provider name from [[providers]].
-    pub(crate) provider: String,
+    pub provider: String,
     /// Actual model name sent to the upstream provider.
-    pub(crate) provider_model: String,
+    pub provider_model: String,
     #[serde(default)]
-    pub(crate) routing_strategy: RoutingStrategy,
+    pub routing_strategy: RoutingStrategy,
     #[serde(default)]
-    pub(crate) fallbacks: Vec<ModelFallback>,
+    pub fallbacks: Vec<ModelFallback>,
     /// Canary rollout (issue #276): route a deterministic, sticky
     /// percentage of this logical model's traffic to an alternate
     /// provider/model. Sticky by api key / tenant so a given caller lands
@@ -1382,7 +1382,7 @@ pub(crate) struct Model {
     /// unchanged); `percent = 100` promotes the canary to primary as a
     /// config-only change.
     #[serde(default)]
-    pub(crate) canary: Option<CanaryRoute>,
+    pub canary: Option<CanaryRoute>,
     /// Shadow/mirror rollout (issue #276): duplicate a sampled,
     /// budget-capped fraction of this model's requests to a secondary
     /// provider/model without affecting the client response. Fire-and-forget
@@ -1390,106 +1390,106 @@ pub(crate) struct Model {
     /// tenant, never trips the primary provider's circuit breaker). Absent =
     /// no shadow.
     #[serde(default)]
-    pub(crate) shadow: Option<ShadowRoute>,
+    pub shadow: Option<ShadowRoute>,
     #[serde(default)]
-    pub(crate) visible_organization_ids: Vec<String>,
+    pub visible_organization_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) visible_project_ids: Vec<String>,
+    pub visible_project_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) capabilities: Vec<String>,
+    pub capabilities: Vec<String>,
     #[serde(default)]
-    pub(crate) context_window: Option<u32>,
+    pub context_window: Option<u32>,
     #[serde(default)]
-    pub(crate) input_price_per_1m: Option<f64>,
+    pub input_price_per_1m: Option<f64>,
     #[serde(default)]
-    pub(crate) output_price_per_1m: Option<f64>,
+    pub output_price_per_1m: Option<f64>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) cache_enabled: Option<bool>,
+    pub cache_enabled: Option<bool>,
 }
 
 /// Canary target for a logical model (issue #276).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct CanaryRoute {
+pub struct CanaryRoute {
     /// Provider name from `[[providers]]` to canary onto.
-    pub(crate) provider: String,
+    pub provider: String,
     /// Actual model name sent to the canary provider.
-    pub(crate) provider_model: String,
+    pub provider_model: String,
     /// Percentage of traffic (0-100) routed to the canary. `0` disables the
     /// split (no canary traffic); `100` sends all traffic to the canary
     /// (canary becomes primary).
     #[serde(default)]
-    pub(crate) percent: u8,
+    pub percent: u8,
     #[serde(default)]
-    pub(crate) input_price_per_1m: Option<f64>,
+    pub input_price_per_1m: Option<f64>,
     #[serde(default)]
-    pub(crate) output_price_per_1m: Option<f64>,
+    pub output_price_per_1m: Option<f64>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 /// Shadow/mirror target for a logical model (issue #276).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct ShadowRoute {
+pub struct ShadowRoute {
     /// Provider name from `[[providers]]` to mirror requests to.
-    pub(crate) provider: String,
+    pub provider: String,
     /// Actual model name sent to the shadow provider.
-    pub(crate) provider_model: String,
+    pub provider_model: String,
     /// Percentage of requests (0-100) mirrored to the shadow target,
     /// sampled stickily by api key / tenant. `0` disables mirroring.
     #[serde(default)]
-    pub(crate) sample_percent: u8,
+    pub sample_percent: u8,
     /// Maximum shadow dispatches admitted per process lifetime (across all
     /// callers of this model); `0` = uncapped. Caps the mirror's cost.
     #[serde(default)]
-    pub(crate) max_requests: u64,
+    pub max_requests: u64,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct ModelFallback {
-    pub(crate) provider: String,
-    pub(crate) provider_model: String,
+pub struct ModelFallback {
+    pub provider: String,
+    pub provider_model: String,
     #[serde(default)]
-    pub(crate) input_price_per_1m: Option<f64>,
+    pub input_price_per_1m: Option<f64>,
     #[serde(default)]
-    pub(crate) output_price_per_1m: Option<f64>,
+    pub output_price_per_1m: Option<f64>,
     #[serde(default)]
-    pub(crate) priority: Option<u32>,
+    pub priority: Option<u32>,
     #[serde(default)]
-    pub(crate) weight: Option<u32>,
+    pub weight: Option<u32>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct ApiKey {
+pub struct ApiKey {
     /// Stable non-secret identifier used in logs and audit records.
-    pub(crate) id: String,
-    pub(crate) name: String,
+    pub id: String,
+    pub name: String,
     /// Environment variable containing the secret value. Preferred for real use.
     #[serde(default)]
-    pub(crate) key_env: Option<String>,
+    pub key_env: Option<String>,
     /// Plain value for local development only. Do not use in production.
     #[serde(default)]
-    pub(crate) key: Option<String>,
+    pub key: Option<String>,
     /// Hashed key value for durable config. Use `ferrogate hash-key --secret ...` to generate.
     #[serde(default)]
-    pub(crate) key_hash: Option<String>,
+    pub key_hash: Option<String>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) scopes: Vec<String>,
+    pub scopes: Vec<String>,
     #[serde(default)]
-    pub(crate) allowed_models: Vec<String>,
+    pub allowed_models: Vec<String>,
     #[serde(default)]
-    pub(crate) denied_models: Vec<String>,
+    pub denied_models: Vec<String>,
     #[serde(default)]
-    pub(crate) allowed_providers: Vec<String>,
+    pub allowed_providers: Vec<String>,
     #[serde(default)]
-    pub(crate) denied_providers: Vec<String>,
+    pub denied_providers: Vec<String>,
     /// Regions this key's requests may route to (issue #173), e.g.
     /// ["eu-west-1"] -- empty means unrestricted, mirroring
     /// `allowed_models`/`allowed_providers`. Enforced in
@@ -1498,7 +1498,7 @@ pub(crate) struct ApiKey {
     /// declared region is ineligible once this is non-empty (fail closed,
     /// not open).
     #[serde(default)]
-    pub(crate) region_allowlist: Vec<String>,
+    pub region_allowlist: Vec<String>,
     /// The tenant this credential speaks for: a foreign key to `tenants.id`,
     /// and the authorization identity every tenant-isolation check in
     /// `crate::auth` reads (`authorize_tenant_scope`, `filter_by_tenant_scope`,
@@ -1512,7 +1512,7 @@ pub(crate) struct ApiKey {
     /// shape for a platform operator, and one that must now say so via
     /// [`Self::platform_operator`].
     #[serde(default)]
-    pub(crate) organization_id: Option<String>,
+    pub organization_id: Option<String>,
     /// Explicit platform-root opt-in (issue #515). `Some(true)` grants the
     /// unrestricted, cross-tenant identity that `organization_id: None` used to
     /// confer implicitly; it is mutually exclusive with `organization_id`
@@ -1532,118 +1532,118 @@ pub(crate) struct ApiKey {
     /// [`super::TenancyConfig::implicit_platform_operator`]: root under the
     /// legacy default, refused at authentication once that is flipped off.
     #[serde(default)]
-    pub(crate) platform_operator: Option<bool>,
+    pub platform_operator: Option<bool>,
     #[serde(default)]
-    pub(crate) team_id: Option<String>,
+    pub team_id: Option<String>,
     #[serde(default)]
-    pub(crate) project_id: Option<String>,
+    pub project_id: Option<String>,
     #[serde(default)]
-    pub(crate) workspace_id: Option<String>,
+    pub workspace_id: Option<String>,
     #[serde(default)]
-    pub(crate) user_id: Option<String>,
+    pub user_id: Option<String>,
     #[serde(default)]
-    pub(crate) monthly_token_budget: Option<u64>,
+    pub monthly_token_budget: Option<u64>,
     #[serde(default)]
-    pub(crate) request_limit_per_minute: Option<u64>,
+    pub request_limit_per_minute: Option<u64>,
     #[serde(default)]
-    pub(crate) expires_at_unix: Option<u64>,
+    pub expires_at_unix: Option<u64>,
     #[serde(default)]
-    pub(crate) log_bodies: Option<bool>,
+    pub log_bodies: Option<bool>,
     #[serde(default)]
-    pub(crate) cache_enabled: Option<bool>,
+    pub cache_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct PolicyRule {
-    pub(crate) name: String,
+pub struct PolicyRule {
+    pub name: String,
     #[serde(default = "default_policy_effect")]
-    pub(crate) effect: String,
+    pub effect: String,
     #[serde(default)]
-    pub(crate) organization_ids: Vec<String>,
+    pub organization_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) project_ids: Vec<String>,
+    pub project_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) api_key_ids: Vec<String>,
+    pub api_key_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) models: Vec<String>,
+    pub models: Vec<String>,
     #[serde(default)]
-    pub(crate) providers: Vec<String>,
+    pub providers: Vec<String>,
     #[serde(default = "default_policy_code")]
-    pub(crate) code: String,
+    pub code: String,
     #[serde(default = "default_policy_message")]
-    pub(crate) message: String,
+    pub message: String,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct GatewayConfigProfile {
-    pub(crate) id: String,
-    pub(crate) name: String,
+pub struct GatewayConfigProfile {
+    pub id: String,
+    pub name: String,
     #[serde(default = "default_gateway_config_revision")]
-    pub(crate) revision: u32,
+    pub revision: u32,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) api_key_ids: Vec<String>,
+    pub api_key_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) cache_enabled: Option<bool>,
+    pub cache_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AgentWorkflowPolicy {
-    pub(crate) id: String,
-    pub(crate) name: String,
+pub struct AgentWorkflowPolicy {
+    pub id: String,
+    pub name: String,
     #[serde(default = "default_gateway_config_revision")]
-    pub(crate) version: u32,
+    pub version: u32,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) organization_ids: Vec<String>,
+    pub organization_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) project_ids: Vec<String>,
+    pub project_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) api_key_ids: Vec<String>,
-    pub(crate) nodes: Vec<AgentWorkflowNode>,
+    pub api_key_ids: Vec<String>,
+    pub nodes: Vec<AgentWorkflowNode>,
     #[serde(default)]
-    pub(crate) edges: Vec<AgentWorkflowEdge>,
+    pub edges: Vec<AgentWorkflowEdge>,
     #[serde(default)]
-    pub(crate) max_model_calls: Option<u32>,
+    pub max_model_calls: Option<u32>,
     #[serde(default)]
-    pub(crate) max_tool_calls: Option<u32>,
+    pub max_tool_calls: Option<u32>,
     #[serde(default)]
-    pub(crate) max_parallelism: Option<u32>,
+    pub max_parallelism: Option<u32>,
     #[serde(default)]
-    pub(crate) max_iterations: Option<u32>,
+    pub max_iterations: Option<u32>,
     #[serde(default)]
-    pub(crate) timeout_millis: Option<u64>,
+    pub timeout_millis: Option<u64>,
     #[serde(default)]
-    pub(crate) token_budget: Option<u64>,
+    pub token_budget: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AgentWorkflowNode {
-    pub(crate) id: String,
+pub struct AgentWorkflowNode {
+    pub id: String,
     #[serde(default)]
-    pub(crate) kind: AgentWorkflowNodeKind,
+    pub kind: AgentWorkflowNodeKind,
     #[serde(default)]
-    pub(crate) model: Option<String>,
+    pub model: Option<String>,
     #[serde(default)]
-    pub(crate) providers: Vec<String>,
+    pub providers: Vec<String>,
     #[serde(default)]
-    pub(crate) tool: Option<String>,
+    pub tool: Option<String>,
     #[serde(default)]
-    pub(crate) max_iterations: Option<u32>,
+    pub max_iterations: Option<u32>,
     #[serde(default)]
-    pub(crate) token_budget: Option<u64>,
+    pub token_budget: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AgentWorkflowNodeKind {
+pub enum AgentWorkflowNodeKind {
     #[default]
     Model,
     Tool,
@@ -1654,31 +1654,31 @@ pub(crate) enum AgentWorkflowNodeKind {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AgentWorkflowEdge {
-    pub(crate) from: String,
-    pub(crate) to: String,
+pub struct AgentWorkflowEdge {
+    pub from: String,
+    pub to: String,
     #[serde(default)]
-    pub(crate) condition: Option<String>,
+    pub condition: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PromptTemplate {
-    pub(crate) id: String,
-    pub(crate) name: String,
+pub struct PromptTemplate {
+    pub id: String,
+    pub name: String,
     #[serde(default)]
-    pub(crate) status: PromptTemplateStatus,
+    pub status: PromptTemplateStatus,
     #[serde(default)]
-    pub(crate) target: PromptTemplateTarget,
-    pub(crate) model: String,
+    pub target: PromptTemplateTarget,
+    pub model: String,
     #[serde(default)]
-    pub(crate) variables: Vec<PromptTemplateVariable>,
-    pub(crate) versions: Vec<PromptTemplateVersion>,
+    pub variables: Vec<PromptTemplateVariable>,
+    pub versions: Vec<PromptTemplateVersion>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PromptTemplateStatus {
+pub enum PromptTemplateStatus {
     Draft,
     #[default]
     Active,
@@ -1687,7 +1687,7 @@ pub(crate) enum PromptTemplateStatus {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PromptTemplateTarget {
+pub enum PromptTemplateTarget {
     #[default]
     ChatCompletions,
     Responses,
@@ -1695,35 +1695,35 @@ pub(crate) enum PromptTemplateTarget {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PromptTemplateVariable {
-    pub(crate) name: String,
+pub struct PromptTemplateVariable {
+    pub name: String,
     #[serde(default = "default_true")]
-    pub(crate) required: bool,
+    pub required: bool,
     #[serde(default)]
-    pub(crate) default: Option<String>,
+    pub default: Option<String>,
     #[serde(default)]
-    pub(crate) description: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PromptTemplateVersion {
+pub struct PromptTemplateVersion {
     #[serde(default = "default_gateway_config_revision")]
-    pub(crate) revision: u32,
+    pub revision: u32,
     #[serde(default)]
-    pub(crate) status: PromptTemplateVersionStatus,
-    pub(crate) messages: Vec<PromptTemplateMessage>,
+    pub status: PromptTemplateVersionStatus,
+    pub messages: Vec<PromptTemplateMessage>,
     #[serde(default)]
-    pub(crate) temperature: Option<f64>,
+    pub temperature: Option<f64>,
     #[serde(default)]
-    pub(crate) top_p: Option<f64>,
+    pub top_p: Option<f64>,
     #[serde(default)]
-    pub(crate) max_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PromptTemplateVersionStatus {
+pub enum PromptTemplateVersionStatus {
     Draft,
     #[default]
     Active,
@@ -1732,88 +1732,88 @@ pub(crate) enum PromptTemplateVersionStatus {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PromptTemplateMessage {
-    pub(crate) role: String,
-    pub(crate) content: String,
+pub struct PromptTemplateMessage {
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct GuardrailRule {
-    pub(crate) id: String,
-    pub(crate) name: String,
+pub struct GuardrailRule {
+    pub id: String,
+    pub name: String,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_guardrail_stage")]
-    pub(crate) stage: GuardrailStage,
+    pub stage: GuardrailStage,
     #[serde(default = "all_content_sources")]
-    pub(crate) sources: Vec<ContentSource>,
+    pub sources: Vec<ContentSource>,
     #[serde(default)]
-    pub(crate) organization_ids: Vec<String>,
+    pub organization_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) project_ids: Vec<String>,
+    pub project_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) api_key_ids: Vec<String>,
+    pub api_key_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) models: Vec<String>,
+    pub models: Vec<String>,
     #[serde(default)]
-    pub(crate) providers: Vec<String>,
+    pub providers: Vec<String>,
     #[serde(default)]
-    pub(crate) keywords: Vec<String>,
+    pub keywords: Vec<String>,
     #[serde(default)]
-    pub(crate) regex: Vec<String>,
+    pub regex: Vec<String>,
     #[serde(default)]
-    pub(crate) max_input_bytes: Option<usize>,
+    pub max_input_bytes: Option<usize>,
     #[serde(default)]
-    pub(crate) provider: GuardrailProviderKind,
+    pub provider: GuardrailProviderKind,
     #[serde(default)]
-    pub(crate) provider_endpoint: Option<String>,
+    pub provider_endpoint: Option<String>,
     /// Presidio only: language hint sent with every analyze request.
     #[serde(default)]
-    pub(crate) provider_language: Option<String>,
+    pub provider_language: Option<String>,
     /// Presidio / LLM-Guard only: minimum score to act on, percent (0-100).
     #[serde(default)]
-    pub(crate) provider_score_threshold_percent: Option<u8>,
+    pub provider_score_threshold_percent: Option<u8>,
     /// Presidio only: optional recognizer entity allow-list.
     #[serde(default)]
-    pub(crate) provider_entities: Option<Vec<String>>,
+    pub provider_entities: Option<Vec<String>>,
     /// Presidio / LLM-Guard: required secret reference used to key evidence
     /// fingerprints (HMAC over the flagged content).
     #[serde(default)]
-    pub(crate) provider_fingerprint_secret_ref: Option<String>,
+    pub provider_fingerprint_secret_ref: Option<String>,
     #[serde(default = "default_guardrail_provider_timeout_ms")]
-    pub(crate) provider_timeout_ms: u64,
+    pub provider_timeout_ms: u64,
     #[serde(flatten)]
-    pub(crate) provider_runtime: GuardrailProviderRuntimeConfig,
+    pub provider_runtime: GuardrailProviderRuntimeConfig,
     #[serde(default = "default_guardrail_effect")]
-    pub(crate) effect: GuardrailEffect,
+    pub effect: GuardrailEffect,
     #[serde(default = "default_guardrail_code")]
-    pub(crate) code: String,
+    pub code: String,
     #[serde(default = "default_guardrail_message")]
-    pub(crate) message: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct GuardrailProviderRuntimeConfig {
+pub struct GuardrailProviderRuntimeConfig {
     #[serde(default)]
-    pub(crate) provider_on_error: GuardrailProviderErrorMode,
+    pub provider_on_error: GuardrailProviderErrorMode,
     #[serde(default = "default_guardrail_provider_max_concurrency")]
-    pub(crate) provider_max_concurrency: usize,
+    pub provider_max_concurrency: usize,
     #[serde(default = "default_guardrail_provider_circuit_failure_threshold")]
-    pub(crate) provider_circuit_failure_threshold: u32,
+    pub provider_circuit_failure_threshold: u32,
     #[serde(default = "default_guardrail_provider_circuit_cooldown_ms")]
-    pub(crate) provider_circuit_cooldown_ms: u64,
+    pub provider_circuit_cooldown_ms: u64,
     #[serde(default)]
-    pub(crate) provider_max_retries: u8,
+    pub provider_max_retries: u8,
     #[serde(default = "default_guardrail_provider_max_payload_bytes")]
-    pub(crate) provider_max_payload_bytes: usize,
+    pub provider_max_payload_bytes: usize,
     #[serde(default = "default_guardrail_provider_max_response_bytes")]
-    pub(crate) provider_max_response_bytes: usize,
+    pub provider_max_response_bytes: usize,
     #[serde(default)]
-    pub(crate) provider_allow_private_network: bool,
+    pub provider_allow_private_network: bool,
     #[serde(default)]
-    pub(crate) provider_secret_ref: Option<String>,
+    pub provider_secret_ref: Option<String>,
 }
 
 impl Default for GuardrailProviderRuntimeConfig {
@@ -1835,7 +1835,7 @@ impl Default for GuardrailProviderRuntimeConfig {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GuardrailProviderErrorMode {
+pub enum GuardrailProviderErrorMode {
     #[default]
     Block,
     Record,
@@ -1852,7 +1852,7 @@ pub(crate) enum GuardrailProviderErrorMode {
 /// `provider_fingerprint_secret_ref` for keyed evidence.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GuardrailProviderKind {
+pub enum GuardrailProviderKind {
     #[default]
     None,
     CustomHttp,
@@ -1862,14 +1862,14 @@ pub(crate) enum GuardrailProviderKind {
 
 impl GuardrailProviderKind {
     /// True for every kind that dispatches to an external HTTP detector.
-    pub(crate) fn is_external(self) -> bool {
+    pub fn is_external(self) -> bool {
         !matches!(self, Self::None)
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GuardrailStage {
+pub enum GuardrailStage {
     #[default]
     Request,
     Response,
@@ -1877,7 +1877,7 @@ pub(crate) enum GuardrailStage {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GuardrailEffect {
+pub enum GuardrailEffect {
     #[default]
     Deny,
     Redact,
@@ -1885,117 +1885,117 @@ pub(crate) enum GuardrailEffect {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExtensionKind {
+pub enum ExtensionKind {
     RequestHook,
     ToolProvider,
     EventSink,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub(crate) struct ExtensionConfig {
-    pub(crate) id: String,
-    pub(crate) kind: ExtensionKind,
+pub struct ExtensionConfig {
+    pub id: String,
+    pub kind: ExtensionKind,
     #[serde(default = "default_plugin_manifest_version")]
-    pub(crate) version: String,
+    pub version: String,
     #[serde(default)]
-    pub(crate) manifest: PluginManifest,
+    pub manifest: PluginManifest,
     #[serde(default)]
-    pub(crate) compatibility: PluginCompatibility,
+    pub compatibility: PluginCompatibility,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_extension_source")]
-    pub(crate) source: String,
+    pub source: String,
     #[serde(default = "default_extension_order")]
-    pub(crate) order: u32,
+    pub order: u32,
     #[serde(default)]
-    pub(crate) approval_policy: ApprovalPolicy,
+    pub approval_policy: ApprovalPolicy,
     #[serde(default)]
-    pub(crate) permissions: ExtensionPermissions,
+    pub permissions: ExtensionPermissions,
     #[serde(default)]
-    pub(crate) config: BTreeMap<String, toml::Value>,
+    pub config: BTreeMap<String, toml::Value>,
 }
 
-pub(crate) type PluginConfig = ExtensionConfig;
+pub type PluginConfig = ExtensionConfig;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub(crate) struct PluginManifest {
+pub struct PluginManifest {
     #[serde(default)]
-    pub(crate) name: Option<String>,
+    pub name: Option<String>,
     #[serde(default)]
-    pub(crate) description: Option<String>,
+    pub description: Option<String>,
     #[serde(default)]
-    pub(crate) capabilities: Vec<String>,
+    pub capabilities: Vec<String>,
     #[serde(default)]
-    pub(crate) required_permissions: ExtensionPermissions,
+    pub required_permissions: ExtensionPermissions,
     #[serde(default)]
-    pub(crate) hooks: Vec<String>,
+    pub hooks: Vec<String>,
     #[serde(default)]
-    pub(crate) config_schema: Option<toml::Value>,
+    pub config_schema: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct PluginCompatibility {
+pub struct PluginCompatibility {
     #[serde(default)]
-    pub(crate) min_gateway_version: Option<String>,
+    pub min_gateway_version: Option<String>,
     #[serde(default)]
-    pub(crate) max_gateway_version: Option<String>,
+    pub max_gateway_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub(crate) struct SkillPackage {
-    pub(crate) id: String,
-    pub(crate) name: String,
+pub struct SkillPackage {
+    pub id: String,
+    pub name: String,
     #[serde(default = "default_skill_package_version")]
-    pub(crate) version: String,
+    pub version: String,
     #[serde(default)]
-    pub(crate) description: Option<String>,
+    pub description: Option<String>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) compatibility: SkillPackageCompatibility,
+    pub compatibility: SkillPackageCompatibility,
     #[serde(default)]
-    pub(crate) permissions: ExtensionPermissions,
+    pub permissions: ExtensionPermissions,
     #[serde(default)]
-    pub(crate) capabilities: Vec<SkillPackageCapability>,
+    pub capabilities: Vec<SkillPackageCapability>,
     #[serde(default)]
-    pub(crate) resources: SkillPackageResources,
+    pub resources: SkillPackageResources,
     #[serde(default)]
-    pub(crate) api_key_ids: Vec<String>,
+    pub api_key_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) metadata: BTreeMap<String, toml::Value>,
+    pub metadata: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub(crate) struct SkillPackageResources {
+pub struct SkillPackageResources {
     #[serde(default)]
-    pub(crate) plugins: Vec<PluginConfig>,
+    pub plugins: Vec<PluginConfig>,
     #[serde(default)]
-    pub(crate) mcp_servers: Vec<McpServerConfig>,
+    pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
-    pub(crate) prompt_templates: Vec<PromptTemplate>,
+    pub prompt_templates: Vec<PromptTemplate>,
     #[serde(default)]
-    pub(crate) agent_workflows: Vec<AgentWorkflowPolicy>,
+    pub agent_workflows: Vec<AgentWorkflowPolicy>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct SkillPackageCompatibility {
+pub struct SkillPackageCompatibility {
     #[serde(default)]
-    pub(crate) min_gateway_version: Option<String>,
+    pub min_gateway_version: Option<String>,
     #[serde(default)]
-    pub(crate) agent_runtimes: Vec<String>,
+    pub agent_runtimes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct SkillPackageCapability {
-    pub(crate) kind: SkillPackageCapabilityKind,
-    pub(crate) id: String,
+pub struct SkillPackageCapability {
+    pub kind: SkillPackageCapabilityKind,
+    pub id: String,
     #[serde(default)]
-    pub(crate) description: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SkillPackageCapabilityKind {
+pub enum SkillPackageCapabilityKind {
     Plugin,
     Tool,
     McpServer,
@@ -2005,37 +2005,37 @@ pub(crate) enum SkillPackageCapabilityKind {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub(crate) struct ExtensionPermissions {
+pub struct ExtensionPermissions {
     #[serde(default)]
-    pub(crate) tools: Vec<String>,
+    pub tools: Vec<String>,
     #[serde(default)]
-    pub(crate) network: Vec<String>,
+    pub network: Vec<String>,
     #[serde(default)]
-    pub(crate) filesystem: bool,
+    pub filesystem: bool,
     #[serde(default)]
-    pub(crate) shell: bool,
+    pub shell: bool,
     #[serde(default)]
-    pub(crate) tenant_scope: bool,
+    pub tenant_scope: bool,
     #[serde(default)]
-    pub(crate) secrets: bool,
+    pub secrets: bool,
     #[serde(default)]
-    pub(crate) admin_mutation: bool,
+    pub admin_mutation: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct TelemetryConfig {
+pub struct TelemetryConfig {
     #[serde(default = "default_service_name")]
-    pub(crate) service_name: String,
+    pub service_name: String,
     #[serde(default)]
-    pub(crate) log_bodies: bool,
+    pub log_bodies: bool,
     #[serde(default)]
-    pub(crate) access_log: AccessLogMode,
+    pub access_log: AccessLogMode,
     #[serde(default = "default_access_log_sample_rate")]
-    pub(crate) access_log_sample_rate: u64,
+    pub access_log_sample_rate: u64,
     #[serde(default = "default_access_log_error_rate_limit_per_sec")]
-    pub(crate) access_log_error_rate_limit_per_sec: u64,
+    pub access_log_error_rate_limit_per_sec: u64,
     #[serde(default)]
-    pub(crate) otlp_endpoint: Option<String>,
+    pub otlp_endpoint: Option<String>,
 }
 
 /// Outbound notification channel for proactive budget-threshold alerting
@@ -2045,15 +2045,15 @@ pub(crate) struct TelemetryConfig {
 /// channel implemented today; `webhook_url` is the documented extension
 /// point other channels (email/Slack) would plug into alongside.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct BillingAlertsConfig {
+pub struct BillingAlertsConfig {
     /// POST target for budget-threshold-crossing notifications. `None`
     /// (the default) disables dispatch entirely -- threshold crossings are
     /// still detected and recorded (so a later-configured webhook doesn't
     /// replay history), just not delivered anywhere.
     #[serde(default)]
-    pub(crate) webhook_url: Option<String>,
+    pub webhook_url: Option<String>,
     #[serde(default = "default_billing_alerts_webhook_timeout_secs")]
-    pub(crate) webhook_timeout_secs: u64,
+    pub webhook_timeout_secs: u64,
     /// HMAC-SHA256 secret for signing budget-alert webhooks (issue #228). When
     /// set, each delivery carries `X-FerroGate-Timestamp` and
     /// `X-FerroGate-Signature: sha256=<hex of HMAC(secret, "<timestamp>.<body>")>`
@@ -2061,7 +2061,7 @@ pub(crate) struct BillingAlertsConfig {
     /// leaves alerts unsigned (legacy). Prefer an env placeholder so the secret
     /// is not stored in plaintext config.
     #[serde(default)]
-    pub(crate) webhook_signing_secret: Option<String>,
+    pub webhook_signing_secret: Option<String>,
 }
 
 fn default_billing_alerts_webhook_timeout_secs() -> u64 {
@@ -2079,32 +2079,32 @@ impl Default for BillingAlertsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct ObservabilityConfig {
+pub struct ObservabilityConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) provider: ObservabilityProvider,
+    pub provider: ObservabilityProvider,
     /// OTLP/HTTP+JSON collector endpoint. Under
     /// [`ObservabilityProvider::Cloudflare`] this is the URL of the FerroGate
     /// `telemetry-collector` Worker (issue #520) rather than a self-hosted
     /// collector; the wire protocol is identical either way.
     #[serde(default)]
-    pub(crate) otlp_endpoint: Option<String>,
+    pub otlp_endpoint: Option<String>,
     /// Secret reference (`env://NAME`, `cf://...`, ...) for the bearer token
     /// the Cloudflare collector Worker requires. Resolved through the shared
     /// `SecretResolverRegistry` seam so the credential is never plaintext in
     /// this file (issue #520).
     #[serde(default)]
-    pub(crate) cloudflare_collector_token_ref: Option<String>,
+    pub cloudflare_collector_token_ref: Option<String>,
     /// Fallback tenant for telemetry records that carry no tenant attribute.
     /// Analytics Engine allows exactly one `index` per data point and the
     /// collector uses the tenant as that index, so it needs some value.
     #[serde(default)]
-    pub(crate) cloudflare_default_tenant: Option<String>,
+    pub cloudflare_default_tenant: Option<String>,
     #[serde(default = "default_observability_prometheus_metrics_path")]
-    pub(crate) prometheus_metrics_path: String,
+    pub prometheus_metrics_path: String,
     #[serde(default = "default_observability_export_timeout_secs")]
-    pub(crate) export_timeout_secs: u64,
+    pub export_timeout_secs: u64,
     /// #357: running-presence TTL (seconds) for the observed-agent-activity
     /// surface. A virtual API key whose most recent observed request is within
     /// this window is reported `running`; older evidence expires to `inactive`.
@@ -2112,12 +2112,12 @@ pub(crate) struct ObservabilityConfig {
     /// config, via the `FERROGATE_OBSERVED_ACTIVITY_RUNNING_TTL_SECONDS` env
     /// override (see `resolve_observed_activity_running_ttl_seconds`).
     #[serde(default = "default_observability_observed_activity_running_ttl_secs")]
-    pub(crate) observed_activity_running_ttl_secs: u64,
+    pub observed_activity_running_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ObservabilityProvider {
+pub enum ObservabilityProvider {
     #[default]
     Vector,
     Otlp,
@@ -2130,40 +2130,40 @@ pub(crate) enum ObservabilityProvider {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct AnalyticsConfig {
+pub struct AnalyticsConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) provider: AnalyticsProvider,
+    pub provider: AnalyticsProvider,
     #[serde(default)]
-    pub(crate) required: bool,
+    pub required: bool,
     #[serde(default)]
-    pub(crate) vector_endpoint: Option<String>,
+    pub vector_endpoint: Option<String>,
     #[serde(default)]
-    pub(crate) clickhouse_url: Option<String>,
+    pub clickhouse_url: Option<String>,
     #[serde(default)]
-    pub(crate) clickhouse_url_env: Option<String>,
+    pub clickhouse_url_env: Option<String>,
     #[serde(default = "default_analytics_export_timeout_secs")]
-    pub(crate) export_timeout_secs: u64,
+    pub export_timeout_secs: u64,
     #[serde(default = "default_analytics_batch_max_events")]
-    pub(crate) batch_max_events: usize,
+    pub batch_max_events: usize,
     #[serde(default = "default_analytics_flush_interval_millis")]
-    pub(crate) flush_interval_millis: u64,
+    pub flush_interval_millis: u64,
     #[serde(default = "default_analytics_queue_capacity")]
-    pub(crate) queue_capacity: usize,
+    pub queue_capacity: usize,
     #[serde(default = "default_request_log_retention_records")]
-    pub(crate) request_log_retention_records: usize,
+    pub request_log_retention_records: usize,
     #[serde(default = "default_audit_event_retention_records")]
-    pub(crate) audit_event_retention_records: usize,
+    pub audit_event_retention_records: usize,
     #[serde(default = "default_guardrail_evaluation_retention_records")]
-    pub(crate) guardrail_evaluation_retention_records: usize,
+    pub guardrail_evaluation_retention_records: usize,
     #[serde(default = "default_billing_event_retention_records")]
-    pub(crate) billing_event_retention_records: usize,
+    pub billing_event_retention_records: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AnalyticsProvider {
+pub enum AnalyticsProvider {
     #[default]
     Vector,
     Clickhouse,
@@ -2171,30 +2171,30 @@ pub(crate) enum AnalyticsProvider {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct MeteringConfig {
+pub struct MeteringConfig {
     #[serde(default)]
-    pub(crate) export_enabled: bool,
+    pub export_enabled: bool,
     #[serde(default)]
-    pub(crate) export_provider: MeteringExportProvider,
+    pub export_provider: MeteringExportProvider,
     #[serde(default = "default_metering_export_endpoint")]
-    pub(crate) export_endpoint: String,
+    pub export_endpoint: String,
     #[serde(default)]
-    pub(crate) export_token_env: Option<String>,
+    pub export_token_env: Option<String>,
     #[serde(default)]
-    pub(crate) export_token: Option<String>,
+    pub export_token: Option<String>,
     #[serde(default = "default_metering_export_timeout_secs")]
-    pub(crate) export_timeout_secs: u64,
+    pub export_timeout_secs: u64,
     #[serde(default = "default_metering_export_event_type")]
-    pub(crate) export_event_type: String,
+    pub export_event_type: String,
     #[serde(default = "default_metering_export_source")]
-    pub(crate) export_source: String,
+    pub export_source: String,
     #[serde(default)]
-    pub(crate) export_subject: MeteringExportSubject,
+    pub export_subject: MeteringExportSubject,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MeteringExportProvider {
+pub enum MeteringExportProvider {
     #[default]
     Legacy,
     Openmeter,
@@ -2202,7 +2202,7 @@ pub(crate) enum MeteringExportProvider {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MeteringExportSubject {
+pub enum MeteringExportSubject {
     #[default]
     #[serde(rename = "api_key_id")]
     ApiKey,
@@ -2215,26 +2215,26 @@ pub(crate) enum MeteringExportSubject {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct CacheConfig {
+pub struct CacheConfig {
     #[serde(default)]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) mode: CacheMode,
+    pub mode: CacheMode,
     #[serde(default = "default_cache_ttl_secs")]
-    pub(crate) ttl_secs: u64,
+    pub ttl_secs: u64,
     #[serde(default = "default_cache_max_records")]
-    pub(crate) max_records: usize,
+    pub max_records: usize,
     /// Cosine-similarity threshold for `CacheMode::Semantic` (#273). A prior
     /// cached response is served only when the current request's prompt
     /// embedding is within this cosine distance of the stored one. Ignored
     /// unless `mode = "semantic"`. Range (0.0, 1.0].
     #[serde(default = "default_cache_semantic_similarity_threshold")]
-    pub(crate) semantic_similarity_threshold: f32,
+    pub semantic_similarity_threshold: f32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CacheMode {
+pub enum CacheMode {
     #[default]
     ExactMatch,
     /// Embedding-based similarity lookup (#273): on an exact-match miss, the
@@ -2247,7 +2247,7 @@ pub(crate) enum CacheMode {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AccessLogMode {
+pub enum AccessLogMode {
     Off,
     #[default]
     Error,
@@ -2256,62 +2256,62 @@ pub(crate) enum AccessLogMode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct StorageConfig {
+pub struct StorageConfig {
     #[serde(default)]
-    pub(crate) provider: StorageProviderKind,
+    pub provider: StorageProviderKind,
     #[serde(default)]
-    pub(crate) required: bool,
+    pub required: bool,
     #[serde(default = "default_storage_provider_order")]
-    pub(crate) provider_order: Vec<StorageProviderKind>,
+    pub provider_order: Vec<StorageProviderKind>,
     #[serde(default)]
-    pub(crate) libsql_url: Option<String>,
+    pub libsql_url: Option<String>,
     #[serde(default)]
-    pub(crate) libsql_auth_token: Option<String>,
+    pub libsql_auth_token: Option<String>,
     #[serde(default)]
-    pub(crate) libsql_auth_token_env: Option<String>,
+    pub libsql_auth_token_env: Option<String>,
     #[serde(default)]
-    pub(crate) postgres_dsn: Option<String>,
+    pub postgres_dsn: Option<String>,
     #[serde(default)]
-    pub(crate) postgres_dsn_env: Option<String>,
+    pub postgres_dsn_env: Option<String>,
     #[serde(default)]
-    pub(crate) supabase_dsn_env: Option<String>,
+    pub supabase_dsn_env: Option<String>,
     #[serde(default = "default_postgres_pool_size")]
-    pub(crate) postgres_pool_size: usize,
+    pub postgres_pool_size: usize,
     #[serde(default = "default_postgres_pool_acquire_timeout_millis")]
-    pub(crate) postgres_pool_acquire_timeout_millis: u64,
+    pub postgres_pool_acquire_timeout_millis: u64,
     #[serde(default)]
-    pub(crate) postgres_tls_mode: PostgresTlsMode,
+    pub postgres_tls_mode: PostgresTlsMode,
     #[serde(default)]
-    pub(crate) postgres_tls_ca_cert_path: Option<String>,
+    pub postgres_tls_ca_cert_path: Option<String>,
     #[serde(default = "default_postgres_connect_timeout_secs")]
-    pub(crate) postgres_connect_timeout_secs: u64,
+    pub postgres_connect_timeout_secs: u64,
     #[serde(default = "default_postgres_statement_timeout_millis")]
-    pub(crate) postgres_statement_timeout_millis: u64,
+    pub postgres_statement_timeout_millis: u64,
     #[serde(default)]
-    pub(crate) postgres_schema: Option<String>,
+    pub postgres_schema: Option<String>,
     #[serde(default)]
-    pub(crate) postgres_search_path: Vec<String>,
+    pub postgres_search_path: Vec<String>,
     /// D1 control-database uuid for `provider = "cloudflare_d1"` (issue #445):
     /// the database holding `tenants`, config documents, and the account-global
     /// families. Absent/empty means "not provisioned yet" -- the backend rejects
     /// control-plane access until `provision_control_database` seeds it.
     #[serde(default)]
-    pub(crate) d1_control_database_id: Option<String>,
+    pub d1_control_database_id: Option<String>,
     /// Pre-seeded `tenant_id -> D1 database uuid` registry entries (issue #445),
     /// for a deployment resuming against already-provisioned tenant databases.
     #[serde(default)]
-    pub(crate) d1_tenant_databases: std::collections::BTreeMap<String, String>,
+    pub d1_tenant_databases: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_storage_migration_mode")]
-    pub(crate) migration_mode: StorageMigrationMode,
+    pub migration_mode: StorageMigrationMode,
     #[serde(default = "default_admin_list_limit")]
-    pub(crate) admin_list_default_limit: usize,
+    pub admin_list_default_limit: usize,
     #[serde(default = "default_admin_list_max_limit")]
-    pub(crate) admin_list_max_limit: usize,
+    pub admin_list_max_limit: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum StorageMigrationMode {
+pub enum StorageMigrationMode {
     #[default]
     Auto,
     ValidateOnly,
@@ -2319,7 +2319,7 @@ pub(crate) enum StorageMigrationMode {
 }
 
 impl StorageMigrationMode {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             StorageMigrationMode::Auto => "auto",
             StorageMigrationMode::ValidateOnly => "validate_only",
@@ -2329,33 +2329,33 @@ impl StorageMigrationMode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct ReliabilityConfig {
+pub struct ReliabilityConfig {
     #[serde(default)]
-    pub(crate) provider_circuit_breaker_failure_threshold: Option<u32>,
+    pub provider_circuit_breaker_failure_threshold: Option<u32>,
     #[serde(default)]
-    pub(crate) provider_circuit_breaker_cooldown_secs: Option<u64>,
+    pub provider_circuit_breaker_cooldown_secs: Option<u64>,
     #[serde(default)]
-    pub(crate) provider_dispatch_timeout_secs: Option<u64>,
+    pub provider_dispatch_timeout_secs: Option<u64>,
     #[serde(default)]
-    pub(crate) provider_dispatch_max_retries: Option<u32>,
+    pub provider_dispatch_max_retries: Option<u32>,
     #[serde(default)]
-    pub(crate) provider_response_body_max_bytes: Option<usize>,
+    pub provider_response_body_max_bytes: Option<usize>,
     #[serde(default = "default_tool_approval_timeout_secs")]
-    pub(crate) tool_approval_timeout_secs: u64,
+    pub tool_approval_timeout_secs: u64,
     #[serde(default = "default_mcp_dispatch_timeout_secs")]
-    pub(crate) mcp_dispatch_timeout_secs: u64,
+    pub mcp_dispatch_timeout_secs: u64,
     #[serde(default = "default_mcp_dispatch_max_concurrency")]
-    pub(crate) mcp_dispatch_max_concurrency: usize,
+    pub mcp_dispatch_max_concurrency: usize,
     #[serde(default)]
-    pub(crate) graceful_shutdown_grace_period_secs: Option<u64>,
+    pub graceful_shutdown_grace_period_secs: Option<u64>,
     #[serde(default)]
-    pub(crate) graceful_shutdown_timeout_secs: Option<u64>,
+    pub graceful_shutdown_timeout_secs: Option<u64>,
     #[serde(default)]
-    pub(crate) graceful_upgrade_pid_file: Option<String>,
+    pub graceful_upgrade_pid_file: Option<String>,
     #[serde(default)]
-    pub(crate) graceful_upgrade_sock: Option<String>,
+    pub graceful_upgrade_sock: Option<String>,
     #[serde(default)]
-    pub(crate) graceful_upgrade_sock_retries: Option<usize>,
+    pub graceful_upgrade_sock_retries: Option<usize>,
 }
 
 /// #312: centralized request-body size caps (`[limits]`).
@@ -2366,146 +2366,146 @@ pub(crate) struct ReliabilityConfig {
 /// centralization; the defaults below are exactly those literals, so an
 /// absent `[limits]` section leaves behavior unchanged.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub(crate) struct LimitsConfig {
+pub struct LimitsConfig {
     /// `/v1/chat/completions`, `/v1/embeddings`, `/v1/images/generations`,
     /// `/v1/messages` request bodies. Default 1 MiB.
     #[serde(default)]
-    pub(crate) inference_body_max_bytes: Option<usize>,
+    pub inference_body_max_bytes: Option<usize>,
     /// Standard `/admin/v1/*` JSON mutations (providers/models/api-keys/
     /// policies/plugins/prompt-templates/skill-packages/agent-workflows/
     /// agent-upstreams/mcp-servers/gateway-configs upserts, plans, quota
     /// policies, RBAC, virtual keys/tenants, agent schedules, admin
     /// agent-run mutations, self-hosted worker management). Default 64 KiB.
     #[serde(default)]
-    pub(crate) admin_body_max_bytes: Option<usize>,
+    pub admin_body_max_bytes: Option<usize>,
     /// Compact admin control operations: wallet mutations, site-domain
     /// bindings, `/admin/v1/drain`, tool-approval decisions. Default 16 KiB.
     #[serde(default)]
-    pub(crate) admin_small_body_max_bytes: Option<usize>,
+    pub admin_small_body_max_bytes: Option<usize>,
     /// Full-config documents posted to `/admin/v1/config/validate` and
     /// `/admin/v1/config/reload`. Default 256 KiB.
     #[serde(default)]
-    pub(crate) admin_config_body_max_bytes: Option<usize>,
+    pub admin_config_body_max_bytes: Option<usize>,
     /// Data-plane tool/agent invocation payloads: `/v1/tools/execute`,
     /// `/v1/mcp/tool/execute`, `/v1/functions/execute`, `/v1/mcp` JSON-RPC,
     /// `/v1/prompts/{id}/render`, `/v1/agent-runs` creation. Default 64 KiB.
     #[serde(default)]
-    pub(crate) tool_body_max_bytes: Option<usize>,
+    pub tool_body_max_bytes: Option<usize>,
     /// Asset control-plane JSON (`/v1/assets/presign/*` upload-intent,
     /// commit, download-url requests) -- not asset payload bytes themselves,
     /// which are governed by tenant storage quotas. Default 64 KiB.
     #[serde(default)]
-    pub(crate) asset_control_body_max_bytes: Option<usize>,
+    pub asset_control_body_max_bytes: Option<usize>,
     /// A2A agent ingress bodies on `/v1/agents/*`. Default 128 KiB.
     #[serde(default)]
-    pub(crate) agent_ingress_body_max_bytes: Option<usize>,
+    pub agent_ingress_body_max_bytes: Option<usize>,
     /// Self-hosted worker transport frames (lease poll/ack, heartbeat,
     /// checkpoint, artifact, telemetry envelopes). Default 1 MiB.
     #[serde(default)]
-    pub(crate) worker_transport_body_max_bytes: Option<usize>,
+    pub worker_transport_body_max_bytes: Option<usize>,
     /// `/admin/v1/guardrail-policies` documents, which can carry large
     /// pattern lists. Default 1 MiB.
     #[serde(default)]
-    pub(crate) guardrail_policy_body_max_bytes: Option<usize>,
+    pub guardrail_policy_body_max_bytes: Option<usize>,
 }
 
-pub(crate) const DEFAULT_INFERENCE_BODY_MAX_BYTES: usize = 1024 * 1024;
-pub(crate) const DEFAULT_ADMIN_BODY_MAX_BYTES: usize = 64 * 1024;
-pub(crate) const DEFAULT_ADMIN_SMALL_BODY_MAX_BYTES: usize = 16 * 1024;
-pub(crate) const DEFAULT_ADMIN_CONFIG_BODY_MAX_BYTES: usize = 256 * 1024;
-pub(crate) const DEFAULT_TOOL_BODY_MAX_BYTES: usize = 64 * 1024;
-pub(crate) const DEFAULT_ASSET_CONTROL_BODY_MAX_BYTES: usize = 64 * 1024;
-pub(crate) const DEFAULT_AGENT_INGRESS_BODY_MAX_BYTES: usize = 128 * 1024;
-pub(crate) const DEFAULT_WORKER_TRANSPORT_BODY_MAX_BYTES: usize = 1024 * 1024;
-pub(crate) const DEFAULT_GUARDRAIL_POLICY_BODY_MAX_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_INFERENCE_BODY_MAX_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_ADMIN_BODY_MAX_BYTES: usize = 64 * 1024;
+pub const DEFAULT_ADMIN_SMALL_BODY_MAX_BYTES: usize = 16 * 1024;
+pub const DEFAULT_ADMIN_CONFIG_BODY_MAX_BYTES: usize = 256 * 1024;
+pub const DEFAULT_TOOL_BODY_MAX_BYTES: usize = 64 * 1024;
+pub const DEFAULT_ASSET_CONTROL_BODY_MAX_BYTES: usize = 64 * 1024;
+pub const DEFAULT_AGENT_INGRESS_BODY_MAX_BYTES: usize = 128 * 1024;
+pub const DEFAULT_WORKER_TRANSPORT_BODY_MAX_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_GUARDRAIL_POLICY_BODY_MAX_BYTES: usize = 1024 * 1024;
 
 impl LimitsConfig {
-    pub(crate) fn inference_body_max_bytes(&self) -> usize {
+    pub fn inference_body_max_bytes(&self) -> usize {
         self.inference_body_max_bytes
             .unwrap_or(DEFAULT_INFERENCE_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn admin_body_max_bytes(&self) -> usize {
+    pub fn admin_body_max_bytes(&self) -> usize {
         self.admin_body_max_bytes
             .unwrap_or(DEFAULT_ADMIN_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn admin_small_body_max_bytes(&self) -> usize {
+    pub fn admin_small_body_max_bytes(&self) -> usize {
         self.admin_small_body_max_bytes
             .unwrap_or(DEFAULT_ADMIN_SMALL_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn admin_config_body_max_bytes(&self) -> usize {
+    pub fn admin_config_body_max_bytes(&self) -> usize {
         self.admin_config_body_max_bytes
             .unwrap_or(DEFAULT_ADMIN_CONFIG_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn tool_body_max_bytes(&self) -> usize {
+    pub fn tool_body_max_bytes(&self) -> usize {
         self.tool_body_max_bytes
             .unwrap_or(DEFAULT_TOOL_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn asset_control_body_max_bytes(&self) -> usize {
+    pub fn asset_control_body_max_bytes(&self) -> usize {
         self.asset_control_body_max_bytes
             .unwrap_or(DEFAULT_ASSET_CONTROL_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn agent_ingress_body_max_bytes(&self) -> usize {
+    pub fn agent_ingress_body_max_bytes(&self) -> usize {
         self.agent_ingress_body_max_bytes
             .unwrap_or(DEFAULT_AGENT_INGRESS_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn worker_transport_body_max_bytes(&self) -> usize {
+    pub fn worker_transport_body_max_bytes(&self) -> usize {
         self.worker_transport_body_max_bytes
             .unwrap_or(DEFAULT_WORKER_TRANSPORT_BODY_MAX_BYTES)
     }
 
-    pub(crate) fn guardrail_policy_body_max_bytes(&self) -> usize {
+    pub fn guardrail_policy_body_max_bytes(&self) -> usize {
         self.guardrail_policy_body_max_bytes
             .unwrap_or(DEFAULT_GUARDRAIL_POLICY_BODY_MAX_BYTES)
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Upstream {
-    pub(crate) name: String,
+pub struct Upstream {
+    pub name: String,
     #[serde(default)]
-    pub(crate) url: Option<String>,
+    pub url: Option<String>,
     #[serde(default)]
-    pub(crate) urls: Vec<String>,
+    pub urls: Vec<String>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AgentUpstreamConfig {
-    pub(crate) id: String,
-    pub(crate) name: String,
+pub struct AgentUpstreamConfig {
+    pub id: String,
+    pub name: String,
     #[serde(default)]
-    pub(crate) description: Option<String>,
+    pub description: Option<String>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_agent_upstream_protocol")]
-    pub(crate) protocol: AgentUpstreamProtocol,
-    pub(crate) endpoint: String,
+    pub protocol: AgentUpstreamProtocol,
+    pub endpoint: String,
     #[serde(default)]
-    pub(crate) auth: AgentUpstreamAuth,
+    pub auth: AgentUpstreamAuth,
     #[serde(default)]
-    pub(crate) tenant_ids: Vec<String>,
+    pub tenant_ids: Vec<String>,
     #[serde(default)]
-    pub(crate) capabilities: Vec<AgentUpstreamCapability>,
+    pub capabilities: Vec<AgentUpstreamCapability>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AgentUpstreamProtocol {
+pub enum AgentUpstreamProtocol {
     #[default]
     A2a,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AgentUpstreamAuth {
+pub enum AgentUpstreamAuth {
     #[default]
     None,
     Bearer {
@@ -2519,7 +2519,7 @@ pub(crate) enum AgentUpstreamAuth {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AgentUpstreamCapability {
+pub enum AgentUpstreamCapability {
     Invoke,
     Read,
     Stream,
@@ -2527,37 +2527,37 @@ pub(crate) enum AgentUpstreamCapability {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct RouteRule {
-    pub(crate) name: String,
-    pub(crate) upstream: String,
+pub struct RouteRule {
+    pub name: String,
+    pub upstream: String,
     #[serde(default)]
-    pub(crate) hosts: Vec<String>,
+    pub hosts: Vec<String>,
     #[serde(default)]
-    pub(crate) path_prefixes: Vec<String>,
+    pub path_prefixes: Vec<String>,
     #[serde(default)]
-    pub(crate) match_headers: Vec<HeaderMatcher>,
+    pub match_headers: Vec<HeaderMatcher>,
     #[serde(default)]
-    pub(crate) strip_prefix: Option<String>,
+    pub strip_prefix: Option<String>,
     #[serde(default)]
-    pub(crate) add_prefix: Option<String>,
+    pub add_prefix: Option<String>,
     #[serde(default)]
-    pub(crate) request_headers: Vec<HeaderMutation>,
+    pub request_headers: Vec<HeaderMutation>,
     #[serde(default)]
-    pub(crate) response_headers: Vec<HeaderMutation>,
+    pub response_headers: Vec<HeaderMutation>,
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct HeaderMutation {
-    pub(crate) name: String,
-    pub(crate) value: String,
+pub struct HeaderMutation {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct HeaderMatcher {
-    pub(crate) name: String,
-    pub(crate) value: String,
+pub struct HeaderMatcher {
+    pub name: String,
+    pub value: String,
 }
 
 fn default_listen() -> String {
@@ -2770,7 +2770,7 @@ fn default_observability_export_timeout_secs() -> u64 {
 
 /// #357: default running-presence TTL (seconds) for the observed-agent-activity
 /// surface. Matches the value the issue's view contract proposes.
-pub(crate) fn default_observability_observed_activity_running_ttl_secs() -> u64 {
+pub fn default_observability_observed_activity_running_ttl_secs() -> u64 {
     60
 }
 

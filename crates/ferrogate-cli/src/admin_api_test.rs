@@ -9,8 +9,8 @@
 
 use super::*;
 use crate::auth::authenticate_admin_gate;
-use crate::config::AuthServiceConfig;
 use ferrogate_auth::AuthDecision;
+use ferrogate_config::AuthServiceConfig;
 use ferrogate_core::TenantContext;
 use http::StatusCode;
 
@@ -20,11 +20,11 @@ fn disabled_auth_service() -> AuthServiceConfig {
     serde_json::from_value(serde_json::json!({})).expect("default auth_service config")
 }
 
-fn config_key(value: serde_json::Value) -> crate::config::ApiKey {
+fn config_key(value: serde_json::Value) -> ferrogate_config::ApiKey {
     serde_json::from_value(value).expect("test api key")
 }
 
-fn admin_key() -> crate::config::ApiKey {
+fn admin_key() -> ferrogate_config::ApiKey {
     config_key(serde_json::json!({
         "id": "admin",
         "name": "Platform operator",
@@ -33,7 +33,7 @@ fn admin_key() -> crate::config::ApiKey {
     }))
 }
 
-fn chat_only_key() -> crate::config::ApiKey {
+fn chat_only_key() -> ferrogate_config::ApiKey {
     config_key(serde_json::json!({
         "id": "chat",
         "name": "Data-plane only",

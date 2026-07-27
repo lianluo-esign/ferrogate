@@ -13,8 +13,8 @@ use std::sync::{Arc, Barrier};
 
 use super::super::FerroGateway;
 use super::*;
-use crate::config::Config;
 use crate::state::SharedAppState;
+use ferrogate_config::Config;
 use ferrogate_storage::{
     asset_channel_id, stored_asset_id, stored_asset_variant_id, StoredAssetChannel,
     VariantDeleteOutcome,

@@ -1,10 +1,8 @@
 use super::*;
-use crate::{
-    config::{
-        AgentRuntimeProvider, Config, ManagedWorkerCapabilityActionConfig,
-        ManagedWorkerCapabilityTargetGrantConfig,
-    },
-    state::SharedAppState,
+use crate::state::SharedAppState;
+use ferrogate_config::{
+    AgentRuntimeProvider, Config, ManagedWorkerCapabilityActionConfig,
+    ManagedWorkerCapabilityTargetGrantConfig,
 };
 use ferrogate_runtime::{
     CapabilityTargetSelector, ExternalActionAuthorizationRequest, ExternalActionFramework,

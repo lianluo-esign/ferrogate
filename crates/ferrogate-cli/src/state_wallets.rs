@@ -858,7 +858,7 @@ mod tests {
                 output_price_per_1m: Some(0.0),
                 ..test_model()
             }],
-            billing_alerts: crate::config::BillingAlertsConfig {
+            billing_alerts: ferrogate_config::BillingAlertsConfig {
                 webhook_url: Some(webhook_url),
                 webhook_timeout_secs: 5,
                 ..Default::default()
@@ -957,7 +957,7 @@ mod tests {
                 output_price_per_1m: Some(0.0),
                 ..test_model()
             }],
-            billing_alerts: crate::config::BillingAlertsConfig {
+            billing_alerts: ferrogate_config::BillingAlertsConfig {
                 webhook_url: Some(webhook_url),
                 webhook_timeout_secs: 5,
                 ..Default::default()

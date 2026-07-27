@@ -10,8 +10,8 @@ use super::{
     a2a_input_envelope, a2a_message_count, a2a_output_envelope, declared_parent_action_fingerprint,
     A2A_ROUTE, PARENT_ACTION_FINGERPRINT_HEADER,
 };
-use crate::config::{Config, GuardrailStage};
 use crate::state::{AppState, GuardrailEvaluationContext, SharedAppState};
+use ferrogate_config::{Config, GuardrailStage};
 use ferrogate_guardrails::{
     CheckBinding, DetectorDefinition, DetectorStage, GuardrailProtocol, PolicyAction,
     PolicyAggregation, PolicyExecution, PolicyMode, PolicyRevision, PolicyScopeSelector,

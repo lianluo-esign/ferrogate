@@ -26,17 +26,17 @@ fn lifecycle_config(
     enabled: bool,
     dry_run: bool,
     keep_last_n: Option<u64>,
-) -> crate::config::AssetLifecycleConfig {
-    crate::config::AssetLifecycleConfig {
+) -> ferrogate_config::AssetLifecycleConfig {
+    ferrogate_config::AssetLifecycleConfig {
         enabled,
         dry_run,
         default_keep_last_n: keep_last_n,
         retention_min_age_secs: 0,
-        ..crate::config::AssetLifecycleConfig::default()
+        ..ferrogate_config::AssetLifecycleConfig::default()
     }
 }
 
-fn state_with(config: crate::config::AssetLifecycleConfig) -> AppState {
+fn state_with(config: ferrogate_config::AssetLifecycleConfig) -> AppState {
     AppState::new(Config {
         asset_lifecycle: config,
         ..Config::default()
@@ -340,15 +340,15 @@ fn compliance_config(
     request_log_max_age: Option<i64>,
     audit_event_max_age: Option<i64>,
     response_body_max_age: Option<i64>,
-) -> crate::config::AssetLifecycleConfig {
-    crate::config::AssetLifecycleConfig {
+) -> ferrogate_config::AssetLifecycleConfig {
+    ferrogate_config::AssetLifecycleConfig {
         enabled: true,
         dry_run,
         retention_min_age_secs: 0,
         default_request_log_max_age_secs: request_log_max_age,
         default_audit_event_max_age_secs: audit_event_max_age,
         default_response_body_max_age_secs: response_body_max_age,
-        ..crate::config::AssetLifecycleConfig::default()
+        ..ferrogate_config::AssetLifecycleConfig::default()
     }
 }
 

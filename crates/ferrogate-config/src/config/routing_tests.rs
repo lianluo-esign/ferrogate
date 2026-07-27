@@ -6,9 +6,9 @@
 
 use http::HeaderMap;
 
-use crate::{
-    config::{HeaderMatcher, RouteRule, Upstream},
+use super::{
     routing::{build_target_url, parse_upstream_endpoint},
+    HeaderMatcher, RouteRule, Upstream,
 };
 
 #[test]

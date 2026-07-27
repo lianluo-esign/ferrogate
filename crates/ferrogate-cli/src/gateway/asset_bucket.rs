@@ -29,6 +29,11 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use bytes::Bytes;
 use ferrogate_cloudflare::{CloudflareClient, HttpMethod};
+// The endpoint decomposition moved to `ferrogate-config` in #553 stage 3a:
+// `Config::validate_asset_bucket_r2` is its other caller, and validation now
+// lives there. It is still the SAME decomposition the signer below uses, which
+// is the whole point of #485.
+use ferrogate_config::parse_endpoint;
 use ferrogate_providers::{
     presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_streamed_with_content_hash_header,
     sign_sigv4_with_content_hash_header, AwsCredentials, PresignBoundPayload, PresignRequest,
@@ -50,7 +55,7 @@ pub(crate) struct AssetBucketConfig {
     /// `https://<account_id>.r2.cloudflarestorage.com` (or the jurisdiction
     /// hosts `<account_id>.eu.r2.cloudflarestorage.com` /
     /// `<account_id>.fedramp.r2.cloudflarestorage.com`), set `region` to R2's
-    /// fixed [`R2_REGION`] (`auto`), and use an R2 Access Key ID + Secret
+    /// fixed [`ferrogate_config::R2_REGION`] (`auto`), and use an R2 Access Key ID + Secret
     /// (created via R2's Create-Token API) through the same `access_key_id` +
     /// `secret_access_key` pair. R2 buckets are addressed path-style
     /// (`/{bucket}/{key}`), which is exactly how this client already builds its
@@ -70,169 +75,6 @@ pub(crate) struct AssetBucketConfig {
     pub(crate) region: String,
     pub(crate) access_key_id: String,
     pub(crate) secret_access_key: String,
-}
-
-/// The DNS suffix every Cloudflare R2 S3-API host ends with (issue #410).
-/// The per-account host is `<account_id>.r2.cloudflarestorage.com`; the
-/// jurisdiction hosts insert a `.eu.` / `.fedramp.` label before it.
-pub(crate) const R2_ENDPOINT_SUFFIX: &str = "r2.cloudflarestorage.com";
-
-/// The region FerroGate requires for an R2 endpoint. R2 ignores geographic
-/// regions; its canonical credential scope is `.../auto/s3/aws4_request`, and
-/// Cloudflare's S3-compatibility docs additionally accept a *blank* region and
-/// `us-east-1` as aliases for `auto`. FerroGate pins the canonical `auto`
-/// rather than accepting the aliases: the signer folds whatever region string
-/// it is given straight into the credential scope, so pinning one value keeps
-/// the signed scope unambiguous and keeps this the only R2-specific config the
-/// SigV4 path needs. The load-time guard's error message says exactly what to
-/// set.
-pub(crate) const R2_REGION: &str = "auto";
-
-/// A parsed Cloudflare R2 S3 endpoint (issue #410): the account id and the
-/// optional data-residency jurisdiction (`eu` / `fedramp`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct R2Endpoint {
-    pub(crate) account_id: String,
-    /// `None` for the default global host; `Some("eu")` / `Some("fedramp")`
-    /// for the jurisdiction hosts.
-    pub(crate) jurisdiction: Option<&'static str>,
-}
-
-/// `asset_bucket.endpoint` decomposed into the exact pieces the runtime SigV4
-/// path uses (issue #485).
-///
-/// This type exists so the load-time guards and the runtime signer cannot
-/// disagree about what an endpoint *means*. Before #485 there were two
-/// independent decompositions -- a validation-only `endpoint_host()` that
-/// dropped the port and any path suffix, and
-/// `AssetBucketClient::scheme_and_host` which dropped neither -- so an
-/// endpoint the guard judged to be a clean R2 host could still sign a
-/// completely different `host` header. Both now go through
-/// [`parse_endpoint`], and the R2 guards are written against
-/// [`EndpointParts::signing_host`] (the literal value the signer signs), so a
-/// value the guard accepts is by construction the value the signer sends.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EndpointParts {
-    /// `http` only for an explicit `http://` endpoint (local mocks); `https`
-    /// otherwise, matching `bedrock.rs::extract_host`'s convention.
-    pub(crate) scheme: &'static str,
-    /// `host[:port]`, ASCII-lowercased. DNS hostnames are case-insensitive, so
-    /// normalizing here (rather than in each caller) is what makes the R2
-    /// detector case-insensitive *and* guarantees the signer signs the same
-    /// spelling the guard inspected.
-    pub(crate) authority: String,
-    /// Any path prefix the endpoint carries (`/storage/v1/s3` for Supabase
-    /// Storage), or `""`. Case is preserved -- URL paths are case-sensitive.
-    /// A trailing `/` is trimmed, exactly as the signer trims it.
-    pub(crate) path_prefix: String,
-}
-
-impl EndpointParts {
-    /// The literal string the runtime puts in the signed `host` header and in
-    /// the authority position of every request URL it builds. For a
-    /// path-prefixed endpoint this deliberately includes the prefix, because
-    /// that is what the signer does today; the R2 guard rejects such an
-    /// endpoint precisely because this is not a bare R2 host.
-    pub(crate) fn signing_host(&self) -> String {
-        format!("{}{}", self.authority, self.path_prefix)
-    }
-
-    /// The bare DNS host: [`Self::authority`] with any `:port` removed.
-    pub(crate) fn host_name(&self) -> &str {
-        if self.authority.starts_with('[') {
-            // IPv6 literal: `[::1]:8080` -> `[::1]`.
-            return match self.authority.find(']') {
-                Some(end) => &self.authority[..=end],
-                None => &self.authority,
-            };
-        }
-        self.authority
-            .split(':')
-            .next()
-            .unwrap_or(self.authority.as_str())
-    }
-}
-
-/// Decomposes `asset_bucket.endpoint` the way the runtime signer does. THE
-/// single source of truth for "what host will we sign?" -- see
-/// [`EndpointParts`].
-pub(crate) fn parse_endpoint(endpoint: &str) -> anyhow::Result<EndpointParts> {
-    let raw = endpoint.trim();
-    let (scheme, rest) = match raw.strip_prefix("http://") {
-        Some(rest) => ("http", rest),
-        None => ("https", raw.strip_prefix("https://").unwrap_or(raw)),
-    };
-    let rest = rest.trim_end_matches('/');
-    let (authority, path_prefix) = match rest.find('/') {
-        Some(index) => (&rest[..index], &rest[index..]),
-        None => (rest, ""),
-    };
-    if authority.is_empty() {
-        anyhow::bail!("asset_bucket.endpoint {endpoint} has no host");
-    }
-    Ok(EndpointParts {
-        scheme,
-        authority: authority.to_ascii_lowercase(),
-        path_prefix: path_prefix.to_string(),
-    })
-}
-
-/// True when `endpoint`'s host is under the R2 S3 domain (any account /
-/// jurisdiction), used to decide whether the R2-specific validation applies.
-/// This is a permissive detector: it matches even an endpoint the signer could
-/// never use against R2 (a missing account label, a stray port, a path suffix,
-/// an upper-case spelling) so `validate_asset_bucket_r2` can reject those with
-/// a clear error rather than silently treating them as a generic S3 endpoint.
-pub(crate) fn endpoint_targets_r2(endpoint: &str) -> bool {
-    let Ok(parts) = parse_endpoint(endpoint) else {
-        return false;
-    };
-    let host = parts.host_name();
-    host == R2_ENDPOINT_SUFFIX || host.ends_with(&format!(".{R2_ENDPOINT_SUFFIX}"))
-}
-
-/// Strictly parses an R2 S3 endpoint of the form
-/// `https://<account_id>.r2.cloudflarestorage.com` (optionally with a
-/// `.eu.` / `.fedramp.` jurisdiction label). Returns `None` when the host is
-/// not R2 *or* when the signer would not sign a bare R2 host for it: a
-/// malformed (empty / multi-label) account id, a `:port`, or a path suffix.
-/// The account id must be a single DNS label (no dots), matching R2's
-/// 32-hex-char account id.
-///
-/// The port/path rejections are the #485 fix: R2 addresses buckets path-style
-/// off the account host, so anything beyond that host is not "ignored" by the
-/// runtime -- `AssetBucketClient::scheme_and_host` folds it into the signed
-/// `host` header and the request URL, which R2 rejects with an opaque error.
-/// `Some(_)` therefore carries a promise: reassembling the returned account id
-/// and jurisdiction reproduces [`EndpointParts::signing_host`] exactly (pinned
-/// by `r2_validation_and_the_runtime_signer_agree_on_every_endpoint`).
-pub(crate) fn parse_r2_endpoint(endpoint: &str) -> Option<R2Endpoint> {
-    let parts = parse_endpoint(endpoint).ok()?;
-    // Anything the signer would append to the host is disqualifying.
-    if !parts.path_prefix.is_empty() {
-        return None;
-    }
-    let host = parts.host_name();
-    if host.len() != parts.authority.len() {
-        return None; // an explicit `:port`
-    }
-    // `<...>.r2.cloudflarestorage.com` -> `<...>` (with its trailing dot).
-    let prefix = host.strip_suffix(R2_ENDPOINT_SUFFIX)?.strip_suffix('.')?; // reject the bare suffix domain (empty account)
-    let (account_id, jurisdiction) = if let Some(account) = prefix.strip_suffix(".eu") {
-        (account, Some("eu"))
-    } else if let Some(account) = prefix.strip_suffix(".fedramp") {
-        (account, Some("fedramp"))
-    } else {
-        (prefix, None)
-    };
-    // A valid account id is a single, non-empty DNS label.
-    if account_id.is_empty() || account_id.contains('.') {
-        return None;
-    }
-    Some(R2Endpoint {
-        account_id: account_id.to_string(),
-        jurisdiction,
-    })
 }
 
 pub(crate) struct AssetBucketClient {
@@ -1761,6 +1603,12 @@ fn parse_rfc3339_unix(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The rest of the #485 endpoint decomposition; only `parse_endpoint` is
+    // reached by the runtime signer above, so the others are imported here
+    // rather than left unused at module scope.
+    use ferrogate_config::{
+        endpoint_targets_r2, parse_r2_endpoint, R2Endpoint, R2_ENDPOINT_SUFFIX, R2_REGION,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};

@@ -29,14 +29,14 @@ fn state_with(
     max_total_gateway_buffer_bytes: Option<u64>,
     buffer_admission_wait_ms: Option<u64>,
 ) -> crate::state::AppState {
-    crate::state::AppState::new(crate::config::Config {
-        asset_bucket: crate::config::AssetBucketConfig {
+    crate::state::AppState::new(ferrogate_config::Config {
+        asset_bucket: ferrogate_config::AssetBucketConfig {
             max_gateway_buffer_bytes,
             max_total_gateway_buffer_bytes,
             buffer_admission_wait_ms,
-            ..crate::config::AssetBucketConfig::default()
+            ..ferrogate_config::AssetBucketConfig::default()
         },
-        ..crate::config::Config::default()
+        ..ferrogate_config::Config::default()
     })
 }
 

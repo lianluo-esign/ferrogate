@@ -17,8 +17,8 @@ use ferrogate_providers::ModelRoute;
 
 use super::chat::{prepare_ai_provider_request, AiEndpoint, AiProviderRequestInput};
 use super::dispatch::dispatch_provider_request;
-use crate::config::Provider;
 use crate::state::AppState;
+use ferrogate_config::Provider;
 
 /// Owned inputs for a shadow-mirror attempt, gathered on the primary
 /// request path and moved into the fire-and-forget task.

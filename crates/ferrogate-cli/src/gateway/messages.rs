@@ -41,7 +41,6 @@ use tracing::warn;
 
 use crate::{
     auth::{authenticate, authorize_external_rbac, AuthContext},
-    config::{GuardrailEffect, GuardrailStage},
     responses::{
         streaming_body_channel, write_json_error, write_raw_response,
         write_streaming_bytes_response, write_streaming_response,
@@ -52,6 +51,7 @@ use crate::{
     },
 };
 use ferrogate_billing::{ProviderAttempt, TokenUsage as BillingTokenUsage};
+use ferrogate_config::{GuardrailEffect, GuardrailStage};
 use ferrogate_core::{RequestContext, TenantContext};
 use ferrogate_guardrails::{
     normalize_request as normalize_guardrail_request,

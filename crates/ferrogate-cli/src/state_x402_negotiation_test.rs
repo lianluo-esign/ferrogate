@@ -36,7 +36,7 @@ use serde_json::json;
 
 use super::super::AppState;
 use super::*;
-use crate::config::Config;
+use ferrogate_config::Config;
 
 const TENANT: &str = "tenant-x402-neg";
 const RESOURCE_URL: &str = "https://api.example.com/paid";

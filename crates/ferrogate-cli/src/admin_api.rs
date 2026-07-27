@@ -41,10 +41,8 @@ use ferrogate_auth::{
 };
 use ferrogate_storage::StorageProviderKind;
 
-use crate::{
-    auth::{authenticate_admin_gate, build_auth_service_target, AuthError},
-    config::Config,
-};
+use crate::auth::{authenticate_admin_gate, build_auth_service_target, AuthError};
+use ferrogate_config::Config;
 
 /// Canonical wire/log identity of the standalone FerroGate Control Plane API
 /// service (issue #359). Emitted in the startup log, the connection-accept

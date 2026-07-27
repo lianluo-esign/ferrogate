@@ -21,12 +21,6 @@ use crate::gateway::dispatch::dispatch_provider_request;
 use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
     auth::{authenticate, AuthContext},
-    config::{
-        config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, GuardrailEffect, GuardrailStage,
-        PolicyRule, PromptTemplate, PromptTemplateStatus, PromptTemplateTarget,
-        PromptTemplateVersion, PromptTemplateVersionStatus, Provider, SkillPackage,
-        SkillPackageCapabilityKind,
-    },
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
         write_empty_response, write_json_error, write_json_error_and_close, write_json_response,
@@ -62,6 +56,11 @@ use crate::{
         AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord,
         SelfHostedWorkerRecordError,
     },
+};
+use ferrogate_config::{
+    config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, GuardrailEffect, GuardrailStage,
+    PolicyRule, PromptTemplate, PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
+    PromptTemplateVersionStatus, Provider, SkillPackage, SkillPackageCapabilityKind,
 };
 use ferrogate_providers::provider_compatibility_kind;
 use ferrogate_providers::{ProviderHeader, SecretValue};
@@ -622,7 +621,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        let server = match serde_json::from_slice::<crate::config::McpServerConfig>(&body) {
+        let server = match serde_json::from_slice::<ferrogate_config::McpServerConfig>(&body) {
             Ok(server) => {
                 if path_name.is_some_and(|path_name| path_name != server.name.as_str()) {
                     let message = "request path name and body name must match";
@@ -10274,7 +10273,7 @@ impl FerroGateway {
     }
 }
 
-fn api_key_source(key: &crate::config::ApiKey) -> &'static str {
+fn api_key_source(key: &ferrogate_config::ApiKey) -> &'static str {
     if key.key_env.is_some() {
         "env"
     } else if key.key_hash.is_some() {
@@ -10293,8 +10292,8 @@ fn api_key_source(key: &crate::config::ApiKey) -> &'static str {
 /// computed without it would be a guess. It is deliberately the same
 /// `resolve_platform_operator` the auth path runs, not a re-derivation.
 fn admin_api_key(
-    key: &crate::config::ApiKey,
-    tenancy: &crate::config::TenancyConfig,
+    key: &ferrogate_config::ApiKey,
+    tenancy: &ferrogate_config::TenancyConfig,
 ) -> AdminApiKey {
     AdminApiKey {
         id: key.id.clone(),
@@ -10329,7 +10328,7 @@ fn admin_api_key(
 }
 
 fn admin_gateway_config(
-    profile: &crate::config::GatewayConfigProfile,
+    profile: &ferrogate_config::GatewayConfigProfile,
 ) -> AdminGatewayConfigProfile {
     AdminGatewayConfigProfile {
         id: profile.id.clone(),
@@ -10440,7 +10439,7 @@ fn admin_skill_package(package: &SkillPackage) -> AdminSkillPackage {
     }
 }
 
-fn admin_agent_upstream(upstream: &crate::config::AgentUpstreamConfig) -> AdminAgentUpstream {
+fn admin_agent_upstream(upstream: &ferrogate_config::AgentUpstreamConfig) -> AdminAgentUpstream {
     AdminAgentUpstream {
         id: upstream.id.clone(),
         name: upstream.name.clone(),
@@ -10454,7 +10453,7 @@ fn admin_agent_upstream(upstream: &crate::config::AgentUpstreamConfig) -> AdminA
 }
 
 fn agent_upstream_visible_to_auth(
-    upstream: &crate::config::AgentUpstreamConfig,
+    upstream: &ferrogate_config::AgentUpstreamConfig,
     auth: &AuthContext,
 ) -> bool {
     if upstream.tenant_ids.is_empty() {
@@ -10471,7 +10470,7 @@ fn agent_upstream_visible_to_auth(
 fn agent_upstream_from_mutation(
     path_id: Option<&str>,
     payload: AdminAgentUpstreamMutation,
-) -> anyhow::Result<crate::config::AgentUpstreamConfig> {
+) -> anyhow::Result<ferrogate_config::AgentUpstreamConfig> {
     let id = payload
         .id
         .or_else(|| path_id.map(str::to_string))
@@ -10482,7 +10481,7 @@ fn agent_upstream_from_mutation(
     let endpoint = payload
         .endpoint
         .ok_or_else(|| anyhow::anyhow!("field endpoint: cannot be empty"))?;
-    Ok(crate::config::AgentUpstreamConfig {
+    Ok(ferrogate_config::AgentUpstreamConfig {
         id,
         name,
         description: payload.description,
@@ -10493,15 +10492,15 @@ fn agent_upstream_from_mutation(
         tenant_ids: payload.tenant_ids.unwrap_or_default(),
         capabilities: payload.capabilities.unwrap_or_else(|| {
             vec![
-                crate::config::AgentUpstreamCapability::Invoke,
-                crate::config::AgentUpstreamCapability::Read,
+                ferrogate_config::AgentUpstreamCapability::Invoke,
+                ferrogate_config::AgentUpstreamCapability::Read,
             ]
         }),
     })
 }
 
 fn agent_upstream_discovery<'a>(
-    upstream: &'a crate::config::AgentUpstreamConfig,
+    upstream: &'a ferrogate_config::AgentUpstreamConfig,
 ) -> AgentUpstreamDiscovery<'a> {
     AgentUpstreamDiscovery {
         object: "agent_upstream",
@@ -10556,7 +10555,7 @@ fn a2a_now_unix_seconds() -> u64 {
 }
 
 fn agent_upstream_headers(
-    upstream: &crate::config::AgentUpstreamConfig,
+    upstream: &ferrogate_config::AgentUpstreamConfig,
     auth: &AuthContext,
     request_id: &str,
     parent_action_fingerprint: Option<&str>,
@@ -10585,8 +10584,8 @@ fn agent_upstream_headers(
     }
 
     match &upstream.auth {
-        crate::config::AgentUpstreamAuth::None => {}
-        crate::config::AgentUpstreamAuth::Bearer { token } => {
+        ferrogate_config::AgentUpstreamAuth::None => {}
+        ferrogate_config::AgentUpstreamAuth::Bearer { token } => {
             if let Some(token) = token {
                 headers.push(ProviderHeader {
                     name: http::header::AUTHORIZATION.as_str().to_string(),
@@ -10594,7 +10593,7 @@ fn agent_upstream_headers(
                 });
             }
         }
-        crate::config::AgentUpstreamAuth::Header { name, value } => {
+        ferrogate_config::AgentUpstreamAuth::Header { name, value } => {
             if let Some(value) = value {
                 headers.push(ProviderHeader {
                     name: name.clone(),
@@ -10613,8 +10612,8 @@ fn agent_upstream_headers(
 }
 
 fn admin_skill_package_resources(
-    resources: &crate::config::SkillPackageResources,
-) -> crate::config::SkillPackageResources {
+    resources: &ferrogate_config::SkillPackageResources,
+) -> ferrogate_config::SkillPackageResources {
     let mut resources = resources.clone();
     for plugin in &mut resources.plugins {
         plugin.config = redact_plugin_config(&plugin.config);
@@ -10810,7 +10809,7 @@ fn requested_optional_header(
 }
 
 fn admin_plugin(
-    plugin: &crate::config::PluginConfig,
+    plugin: &ferrogate_config::PluginConfig,
     status: Option<crate::extensions::ExtensionStatus>,
 ) -> AdminPlugin {
     let status = status.unwrap_or(crate::extensions::ExtensionStatus {
@@ -10954,14 +10953,14 @@ fn provider_catalog_error(
 fn find_api_key<'a>(
     state: &'a crate::state::AppState,
     id: &str,
-) -> Option<&'a crate::config::ApiKey> {
+) -> Option<&'a ferrogate_config::ApiKey> {
     state.config.api_keys.iter().find(|key| key.id == id)
 }
 
 fn find_gateway_config<'a>(
     state: &'a crate::state::AppState,
     id: &str,
-) -> Option<&'a crate::config::GatewayConfigProfile> {
+) -> Option<&'a ferrogate_config::GatewayConfigProfile> {
     state
         .config
         .gateway_configs
@@ -11040,7 +11039,7 @@ fn api_key_from_mutation(
 fn gateway_config_from_mutation(
     path_id: Option<&str>,
     payload: AdminGatewayConfigMutation,
-) -> anyhow::Result<crate::config::GatewayConfigProfile> {
+) -> anyhow::Result<ferrogate_config::GatewayConfigProfile> {
     let id = payload
         .id
         .or_else(|| path_id.map(ToOwned::to_owned))
@@ -11049,7 +11048,7 @@ fn gateway_config_from_mutation(
         anyhow::bail!("request path id and body id must match");
     }
 
-    Ok(crate::config::GatewayConfigProfile {
+    Ok(ferrogate_config::GatewayConfigProfile {
         id,
         name: payload
             .name
@@ -11064,7 +11063,7 @@ fn gateway_config_from_mutation(
 fn plugin_from_mutation(
     path_id: Option<&str>,
     payload: AdminPluginMutation,
-) -> anyhow::Result<crate::config::PluginConfig> {
+) -> anyhow::Result<ferrogate_config::PluginConfig> {
     let id = payload
         .id
         .or_else(|| path_id.map(ToOwned::to_owned))
@@ -11073,7 +11072,7 @@ fn plugin_from_mutation(
         anyhow::bail!("request path id and body id must match");
     }
 
-    Ok(crate::config::PluginConfig {
+    Ok(ferrogate_config::PluginConfig {
         id,
         kind: payload.kind,
         version: payload.version.unwrap_or_else(|| "0.1.0".into()),
@@ -11352,7 +11351,7 @@ fn fnv1a64_update(hash: &mut u64, bytes: &[u8]) {
 fn find_policy<'a>(
     state: &'a crate::state::AppState,
     name: &str,
-) -> Option<&'a crate::config::PolicyRule> {
+) -> Option<&'a ferrogate_config::PolicyRule> {
     state
         .config
         .policies

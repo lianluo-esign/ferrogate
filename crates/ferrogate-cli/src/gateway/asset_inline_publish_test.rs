@@ -148,7 +148,7 @@ fn is_conflict(outcome: &InlinePublishOutcome) -> bool {
 /// timing sleeps.
 #[test]
 fn concurrent_different_content_first_pushes_have_exactly_one_winner() {
-    let state = AppState::new(crate::config::Config::default());
+    let state = AppState::new(ferrogate_config::Config::default());
     let bucket = Arc::new(RecordingBucket::default());
     let barrier = Arc::new(Barrier::new(3));
     let (tx, rx) = mpsc::channel();
@@ -237,7 +237,7 @@ fn concurrent_different_content_first_pushes_have_exactly_one_winner() {
 /// remain hash-consistent.
 #[test]
 fn concurrent_same_content_first_pushes_have_exactly_one_winner() {
-    let state = AppState::new(crate::config::Config::default());
+    let state = AppState::new(ferrogate_config::Config::default());
     let bucket = Arc::new(RecordingBucket::default());
     let barrier = Arc::new(Barrier::new(3));
     let (tx, rx) = mpsc::channel();
@@ -300,7 +300,7 @@ fn concurrent_same_content_first_pushes_have_exactly_one_winner() {
 /// candidate and leave the winner's object and metadata untouched.
 #[test]
 fn loser_reclaims_only_its_own_candidate_against_a_seeded_winner() {
-    let state = AppState::new(crate::config::Config::default());
+    let state = AppState::new(ferrogate_config::Config::default());
     let bucket = RecordingBucket::default();
 
     let winner_bytes = vec![1_u8; 32];
@@ -512,7 +512,7 @@ fn conflict_with_an_unreadable_winner_preserves_the_candidate() {
 /// winner's bytes live in the row and a loser has nothing to clean.
 #[test]
 fn pure_inline_publish_has_no_candidate_to_clean() {
-    let state = AppState::new(crate::config::Config::default());
+    let state = AppState::new(ferrogate_config::Config::default());
     let sink = NoCandidateSink;
 
     let mut winner = bucket_asset(&[1_u8; 4], "");

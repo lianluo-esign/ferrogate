@@ -5,7 +5,7 @@
 // description: Unit tests for CLI authentication, kept outside business logic.
 
 use super::*;
-use crate::config::Config;
+use ferrogate_config::Config;
 use ferrogate_storage::{StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -703,7 +703,7 @@ fn quota_policy_model_allowlist_intersects_with_the_keys_own_allowlist() {
 
 #[test]
 fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
-    use crate::config::{Model, Provider};
+    use ferrogate_config::{Model, Provider};
     use ferrogate_core::RequestContext;
     use ferrogate_providers::{ProviderUsage, RoutingStrategy};
     use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
@@ -820,7 +820,7 @@ fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
 
 #[test]
 fn tenant_scoped_monthly_budget_is_shared_across_two_keys_under_the_tenant() {
-    use crate::config::{Model, Provider};
+    use ferrogate_config::{Model, Provider};
     use ferrogate_core::RequestContext;
     use ferrogate_providers::{ProviderUsage, RoutingStrategy};
     use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
@@ -1138,8 +1138,8 @@ fn verifies_hashed_api_key_secret() {
     };
 
     assert!(hash.starts_with("blake2b:"));
-    assert!(key.matches_presented_key("client-secret"));
-    assert!(!key.matches_presented_key("wrong-secret"));
+    assert!(super::api_key_matches_presented_key(&key, "client-secret"));
+    assert!(!super::api_key_matches_presented_key(&key, "wrong-secret"));
 }
 
 // --- issue #515: `organization_id` is a validated tenant identity, and
@@ -1326,7 +1326,7 @@ fn config_validate_is_what_emits_the_implicit_platform_root_warning() {
 
     let opted_in = Config {
         api_keys,
-        tenancy: crate::config::TenancyConfig {
+        tenancy: ferrogate_config::TenancyConfig {
             implicit_platform_operator: false,
             ..Default::default()
         },

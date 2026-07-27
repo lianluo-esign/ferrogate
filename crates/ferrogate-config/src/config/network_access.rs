@@ -14,13 +14,13 @@ use http::HeaderMap;
 /// A parsed IPv4/IPv6 CIDR range. A bare IP address (no `/n` suffix) is
 /// treated as an exact match (`/32` for IPv4, `/128` for IPv6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct IpCidr {
+pub struct IpCidr {
     network: IpAddr,
     prefix_len: u8,
 }
 
 impl IpCidr {
-    pub(crate) fn parse(raw: &str) -> Result<Self, String> {
+    pub fn parse(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err("empty CIDR/IP entry".to_string());
@@ -53,7 +53,7 @@ impl IpCidr {
         })
     }
 
-    pub(crate) fn contains(&self, candidate: &IpAddr) -> bool {
+    pub fn contains(&self, candidate: &IpAddr) -> bool {
         match (self.network, candidate) {
             (IpAddr::V4(network), IpAddr::V4(candidate)) => {
                 masked_eq_u32(u32::from(network), u32::from(*candidate), self.prefix_len)
@@ -101,7 +101,7 @@ fn masked_eq_u128(a: u128, b: u128, prefix_len: u8) -> bool {
 /// pre-auth allowlist and minting a fresh rate-limit window per fake IP.
 /// `trusted_proxy_hops` is clamped to at least 1 whenever forwarded headers are
 /// trusted.
-pub(crate) fn resolve_client_ip(
+pub fn resolve_client_ip(
     headers: &HeaderMap,
     peer_addr: Option<IpAddr>,
     trust_forwarded_for: bool,
@@ -152,7 +152,7 @@ const MAX_TRACKED_SOURCE_IPS: usize = 100_000;
 /// simpler than the per-key `ClusterCounterBackend` machinery: this is a
 /// coarse, single-node, in-process flood gate, not a billing-accurate quota.
 #[derive(Debug, Default)]
-pub(crate) struct UnauthenticatedIpRateLimiter {
+pub struct UnauthenticatedIpRateLimiter {
     windows: Mutex<HashMap<IpAddr, (u64, u64)>>,
 }
 
@@ -160,7 +160,7 @@ impl UnauthenticatedIpRateLimiter {
     /// Returns `true` if `ip` is still within `limit` requests for the
     /// current `now_minute` window (a monotonically increasing minute
     /// counter, e.g. `unix_seconds / 60`).
-    pub(crate) fn allow(&self, ip: IpAddr, now_minute: u64, limit: u64) -> bool {
+    pub fn allow(&self, ip: IpAddr, now_minute: u64, limit: u64) -> bool {
         let mut windows = self
             .windows
             .lock()

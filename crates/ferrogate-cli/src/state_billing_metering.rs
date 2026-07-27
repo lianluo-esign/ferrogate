@@ -1364,7 +1364,7 @@ mod tests {
     #[test]
     fn request_log_export_filters_records_and_redacts_configured_secrets() {
         let state = AppState::new(Config {
-            api_keys: vec![crate::config::ApiKey {
+            api_keys: vec![ferrogate_config::ApiKey {
                 region_allowlist: Vec::new(),
                 id: "key_dev".into(),
                 name: "Development key".into(),
@@ -1490,16 +1490,16 @@ mod tests {
     #[test]
     fn in_memory_analytics_retains_configured_window_with_paginated_admin_views() {
         let state = AppState::new(Config {
-            analytics: crate::config::AnalyticsConfig {
+            analytics: ferrogate_config::AnalyticsConfig {
                 request_log_retention_records: 2,
                 audit_event_retention_records: 2,
                 billing_event_retention_records: 2,
-                ..crate::config::AnalyticsConfig::default()
+                ..ferrogate_config::AnalyticsConfig::default()
             },
-            storage: crate::config::StorageConfig {
+            storage: ferrogate_config::StorageConfig {
                 admin_list_default_limit: 1,
                 admin_list_max_limit: 2,
-                ..crate::config::StorageConfig::default()
+                ..ferrogate_config::StorageConfig::default()
             },
             ..Config::default()
         });
