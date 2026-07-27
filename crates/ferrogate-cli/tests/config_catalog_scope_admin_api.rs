@@ -21,7 +21,7 @@
 // tests/agent_workflow_scope_admin_api.rs, because its rows also join runtime
 // counters. `/admin/v1/api-keys` is operator-gated and
 // `GuardrailRule` has no read surface at all -- see the derivation table on
-// `ConfigCatalogScope` in gateway/rbac.rs.)
+// `ConfigCatalogScope` in ferrogate-gateway/src/server/rbac.rs.)
 //
 // Every assertion below is on the ROWS (and the ids inside them) a scoped
 // caller actually receives, never on handler source text: revert any one of
@@ -29,49 +29,93 @@
 // out-of-scope rows come back and fails. Runs against a real gateway process
 // with in-memory storage -- no Postgres, no Docker.
 //
-// BRANCH SPECIFICITY (issue #500's standing bar). Nine handler branches call
-// `config_catalog_scope`, and each is pinned by exactly one test -- reverting
-// that one branch to `Ok(_) => ...` reds that test and no other, because no
-// two tests read the same route+arm:
+// OBSERVED: 8 passed, 0 failed, 0 ignored in 0.13s of harness time (0.28-0.34s
+// wall for the whole warm `cargo test` invocation across repeats; ~1m30s once
+// more if the workspace has to compile first) --
+//   cargo test -p ferrogate-cli --all-features --test \
+//       config_catalog_scope_admin_api -- --test-threads=4
+// Every mutation named below was run the same way against a pristine tree,
+// one at a time, and the reds recorded here are what the runs printed rather
+// than what the code reads like. Line numbers are as of the tree that carries
+// this comment; they have already moved twice under this file (#546 inserted
+// the agent-workflow handlers above the skill-package ones, #553 stage 3b
+// moved the trunk from ferrogate-cli to ferrogate-gateway/src/server), so
+// treat the named construct as authoritative and the number as a hint.
 //
-//   local.rs:8756  GET /admin/v1/policies              -> tenant_scoped_key_lists_only_policies_that_can_act_on_it
-//   local.rs:8798  GET /admin/v1/policies/{name}       -> tenant_scoped_key_cannot_fetch_an_out_of_scope_policy_by_name
-//   local.rs:891   GET /admin/v1/gateway-configs       -> tenant_scoped_key_lists_only_gateway_profiles_its_keys_may_select
-//   local.rs:934   GET /admin/v1/gateway-configs/{id}  -> tenant_scoped_key_cannot_fetch_an_out_of_scope_gateway_profile_by_id
-//   local.rs:8115  GET /admin/v1/models                -> tenant_scoped_key_lists_only_models_visible_to_it
-//   local.rs:1686  GET /admin/v1/skill-packages        -> tenant_scoped_key_lists_only_skill_packages_its_keys_may_load
-//   local.rs:1729  GET /admin/v1/skill-packages/{id}   -> (same test, list half vs by-id half)
-//   local.rs:9283  GET /admin/v1/agent-upstreams       -> tenant_scoped_key_lists_only_agent_upstreams_its_keys_may_reach
-//   local.rs:9316  GET /admin/v1/agent-upstreams/{id}  -> (same test, list half vs by-id half)
+// BRANCH SPECIFICITY (issue #500's standing bar). Nine handler branches in
+// ferrogate-gateway/src/server/local.rs call `config_catalog_scope`, and each
+// is pinned by exactly one test. The mutation run for each row was: replace
+// that branch's `Ok(scope) => scope,` arm with
+// `Ok(_) => super::rbac::ConfigCatalogScope::Full,` -- the original #518/#535
+// defect exactly, an authenticated handler that then ignores who is asking.
 //
-// The four by-id branches additionally carry `&& !scope.is_full()`; deleting
-// it turns the OPERATOR's 404 for an absent id into a 403, which is asserted
-// once per by-id branch, so that clause is pinned four times over and never
-// by implication from a sibling route.
+//   local.rs:8798  GET /admin/v1/policies              -> RED tenant_scoped_key_lists_only_policies_that_can_act_on_it (+ the eighth)
+//   local.rs:8840  GET /admin/v1/policies/{name}       -> RED tenant_scoped_key_cannot_fetch_an_out_of_scope_policy_by_name
+//   local.rs:892   GET /admin/v1/gateway-configs       -> RED tenant_scoped_key_lists_only_gateway_profiles_its_keys_may_select
+//   local.rs:935   GET /admin/v1/gateway-configs/{id}  -> RED tenant_scoped_key_cannot_fetch_an_out_of_scope_gateway_profile_by_id
+//   local.rs:8157  GET /admin/v1/models                -> RED tenant_scoped_key_lists_only_models_visible_to_it
+//   local.rs:1728  GET /admin/v1/skill-packages        -> RED tenant_scoped_key_lists_only_skill_packages_its_keys_may_load
+//   local.rs:1771  GET /admin/v1/skill-packages/{id}   -> RED (same test, list half vs by-id half)
+//   local.rs:9325  GET /admin/v1/agent-upstreams       -> RED tenant_scoped_key_lists_only_agent_upstreams_its_keys_may_reach (+ the eighth)
+//   local.rs:9358  GET /admin/v1/agent-upstreams/{id}  -> RED (same test, list half vs by-id half)
+//
+// All nine runs printed exactly the rows above and nothing else: seven of them
+// `7 passed; 1 failed`, and the two list branches the eighth test reads
+// through (policies, agent-upstreams) `6 passed; 2 failed`. `/admin/v1/models`
+// has no by-id surface, which is why nine branches cover five route families.
+//
+// The four by-id branches additionally carry `&& !scope.is_full()`
+// (local.rs:952, :1794, :8858, :9376 -- a fifth at :1385 belongs to the
+// agent-workflow route #546 split out). Deleting the clause turns the
+// OPERATOR's 404 for an absent id into a 403. Run one at a time, each deletion
+// printed `7 passed; 1 failed` and reddened only its own route's test
+// (:952 -> ..._gateway_profile_by_id, :1794 -> ..._skill_packages...,
+// :8858 -> ..._policy_by_name, :9376 -> ..._agent_upstreams...), so the clause
+// is pinned four times over and never by implication from a sibling route.
 //
 // The eighth test pins a different axis -- the two durable listings that feed
 // the scope itself -- and is the one place the matrix is not one-to-one: it
 // reads through the policy and agent-upstream lists, so those two handler
-// mutations red it as well as their own test. That is intrinsic (a scope-
-// SOURCE test has to observe through some scoped surface) and it does not
-// make either test redundant, because the containment runs one way only.
-// Deleting `api_key_ids.extend(list_virtual_api_keys(..))` (rbac.rs:1431) or
-// `project_ids.extend(list_projects(..))` (:1439) reds ONLY the eighth test:
-// it is the only test in this file that creates a project or a virtual key,
-// so in the other seven both listings come back empty and neither mutation
-// can change a byte of their responses.
+// mutations red it as well as their own test (observed above). That is
+// intrinsic (a scope-SOURCE test has to observe through some scoped surface)
+// and it does not make either test redundant, because the containment runs one
+// way only. Deleting `api_key_ids.extend(list_virtual_api_keys(..))`
+// (rbac.rs:1485) or `project_ids.extend(list_projects(..))` (:1493) reds ONLY
+// the eighth test -- both runs printed `7 passed; 1 failed` with
+// config_catalog_scope_resolves_durable_virtual_keys_and_projects the sole
+// failure. It is the only test in this file that creates a project or a
+// virtual key, so in the other seven both listings come back empty and neither
+// mutation can change a byte of their responses.
 //
-// The CONVERSE does not hold, and an earlier revision of this header asserted
-// that it did. Deleting the static `own_static_keys()` seeding
-// (rbac.rs:1427-1428) reds the other seven AND the eighth: tenant A's scope
-// collapses to `api_key_ids = {<durable key a>}`, so `narrow` returns `None`
-// for every row selected by a *static* key id, and `deny-both-keys`,
+// The CONVERSE does not hold, and two earlier revisions of this header got it
+// wrong in opposite directions -- first claiming the seeding was redundant,
+// then that removing it reds all eight. Deleting the static `own_static_keys()`
+// seeding (rbac.rs:1474-1484, i.e. the closure and BOTH `HashSet` initialisers
+// it feeds, replaced by two empty sets; deleting a narrower slice leaves a
+// dangling `.filter_map(..).collect();` that will not compile) reds SIX of the
+// other seven and the eighth -- `1 passed; 7 failed`, observed. Tenant A's
+// scope collapses to `api_key_ids = {<durable key a>}`, so `narrow` returns
+// `None` for every row selected by a *static* key id, and `deny-both-keys`,
 // `upstream-a` and `upstream-both` drop out of the eighth test's exact
-// expectations too. That is a consequence of asserting exact sorted sets
-// rather than `contains()` -- the stronger assertion, and worth the loss --
-// but the claim is corrected here rather than left standing, because this
-// matrix is what a reviewer checks branch specificity against and a wrong
-// audit is worse than no audit.
+// expectations too (a consequence of asserting exact sorted sets rather than
+// `contains()` -- the stronger assertion, and worth the loss).
+//
+// The one survivor is `tenant_scoped_key_cannot_fetch_an_out_of_scope_policy_by_name`,
+// and the reason is the useful part of this negative result: its only positive
+// tenant-A reads are `deny-tenant-a` and `deny-both-tenants`, both ORGANIZATION
+// selectors, and `visible_policy` sends those through `narrow_organizations`
+// (rbac.rs:1292), which REBUILDS the list from `tenant_id` and never reads
+// `api_key_ids`/`project_ids` at all. Its refusal loop is `403
+// tenant_scope_denied` with or without the seeding, its operator reads are
+// `Full`, and it is the one tenant test with no TENANT_B half, so nothing in it
+// depends on tenant B's static `project_id` either. That names the one arm of
+// `visible_policy` the static seeding cannot reach -- and it is why the
+// seeding's own pinning comes from the other six, not from this test.
+//
+// KNOWN GAP, not a claim: the four by-id surfaces have positive controls for
+// tenant A and for the operator, but no positive by-id read as TENANT B. The
+// list surfaces all exercise both tenants, so caller-keying is pinned there;
+// a by-id handler that keyed off a hardcoded tenant A would still pass here.
 
 mod support;
 
@@ -122,29 +166,36 @@ const TENANT_B: [&str; 2] = [
 /// constraints, read off `ferrogate-config/src/config/validate.rs` (the crate
 /// this module moved to in #553 stage 3a) rather than guessed:
 ///
-/// * `validate_skill_packages` (`validate.rs:2295`) rejects a package with an
+/// * `validate_skill_packages` (`validate.rs:2343`) rejects a package with an
 ///   empty `capabilities` list, so each `[[skill_packages]]` entry carries a
 ///   `[[skill_packages.capabilities]]` sub-table. A capability is a *table*
 ///   (`SkillPackageCapability { kind, id }`), never a bare string.
 /// * a `kind = "plugin"` capability id must name a registered plugin
-///   (`validate.rs:2337`; the id set is `plugins` + `extensions` + resources
+///   (`validate.rs:2383`; the id set is `plugins` + `extensions` + resources
 ///   embedded in packages), which is what the single `[[plugins]]` entry
 ///   below is for. `tool.echo` is one of the builtin ids
 ///   `validate_builtin_plugin_shape` accepts, and it must be declared
 ///   `kind = "tool_provider"`.
-/// * `validate_agent_upstreams` (`validate.rs:2959`) rejects an empty
+/// * `validate_agent_upstreams` (`validate.rs:3007`) rejects an empty
 ///   `capabilities` list too; there a capability is a plain enum string.
 ///
-/// Those three were derived from the error the suite actually produced, which
-/// bounds the validator PREFIX and not the suffix: `Config::validate`
-/// (`validate.rs:89`) runs its checks in sequence and aborts on the first, so
-/// everything after `validate_agent_upstreams` -- `validate_guardrails`,
-/// `validate_tls`, `validate_storage` and the rest -- has still never run on
-/// this fixture. Nothing here is expected to trip them (the fixture declares
-/// no guardrail, tls, storage or cluster block, and the sibling
-/// `rbac_catalog_scope_admin_api` boots a strictly smaller config through all
-/// of them on defaults), but "the error came from validator N" is evidence
-/// about `1..=N` only, and this file is not entitled to more than it proved.
+/// A previous revision of this comment could only bound the validator PREFIX:
+/// the three constraints were read off the error the dead gateway printed, and
+/// `Config::validate` (`validate.rs:89`) aborts on the first failure, so
+/// nothing after `validate_agent_upstreams` had evidence either way. That
+/// caveat is now DISCHARGED by observation rather than argument: the suite
+/// boots and its eight tests pass, the gateway refuses to bind on a config
+/// `Config::validate` rejects, and `validate` returns `Ok` only after running
+/// every check in the sequence -- so `validate_guardrails`, `validate_tls`,
+/// `validate_storage`, `validate_cluster` and the rest have all now run on
+/// this exact fixture and passed.
+///
+/// The same run discharges #540 (`0c4493c`), which made an `[[api_keys]]`
+/// entry declaring neither `platform_operator` nor `organization_id` a hard
+/// load-time refusal (`ensure_every_key_declares_tenant_identity`,
+/// `validate.rs:106`). Every key in this fixture declares one explicitly --
+/// the `admin` key is `platform_operator = true`, the four tenant keys carry an
+/// `organization_id` -- and a green suite is the proof, not a reading.
 fn write_config(path: &std::path::Path, gateway_addr: &str) {
     std::fs::write(
         path,
