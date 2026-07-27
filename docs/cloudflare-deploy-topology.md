@@ -65,9 +65,9 @@ Every constraint in this doc follows from what the runtime concretely does.
 Citations are against the current tree.
 
 **Pingora data plane, native listeners.** The gateway is a Pingora HTTP proxy
-service: `serve()` at `crates/ferrogate-cli/src/gateway/mod.rs:191` builds a
-`Server::new_with_opt_and_conf` (`mod.rs:296`), wraps the `FerroGateway`
-proxy in `http_proxy_service_with_name` (`mod.rs:300`), binds either a TLS
+service: `serve()` in `crates/ferrogate-cli/src/gateway/mod.rs` builds a
+`Server::new_with_opt_and_conf`, wraps the `FerroGateway`
+proxy in `http_proxy_service_with_name`, binds either a TLS
 listener via `service.add_tls_with_settings(&listen, ...)` (`mod.rs:307`) or a
 plain TCP listener via `service.add_tcp(&listen)` (`mod.rs:317`), and blocks in
 `server.run_forever()` (`mod.rs:328`). This is native tokio + raw socket
@@ -94,7 +94,8 @@ antithesis of an isolate-friendly database client.
 binding: OTLP + analytics senders, ACME renewal, MCP health scheduler, external
 action authorizer, billing outbox sweeper, agent schedule sweeper, asset
 lifecycle sweeper, x402 TTL sweeper and settlement reconciler
-(`crates/ferrogate-cli/src/gateway/mod.rs:275-289`). These assume the process
+(all spawned from `serve()` in `crates/ferrogate-cli/src/gateway/mod.rs`).
+These assume the process
 is **continuously running**; any scale-to-zero topology silently pauses them.
 
 **Own TLS/ACME stack.** The runtime can terminate TLS itself and run an ACME
@@ -211,8 +212,9 @@ For FerroGate this means:
   blocked: Postgres-over-WebSocket drivers, a TCP-over-HTTPS tunnel, or
   pgbouncer on 443.
 - **D1**: only after #419/#420 add a D1 `RuntimeControlPlaneBackend` variant
-  (seam: `crates/ferrogate-storage/src/lib.rs:9939`, repository traits
-  from `:756`) — a real porting effort (SQLite semantics, no `tokio-postgres`), and
+  (seam: the `RuntimeControlPlaneBackend` enum in
+  `crates/ferrogate-storage/src/lib.rs`, plus the repository traits in the same
+  file) — a real porting effort (SQLite semantics, no `tokio-postgres`), and
   per [`cloudflare-integration.md` §6](cloudflare-integration.md#6-d1) hot-path
   access must go through a binding, not the rate-limited REST query API. From a
   container, that binding is reached via the shim (§6).
@@ -398,11 +400,20 @@ existing Dockerfile deploys as-is.
 4. **CF-native tier (conditional).** D1 control-plane backend (#419/#420) and
    deeper binding integration — only if phase 3 demonstrates demand.
 
+**On citations in this document (#484).** Code references here name
+*symbols*, not line numbers. The line-anchored form drifted twice: once between
+`10ec6f4` and the #484 review, and again before that review's fix landed --
+`gateway/mod.rs:191` now points at a version-string comparison and
+`ferrogate-storage/src/lib.rs:9939` at a closing brace. A spike document is read
+months after it is written, by someone following its anchors into unrelated
+code and concluding the document is stale. Symbols move with the code; line
+numbers rot silently and there is no gate that can catch it.
+
 **Follow-up implementation issues to file (list only — deliberately not
-created here).** **Status as of 2026-07-25 (#484): none of the six has been
-filed.** Item 2 in particular — executing this document's §9 runbook — is the
-work every "pending verification" note below depends on, and it has no tracked
-owner.
+created here).** **Status as of 2026-07-27: tracked in #539**, which carries all six as a
+checklist. Item 2 — executing this document's §9 runbook — is the work every
+"pending verification" note below depends on; it needs a live Cloudflare
+account and so cannot be done in the development environment.
 
 1. *Edge Worker for hybrid topology* — thin auth/cache/guardrail pre-check
    Worker forwarding to the FerroGate origin; per-route rollout config.
