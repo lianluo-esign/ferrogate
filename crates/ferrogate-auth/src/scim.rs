@@ -22,6 +22,7 @@ use crate::http::{
     forbidden, internal_error, not_found, storage_error, unauthorized, unprocessable, HttpRequest,
     HttpResponse,
 };
+use crate::membership_role::MembershipRole;
 use crate::util::{
     block_on_sync_bridge, is_valid_email, next_id, now_unix_seconds, unusable_password_hash,
 };
@@ -70,7 +71,7 @@ pub(crate) fn handle_admin_scim_token_create(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can create a SCIM provisioning token");
     }
     let workspace = match resolve_default_workspace(console, &membership.tenant_id) {
@@ -264,13 +265,20 @@ pub(crate) fn handle_scim_user_create(
     if !is_valid_email(&email) {
         return unprocessable("userName must be a valid email address");
     }
-    let role = payload
-        .ferrogate_role
-        .as_deref()
-        .map(str::trim)
-        .filter(|role| !role.is_empty())
-        .unwrap_or("member")
-        .to_string();
+    // Validate the IdP-supplied tier in code (issue #517): SCIM writes this
+    // straight into `admin_user_tenant_memberships.role`, and the D1 backend
+    // carries no CHECK to catch an unknown value.
+    let role = match MembershipRole::parse(
+        payload
+            .ferrogate_role
+            .as_deref()
+            .map(str::trim)
+            .filter(|role| !role.is_empty())
+            .unwrap_or(MembershipRole::Member.as_str()),
+    ) {
+        Ok(role) => role,
+        Err(error) => return unprocessable(&format!("ferrogateRole: {error}")),
+    };
     let display_name = payload
         .display_name
         .as_deref()
@@ -316,7 +324,7 @@ pub(crate) fn handle_scim_user_create(
         id: next_id("membership"),
         user_id: user.id.clone(),
         tenant_id: tenant_id.to_string(),
-        role: role.clone(),
+        role: role.to_string(),
         created_at_unix: now_unix_seconds() as i64,
     };
     if let Err(error) = block_on_sync_bridge(
@@ -335,7 +343,7 @@ pub(crate) fn handle_scim_user_create(
 
     HttpResponse::json(
         201,
-        scim_user_resource_with_active(&user, &role, payload.active != Some(false)),
+        scim_user_resource_with_active(&user, role.as_str(), payload.active != Some(false)),
     )
 }
 

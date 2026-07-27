@@ -26,6 +26,7 @@ use crate::admin_console::{
 use crate::http::{
     forbidden, internal_error, not_found, storage_error, unauthorized, unprocessable, HttpResponse,
 };
+use crate::membership_role::MembershipRole;
 use crate::saml;
 use crate::scim::membership_role_in_tenant;
 use crate::util::{
@@ -161,11 +162,28 @@ pub(crate) fn handle_admin_sso_config_set(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can configure SSO");
     }
-    let group_role_mapping: std::collections::BTreeMap<String, String> =
-        payload.group_role_mapping.clone().into_iter().collect();
+    // Validate the tiers this config can JIT-provision (issue #517) BEFORE
+    // persisting it: `default_role` and every `group_role_mapping` value ends
+    // up written verbatim into `admin_user_tenant_memberships.role` on a first
+    // SSO login, so an unvalidated one is an unvalidated role write with an
+    // IdP round-trip in between.
+    let default_role = match MembershipRole::parse(payload.default_role.trim()) {
+        Ok(role) => role,
+        Err(error) => return unprocessable(&format!("default_role: {error}")),
+    };
+    let mut group_role_mapping: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for (group, role) in &payload.group_role_mapping {
+        match MembershipRole::parse(role.trim()) {
+            Ok(role) => {
+                group_role_mapping.insert(group.clone(), role.to_string());
+            }
+            Err(error) => return unprocessable(&format!("group_role_mapping[{group:?}]: {error}")),
+        }
+    }
     let now = now_unix_seconds() as i64;
     let existing = read_stored_sso_config(console, &membership.tenant_id);
     let created_at_unix = existing.map(|config| config.created_at_unix).unwrap_or(now);
@@ -216,7 +234,7 @@ pub(crate) fn handle_admin_sso_config_set(
             StoredSsoProviderConfig {
                 tenant_id: membership.tenant_id.clone(),
                 provider_kind: "oidc".into(),
-                default_role: payload.default_role.clone(),
+                default_role: default_role.to_string(),
                 group_role_mapping,
                 oidc_issuer: Some(issuer),
                 oidc_client_id: Some(client_id),
@@ -279,7 +297,7 @@ pub(crate) fn handle_admin_sso_config_set(
             StoredSsoProviderConfig {
                 tenant_id: membership.tenant_id.clone(),
                 provider_kind: "saml".into(),
-                default_role: payload.default_role.clone(),
+                default_role: default_role.to_string(),
                 group_role_mapping,
                 oidc_issuer: None,
                 oidc_client_id: None,
@@ -335,7 +353,7 @@ pub(crate) fn handle_admin_sso_config_get(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can read the SSO configuration");
     }
     let Some(config) = read_stored_sso_config(console, &membership.tenant_id) else {
@@ -383,7 +401,7 @@ pub(crate) fn handle_admin_sso_config_delete(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can remove the SSO configuration");
     }
     match block_on_sync_bridge(
@@ -662,10 +680,17 @@ fn complete_sso_login(
     group_role_mapping: &HashMap<String, String>,
     default_role: &str,
 ) -> HttpResponse {
-    let mapped_role = groups
-        .iter()
-        .find_map(|group| group_role_mapping.get(group).cloned())
-        .unwrap_or_else(|| default_role.to_string());
+    // Resolve the IdP's group claim to a tier. Both the mapping values and
+    // `default_role` are validated at config time (issue #517), but a config
+    // persisted BEFORE that validator existed can still hold junk -- resolve
+    // it to the least privilege rather than storing an unknown role or
+    // defaulting up to owner.
+    let mapped_role = MembershipRole::from_stored(
+        groups
+            .iter()
+            .find_map(|group| group_role_mapping.get(group).map(String::as_str))
+            .unwrap_or(default_role),
+    );
 
     let existing = match block_on_sync_bridge(console.repositories.get_admin_user_by_email(email)) {
         Ok(existing) => existing,
@@ -722,13 +747,13 @@ fn complete_sso_login(
     // override a role an owner explicitly changed afterward via the
     // team-management API.
     let effective_role = match membership_role_in_tenant(console, tenant_id, &user.id) {
-        Some(role) => role,
+        Some(role) => MembershipRole::from_stored(&role),
         None => {
             let membership = StoredAdminUserMembership {
                 id: next_id("membership"),
                 user_id: user.id.clone(),
                 tenant_id: tenant_id.to_string(),
-                role: mapped_role.clone(),
+                role: mapped_role.to_string(),
                 created_at_unix: now_unix_seconds() as i64,
             };
             if let Err(error) = block_on_sync_bridge(
@@ -753,12 +778,17 @@ fn complete_sso_login(
         Ok(None) => return internal_error("no workspace found for this tenant"),
         Err(error) => return storage_error(&error),
     };
-    let gateway_api_key =
-        match provision_gateway_api_key(console, &workspace.id, &workspace.project_id, tenant_id) {
-            Ok(secret) => secret,
-            Err(error) => return internal_error(&error.to_string()),
-        };
-    match issue_session(console, &user.id, email, tenant_id, &effective_role) {
+    let gateway_api_key = match provision_gateway_api_key(
+        console,
+        &workspace.id,
+        &workspace.project_id,
+        tenant_id,
+        effective_role,
+    ) {
+        Ok(secret) => secret,
+        Err(error) => return internal_error(&error.to_string()),
+    };
+    match issue_session(console, &user.id, email, tenant_id, effective_role.as_str()) {
         Ok((access_token, refresh_token)) => HttpResponse::json(
             200,
             AdminSessionResponse {
@@ -773,7 +803,7 @@ fn complete_sso_login(
                 tenant: AdminTenantView {
                     id: tenant_account.id,
                     name: tenant_account.name,
-                    role: effective_role,
+                    role: effective_role.to_string(),
                 },
                 gateway_api_key,
             },

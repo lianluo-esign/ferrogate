@@ -17,6 +17,7 @@
 mod admin_console;
 mod api_key;
 mod http;
+mod membership_role;
 mod rbac;
 mod saml;
 mod scim;
@@ -35,6 +36,7 @@ pub use api_key::{
     ApiKeyAuthenticator, StorageApiKeyAuthenticator, VirtualApiKeyMaterial,
 };
 pub use http::{read_http_request_bounded, HttpRequest, HttpResponse, RequestLengthError};
+pub use membership_role::{InvalidMembershipRole, MembershipRole};
 pub use rbac::{
     AuthApiKey, AuthDecision, AuthServiceData, AuthorizationDecision, AuthorizeRequest, Permission,
     PolicyBinding, PolicySubject, RbacAuthService, Role, TenantRecord,
@@ -64,7 +66,8 @@ use blake2::{Blake2b512, Digest};
 use ferrogate_core::TenantContext;
 #[cfg(test)]
 use ferrogate_storage::{
-    RuntimeStorageRepositories, StoredAdminUserRefreshToken, StoredApiKey, StoredSsoPendingFlow,
+    RuntimeStorageRepositories, StoredAdminUser, StoredAdminUserMembership,
+    StoredAdminUserRefreshToken, StoredApiKey, StoredSsoPendingFlow,
 };
 #[cfg(test)]
 use jsonwebtoken::{encode, Header};
@@ -92,3 +95,7 @@ mod admin_console_test;
 #[cfg(test)]
 #[path = "credential_debug_test.rs"]
 mod credential_debug_test;
+
+#[cfg(test)]
+#[path = "membership_role_test.rs"]
+mod membership_role_test;

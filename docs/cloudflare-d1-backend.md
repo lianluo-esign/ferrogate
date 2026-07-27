@@ -112,9 +112,21 @@ Ported from the core tables of `sql/001_init_postgres.sql`
   64-bit), `BOOLEAN` → `INTEGER` 0/1, `EXTRACT(EPOCH FROM NOW())` →
   `unixepoch()`.
 
+- **Enumeration `CHECK`s dropped** — validated in Rust before the write.
+  **One exception (issue #517):**
+  `admin_user_tenant_memberships.role` keeps its
+  `CHECK (role IN ('owner','admin','member','viewer'))`, because that column
+  is a privilege tier (it selects the scopes a console session's gateway API
+  key is minted with), not a descriptive enum. `MembershipRole::parse`
+  (`crates/ferrogate-auth/src/membership_role.rs`) is the enforcement that
+  covers both backends and already-provisioned databases — SQLite cannot add
+  a `CHECK` to an existing table, so the constraint only binds newly
+  provisioned D1 databases and is a second layer, not the primary one.
+
 A portability test matrix
 (`control_plane_store_d1_test.rs::portability`) parses BOTH migration files
-and asserts the core tables expose identical column sets, that the D1
+and asserts the core tables expose identical column sets, that the membership
+`role` domain is identical in both dialects, that the D1
 dialect carries no RLS/`current_setting` scaffolding and no `REFERENCES`
 clauses, and (via mocked-transport round-trip tests) that the row shape a D1
 write produces decodes back into the same `Stored*` struct the Postgres row

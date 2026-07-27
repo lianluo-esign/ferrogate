@@ -577,6 +577,361 @@ fn revoke_removes_a_teammate_and_refuses_to_remove_the_last_owner() {
     assert_eq!(self_revoke.status, 409);
 }
 
+// -- issue #517: the four membership tiers are real, and the console
+// session's gateway key is scoped from the caller's tier ------------------
+
+/// Provisions a real, password-authenticating teammate whose ONLY membership
+/// is `role` in `tenant_id`, so `handle_admin_login` resolves that tier. This
+/// is the state an invited (non-self-registered) teammate is in.
+fn seed_teammate(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    email: &str,
+    password: &str,
+    role: &str,
+) -> String {
+    let now = now_unix_seconds() as i64;
+    let user_id = next_id("user");
+    block_on_sync_bridge(console.repositories.upsert_admin_user(StoredAdminUser {
+        id: user_id.clone(),
+        email: email.into(),
+        password_hash: hash_password(password).unwrap(),
+        display_name: "Teammate".into(),
+        superadmin: false,
+        created_at_unix: now,
+        updated_at_unix: now,
+        last_login_at_unix: None,
+        disabled_at_unix: None,
+    }))
+    .unwrap();
+    block_on_sync_bridge(console.repositories.upsert_admin_user_membership(
+        StoredAdminUserMembership {
+            id: next_id("membership"),
+            user_id: user_id.clone(),
+            tenant_id: tenant_id.into(),
+            role: role.into(),
+            created_at_unix: now,
+        },
+    ))
+    .unwrap();
+    user_id
+}
+
+fn login_gateway_key_scopes(
+    console: &AdminConsoleState,
+    email: &str,
+    password: &str,
+) -> Vec<String> {
+    let login = handle_admin_login(
+        console,
+        AdminLoginRequest {
+            email: email.into(),
+            password: password.into(),
+        },
+    );
+    assert_eq!(login.status, 200, "{:?}", body_json(&login));
+    let secret = body_json(&login)["gateway_api_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let material = virtual_api_key_material(&secret).unwrap();
+    let candidates = block_on_sync_bridge(
+        console
+            .repositories
+            .find_api_key_records_by_prefix(&material.key_prefix),
+    )
+    .unwrap();
+    assert_eq!(candidates.len(), 1);
+    candidates[0].scopes.clone()
+}
+
+/// The bug in issue #517, end to end through the real login route: a console
+/// session's gateway virtual key is minted with the scopes of the caller's
+/// TIER, not a fixed admin.read+admin.write+assets.* grant. Each tier is
+/// asserted separately, so flattening the ladder turns the non-owner cases
+/// red.
+#[test]
+fn login_mints_a_gateway_key_scoped_to_the_membership_tier() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "tiers-owner@acme.test",
+        "correct-horse-517",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    // owner: the registering user's own session key.
+    let owner_key_scopes = {
+        let material =
+            virtual_api_key_material(owner["gateway_api_key"].as_str().unwrap()).unwrap();
+        let candidates = block_on_sync_bridge(
+            console
+                .repositories
+                .find_api_key_records_by_prefix(&material.key_prefix),
+        )
+        .unwrap();
+        candidates[0].scopes.clone()
+    };
+    assert_eq!(
+        owner_key_scopes,
+        ["admin.read", "admin.write", "assets.read", "assets.write"],
+        "owner"
+    );
+
+    for (role, expected) in [
+        (
+            "admin",
+            vec!["admin.read", "admin.write", "assets.read", "assets.write"],
+        ),
+        ("member", vec!["admin.read", "assets.read", "assets.write"]),
+        ("viewer", vec!["admin.read", "assets.read"]),
+    ] {
+        let email = format!("tiers-{role}@acme.test");
+        seed_teammate(&console, &tenant_id, &email, "correct-horse-517", role);
+        let scopes = login_gateway_key_scopes(&console, &email, "correct-horse-517");
+        assert_eq!(scopes, expected, "tier {role}");
+    }
+}
+
+/// The headline consequence, isolated: a `viewer` never receives a key that
+/// can write anything.
+#[test]
+fn a_viewer_session_key_carries_no_write_scope() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "viewer-tenant-owner@acme.test",
+        "correct-horse-517b",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    seed_teammate(
+        &console,
+        &tenant_id,
+        "read-only@acme.test",
+        "correct-horse-517b",
+        "viewer",
+    );
+
+    let scopes = login_gateway_key_scopes(&console, "read-only@acme.test", "correct-horse-517b");
+    assert!(
+        !scopes.iter().any(|scope| scope.ends_with(".write")),
+        "a viewer's gateway key must hold no .write scope, got {scopes:?}"
+    );
+    assert!(
+        !scopes.iter().any(|scope| scope == "admin.write"),
+        "a viewer must never hold admin.write (it self-escalates via \
+         POST /admin/v1/virtual-keys), got {scopes:?}"
+    );
+}
+
+/// A role value that predates the validator (or was written straight into a
+/// D1 database, which carried no CHECK) must FAIL CLOSED: least privilege,
+/// never the most privileged tier.
+#[test]
+fn a_legacy_unparseable_role_resolves_to_the_least_privilege() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "legacy-owner@acme.test",
+        "correct-horse-517c",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    // Written directly to storage: no write path would accept this now.
+    seed_teammate(
+        &console,
+        &tenant_id,
+        "legacy@acme.test",
+        "correct-horse-517c",
+        "superuser",
+    );
+
+    let login = handle_admin_login(
+        &console,
+        AdminLoginRequest {
+            email: "legacy@acme.test".into(),
+            password: "correct-horse-517c".into(),
+        },
+    );
+    assert_eq!(login.status, 200);
+    let body = body_json(&login);
+    assert_eq!(
+        body["tenant"]["role"], "viewer",
+        "an unknown stored role must be reported as the tier it actually got"
+    );
+
+    let material = virtual_api_key_material(body["gateway_api_key"].as_str().unwrap()).unwrap();
+    let candidates = block_on_sync_bridge(
+        console
+            .repositories
+            .find_api_key_records_by_prefix(&material.key_prefix),
+    )
+    .unwrap();
+    assert_eq!(
+        candidates[0].scopes,
+        ["admin.read", "assets.read"],
+        "an unknown stored role must not mint a write-capable key"
+    );
+
+    // ... and it must not pass the owner-only gate either.
+    let token = body["access_token"].as_str().unwrap();
+    let invite = handle_admin_team_invite(
+        &console,
+        token,
+        AdminInviteRequest {
+            email: "legacy-owner@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    assert_eq!(invite.status, 403);
+}
+
+/// Every path that WRITES a role validates it against the accepted set in
+/// code -- not only in the Postgres CHECK the D1 twin lacks.
+#[test]
+fn invite_rejects_a_role_outside_the_accepted_set() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "role-validation-owner@acme.test",
+        "correct-horse-517d",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap().to_string();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    register(&console, "invitee@acme.test", "correct-horse-517e");
+
+    for role in ["superuser", "Owner", "", "   ", "owner,admin"] {
+        let invite = handle_admin_team_invite(
+            &console,
+            &owner_token,
+            AdminInviteRequest {
+                email: "invitee@acme.test".into(),
+                role: role.into(),
+            },
+        );
+        assert_eq!(invite.status, 422, "role {role:?} must be rejected");
+    }
+
+    // Nothing was written: the tenant still has exactly its one owner.
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&tenant_id),
+    )
+    .unwrap();
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0].role, "owner");
+
+    // The accepted set still works.
+    let ok = handle_admin_team_invite(
+        &console,
+        &owner_token,
+        AdminInviteRequest {
+            email: "invitee@acme.test".into(),
+            role: "viewer".into(),
+        },
+    );
+    assert_eq!(ok.status, 201);
+    assert_eq!(body_json(&ok)["role"], "viewer");
+}
+
+#[test]
+fn change_role_rejects_a_role_outside_the_accepted_set() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "change-validation-owner@acme.test",
+        "correct-horse-517f",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap().to_string();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let target_id = seed_teammate(
+        &console,
+        &tenant_id,
+        "change-target@acme.test",
+        "correct-horse-517f",
+        "member",
+    );
+
+    for role in ["superuser", "ADMIN", "", "admin.write"] {
+        let changed = handle_admin_team_change_role(
+            &console,
+            &owner_token,
+            &target_id,
+            AdminChangeRoleRequest { role: role.into() },
+        );
+        assert_eq!(changed.status, 422, "role {role:?} must be rejected");
+    }
+
+    // The stored role is untouched by every rejected attempt.
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&tenant_id),
+    )
+    .unwrap();
+    let stored = memberships
+        .iter()
+        .find(|membership| membership.user_id == target_id)
+        .unwrap();
+    assert_eq!(stored.role, "member");
+
+    let ok = handle_admin_team_change_role(
+        &console,
+        &owner_token,
+        &target_id,
+        AdminChangeRoleRequest {
+            role: "viewer".into(),
+        },
+    );
+    assert_eq!(ok.status, 200);
+    assert_eq!(body_json(&ok)["role"], "viewer");
+}
+
+/// SCIM is an IdP-driven write path into the same column, and the D1 backend
+/// has no CHECK to catch it.
+#[test]
+fn scim_user_create_rejects_a_role_outside_the_accepted_set() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-role-owner@acme.test",
+        "correct-horse-517g",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-bad-role@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("superuser".into()),
+        },
+    );
+    assert_eq!(create.status, 422);
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&tenant_id),
+    )
+    .unwrap();
+    assert_eq!(memberships.len(), 1, "no membership may have been written");
+
+    let ok = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-viewer@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("viewer".into()),
+        },
+    );
+    assert_eq!(ok.status, 201);
+    assert_eq!(body_json(&ok)["ferrogateRole"], "viewer");
+}
+
 #[test]
 fn team_list_is_unauthorized_without_a_bearer_token() {
     let console = console();
@@ -1518,6 +1873,58 @@ fn sso_config_request(issuer: &str) -> SsoConfigRequest {
         name_attribute: None,
         groups_attribute: None,
     }
+}
+
+/// Issue #517: an SSO config is a deferred role WRITE -- `default_role` and
+/// every `group_role_mapping` value lands verbatim in
+/// `admin_user_tenant_memberships.role` on a first SSO login. Validate the
+/// tiers at config time, and persist nothing when one is unknown.
+#[test]
+fn sso_config_set_rejects_role_values_outside_the_accepted_set() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "sso-role-validation@acme.test",
+        "correct-horse-517h",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap().to_string();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let mut bad_default = sso_config_request("https://idp.example.test");
+    bad_default.default_role = "superuser".into();
+    let response = handle_admin_sso_config_set(&console, &owner_token, bad_default);
+    assert_eq!(response.status, 422);
+    assert!(body_json(&response)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("default_role"));
+
+    let mut bad_mapping = sso_config_request("https://idp.example.test");
+    bad_mapping.group_role_mapping = [("Engineering".to_string(), "root".to_string())]
+        .into_iter()
+        .collect();
+    let response = handle_admin_sso_config_set(&console, &owner_token, bad_mapping);
+    assert_eq!(response.status, 422);
+    assert!(body_json(&response)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("group_role_mapping"));
+
+    // Nothing was persisted by either rejected attempt.
+    assert!(
+        block_on_sync_bridge(console.repositories.get_sso_provider_config(&tenant_id))
+            .unwrap()
+            .is_none(),
+        "a rejected SSO config must not be stored"
+    );
+
+    // The accepted set still configures.
+    let ok = handle_admin_sso_config_set(
+        &console,
+        &owner_token,
+        sso_config_request("https://idp.example.test"),
+    );
+    assert_eq!(ok.status, 200);
 }
 
 #[test]

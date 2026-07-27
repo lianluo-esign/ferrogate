@@ -25,6 +25,7 @@ use crate::http::{
     conflict, forbidden, internal_error, not_found, storage_error, unauthorized, unprocessable,
     HttpResponse,
 };
+use crate::membership_role::MembershipRole;
 use crate::rbac::{Permission, PolicyBinding, PolicySubject, Role};
 use crate::server::AuthService;
 use crate::util::{
@@ -165,9 +166,11 @@ pub struct AdminSessionResponse {
     pub expires_in: u64,
     pub user: AdminUserView,
     pub tenant: AdminTenantView,
-    /// A freshly-minted, admin.read+admin.write-scoped virtual API key for
-    /// the gateway's own Admin API, shown once (never recoverable after this
-    /// response, matching the existing virtual-key create/rotate contract).
+    /// A freshly-minted virtual API key for the gateway's own Admin API,
+    /// scoped to the session's membership tier
+    /// ([`MembershipRole::gateway_api_key_scopes`], issue #517) and shown
+    /// once (never recoverable after this response, matching the existing
+    /// virtual-key create/rotate contract).
     pub gateway_api_key: String,
 }
 
@@ -323,11 +326,12 @@ pub(crate) fn handle_admin_register(
     if let Err(error) = block_on_sync_bridge(console.repositories.upsert_admin_user(user)) {
         return storage_error(&error);
     }
+    // Registration always creates the tenant's first owner.
     let membership = StoredAdminUserMembership {
         id: next_id("membership"),
         user_id: user_id.clone(),
         tenant_id: tenant_id.clone(),
-        role: "owner".into(),
+        role: MembershipRole::Owner.to_string(),
         created_at_unix: now,
     };
     if let Err(error) = block_on_sync_bridge(
@@ -338,13 +342,24 @@ pub(crate) fn handle_admin_register(
         return storage_error(&error);
     }
 
-    let gateway_api_key =
-        match provision_gateway_api_key(console, &workspace_id, &project_id, &tenant_id) {
-            Ok(secret) => secret,
-            Err(error) => return internal_error(&error.to_string()),
-        };
+    let gateway_api_key = match provision_gateway_api_key(
+        console,
+        &workspace_id,
+        &project_id,
+        &tenant_id,
+        MembershipRole::Owner,
+    ) {
+        Ok(secret) => secret,
+        Err(error) => return internal_error(&error.to_string()),
+    };
 
-    match issue_session(console, &user_id, &email, &tenant_id, "owner") {
+    match issue_session(
+        console,
+        &user_id,
+        &email,
+        &tenant_id,
+        MembershipRole::Owner.as_str(),
+    ) {
         Ok((access_token, refresh_token)) => HttpResponse::json(
             201,
             AdminSessionResponse {
@@ -359,7 +374,7 @@ pub(crate) fn handle_admin_register(
                 tenant: AdminTenantView {
                     id: tenant_id,
                     name: organization_name,
-                    role: "owner".into(),
+                    role: MembershipRole::Owner.to_string(),
                 },
                 gateway_api_key,
             },
@@ -417,11 +432,17 @@ pub(crate) fn handle_admin_login(
     // so multiple concurrent browser sessions each keep their own working
     // key; an operator can still revoke any of them via the existing
     // /admin/v1/virtual-keys API.
+    // Derive the key's authority from the caller's tier in THIS tenant
+    // (issue #517). `from_stored` resolves an unrecognised legacy value to
+    // `viewer`, the least privilege, so a role string that predates the
+    // validator can never mint `admin.write`.
+    let session_role = MembershipRole::from_stored(&membership.role);
     let gateway_api_key = match provision_gateway_api_key(
         console,
         &workspace.id,
         &workspace.project_id,
         &workspace.tenant_id,
+        session_role,
     ) {
         Ok(secret) => secret,
         Err(error) => return internal_error(&error.to_string()),
@@ -433,12 +454,15 @@ pub(crate) fn handle_admin_login(
         return storage_error(&error);
     }
 
+    // Report the tier the session ACTUALLY got, i.e. the same resolved value
+    // the gateway key above was scoped from -- never the raw stored string,
+    // which would advertise an authority the key does not carry.
     match issue_session(
         console,
         &user.id,
         &email,
         &membership.tenant_id,
-        &membership.role,
+        session_role.as_str(),
     ) {
         Ok((access_token, refresh_token)) => HttpResponse::json(
             200,
@@ -454,7 +478,7 @@ pub(crate) fn handle_admin_login(
                 tenant: AdminTenantView {
                     id: tenant_account.id,
                     name: tenant_account.name,
-                    role: membership.role.clone(),
+                    role: session_role.to_string(),
                 },
                 gateway_api_key,
             },
@@ -533,7 +557,7 @@ pub(crate) fn handle_admin_refresh(
         &user.id,
         &user.email,
         &membership.tenant_id,
-        &membership.role,
+        MembershipRole::from_stored(&membership.role).as_str(),
     ) {
         Ok((access_token, refresh_token)) => HttpResponse::json(
             200,
@@ -695,17 +719,21 @@ pub(crate) fn handle_admin_team_invite(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can invite teammates");
     }
     let email = payload.email.trim().to_ascii_lowercase();
-    let role = payload.role.trim().to_string();
     if !is_valid_email(&email) {
         return unprocessable("email must be a valid address");
     }
-    if role.is_empty() {
-        return unprocessable("role must not be empty");
-    }
+    // Validate the tier IN CODE (issue #517), not only in the Postgres CHECK
+    // the D1 twin does not carry: an unknown string must never be stored as a
+    // role, because everything downstream (the owner gate, the minted gateway
+    // scopes) then has to guess what it meant.
+    let role = match MembershipRole::parse(payload.role.trim()) {
+        Ok(role) => role,
+        Err(error) => return unprocessable(&error.to_string()),
+    };
     let invited_user = match block_on_sync_bridge(
         console.repositories.get_admin_user_by_email(&email),
     ) {
@@ -728,7 +756,7 @@ pub(crate) fn handle_admin_team_invite(
         id: next_id("membership"),
         user_id: invited_user.id.clone(),
         tenant_id: membership.tenant_id,
-        role: role.clone(),
+        role: role.to_string(),
         created_at_unix: now_unix_seconds() as i64,
     };
     if let Err(error) = block_on_sync_bridge(
@@ -744,7 +772,7 @@ pub(crate) fn handle_admin_team_invite(
             user_id: invited_user.id,
             email: invited_user.email,
             display_name: invited_user.display_name,
-            role,
+            role: role.to_string(),
         },
     )
 }
@@ -761,13 +789,15 @@ pub(crate) fn handle_admin_team_change_role(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can change teammate roles");
     }
-    let role = payload.role.trim().to_string();
-    if role.is_empty() {
-        return unprocessable("role must not be empty");
-    }
+    // Pre-#517 this checked non-emptiness only, so ANY string was an
+    // acceptable role. Validate against the accepted set in code.
+    let role = match MembershipRole::parse(payload.role.trim()) {
+        Ok(role) => role,
+        Err(error) => return unprocessable(&error.to_string()),
+    };
     let existing = match block_on_sync_bridge(
         console
             .repositories
@@ -782,7 +812,7 @@ pub(crate) fn handle_admin_team_change_role(
     else {
         return not_found("no such teammate in this tenant");
     };
-    if target.role == "owner" && role != "owner" {
+    if MembershipRole::from_stored(&target.role).is_owner() && !role.is_owner() {
         let owners = block_on_sync_bridge(
             console
                 .repositories
@@ -791,7 +821,7 @@ pub(crate) fn handle_admin_team_change_role(
         .map(|memberships| {
             memberships
                 .iter()
-                .filter(|candidate| candidate.role == "owner")
+                .filter(|candidate| MembershipRole::from_stored(&candidate.role).is_owner())
                 .count()
         })
         .unwrap_or(0);
@@ -799,7 +829,9 @@ pub(crate) fn handle_admin_team_change_role(
             return conflict("cannot demote the last owner of a tenant");
         }
     }
-    target.role = role.clone();
+    // Store the CANONICAL string, so a padded/aliased input can never reach
+    // storage as a role no reader recognises.
+    target.role = role.to_string();
     if let Err(error) =
         block_on_sync_bridge(console.repositories.upsert_admin_user_membership(target))
     {
@@ -807,7 +839,11 @@ pub(crate) fn handle_admin_team_change_role(
     }
     HttpResponse::json(
         200,
-        json!({ "object": "membership", "user_id": target_user_id, "role": role }),
+        json!({
+            "object": "membership",
+            "user_id": target_user_id,
+            "role": role.as_str(),
+        }),
     )
 }
 
@@ -824,7 +860,7 @@ pub(crate) fn handle_admin_team_revoke(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can remove teammates");
     }
     if caller.id == target_user_id {
@@ -835,7 +871,7 @@ pub(crate) fn handle_admin_team_revoke(
         ) {
             Ok(memberships) => memberships
                 .iter()
-                .filter(|candidate| candidate.role == "owner")
+                .filter(|candidate| MembershipRole::from_stored(&candidate.role).is_owner())
                 .count(),
             Err(error) => return storage_error(&error),
         };
@@ -895,7 +931,7 @@ pub(crate) fn handle_rbac_role_upsert(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can manage roles");
     }
     let id = payload.id.trim().to_string();
@@ -930,7 +966,7 @@ pub(crate) fn handle_rbac_role_delete(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can manage roles");
     }
     match service
@@ -973,7 +1009,7 @@ pub(crate) fn handle_rbac_binding_upsert(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can manage policy bindings");
     }
     let id = payload.id.trim().to_string();
@@ -1005,7 +1041,7 @@ pub(crate) fn handle_rbac_binding_delete(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    if membership.role != "owner" {
+    if !MembershipRole::from_stored(&membership.role).is_owner() {
         return forbidden("only a tenant owner can manage policy bindings");
     }
     let tenant = tenant_context_for(&membership.tenant_id);
@@ -1034,26 +1070,32 @@ pub(crate) fn resolve_default_workspace(
         .find(|workspace| workspace.tenant_id == tenant_id))
 }
 
-/// Create a durable, admin.read+admin.write+assets.read+assets.write
-/// -scoped virtual API key for the gateway's own Admin API, reusing the
-/// exact secret format/hashing the gateway's existing
+/// Create a durable virtual API key for the gateway's own Admin API,
+/// reusing the exact secret format/hashing the gateway's existing
 /// `/admin/v1/virtual-keys` endpoint already produces and verifies
 /// (issue #157) -- the console is just another virtual-key holder, not a
 /// special case in the gateway's auth path.
 ///
-/// The assets.* scopes (added for #178's admin-console asset management
-/// UI) don't cross a real privilege boundary beyond what admin.write
-/// already grants: any admin.write holder can already self-escalate to
+/// **The scopes are derived from the caller's membership tier**
+/// ([`MembershipRole::gateway_api_key_scopes`], issue #517). Before that,
+/// every console session -- including one belonging to a user invited as
+/// `viewer` -- was minted a fixed
+/// `admin.read + admin.write + assets.read + assets.write` key, i.e. the
+/// role column advertised four tiers while the key handed out one.
+///
+/// The `assets.*` scopes (added for #178's admin-console asset management
+/// UI) don't cross a real privilege boundary *beyond what `admin.write`
+/// already grants*: any `admin.write` holder can already self-escalate to
 /// any scope by calling `POST /admin/v1/virtual-keys` to mint a new,
-/// arbitrarily-scoped key. Including them directly on the session key
-/// just removes that indirection for the one console-native feature that
-/// needs it, rather than expanding what a compromised session can
-/// ultimately reach.
+/// arbitrarily-scoped key. That is exactly why `admin.write` itself is now
+/// restricted to `owner`/`admin`: on a tier that lacks it, the assets
+/// scopes are the whole grant rather than a shortcut through one.
 pub(crate) fn provision_gateway_api_key(
     console: &AdminConsoleState,
     workspace_id: &str,
     project_id: &str,
     tenant_id: &str,
+    role: MembershipRole,
 ) -> anyhow::Result<String> {
     let secret = generate_virtual_api_key_secret()?;
     let material = virtual_api_key_material(&secret)
@@ -1074,12 +1116,7 @@ pub(crate) fn provision_gateway_api_key(
         key_hash: material.key_hash,
         last4: material.last4,
         enabled: true,
-        scopes: vec![
-            "admin.read".into(),
-            "admin.write".into(),
-            "assets.read".into(),
-            "assets.write".into(),
-        ],
+        scopes: role.gateway_api_key_scopes(),
         allowed_models: Vec::new(),
         allowed_providers: Vec::new(),
         tenant,

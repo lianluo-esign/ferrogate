@@ -6091,6 +6091,33 @@ mod portability {
         }
     }
 
+    /// Issue #517: the membership `role` column is a PRIVILEGE TIER (it picks
+    /// the scopes a console session's gateway key is minted with), so both
+    /// dialects must constrain it to the same four values. The D1 twin shipped
+    /// with no CHECK at all, which meant the column accepted anything on that
+    /// backend.
+    #[test]
+    fn membership_role_domain_matches_between_postgres_and_d1() {
+        const DOMAIN: &str =
+            "role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer'))";
+        for (dialect, sql) in [("postgres", POSTGRES_SQL), ("d1", D1_SQL)] {
+            let table = sql
+                .split("CREATE TABLE IF NOT EXISTS admin_user_tenant_memberships")
+                .nth(1)
+                .unwrap_or_else(|| {
+                    panic!("{dialect} migration should define admin_user_tenant_memberships")
+                })
+                .split(");")
+                .next()
+                .unwrap();
+            assert!(
+                table.contains(DOMAIN),
+                "{dialect} admin_user_tenant_memberships.role must be constrained to the four \
+                 membership tiers; got:{table}"
+            );
+        }
+    }
+
     /// The D1 dialect must carry NO RLS/GUC scaffolding (isolation is
     /// database-per-tenant) and no cross-table FKs (documented divergence).
     #[test]
