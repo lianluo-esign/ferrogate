@@ -280,6 +280,13 @@ fn iam_virtual_keys_create_surfaces_one_time_secret() {
         !out.contains("<redacted>"),
         "the mutation response is not redacted: {out}"
     );
+    // Since #505 a mutating verb's stdout is a decision receipt, and the
+    // server's document — including the one-time secret — is nested under
+    // `response`. Pinned here so the secret cannot quietly move (or vanish)
+    // behind the envelope.
+    let receipt: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(receipt["object"], "mutation_receipt", "{out}");
+    assert_eq!(receipt["response"]["key"], "sk-ONE-TIME-abc", "{out}");
 }
 
 // ----- #362 agent/mcp: create round trip + table list ------------------------
@@ -311,9 +318,15 @@ fn agent_mcp_servers_create_round_trip() {
 
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert_eq!(mock.last_request(), "POST /admin/v1/mcp-servers");
-    let body: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
-    assert_eq!(body["id"], "mcp-1");
-    assert_eq!(body["status"], "active");
+    // `create` is a mutating verb, so since #505 stdout is the decision receipt
+    // and the created object lives under `response` — asserting `body["id"]`
+    // directly (as this test did before the refactor) reads a null.
+    let receipt: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(receipt["object"], "mutation_receipt", "{receipt}");
+    assert_eq!(receipt["verb"], "create", "{receipt}");
+    assert_eq!(receipt["target"]["method"], "POST", "{receipt}");
+    assert_eq!(receipt["response"]["id"], "mcp-1", "{receipt}");
+    assert_eq!(receipt["response"]["status"], "active", "{receipt}");
 }
 
 #[test]
