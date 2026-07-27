@@ -25,6 +25,39 @@ The project is developed as the open-source gateway foundation behind
 For the longer capability inventory and current implementation status, read the
 [Product Overview](docs/product-overview.md).
 
+## Where the project is going
+
+Three directions are actively shaping the codebase. They are stated here
+because they change what a contributor should build *toward*, not just what
+exists today.
+
+**1. Cloudflare-native as a first-class deployment target.** Beyond using
+Pingora as the proxy core, FerroGate is growing a real Cloudflare runtime: a
+shared [`ferrogate-cloudflare`](crates/ferrogate-cloudflare) client, D1 as a
+control-plane backend, R2 for asset storage, Secrets Store (`cf://`) for
+credential resolution, and Workers under [`workers/`](workers) — including an
+agent-gateway that runs agent workloads in Containers. Self-hosting on your own
+infrastructure remains fully supported; Cloudflare becomes an alternative
+substrate rather than a replacement. See
+[`docs/cloudflare-integration.md`](docs/cloudflare-integration.md) and
+[`docs/cloudflare-deploy-topology.md`](docs/cloudflare-deploy-topology.md).
+
+**2. Every privileged action is attributable.** The gateway is meant to be
+auditable end to end, not only authenticated. That means a canonical action
+identity and fingerprint shared between the runtime and the CLI, a decision
+receipt on every mutating CLI verb (actor, target fingerprint, policy decision,
+dry-run flag, rollback pointer, audit id — and an explicit `null` with a stated
+reason where the control plane does not yet return one), and client-side
+attribution on every API call. Fields that cannot be determined are rendered
+absent with a reason rather than guessed: **a wrong value in an audit trail is
+worse than a missing one.**
+
+**3. Explicit tenancy over implicit defaults.** Platform-root authority is
+becoming something an operator writes down rather than something an omitted
+field grants, and tenant scoping is enforced at one chokepoint per seam rather
+than per handler. Work in this direction treats a silently-permissive default
+as a defect in its own right.
+
 ## Highlights
 
 - **Multi-protocol inference gateway:** `GET /v1/models`,
@@ -62,9 +95,18 @@ For the longer capability inventory and current implementation status, read the
   Firecracker-backed execution — self-hosted workers connect over verified
   mTLS with control-plane cert issuance and CRL revocation — and audit
   events.
+- **Governed CLI:** `ferrogate ctl` covers the Admin API resource families
+  under an OpenAPI-to-CLI parity gate, and every *mutating* verb returns a
+  decision receipt rather than a bare response body — actor, target
+  fingerprint (byte-identical to the runtime's `CanonicalCapabilityTarget`
+  contract), policy decision, `--dry-run` state, rollback pointer and audit id.
+  The receipt shape is enforced by the command registry at compile time, and a
+  dry run provably issues no state-changing request.
 - **Operator visibility:** request logs, usage and metering events, provider
   health, cache/tool metrics, agent run timelines, structured agent-run OTLP
-  spans, Prometheus, OTLP export, Admin API, and dashboard.
+  spans, Prometheus, OTLP export, Admin API, and dashboard. Where a signal
+  cannot be read, the surface reports *unknown* rather than a confident
+  negative — a presence-store outage does not render as "not running".
 - **Production operations:** durable control-plane storage options, a
   retention engine with per-tenant TTL/purge for request logs and audit
   events, analytics warehouse delivery, reload/drain readiness, cluster
@@ -208,8 +250,18 @@ Implemented agentic gateway surfaces include:
 
 ## Configuration
 
-FerroGate loads `Ferrogate/Caddyfile` by default. Structured TOML and YAML
-configuration are also supported.
+FerroGate loads `Ferrogate/Caddyfile` by default today. Structured TOML and
+YAML configuration are also supported — the loader dispatches on the file
+extension.
+
+> **Direction:** a purpose-built **YAML** schema is becoming the primary
+> configuration format, and the Caddyfile dialect is being retired. The system
+> has outgrown what that dialect expresses well — optional nested records,
+> tri-state flags where `null` is meaningful, and unset-versus-explicit-zero
+> distinctions all need a bespoke line in the Caddyfile mapping layer. New
+> configuration surfaces should be designed against the YAML schema. The
+> Caddyfile examples below still work and will keep working through a stated
+> deprecation window.
 
 ```bash
 ferrogate run --config Ferrogate/Caddyfile
@@ -527,6 +579,9 @@ git diff --check
 ## Documentation
 
 - Product overview and status: [`docs/product-overview.md`](docs/product-overview.md)
+- Cloudflare integration: [`docs/cloudflare-integration.md`](docs/cloudflare-integration.md)
+- Cloudflare deploy topology: [`docs/cloudflare-deploy-topology.md`](docs/cloudflare-deploy-topology.md)
+- Autonomous development loop: [`docs/autonomous-dev-loop.md`](docs/autonomous-dev-loop.md)
 - Agentic gateway architecture: [`docs/agentic-gateway-architecture.md`](docs/agentic-gateway-architecture.md)
 - Agent framework compatibility: [`docs/agent-framework-compatibility.md`](docs/agent-framework-compatibility.md)
 - Agent worker protocol: [`docs/agent-worker-protocol.md`](docs/agent-worker-protocol.md)
@@ -551,6 +606,21 @@ git diff --check
 FerroGate is built for human maintainers and AI coding agents working together.
 The best contributions are small, issue-linked slices that can be reviewed,
 tested, and explained from the operator's point of view.
+
+Day-to-day development runs as **three cooperating agent roles** — one that
+generates code, one that reviews it, and one that tests it end to end — moving
+issues across a GitHub Project board and bouncing anything that fails back with
+findings. The contract is in
+[`docs/autonomous-dev-loop.md`](docs/autonomous-dev-loop.md). Two conventions
+from it are worth knowing even for a one-off human patch:
+
+- **Say what you did not verify.** Commits carry `Tested:` and `Not-tested:`
+  trailers, and a handoff that reads as verified when it is not costs a whole
+  review round.
+- **Assert the behaviour, not the call.** A test that proves a guard was
+  *invoked* while the guard itself could be inverted with the suite still green
+  is the single most common defect this project has had to reject. If you add a
+  guard, name the mutation that would break it.
 
 Good contribution areas:
 
