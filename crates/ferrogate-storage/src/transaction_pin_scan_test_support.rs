@@ -108,6 +108,12 @@ fn transaction_opener(line: &str) -> Option<TransactionOpener> {
 /// legitimately come several statements in -- `initialize_schema` first takes an
 /// advisory lock and creates the schema -- so the window is the whole method
 /// rather than a fixed number of lines.
+///
+/// Both edges of this rule are held by fixtures, because neither is visible
+/// from the real tree: widening the window to the whole file leaves the tree
+/// audit green (every file that opens a transaction also pins in it), and only
+/// `a_pin_in_a_later_method_does_not_vouch_for_an_earlier_transaction` in
+/// `transaction_pin_scan_test.rs` can tell one method's window from the file's.
 fn method_end(lines: &[&str], start: usize) -> usize {
     lines
         .iter()

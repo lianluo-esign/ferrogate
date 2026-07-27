@@ -63,11 +63,17 @@ fn async_pool_retains_typed_timeout_and_transaction_search_path() {
 /// only code, never comments or string literals.
 #[test]
 fn every_postgres_control_plane_transaction_pins_the_configured_search_path() {
-    /// Today's tree opens 236 transactions across 41 files. A scan that finds a
-    /// small fraction of that has broken, not shrunk: this crate does not lose
-    /// a third of its control-plane statements in one change. Failing on the
-    /// count is what stops a future refactor from turning the audit into a
-    /// no-op that still reports success.
+    /// Today's tree opens 236 transactions -- 235 `client.transaction()` plus
+    /// one `build_transaction()` -- spread over 15 of the 42 control-plane
+    /// files this walk reads. Those figures are a `grep` measurement of the
+    /// tree at `9ae94d9`, not an output of this test; they are here to size the
+    /// floors below, and nothing asserts them exactly, because a count that had
+    /// to be edited on every new query would be edited without thought.
+    ///
+    /// A scan that finds a small fraction of that has broken, not shrunk: this
+    /// crate does not lose a third of its control-plane statements in one
+    /// change. Failing on the count is what stops a future refactor from
+    /// turning the audit into a no-op that still reports success.
     const MINIMUM_PLAUSIBLE_SITES: usize = 150;
     const MINIMUM_PLAUSIBLE_FILES: usize = 20;
 

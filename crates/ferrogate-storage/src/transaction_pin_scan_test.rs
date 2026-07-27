@@ -221,6 +221,99 @@ impl Store {
     assert!(sites[0].pinned);
 }
 
+/// Two methods in one source: the first opens a transaction and never pins, the
+/// second pins for real. Nothing else in the suite can tell one method's window
+/// from the whole file -- every other fixture is a single method in a short
+/// source, where end-of-method and end-of-file are the same line.
+///
+/// That gap matters because widening `method_end` to `lines.len()` leaves the
+/// real-tree audit GREEN: in all 15 files that open a transaction, the last
+/// opener is followed within a line or two by a pin, so a file-wide window
+/// marks every site in them pinned. With the rule silently broken, a NEW
+/// unpinned transaction could ship in any of those files -- the same regression
+/// shape as the `build_transaction` hole #480 was filed for, one level down.
+const PIN_IN_A_LATER_METHOD: &str = r#"
+impl Store {
+    async fn record_evidence(&self) -> Result<()> {
+        let transaction = client.transaction().await?;
+        transaction.execute(INSERT_EVIDENCE, &[]).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn record_usage(&self) -> Result<()> {
+        let transaction = client.transaction().await?;
+        if let Some(sql) = self.async_pool.transaction_search_path_sql() {
+            transaction.batch_execute(sql).await?;
+        }
+        transaction.execute(INSERT_USAGE, &[]).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+"#;
+
+/// The same two methods, differing ONLY in that the first one pins as well.
+/// Without it, the rejection above could be a window that had collapsed to
+/// nothing rather than a window that ends at the method.
+const BOTH_METHODS_PIN: &str = r#"
+impl Store {
+    async fn record_evidence(&self) -> Result<()> {
+        let transaction = client.transaction().await?;
+        if let Some(sql) = self.async_pool.transaction_search_path_sql() {
+            transaction.batch_execute(sql).await?;
+        }
+        transaction.execute(INSERT_EVIDENCE, &[]).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn record_usage(&self) -> Result<()> {
+        let transaction = client.transaction().await?;
+        if let Some(sql) = self.async_pool.transaction_search_path_sql() {
+            transaction.batch_execute(sql).await?;
+        }
+        transaction.execute(INSERT_USAGE, &[]).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+"#;
+
+#[test]
+fn a_pin_in_a_later_method_does_not_vouch_for_an_earlier_transaction() {
+    let sites = scan_source("fixture.rs", PIN_IN_A_LATER_METHOD);
+
+    assert_eq!(sites.len(), 2, "{sites:?}");
+    assert_eq!(
+        sites[0].line, 4,
+        "the unpinned site is in `record_evidence`"
+    );
+    assert_eq!(sites[1].line, 11, "the pinned site is in `record_usage`");
+    assert!(
+        !sites[0].pinned,
+        "a pin in the NEXT method vouched for this transaction: the window has stopped ending at \
+         the method, so the audit now accepts any unpinned transaction in a file that pins \
+         somewhere else (#480)",
+    );
+    assert!(
+        sites[1].pinned,
+        "the method that does pin was reported unpinned: the window has collapsed below the \
+         method, which reds correct code",
+    );
+}
+
+#[test]
+fn both_methods_pinning_is_accepted() {
+    let sites = scan_source("fixture.rs", BOTH_METHODS_PIN);
+
+    assert_eq!(sites.len(), 2, "{sites:?}");
+    assert!(
+        sites.iter().all(|site| site.pinned),
+        "two correctly pinned methods in one source were not both accepted: {sites:?}",
+    );
+}
+
 /// Blanking comments is only safe if it knows what a comment IS. `//` inside a
 /// URL and `/*` inside a SQL tag are ordinary string content; a scanner that
 /// blanked from them would erase real pin statements and report false unpinned
