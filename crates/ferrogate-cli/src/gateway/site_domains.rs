@@ -824,39 +824,44 @@ impl FerroGateway {
         if authorize_tenant_scope(&auth, &binding.tenant_id).is_err() {
             return domain_not_found(session, ctx, &hostname).await;
         }
+        // The ownership proof goes with the binding: a later re-bind must
+        // re-prove control rather than inherit a stale proof.
+        //
+        // #488 review item 6, SECOND attempt. The first one returned 503 from
+        // INSIDE the `Ok(true)` arm below -- i.e. after `delete_site_domain`
+        // had already succeeded. So the 503 changed the status code and not
+        // the state: the binding was gone, the `verified` record survived, and
+        // the audit line saying "refusing to unbind" was false. Worse, the
+        // caller could not retry -- the next DELETE finds no binding and 404s,
+        // so the orphaned proof became unreachable through the API entirely.
+        //
+        // Dropping the proof FIRST is what makes the refusal true. If this
+        // fails, nothing has been deleted: the binding still exists, the
+        // caller's retry reaches the same code path, and no state has diverged
+        // from the audit record. The reverse order can only ever produce the
+        // exact inconsistency this item is about.
+        if let Err(error) = state
+            .delete_site_domain_verification(&binding.tenant_id, &hostname)
+            .await
+        {
+            let message = error.to_string();
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "site_domain.unbind",
+                &hostname,
+                "rejected",
+                format!(
+                    "refusing to unbind {hostname}: the ownership proof could not be dropped \
+                     first, and unbinding without dropping it would let a later re-bind \
+                     inherit it without re-proving control. The binding is untouched and the \
+                     request can be retried ({message})"
+                ),
+            ));
+            return storage_error(session, ctx, message).await;
+        }
         match state.delete_site_domain(&hostname).await {
             Ok(true) => {
-                // The ownership proof goes with the binding: a later re-bind
-                // must re-prove control rather than inherit a stale proof.
-                //
-                // #488 review item 6: this used to be warn-only, so the
-                // sentence above was a statement of intent that nothing
-                // enforced. If the delete failed, the binding was gone and a
-                // `verified` record survived, so the NEXT bind hit
-                // `reusable_on_rebind` and the hostname was servable again
-                // immediately with no re-proof -- evidence diverging from
-                // intent, silently and unaudited, in the entity this issue
-                // exists to make authoritative. It is now a 503: the unbind
-                // has not happened, and the caller can retry.
-                if let Err(error) = state
-                    .delete_site_domain_verification(&binding.tenant_id, &hostname)
-                    .await
-                {
-                    let message = error.to_string();
-                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                        ctx,
-                        &auth,
-                        "site_domain.unbind",
-                        &hostname,
-                        "rejected",
-                        format!(
-                            "refusing to unbind {hostname}: the ownership proof could not be \
-                             dropped, and leaving it behind would let a later re-bind inherit \
-                             it without re-proving control ({message})"
-                        ),
-                    ));
-                    return storage_error(session, ctx, message).await;
-                }
                 let acme = self.refresh_acme_after_domain_change(&state, &hostname, false);
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -1044,11 +1049,31 @@ fn site_domain_bind_status(proven: bool, existing: bool) -> BindTerminal {
 /// `StatusCode::NO_CONTENT` left the test green while the gateway answered an
 /// undeclared 204 -- the sending-side/applying-side shape.
 ///
-/// A newtype whose field cannot be reached from here makes that mutation a
-/// COMPILE error instead of a silent pass: the bind response writer takes a
-/// `BindTerminal`, and the only way to obtain one is to run the selector. A
-/// test cannot substitute for this, because the property is "no other value
-/// can reach the writer", which is a statement about every possible caller.
+/// A newtype whose field cannot be reached from here makes THAT mutation a
+/// COMPILE error instead of a silent pass: `BindTerminal(StatusCode::NO_CONTENT)`
+/// in the handler is E0423, because the field is private to the submodule
+/// below and the handler is in the parent.
+///
+/// BE PRECISE ABOUT WHAT THIS DOES AND DOES NOT BUY (#530 review round 4).
+/// An earlier version of this comment claimed "the bind response writer takes
+/// a `BindTerminal`, and the only way to obtain one is to run the selector".
+/// That was false, and it survived two rounds because nobody re-read it
+/// against the writer's signature: the writer is the shared
+/// [`write_json_response`], which takes a `StatusCode` like every other
+/// handler's does. `terminal.status()` is what crosses that boundary.
+///
+/// So what is sealed is the VALUE: a `BindTerminal` cannot be forged, so the
+/// status it carries came from [`site_domain_bind_status`]. What is NOT
+/// sealed is the CALL: a handler can still bypass the terminal entirely and
+/// pass a literal to `write_json_response`, and no type stops it. Closing
+/// that would mean a bind-specific writer that accepts only a `BindTerminal`
+/// -- worth doing if this file grows a second success path, and deliberately
+/// not done for a single call site.
+///
+/// The general lesson, since this comment has now been wrong twice: a claim
+/// about "the only way" is a claim about every caller, and it has to be
+/// checked against the thing being called, not against the thing being
+/// constructed.
 ///
 /// The FIRST attempt at this (#530 review round 2) put the newtype in THIS
 /// module, next to the handler. Rust field privacy is module-scoped, so
