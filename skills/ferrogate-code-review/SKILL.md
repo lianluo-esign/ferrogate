@@ -1,6 +1,6 @@
 ---
 name: ferrogate-code-review
-description: Use when running the FerroGate code-review role of the three-agent board loop — the session that watches the GitHub Project "In review" lane, judges what the dev agent handed off, and either advances the item to "Testing" or bounces it back to "Ready" with findings (e.g. "run the review agent", "work the In review lane", "review what the dev loop landed"). Covers the fixed lane/edges, the board handles, the review methodology (acceptance-box audit first, static verification over rebuild, report-never-edit, `review-rejected` on bounce), and the shared discipline (GraphQL quota rationing, cached lane tooling, worktree isolation, never build in the main worktree). Neighbouring roles: ferrogate-dev-loop (upstream) and ferrogate-test (downstream); all three at once: ferrogate-multi-agent-loop.
+description: Use when running the FerroGate code-review role of the three-agent board loop — the session that watches the GitHub Project "In review" lane, judges what the dev agent handed off, and either advances the item to "Testing" or bounces it back to "In progress" with findings (e.g. "run the review agent", "work the In review lane", "review what the dev loop landed"). Covers the fixed lane/edges, the board handles, the review methodology (acceptance-box audit first, static verification over rebuild, report-never-edit, `review-rejected` on bounce), and the shared discipline (GraphQL quota rationing, cached lane tooling, worktree isolation, never build in the main worktree). Neighbouring roles: ferrogate-dev-loop (upstream) and ferrogate-test (downstream); all three at once: ferrogate-multi-agent-loop.
 ---
 
 # FerroGate Code-Review Agent
@@ -20,12 +20,13 @@ proves it end-to-end in **Testing**.
    inbox; nothing else is.
 2. **PASS → move the item to `Testing`** (`74839551`). That hands it to the test
    agent, which owns all end-to-end proof.
-3. **FAIL → return the item to `Ready`** (`61e4505c`) with the findings in an
-   issue comment. Every bounce in this loop lands in Ready — never In progress,
-   never one lane back. The dev agent treats a returned item as its next slice
-   and works from that comment, so the comment must name exactly what failed.
-   (Precedent: #428 and #346 were bounced from the review lane to Ready on
-   2026-07-25.)
+3. **FAIL → return the item to `In progress`** (`47fc9ee4`) with the findings in
+   an issue comment. **Owner directive, 2026-07-27: bounces land in `In progress`,
+   not `Ready`** — a rejected item is work already in flight, not a fresh slice to
+   be picked. (This reverses the earlier rule; every bounce before 2026-07-27 —
+   #428, #346, #352, #414, #493, #517, #518 — went to `Ready`, so a rework
+   arriving from there is expected, not a protocol violation.) The dev agent
+   works from that comment, so the comment must name exactly what failed.
 4. **Never move a card past `Testing`.** Done belongs to the test gate.
 5. The shared discipline below applies to this session like any other.
 
@@ -64,9 +65,30 @@ Plus `AGENTS.md` commit hygiene: issue-referenced subject, Lore trailers.
 ### What this actually catches — evidence from the first full cycle
 
 42 items reviewed on 2026-07-25 (15 passed, 27 bounced). The bounce rate is high
-**by design**: the dev agent runs in speed mode and keeps only `cargo build`, so
-`cargo test`, `clippy -D warnings`, `check-openapi.py` and `check-module-layout.py`
-findings all land here. Running those four is cheap and worth doing every time.
+**by design**: the dev agent runs in speed mode, so `cargo test`,
+`clippy -D warnings`, `check-openapi.py` and `check-module-layout.py` findings
+all land here. Running those four is cheap and worth doing every time.
+
+**Speed mode narrowed again on 2026-07-27** (owner directive, recorded in
+`ferrogate-dev-loop` / `ferrogate-multi-agent-loop`): the dev lane now keeps only
+**`cargo check --all-targets`** — not even `cargo build`. Tests are still
+*written*, never *executed*. Two consequences for this session:
+
+- **This lane is the first place any test is executed.** A green suite is no
+  longer something upstream established and this session spot-checks; if this
+  session does not run it, nobody has. Running the narrow
+  `cargo test -p <crate> <filter>` is now worth materially more than it was, and
+  a `Not-tested:` trailer is *expected* rather than suspicious — what is
+  unacceptable is a silent one, or one covering an acceptance box.
+- **`cargo fmt --check` is this lane's to catch** and is a legitimate bounce
+  (#493 was bounced on it; the carve-out is now written into both dev skills, so
+  a repeat is a regression, not a misunderstanding). Same for the other things
+  `cargo check` structurally cannot see: `check-openapi.py`, `tsc --noEmit` on
+  `workers/**`, and the admin-console generated-client drift (`npm run
+  check:api-types`, which bounced #518).
+- An interrupted verification can leave a **scratch mutation live in the tree at
+  commit time** — #493 shipped with two. Grep the diff for edits that look like
+  a deliberately broken assertion.
 
 Four failure modes produced most of the bounces. Hunt them by name:
 
@@ -195,7 +217,7 @@ review-lane                 # refresh + list "In review" (~5-10 GraphQL pts)
 review-lane --cached        # zero GraphQL
 review-lane --lanes         # lane histogram only
 review-lane pass <issue>    # -> Testing   (one mutation, no board read)
-review-lane fail <issue>    # -> Ready     (one mutation, no board read)
+review-lane fail <issue>    # -> In progress (one mutation, no board read)
 ```
 
 Cache: **`/tmp/review-board.json`** (never `/tmp/board.json`, the gate's, nor
@@ -214,10 +236,10 @@ labels, and moves cards.
 
 - Project #4 `PVT_kwHOBQOh784BdpVt` (owner `lianluo-esign`), Status field
   `PVTSSF_lAHOBQOh784BdpVtzhYJbgM`.
-- Option ids: Epic `190dc6f3`, Backlog `f75ad846`, **Ready `61e4505c`** (bounce
-  target), In progress `47fc9ee4`, **In review `df73e18b`** (this lane, the
-  renamed "In review & Test"), **Testing `74839551`** (pass target),
-  Done `98236657`.
+- Option ids: Epic `190dc6f3`, Backlog `f75ad846`, Ready `61e4505c`,
+  **In progress `47fc9ee4`** (bounce target since 2026-07-27),
+  **In review `df73e18b`** (this lane, the renamed "In review & Test"),
+  **Testing `74839551`** (pass target), Done `98236657`.
 - Lane order: Epic → Backlog → Ready → In progress → In review → Testing → Done.
 
 ## Shared discipline (identical for all three sessions)
@@ -259,7 +281,7 @@ but do not change the lane or the edges.
 
 ```
 请读取 GitHub Project 看板中 In review 泳道的 issues 持续做代码评审。
-评审通过后把 issue 移动到 Testing 泳道；发现任何问题则把 issue 打回 Ready 泳道，
+评审通过后把 issue 移动到 Testing 泳道；发现任何问题则把 issue 打回 In progress 泳道，
 并在 issue 评论中写明具体问题、影响与复现方式，交给 dev agent 返工。
 1- 最多 3 个 sub agent 并行评审。
 2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，三个 session 共用同一份配额）；
