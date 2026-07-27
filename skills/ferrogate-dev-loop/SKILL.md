@@ -13,12 +13,18 @@ loop's output: `ferrogate-code-review` (In review) and `ferrogate-test`
 
 ## The invariants (do not violate)
 
-1. **This role is code generation only (只负责代码生成).** Write the code, prove
-   it with `cargo build`/`cargo test` plus the repo's local gates (`cargo fmt`,
-   `clippy -D warnings`, `scripts/check-openapi.py`, `tsc`/`vitest` for
-   `admin-console/`) — that is the *whole* proof obligation. **Do not
-   self-review** (a separate code-review agent does that) and **do not run
-   end-to-end tests** (the test agent owns E2E in the Testing lane).
+1. **This role is code generation only (只负责代码生成).** Write the code, then
+   run **`cargo check --all-targets` and nothing else** — that is the *whole*
+   proof obligation (user directive, 2026-07-27; see
+   `ferrogate-multi-agent-loop` → "Speed mode"). **Do not** run `cargo build`,
+   `cargo test`, `clippy`, or a mutation pass; **do not self-review** (a
+   separate code-review agent does that); **do not run end-to-end tests** (the
+   test agent owns E2E in the Testing lane). Still *write* the tests a slice
+   needs — only their execution moves downstream — and state plainly in the
+   commit's `Not-tested:` trailer and the handoff comment that nothing was run.
+   Contract-shaped checks that are not tests (`scripts/check-openapi.py` when
+   you edit the spec, `tsc --noEmit` when you edit `workers/**/*.ts`) still
+   apply: they guard `main` against a break `cargo check` cannot see.
 2. **Advance to "In review", never further.** The code-review agent owns
    In review → Testing; the test gate owns Testing → Done. This loop never
    writes those two transitions.
@@ -61,9 +67,12 @@ loop's output: `ferrogate-code-review` (In review) and `ferrogate-test`
    `*_test.rs` (no inline `mod tests {}`) tests, verifies locally, and **commits
    to its branch only — no push, never touches `main`**.
 3. **Integrate (driver, sequential):** `git fetch` → `git cherry-pick <branch>`
-   → **re-verify the combined `main`** (narrowest `cargo build`/`test`, or
-   `tsc`/`vitest`) → `git push` → comment issue with sha + evidence (incl. what
-   was **not** tested and why) → move board status to **In review** (key node).
+   → **re-verify the combined `main`** (`cargo check --all-targets`; widen to
+   `--workspace` when the slice adds an enum variant / changes a trait or any
+   widely-consumed pub type) → `git push` → **verify the push landed** →
+   comment the issue with sha + evidence (explicitly: what was **not** executed,
+   and which mutations the downstream agent should apply) → move board status to
+   **In review** (key node).
 4. **Cleanup:** `git worktree remove --force .claude/worktrees/agent-<id>` +
    `git branch -D worktree-agent-<id>`. File follow-up issues the slice
    surfaced (issue-linked, house style).
@@ -90,5 +99,7 @@ In review 由 code review agent 负责，Testing 与 Done 由 test agent 负责�
 2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，超出后整个 Project 不可用）；
    只在关键节点读看板，其余一律用 REST (gh api) 与本地缓存 (dev-lane)。
 3- 你只负责代码生成，不做 code review，也不做端到端测试。
-   每次写完代码 cargo test / cargo build 与仓库本地 gate 通过即可移入 In review。
+   每次代码生成完毕只需 `cargo check --all-targets` 通过即可：不跑 build，不跑
+   test，不做变异验证。随后清除 worktree、合并到 main、评论 issue（写明哪些没有
+   执行）、把 issue 移到 In review 交给 code review agent。测试代码照写不执行。
 ```

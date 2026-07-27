@@ -18,7 +18,7 @@ neighbouring roles will do with your output. Each role also has a focused skill:
 | --- | --- | --- | --- |
 | Watches | Backlog / **Ready** (incl. bounced items) / In progress | **In review** only | **Testing** only |
 | Produces | code on `main`; slices parked in "In review" | Testing (pass) or Ready + findings (fail) | Done (pass) or Ready + `gate-rejected` (fail) |
-| Proof it owns | `cargo build` / `cargo test` + the repo's local gates | acceptance-box audit + defect read of the landed diff | full `ferrogate-test` **end-to-end** coverage |
+| Proof it owns | **`cargo check --all-targets` and nothing else** (see Speed mode) | acceptance-box audit + defect read of the landed diff | full `ferrogate-test` **end-to-end** coverage |
 | Never does | self-review; E2E; the Testing/Done transitions | writes product code; E2E; moves cards past Testing | writes product code; moves cards left past Ready |
 | Skill | `ferrogate-dev-loop` | `ferrogate-code-review` | `ferrogate-test` |
 
@@ -39,13 +39,56 @@ Because a bounce skips back over In progress, an issue can cross the board
 several times. **Ready is the dev agent's rework inbox**, not just a queue of
 fresh work.
 
+## Speed mode — the dev lane's proof obligation (user directive, 2026-07-27)
+
+> 你不需要去跑测试 只需要生成代码即可 加速开发流程 测试交给后续的测试agent来做
+> 不需要执行 build 每次代码生成完毕只需要做 cargo check 就结束 清除 worktree 合并到
+> main 把 issue 发到下一步 codereview
+
+The dev role trades local proof for throughput, because two downstream agents
+now exist to catch what it skips. **In the dev lane and in every subagent brief
+it writes:**
+
+- **Run `cargo check --all-targets` — that is the whole gate.** `--all-targets`
+  matters: it type-checks the tests too, so a written-but-unrun test still
+  cannot be malformed. Use `CARGO_TARGET_DIR=/home/dev/ferrogate/target
+  cargo check -j4` (shared target dir; `-j8` freezes the machine).
+- **Do NOT run `cargo build`.** Superseded — `check` catches the
+  non-compiling-`main` hazard that `build` was kept for, at a fraction of the
+  time.
+- **Do NOT run `cargo test`, `clippy`, or the mutation-verification pass.**
+  Those are the review and test agents' findings now, returned via Ready.
+- **Still WRITE the tests.** They are code the reviewer expects and the test
+  agent runs; only their *execution* moves downstream. Writing an assertion so
+  it is not vacuous is still the dev's job (see `ferrogate-dev-loop`, "mutation
+  -verify" — it survives as *design* guidance, not as a proof obligation).
+- **Disclose, don't imply.** The handoff comment and the commit's `Not-tested:`
+  trailer must say plainly that nothing was executed, and name the mutations the
+  downstream agent should apply. A slice that reads as if it were verified is
+  worse than one that admits it was not.
+- **Then, immediately:** cherry-pick onto `main` → `cargo check` → push → verify
+  the push landed → **delete the worktree** → comment the issue → move it to
+  **In review**. Never chain cleanup into the same command as the push.
+
+Two consequences worth stating, because they change what the other roles see:
+
+1. Everything reaching **In review** is compile-verified and nothing more. The
+   review agent is now the *first* execution of any test in the pipeline.
+2. If a scratch mutation was injected while probing an assertion, it is still in
+   the tree when the directive interrupts — **remove it explicitly before
+   committing** and re-read the diff. (This happened on #493: two injected
+   branches were live in `error.rs` at commit time.)
+
 ## The handoff contract
 
 - **Dev → review:** a slice enters "In review" only when its acceptance list is
   *deliverable as written* (every box implemented, or re-scoped by editing the
-  issue first). A `Not-tested:`/"deferred" note is an admission, not an excuse.
-  The dev role writes the E2E-facing surface (harness scenario, Admin API,
-  Playwright flow) but never *runs* end-to-end — that is the test agent's job.
+  issue first). A "deferred" note is an admission, not an excuse. The dev role
+  writes the E2E-facing surface (harness scenario, Admin API, Playwright flow)
+  but never *runs* end-to-end — that is the test agent's job. Under speed mode
+  "implemented" means **written and type-checked**, so a `Not-tested:` trailer
+  is now expected on every dev commit rather than being a red flag; what is
+  still not acceptable is a *silent* one.
 - **Review → test:** on pass the code-review agent moves the item to
   **Testing**. Its bar: every acceptance box has a landed, inspectable artifact
   on `origin/main`, no defect makes the feature wrong, and the handoff comment's
@@ -106,6 +149,10 @@ fresh work.
 2. Every failure bounces to **Ready** — never to In progress, never one lane
    back.
 3. ≤ 3 code-developing subagents in parallel (user-controlled ceiling).
+3b. The dev lane runs **`cargo check --all-targets` only** — no `build`, no
+   `test`, no mutation pass — and every dev slice ends with the same five
+   steps: merge to `main`, delete the worktree, comment, move to **In review**,
+   disclose what was not executed.
 4. Delete every worktree the instant its slice is integrated (~13 GB each);
    never build in the primary working directory.
 5. Default to **zero GraphQL per loop tick**; git + REST keep flowing when the
