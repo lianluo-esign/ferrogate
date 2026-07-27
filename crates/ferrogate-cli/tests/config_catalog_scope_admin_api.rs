@@ -52,10 +52,24 @@
 // reads through the policy and agent-upstream lists, so those two handler
 // mutations red it as well as their own test. That is intrinsic (a scope-
 // SOURCE test has to observe through some scoped surface) and it does not
-// make either test redundant: deleting `api_key_ids.extend(
-// list_virtual_api_keys(..))` or `project_ids.extend(list_projects(..))` reds
-// ONLY the eighth test, and deleting the static `own_static_keys()` seeding
-// beside them reds the other seven and NOT the eighth.
+// make either test redundant, because the containment runs one way only.
+// Deleting `api_key_ids.extend(list_virtual_api_keys(..))` (rbac.rs:1431) or
+// `project_ids.extend(list_projects(..))` (:1439) reds ONLY the eighth test:
+// it is the only test in this file that creates a project or a virtual key,
+// so in the other seven both listings come back empty and neither mutation
+// can change a byte of their responses.
+//
+// The CONVERSE does not hold, and an earlier revision of this header asserted
+// that it did. Deleting the static `own_static_keys()` seeding
+// (rbac.rs:1427-1428) reds the other seven AND the eighth: tenant A's scope
+// collapses to `api_key_ids = {<durable key a>}`, so `narrow` returns `None`
+// for every row selected by a *static* key id, and `deny-both-keys`,
+// `upstream-a` and `upstream-both` drop out of the eighth test's exact
+// expectations too. That is a consequence of asserting exact sorted sets
+// rather than `contains()` -- the stronger assertion, and worth the loss --
+// but the claim is corrected here rather than left standing, because this
+// matrix is what a reviewer checks branch specificity against and a wrong
+// audit is worse than no audit.
 
 mod support;
 
@@ -103,7 +117,8 @@ const TENANT_B: [&str; 2] = [
 /// `Config::validate` refused the file and the gateway exited before binding
 /// -- every test in the suite then spent the harness's 300s readiness window
 /// waiting for a process that was already dead. The three non-obvious
-/// constraints, read off `config/validate.rs` rather than guessed:
+/// constraints, read off `ferrogate-config/src/config/validate.rs` (the crate
+/// this module moved to in #553 stage 3a) rather than guessed:
 ///
 /// * `validate_skill_packages` (`validate.rs:2295`) rejects a package with an
 ///   empty `capabilities` list, so each `[[skill_packages]]` entry carries a
@@ -117,6 +132,17 @@ const TENANT_B: [&str; 2] = [
 ///   `kind = "tool_provider"`.
 /// * `validate_agent_upstreams` (`validate.rs:2959`) rejects an empty
 ///   `capabilities` list too; there a capability is a plain enum string.
+///
+/// Those three were derived from the error the suite actually produced, which
+/// bounds the validator PREFIX and not the suffix: `Config::validate`
+/// (`validate.rs:89`) runs its checks in sequence and aborts on the first, so
+/// everything after `validate_agent_upstreams` -- `validate_guardrails`,
+/// `validate_tls`, `validate_storage` and the rest -- has still never run on
+/// this fixture. Nothing here is expected to trip them (the fixture declares
+/// no guardrail, tls, storage or cluster block, and the sibling
+/// `rbac_catalog_scope_admin_api` boots a strictly smaller config through all
+/// of them on defaults), but "the error came from validator N" is evidence
+/// about `1..=N` only, and this file is not entitled to more than it proved.
 fn write_config(path: &std::path::Path, gateway_addr: &str) {
     std::fs::write(
         path,
