@@ -9,40 +9,54 @@
 //   @cloudflare/vitest-pool-workers + miniflare (no Docker, no Cloudflare account,
 //   no network).
 //
-//   WHAT IS BEING HELD, AND WHY THE EXISTING SUITE DOES NOT HOLD IT.
-//   `AgentGateway.destroyRun()` ends in `await this.destroy()` — the SDK primitive
-//   (agents@0.0.109, dist/chunk-3IQQY2UH.js:879-896) that DROPs the four `cf_agents_*`
-//   tables, calls `ctx.storage.deleteAlarm()`, calls `ctx.storage.deleteAll()` and then
-//   `ctx.abort("destroyed")`. Its predecessor called `deleteAll()` alone. Every existing
-//   destroy assertion in lifecycle.test.ts survives that regression: `deleteAll()` also
-//   clears the synced state, so the follow-up status still answers 404 `not_found`, and
-//   the in-flight abort comes from `destroyRun`'s own `#inFlight.abort(...)`, not from
-//   the SDK. The alarm is the ONLY observable that separates the two, because this
-//   deployment's `compatibility_date = "2025-06-01"` predates 2026-02-24, from which
-//   workerd's `delete_all_deletes_alarm` behaviour makes `deleteAll()` clear alarms by
-//   itself (the flag pair `delete_all_deletes_alarm` / `delete_all_preserves_alarm` is
-//   in the bundled workerd, and vitest.config.ts feeds miniflare the compatibility date
-//   READ FROM wrangler.toml, so the harness runs under the deployed gate).
+//   WHAT IS BEING HELD. `AgentGateway.destroyRun()` ends in `await this.destroy()` —
+//   the SDK primitive (agents@0.0.109, dist/chunk-3IQQY2UH.js:879-896) that DROPs the
+//   four `cf_agents_*` tables, calls `ctx.storage.deleteAlarm()`, calls
+//   `ctx.storage.deleteAll()` and then `ctx.abort("destroyed")`. Its predecessor — the
+//   code #482 was filed against — called `deleteAll()` alone.
 //
 //   THE MUTATION THIS FILE EXISTS TO RED: replace `await this.destroy()` in
 //   `AgentGateway.destroyRun()` (src/index.ts) with `await this.ctx.storage.deleteAll()`.
-//   EXACTLY ONE observable then goes wrong, and it is the one the first test reads: the
-//   alarm `_scheduleNextAlarm()` armed is still pending, and nothing later clears it —
-//   `_scheduleNextAlarm()` (dist/chunk-3IQQY2UH.js:863-875) only ever calls `setAlarm()`,
-//   so with zero schedule rows it returns without calling `deleteAlarm()`. The stale alarm
-//   fires on a name marked `cleaned_up`, re-instantiates the Durable Object and bills
-//   compute.
+//   Ran, not reasoned about (#559 made this Worker's suite terminate; before that no one
+//   could run it): `vitest run` over the whole Worker then reports
+//   `3 failed | 106 passed`. Two are the tests below. The third is
+//   lifecycle.test.ts's "destroy tears the instance down: a following status reports
+//   not_found" — so the older claim here, that every existing destroy assertion SURVIVES
+//   this regression, was also wrong.
 //
-//   WHAT IS *NOT* A SECOND DISCRIMINATOR — and was wrongly written here when this file
-//   first landed: a SURVIVING `cf_agents_schedules` ROW. `AgentGateway` is SQLite-backed
-//   (`wrangler.toml` `new_sqlite_classes`; `vitest.config.ts` `useSQLite: true`), and on a
-//   SQLite-backed Durable Object `deleteAll()` removes the entire contents of the object's
-//   private SQLite database — SQL data AND key-value data, atomically. The mutation
-//   therefore wipes the schedule rows too, and the Agent constructor's
-//   `CREATE TABLE IF NOT EXISTS cf_agents_schedules` (chunk-3IQQY2UH.js:158-168) rebuilds
-//   the table empty on the next wake. Nothing re-arms. The table DROPs inside `destroy()`
-//   are redundant with its own `deleteAll()` here; the `deleteAlarm()` and the
-//   `ctx.abort()` are what the mutation actually loses.
+//   WHAT THE MUTATION ACTUALLY CHANGES, MEASURED. Three observables move, not one — an
+//   earlier version of this header claimed the alarm was the only one, and that is false:
+//     * `GET /control/status` answers 200 `{"status":"cleaned_up"}` instead of 404
+//       `not_found`;
+//     * `POST /schedule/list` answers 400
+//       `{"error":"schedule_error","message":"no such table: cf_agents_schedules: SQLITE_ERROR"}`
+//       instead of 200 `count: 0`;
+//     * the alarm `_scheduleNextAlarm()` armed is STILL PENDING instead of null.
+//   The first two are consequences of the same missing thing: without `ctx.abort()` the
+//   Durable Object is never evicted, so `this.state` stays live in memory (status answers
+//   from it) and the tables `deleteAll()` dropped are never rebuilt (nothing re-runs the
+//   constructor's `CREATE TABLE IF NOT EXISTS`). They say the object did not go away.
+//   Only the third says the *platform* is still holding a timer against a name marked
+//   `cleaned_up`, which is the harm #482 names: the alarm fires, re-instantiates the
+//   object and bills compute.
+//
+//   AND IT IS DURABLE, WHICH IS WHY IT IS THE ONE WORTH PINNING. Under the mutation the
+//   post-destroy alarm read is not a stale in-memory value: driving the route, then
+//   forcing an eviction with `ctx.abort()` from the test side, then re-reading, returns
+//   the SAME epoch-millis timestamp across two evictions. On unmutated code the same
+//   sequence reads `null, null, null`. That also confirms the compatibility premise
+//   below by experiment rather than by documentation: here `deleteAll()` does NOT clear
+//   the alarm. (Deployment `compatibility_date = "2025-06-01"` predates 2026-02-24, from
+//   which workerd's `delete_all_deletes_alarm` behaviour would clear it; vitest.config.ts
+//   feeds miniflare the date READ FROM wrangler.toml, so the harness runs under the
+//   deployed gate. The last test below is the tripwire on that.)
+//
+//   WHAT THIS FILE DOES *NOT* CATCH, also measured. `deleteAll()` FOLLOWED BY
+//   `this.ctx.abort("destroyed")` — i.e. losing only the SDK's explicit `deleteAlarm()`
+//   call — leaves the whole Worker suite green (`109 passed`), because the post-destroy
+//   alarm reads `null` under it too. So the assertion below pins `destroy()` against the
+//   historical `deleteAll()`, which is the regression this issue is about; it does not
+//   pin `deleteAlarm()` in isolation, and nobody should read it as doing so.
 //
 //   NON-VACUITY. The alarm is read through the SAME helper, in the SAME test, for a
 //   sibling run that was NOT destroyed; that read must be non-null. So "null" cannot be
@@ -151,15 +165,22 @@ describe("#482 a destroyed run leaves no pending alarm", () => {
     // re-instantiates the object and runs the SDK constructor's alarm path. That is the
     // last opportunity anything has to notice a stale alarm and delete it, so reading
     // AFTER it is what makes the assertion below about the platform rather than about
-    // when the test happened to look.
+    // when the test happened to look. Its status is asserted a few lines down, AFTER the
+    // guard, on purpose: both reds under the mutation, and the one that should name the
+    // failure is the alarm.
     const after = await SELF.fetch(`${BASE}/control/status?runRef=${destroyed}`, authedInit());
-    expect(after.status).toBe(404);
 
     // THE ASSERTION: pinned to `await this.destroy()` in AgentGateway.destroyRun().
-    // Swap it for `ctx.storage.deleteAll()` and this reds — at this deployment's
-    // compatibility date `deleteAll()` preserves the alarm, and nothing afterwards
-    // deletes it.
+    // Swap it for `ctx.storage.deleteAll()` and this reds with
+    // `expected <epoch-millis> to be null` — at this deployment's compatibility date
+    // `deleteAll()` preserves the alarm, nothing afterwards deletes it, and the
+    // timestamp survives a forced eviction (see the header).
     expect(await pendingAlarm(destroyed)).toBeNull();
+
+    // A SECOND DISCRIMINATOR, not a formality: under the mutation this answers 200
+    // `cleaned_up`, because an un-aborted object keeps serving status out of the
+    // in-memory `this.state` that `deleteAll()` could not reach.
+    expect(after.status).toBe(404);
 
     // NON-VACUITY: same helper, same moment, the run that was NOT destroyed.
     const survivor = await pendingAlarm(sibling);
@@ -167,20 +188,24 @@ describe("#482 a destroyed run leaves no pending alarm", () => {
     expect(survivor as number).toBeGreaterThan(Date.now());
   });
 
-  it("the destroyed run reports no schedules afterwards (post-condition; it does NOT catch the deleteAll mutation)", async () => {
-    // READ THE TITLE LITERALLY. This is a true post-condition of destroy and worth
-    // holding, but it is NOT a second guard on `await this.destroy()`, and an earlier
-    // version of this comment claimed it was. Under the mutation
-    // (`this.destroy()` -> `this.ctx.storage.deleteAll()`) `deleteAll()` wipes the SQL
-    // data too, the Agent constructor's `CREATE TABLE IF NOT EXISTS` rebuilds an empty
-    // `cf_agents_schedules`, and `/schedule/list` still answers `count: 0` — this test
-    // GREENS on the broken implementation. The alarm read in the first test is the only
-    // thing separating the two.
+  it("the destroyed run reports no schedules afterwards (post-condition; under the deleteAll mutation it reds on a 400, never on the count)", async () => {
+    // READ THE TITLE LITERALLY, and note that it is the SECOND correction to it. This is
+    // a true post-condition of destroy, worth holding, and NOT a guard on the alarm.
     //
-    // WHAT IT DOES CATCH: a `destroyRun` that stops tearing storage down at all — drop
-    // the teardown call, or let it return the `cleaned_up` envelope without reaching it,
-    // and the row is still listed (`count: 1`). It also holds the create -> list -> destroy
-    // -> list route pair itself, which is why it is worth its runtime.
+    // It does red under the mutation (`this.destroy()` -> `this.ctx.storage.deleteAll()`),
+    // but the assertion that goes red is `expect(after.status).toBe(200)`, because
+    // `/schedule/list` answers 400 `no such table: cf_agents_schedules`. `count` is never
+    // reached and never wrong. The earlier comment here predicted the opposite — a green
+    // 200 with `count: 0`, from the Agent constructor rebuilding an empty table "on the
+    // next wake". Measurement says there is no next wake: without `ctx.abort()` the same
+    // instance stays resident, so the tables `deleteAll()` dropped stay dropped, the RPC
+    // comes back as a `schedule_error` and `scheduleResponse` maps it to 400. Treat this
+    // test's red as a symptom of a missing eviction, not as evidence about schedules.
+    //
+    // WHAT IT IS ACTUALLY FOR: a `destroyRun` that stops tearing storage down at all —
+    // drop the teardown call, or let it return the `cleaned_up` envelope without reaching
+    // it, and the row is still listed (`count: 1`). It also holds the create -> list ->
+    // destroy -> list route pair itself, which is why it is worth its runtime.
     const name = "run-destroy-rows";
     await start(name);
     await scheduleFarFuture(name, "wake-me");

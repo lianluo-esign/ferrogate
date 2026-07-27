@@ -262,7 +262,7 @@ Each of these reads as thorough. Each survived the mutation named beside it.
 | **A vacuous fixture.** A re-sort asserted over rows that were already sorted; a truncate asserted over 2 rows with `limit = 10`. | `#460` fire-list | Input that is wrong in the direction the transform fixes. |
 | **A guard coarser than the rule it enforces.** One audit walked a single directory by filename prefix while its convention spanned three crates; another signed off on `(file, fn)`, so a *new* capture inside an already-blessed function was pre-approved. | `#495`; `#526`, fixed by keying on `(file, fn, idiom, exact count)` | Key the guard on the exact thing that must not change, and prove its reach covers the whole class it claims. |
 | **A count asserted as fact with no mechanism.** "236 transactions across 41 files", in a comment. It was 42 by the next slice. | `#480` | Either compute the count in the test, or delete the claim. |
-| **Green for an unrelated reason.** The schedule-count assertion passes on the broken implementation too, because `deleteAll()` wipes the tables and the constructor recreates them empty. | `#482` | A value that only the correct path can produce. |
+| **Red for an unrelated reason.** The schedule-count test does fail on the broken implementation — on `status === 200`, because the route 400s with `no such table`. `count` is never reached, so the assertion the test is named for is still unproven, and the entry that used to sit here predicted the opposite outcome from the same reasoning. | `#482`, corrected once the suite could actually run (`#559`) | Run the mutation and read which line reds. A test that fails for the wrong reason passes for the wrong reason too. |
 
 ### Where mutation reasoning is not enough
 
