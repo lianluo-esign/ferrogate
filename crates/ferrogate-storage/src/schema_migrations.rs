@@ -18,43 +18,76 @@
 //! that does not exist.
 //!
 //! The fix is not a fresher copy, and not a reminder test that a human must
-//! react to: it is to delete the copy. `head_migration` parses the migration
+//! react to: it is to delete the copy. [`head_migration`] parses the migration
 //! ledger out of the SQL text during const evaluation, so the constants are a
 //! projection of the file rather than a claim about it, and adding migration
-//! `060_...` moves them with zero edits here. Formats the parser does not
-//! understand are a COMPILE error (const panic), not a silent skip -- a new
-//! migration therefore cannot land unnoticed in either direction.
+//! `060_...` moves them with zero edits here.
+//!
+//! # What "fails closed" means here, exactly
+//!
+//! The first version of this module said a new migration "cannot land unnoticed
+//! in either direction". That was too strong, and review found the two shapes
+//! that walked past it: a second tuple on one `VALUES` clause, and a
+//! schema-qualified table name. Both are parsed now, but the honest statement of
+//! the guarantee is bounded by what a text scan can promise, so here it is:
+//!
+//! * A statement whose table reference resolves to `storage_schema_migrations`
+//!   -- bare or schema-qualified, quoted or not -- MUST carry the column list
+//!   `(version, name)` and a `VALUES` clause of one or more
+//!   `(<version>, '<name>')` tuples. EVERY tuple is read, so the head is the
+//!   maximum over rows, not over statements.
+//! * Anything else about such a statement is a const panic, i.e. a COMPILE
+//!   error, never a silently skipped migration. There is no `unwrap_or`,
+//!   `unwrap_or_default` or default-zero anywhere on this path.
+//! * A ledger row recorded by some OTHER statement -- `COPY`, `UPDATE`,
+//!   `MERGE`, an `INSERT` assembled from a string at runtime -- is outside what
+//!   this scan sees, and nothing here detects it. That residue is why
+//!   `schema_migrations_test.rs` cross-checks the parser's row AND statement
+//!   counts against a second reader written to a different shape, instead of
+//!   resting on the promise above.
 //!
 //! What the parser deliberately does NOT decide is whether the DATABASE is
 //! allowed to be ahead of this file: callers compare a live ledger against this
 //! head for EXACT equality (`crate::validate_postgres_schema`, and the
 //! `supabase-restart` harness). See `schema_migrations_test.rs` for the
-//! properties that hold this module up.
+//! properties that hold this module up -- including fixtures that drive
+//! [`head_migration`] over ledgers this file does not contain, because a parser
+//! only ever pointed at text that parses is untested against the text that does
+//! not (#500).
 
 /// The control-plane schema every Postgres/Supabase deployment is initialized
 /// from, and the only source of truth for which migrations exist.
 pub(crate) const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
 
-/// Every applied-migration record in the SQL is written as this statement
-/// followed by `VALUES (<version>, '<name>')`, whether it stands alone or is
-/// nested in a `DO $$ ... $$` block. Parsing anchors on the INSERT rather than
-/// on `VALUES (` alone because the file carries many unrelated inserts.
-const LEDGER_INSERT: &[u8] = b"INSERT INTO storage_schema_migrations (version, name)";
-const LEDGER_VALUES: &[u8] = b"VALUES (";
-const LEDGER_NAME_SEPARATOR: &[u8] = b", '";
+/// Applied-migration records are written as
+/// `INSERT INTO [<schema>.]storage_schema_migrations (version, name) VALUES ...`,
+/// whether the statement stands alone or is nested in a `DO $$ ... $$` block.
+/// Parsing anchors on `INSERT INTO` and then resolves the table reference,
+/// rather than on `VALUES (` alone, because the file carries unrelated inserts;
+/// resolving the reference instead of matching one fixed 53-byte string is what
+/// stops a qualified or quoted name from being walked past.
+const LEDGER_INSERT_PREFIX: &[u8] = b"INSERT INTO";
+const LEDGER_TABLE: &[u8] = b"storage_schema_migrations";
+const LEDGER_COLUMNS: &[u8] = b"(version, name)";
+const LEDGER_VALUES: &[u8] = b"VALUES";
 
-/// The highest-numbered migration recorded in [`POSTGRES_SCHEMA_SQL`], plus how
-/// many ledger statements were parsed to find it (some versions appear twice --
-/// once inside a `DO` block and once as a bare statement -- so the entry count
-/// is NOT the head version).
+/// The highest-numbered migration recorded in [`POSTGRES_SCHEMA_SQL`], plus the
+/// two counts that let a test detect a row the parser walked past.
 struct LedgerHead {
     version: u64,
     name: &'static str,
-    /// Only read by the tests below (`POSTGRES_SCHEMA_LEDGER_ENTRIES`), which
-    /// is the point: it exists so a migration the parser silently walked past
-    /// can be detected by counting.
+    /// How many `(<version>, '<name>')` tuples were read. Some versions appear
+    /// twice -- once inside a `DO` block and once as a bare statement -- and one
+    /// statement may carry several tuples, so this is NOT the head version and
+    /// NOT the statement count.
     #[cfg_attr(not(test), allow(dead_code))]
-    entries: usize,
+    rows: usize,
+    /// How many ledger INSERT statements were recognized. Read only by the tests
+    /// below, which is the point: it is compared against an independent count
+    /// over the raw text, so a statement shape the anchor stops matching shows
+    /// up as a divergence instead of as a quietly lower head.
+    #[cfg_attr(not(test), allow(dead_code))]
+    statements: usize,
 }
 
 const HEAD: LedgerHead = head_migration(POSTGRES_SCHEMA_SQL);
@@ -66,31 +99,61 @@ const HEAD: LedgerHead = head_migration(POSTGRES_SCHEMA_SQL);
 pub const POSTGRES_SCHEMA_VERSION: u64 = HEAD.version;
 /// Name of [`POSTGRES_SCHEMA_VERSION`]'s migration, derived the same way.
 pub const POSTGRES_SCHEMA_NAME: &str = HEAD.name;
-/// Number of migration-ledger INSERT statements the parser recognized. Tests
-/// compare this against a plain count of the marker in the file: if a future
-/// migration is written in a shape the parser walks past, the counts diverge.
+/// Number of ledger ROWS the parser read out of the file.
 #[cfg(test)]
-pub(crate) const POSTGRES_SCHEMA_LEDGER_ENTRIES: usize = HEAD.entries;
+pub(crate) const POSTGRES_SCHEMA_LEDGER_ROWS: usize = HEAD.rows;
+/// Number of ledger INSERT STATEMENTS the parser recognized.
+#[cfg(test)]
+pub(crate) const POSTGRES_SCHEMA_LEDGER_STATEMENTS: usize = HEAD.statements;
 
+/// Read the migration ledger out of `sql` and return its maximum row.
+///
+/// `const fn` over `&'static str`, so it is const-evaluated for
+/// [`POSTGRES_SCHEMA_SQL`] (a malformed ledger is then a compile error) and
+/// callable at runtime by the tests with literal fixtures.
 const fn head_migration(sql: &'static str) -> LedgerHead {
     let bytes = sql.as_bytes();
     let mut cursor = 0usize;
     let mut version = 0u64;
     let mut name_start = 0usize;
     let mut name_len = 0usize;
-    let mut entries = 0usize;
+    let mut rows = 0usize;
+    let mut statements = 0usize;
     while cursor < bytes.len() {
-        if !matches_at(bytes, cursor, LEDGER_INSERT) {
+        if !matches_at(bytes, cursor, LEDGER_INSERT_PREFIX) {
             cursor += 1;
             continue;
         }
-        let mut at = cursor + LEDGER_INSERT.len();
-        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
-            at += 1;
+        // `INSERT INTO [<schema>.]<table>`: read the reference and keep only its
+        // last component, so `ferrogate_control.storage_schema_migrations` and
+        // `"storage_schema_migrations"` both resolve to the ledger, and
+        // `storage_schema_migrations_archive` does not (the identifier is read
+        // whole and compared whole, never prefix-matched).
+        let after_insert = skip_whitespace(bytes, cursor + LEDGER_INSERT_PREFIX.len());
+        let (mut table_start, mut table_end, mut at) = read_identifier(bytes, after_insert);
+        if at < bytes.len() && bytes[at] == b'.' {
+            let (start, end, next) = read_identifier(bytes, at + 1);
+            table_start = start;
+            table_end = end;
+            at = next;
         }
-        // Anything the parser cannot read is a build failure rather than a
-        // silently skipped migration: a skipped one would move the head
-        // backwards and quietly re-create the #511 drift.
+        if !region_eq(bytes, table_start, table_end, LEDGER_TABLE) {
+            cursor += 1;
+            continue;
+        }
+        // Past this point the statement IS a ledger write, so anything the
+        // parser cannot read is a build failure rather than a silently skipped
+        // migration: a skipped one would move the head backwards and quietly
+        // re-create the #511 drift.
+        statements += 1;
+        at = skip_whitespace(bytes, at);
+        if !matches_at(bytes, at, LEDGER_COLUMNS) {
+            panic!(
+                "sql/001_init_postgres.sql: a storage_schema_migrations INSERT does not use the \
+                 column list `(version, name)`; the schema head cannot be derived"
+            );
+        }
+        at = skip_whitespace(bytes, at + LEDGER_COLUMNS.len());
         if !matches_at(bytes, at, LEDGER_VALUES) {
             panic!(
                 "sql/001_init_postgres.sql: a storage_schema_migrations INSERT is not followed by \
@@ -98,46 +161,114 @@ const fn head_migration(sql: &'static str) -> LedgerHead {
             );
         }
         at += LEDGER_VALUES.len();
-        let mut entry_version = 0u64;
-        let mut digits = 0usize;
-        while at < bytes.len() && bytes[at].is_ascii_digit() {
-            entry_version = entry_version * 10 + (bytes[at] - b'0') as u64;
+        // One `VALUES` clause may carry several tuples. Reading only the first
+        // was the #511 shape all over again: `VALUES (59, '059_x'), (60, '060_y')`
+        // silently reported 59 while the database built from the same file
+        // reported 60.
+        loop {
+            at = skip_whitespace(bytes, at);
+            if at >= bytes.len() || bytes[at] != b'(' {
+                panic!(
+                    "sql/001_init_postgres.sql: a storage_schema_migrations VALUES clause has no \
+                     `(<version>, '<name>')` tuple"
+                );
+            }
+            at = skip_whitespace(bytes, at + 1);
+            let mut entry_version = 0u64;
+            let mut digits = 0usize;
+            while at < bytes.len() && bytes[at].is_ascii_digit() {
+                entry_version = entry_version * 10 + (bytes[at] - b'0') as u64;
+                at += 1;
+                digits += 1;
+            }
+            if digits == 0 {
+                panic!("sql/001_init_postgres.sql: a migration ledger row has no version number");
+            }
+            at = skip_whitespace(bytes, at);
+            if at >= bytes.len() || bytes[at] != b',' {
+                panic!("sql/001_init_postgres.sql: a migration ledger row has no quoted name");
+            }
+            at = skip_whitespace(bytes, at + 1);
+            if at >= bytes.len() || bytes[at] != b'\'' {
+                panic!("sql/001_init_postgres.sql: a migration ledger row has no quoted name");
+            }
             at += 1;
-            digits += 1;
-        }
-        if digits == 0 {
-            panic!("sql/001_init_postgres.sql: a migration ledger row has no version number");
-        }
-        if !matches_at(bytes, at, LEDGER_NAME_SEPARATOR) {
-            panic!("sql/001_init_postgres.sql: a migration ledger row has no quoted name");
-        }
-        at += LEDGER_NAME_SEPARATOR.len();
-        let entry_name_start = at;
-        while at < bytes.len() && bytes[at] != b'\'' {
+            let entry_name_start = at;
+            while at < bytes.len() && bytes[at] != b'\'' {
+                at += 1;
+            }
+            if at >= bytes.len() {
+                panic!("sql/001_init_postgres.sql: a migration ledger name is unterminated");
+            }
+            if at == entry_name_start {
+                panic!("sql/001_init_postgres.sql: a migration ledger name is empty");
+            }
+            let entry_name_end = at;
+            at = skip_whitespace(bytes, at + 1);
+            if at >= bytes.len() || bytes[at] != b')' {
+                panic!("sql/001_init_postgres.sql: a migration ledger row is not closed with `)`");
+            }
             at += 1;
-        }
-        if at >= bytes.len() {
-            panic!("sql/001_init_postgres.sql: a migration ledger name is unterminated");
-        }
-        if at == entry_name_start {
-            panic!("sql/001_init_postgres.sql: a migration ledger name is empty");
-        }
-        entries += 1;
-        if entry_version > version {
-            version = entry_version;
-            name_start = entry_name_start;
-            name_len = at - entry_name_start;
+            rows += 1;
+            // MAXIMUM, not last-seen and not first-seen: the file re-records
+            // several versions and an out-of-order row is a realistic edit.
+            if entry_version > version {
+                version = entry_version;
+                name_start = entry_name_start;
+                name_len = entry_name_end - entry_name_start;
+            }
+            let next = skip_whitespace(bytes, at);
+            if next < bytes.len() && bytes[next] == b',' {
+                at = next + 1;
+                continue;
+            }
+            break;
         }
         cursor = at;
     }
-    if entries == 0 {
+    if rows == 0 {
         panic!("sql/001_init_postgres.sql: no storage_schema_migrations ledger rows were found");
     }
     LedgerHead {
         version,
         name: const_substring(sql, name_start, name_len),
-        entries,
+        rows,
+        statements,
     }
+}
+
+const fn skip_whitespace(bytes: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+        at += 1;
+    }
+    at
+}
+
+/// Read one SQL identifier, tolerating the double-quoted form, and return
+/// `(start, end, after)` where `start..end` is the bare identifier text.
+const fn read_identifier(bytes: &[u8], from: usize) -> (usize, usize, usize) {
+    let mut at = from;
+    let quoted = at < bytes.len() && bytes[at] == b'"';
+    if quoted {
+        at += 1;
+    }
+    let start = at;
+    while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+        at += 1;
+    }
+    let end = at;
+    if quoted && at < bytes.len() && bytes[at] == b'"' {
+        at += 1;
+    }
+    (start, end, at)
+}
+
+const fn region_eq(bytes: &[u8], start: usize, end: usize, needle: &[u8]) -> bool {
+    if end < start || end - start != needle.len() {
+        return false;
+    }
+    matches_at(bytes, start, needle)
 }
 
 const fn matches_at(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
