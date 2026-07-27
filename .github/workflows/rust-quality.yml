@@ -54,10 +54,17 @@ jobs:
       - name: Test admin-console gate toolchain contract
         run: ./scripts/test-check-admin-console.sh
 
+      # These named `-p ferrogate-cli` until #561's rework, and had selected
+      # ZERO tests since #553 stage 1 moved the config module into its own
+      # crate: `cargo test <filter>` exits 0 when the filter matches nothing,
+      # so the step stayed green while running nothing, and paid the entire
+      # ferrogate-cli build to do it. Measured on the pre-change tree, both
+      # commands: 0 passed, 0 failed, across all 66 ferrogate-cli targets.
+      # Now, against ferrogate-config: 21 and 193 tests respectively.
       - name: Run config validation tests
         run: |
-          cargo test -p ferrogate-cli --all-features config::tests
-          cargo test -p ferrogate-cli --all-features config::validation_tests
+          cargo test -p ferrogate-config --all-features config::tests
+          cargo test -p ferrogate-config --all-features config::validation_tests
 
       # #499 (related): check-module-layout.py enforces the per-file line caps
       # that keep ferrogate-storage's lib.rs reviewable. It appeared in no

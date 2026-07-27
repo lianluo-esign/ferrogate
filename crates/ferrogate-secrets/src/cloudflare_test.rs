@@ -24,6 +24,7 @@ use ferrogate_cloudflare::{
     HttpResponse, HttpTransport, RetryPolicy, TokioClock,
 };
 
+use crate::cloudflare_bindings::CF_BINDING_ENV_PREFIX;
 use crate::{
     cf_binding_env_var, cf_binding_name_is_unambiguous, CfSecretBindings, CfSecretsStoreConfig,
     CloudflareSecretResolver, SecretRef, SecretResolver, SecretResolverRegistry, CF_ACCOUNT_ID_ENV,
@@ -173,6 +174,57 @@ fn canonical_names_are_unambiguous_and_everything_else_is_not() {
         assert!(
             !cf_binding_name_is_unambiguous(name),
             "{name} must not be treated as unambiguous"
+        );
+    }
+}
+
+/// What `cf_binding_env_var` PRODUCES was never pinned, only what it collides
+/// with -- and producing a name no shell can export is exactly the defect #561
+/// fixed one layer up, where the `cf://` write refusal named
+/// `FERROGATE_CF_SECRET_OPENAI.API.KEY` as the collision. That fix now routes
+/// through this function, so the same class of bug simply moves down here:
+/// `is_ascii_alphanumeric()` -> `is_alphanumeric()` is a one-word edit that
+/// leaves every other assertion in this file green (`é` and `٣` are neither
+/// canonical nor unambiguous either way, and the aliasing pairs still alias)
+/// while emitting `FERROGATE_CF_SECRET_CAFÉ_KEY`.
+///
+/// The property is the whole point of the prefix convention: whatever an
+/// operator names a secret, what FerroGate asks the platform to export must be
+/// a POSIX environment-variable name.
+#[test]
+fn the_binding_variable_is_always_a_name_a_shell_can_export() {
+    for name in [
+        "openai-api-key",
+        "openai.api.key",
+        "openai api key",
+        "db.password/v2",
+        "café-key",
+        "ключ",
+        "キー",
+        "\u{0663}-key",
+        "openai\u{2013}api\u{2013}key",
+        "emoji-\u{1f511}",
+        "",
+    ] {
+        let variable = cf_binding_env_var(name);
+        assert!(
+            variable.starts_with(CF_BINDING_ENV_PREFIX),
+            "{name:?} produced {variable:?}, which does not carry the binding prefix"
+        );
+        assert!(
+            variable
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+            "{name:?} produced {variable:?}: every character must be [A-Z0-9_], or no shell \
+             can export the binding and the error messages that NAME this variable are \
+             pointing at something that cannot exist"
+        );
+        assert_eq!(
+            variable.chars().count(),
+            CF_BINDING_ENV_PREFIX.chars().count() + name.chars().count(),
+            "{name:?} produced {variable:?}: the mapping must stay one character per \
+             character, otherwise two names of different lengths can collide in a way \
+             cf_binding_name_is_unambiguous does not model"
         );
     }
 }

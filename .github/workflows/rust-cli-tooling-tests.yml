@@ -57,6 +57,27 @@ jobs:
           - slice: test_harness
             package: ferrogate-test
             args: --all-features
+          # The whole crate, no filter. #561 measured that 50 of
+          # ferrogate-cli's 63 integration targets were selected by nothing and
+          # deliberately did NOT add this slice, because the unfiltered run was
+          # red on arrival (352 passed, 13 failed across 8 targets) and a job
+          # that is red the day it lands gets switched off by the next person.
+          # #564 fixed all 13, so that reason has expired: 66 targets, 365
+          # passed, 0 failed, 0 ignored, 0 filtered out.
+          #
+          # It is deliberately kept BESIDE the four filtered slices rather than
+          # replacing them. They are the fast, independently-failing signals --
+          # `cli_e2e` red tells you which surface broke without reading a
+          # 66-target log -- and matrix legs run in parallel, so the cost is
+          # one more concurrent runner, not more wall clock on the critical
+          # path. That cost is real and is the slowest leg of this workflow:
+          # 134s of test time across the 65 binaries, of which
+          # `target_capability_e2e` alone is 71s and `asset_presign_e2e` 21s,
+          # on top of a full ferrogate-cli build. If it ever needs trimming,
+          # those two targets are where the time is, not the long tail.
+          - slice: cli_all
+            package: ferrogate-cli
+            args: --all-features
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

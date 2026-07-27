@@ -13,8 +13,13 @@
 # they never looked absent.
 #
 # Every slice below was executed locally before it was written down, and the
-# counts in each comment are what that run printed. `--skip` filters name real,
-# filed failures; no slice asserts a green run nobody has watched.
+# counts in each comment are what that run printed; no slice asserts a green run
+# nobody has watched. Review returned that claim once, because it did not hold
+# for `agent_worker`: on this box there is no Docker daemon and on
+# `ubuntu-latest` there is, and three of that crate's tests branch on a bare
+# `docker version` probe. The `docker_bin` matrix key below is what makes the
+# claim true again rather than the claim being softened. Two counts were also
+# wrong (`payments`, `secrets`) and are corrected from a fresh run.
 name: Rust platform crate tests
 
 on:
@@ -50,20 +55,41 @@ jobs:
           # needs a KVM runner -- so it was not CI coverage, and the other 341
           # tests ran nowhere. The Firecracker integration targets skip cleanly
           # without /dev/kvm and are included here on that basis.
+          #
+          # `AGENT_WORKER_DOCKER_BIN` is the one slice-level environment
+          # setting in this workflow, and it exists because of the claim above
+          # it. Three tests in this crate branch on `docker_backend_readiness()`
+          # -- a bare `docker version` probe, NOT the
+          # `AGENT_WORKER_ENABLE_DOCKER_BACKEND` opt-in, which two of them set
+          # themselves. On the box where the 342 was measured there is no
+          # daemon, so all three took their hermetic branch; `ubuntu-latest`
+          # ships one, so unpinned this slice would instead pull an image, exec
+          # and commit a live container, and silently stop running the
+          # fail-closed assertion in
+          # `provision_fails_closed_when_docker_backend_enabled_but_daemon_unreachable`.
+          # Naming
+          # a binary that does not exist makes the probe fail deterministically,
+          # so the slice runs the branch that was watched. The consequence is
+          # disclosed rather than hidden: `agent-worker`'s live-Docker lifecycle
+          # is exercised by no CI job, here or anywhere.
           - slice: agent_worker
             package: agent-worker
             args: --all-features
-          # 115 passed / 0 failed / 0 ignored.
+            docker_bin: agent-worker-docker-absent
+          # 115 passed / 0 failed / 0 ignored, over 2 targets.
           - slice: cloudflare
             package: ferrogate-cloudflare
             args: --all-features
-          # 50 passed / 0 failed / 0 ignored -- 49 of them until #561 fixed the
+          # 51 passed / 0 failed / 0 ignored -- 49 of them until #561 fixed the
           # cf:// collision guard's error text, which this slice's first run
-          # caught.
+          # caught, and 50 until the rework pinned the character class that
+          # error's variable name is built from.
           - slice: secrets
             package: ferrogate-secrets
             args: --all-features
-          # 47 passed / 0 failed / 0 ignored.
+          # 82 passed / 0 failed / 0 ignored, over 3 targets: 14 in the lib,
+          # 48 in negative_corpus, 20 in wire_contract. #561 wrote 47 here,
+          # which was the lib target's count of the day and not the slice's.
           - slice: payments
             package: ferrogate-payments
             args: --all-features
@@ -83,5 +109,10 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
+      # `matrix.docker_bin` is empty on every slice but `agent_worker`, and
+      # `docker_bin()` treats an empty value exactly as an unset one, so this
+      # is inert everywhere else.
       - name: Test ${{ matrix.slice }} slice
+        env:
+          AGENT_WORKER_DOCKER_BIN: ${{ matrix.docker_bin }}
         run: cargo test -p "${{ matrix.package }}" ${{ matrix.args }}

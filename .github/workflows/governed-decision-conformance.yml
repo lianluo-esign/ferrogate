@@ -36,8 +36,17 @@ jobs:
       # Drives the real admission seam (`decide_ai_request`) over every fixture
       # and enforces the error-vocabulary coverage gate: a reproducible governed
       # outcome with no fixture fails here.
+      #
+      # This selector read `-p ferrogate-cli --bin ferrogate` until #561's
+      # rework, and had been running NOTHING since #553 stage 3b moved the
+      # governed-decision seam into `ferrogate-gateway`: measured on the
+      # pre-change tree it reported "0 passed; 0 filtered out" -- not even a
+      # filtered test to filter, because that binary carries no tests at all.
+      # Runner B kept running, so #470's whole point (fail CI on divergence
+      # between the authority and the Worker shell) had quietly become a
+      # one-sided check. Against `ferrogate-gateway`: 18 tests.
       - name: Runner A -- the authority
-        run: cargo test -p ferrogate-cli --bin ferrogate governed_decision
+        run: cargo test -p ferrogate-gateway --all-features governed_decision
 
   runner-b-worker-shell:
     name: governed-decision-conformance / runner-b-worker-shell

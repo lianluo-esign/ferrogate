@@ -25,6 +25,7 @@ Modules:
   core-policy
   control-plane
   agentic-gateway
+  governed-decisions
   ai-proxy
   cli-tooling
   platform-crates
@@ -62,8 +63,12 @@ run_quality() {
   cargo fmt --all -- --check
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo metadata --locked --format-version=1 >/dev/null
-  cargo test -p ferrogate-cli --all-features config::tests
-  cargo test -p ferrogate-cli --all-features config::validation_tests
+  # These named `-p ferrogate-cli` until #561's rework and had selected zero
+  # tests since #553 stage 1 moved the config module into its own crate. A
+  # cargo filter that matches nothing exits 0, so both ran nothing, in silence,
+  # in this file and in rust-quality.yml alike. 21 and 193 tests now.
+  cargo test -p ferrogate-config --all-features config::tests
+  cargo test -p ferrogate-config --all-features config::validation_tests
   python3 scripts/check-openapi.py
   # Coverage gate (#561): fails when a workspace member's tests are executed by
   # no CI slice, or by no module in this file. Sub-second, no cargo work.
@@ -113,19 +118,33 @@ run_agentic_gateway() {
 # workspace -- was executed by any job or any module here.
 run_platform_crates() {
   ensure_toolchain
-  # The four skips are issue #563; keep them identical to the workflow's, and
-  # delete them in both places at once. See rust-platform-crate-tests.yml for
-  # why they are skipped rather than waited on.
-  cargo test -p ferrogate-gateway --all-features -- \
-    --skip signed_shared_snapshot_verifies_activates_and_rejects_forgery \
-    --skip signed_snapshot_replay_floor_advances_on_local_publish \
-    --skip signed_snapshot_replay_floor_persists_across_restart \
-    --skip unsigned_shared_snapshots_are_unaffected_by_the_persisted_replay_floor
-  cargo test -p agent-worker --all-features
+  # The four `--skip` filters that stood here were #563's, and #563 landed --
+  # deleting them from rust-platform-crate-tests.yml and not from here, which
+  # is the CI/local drift this module exists to end, reappearing inside the
+  # commit that closed it. 1067 passed / 0 failed / 0 filtered out.
+  cargo test -p ferrogate-gateway --all-features
+  # AGENT_WORKER_DOCKER_BIN matches the workflow slice, for the reason spelled
+  # out there: three tests in this crate branch on a bare `docker version`
+  # probe rather than on the AGENT_WORKER_ENABLE_DOCKER_BACKEND opt-in, so on a
+  # host with a daemon they pull and exec a real container and quietly stop
+  # asserting the daemon-unreachable fail-closed path. Pinning the probe makes
+  # this run the same thing everywhere.
+  AGENT_WORKER_DOCKER_BIN=agent-worker-docker-absent \
+    cargo test -p agent-worker --all-features
   cargo test -p ferrogate-cloudflare --all-features
   cargo test -p ferrogate-secrets --all-features
   cargo test -p ferrogate-payments --all-features
   cargo test -p ferrogate-sync-bridge --all-features
+}
+
+# Mirrors `governed-decision-conformance.yml`'s Runner A (#470, #561 rework).
+# That workflow had no line in this file at all, and the crate coverage gate
+# could not see the hole because `ferrogate-gateway` is selected by the
+# platform-crates module anyway -- selection is not health, and this is what
+# that disclaimer costs when nobody reads it.
+run_governed_decisions() {
+  ensure_toolchain
+  cargo test -p ferrogate-gateway --all-features governed_decision
 }
 
 run_ai_proxy() {
@@ -149,14 +168,15 @@ run_cli_tooling() {
   # (renamed from `cli_core` with the crate in #553). It was missing here, so
   # the crate's ~17k lines of hermetic client tests had no local invocation at
   # all.
-  #
-  # This still does not run `cargo test -p ferrogate-cli` unfiltered: 50 of the
-  # crate's 63 integration targets are selected by nothing, and the unfiltered
-  # run is red on arrival -- 352 passed, 13 failed across 8 targets, measured in
-  # #561 and filed as #564. Adding a job for it before those land would just
-  # produce a red check that the next person turns off.
   cargo test -p ferrogate-control-plane-client --all-features
   cargo test -p ferrogate-test --all-features
+  # Mirrors the `cli_all` slice. #561 measured the unfiltered run as red on
+  # arrival (352 passed, 13 failed across 8 targets) and left it out rather
+  # than land a check the next person would turn off; #564 fixed all 13, so it
+  # is here. 66 targets, 365 passed, 0 failed. This is the slowest line in the
+  # file -- 134s of test time, 71s of it in target_capability_e2e -- and it
+  # comes last so the filtered slices above report first.
+  cargo test -p ferrogate-cli --all-features
 }
 
 run_gateway_runtime() {
@@ -204,6 +224,7 @@ run_module() {
     core-policy) run_core_policy ;;
     control-plane) run_control_plane ;;
     agentic-gateway) run_agentic_gateway ;;
+    governed-decisions) run_governed_decisions ;;
     ai-proxy) run_ai_proxy ;;
     cli-tooling) run_cli_tooling ;;
     platform-crates) run_platform_crates ;;
@@ -236,6 +257,7 @@ if [[ "$1" == "all" ]]; then
     core-policy
     control-plane
     agentic-gateway
+    governed-decisions
     ai-proxy
     cli-tooling
     platform-crates

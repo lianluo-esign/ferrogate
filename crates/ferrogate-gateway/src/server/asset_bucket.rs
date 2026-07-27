@@ -2260,6 +2260,34 @@ mod tests {
         assert!(message.contains("250ms"), "{message}");
     }
 
+    /// Assert that every path a structural guard exempts names a real file.
+    ///
+    /// The four scans below exempt files BY PATH, relative to this crate's
+    /// `src`. An exemption that points at nothing is not a harmless no-op: it
+    /// silently widens the guard, because the file it was meant to exempt is
+    /// now scanned like any other. #553 stage 3b moved this tree from
+    /// `ferrogate-cli/src/gateway/` to `ferrogate-gateway/src/server/` and the
+    /// allow-lists did not move; three guards went red and one, the
+    /// `into_parts` scan, stayed GREEN with a self-exemption pointing at a
+    /// path that had not existed for days -- purely because its own source
+    /// happened not to carry the needle in a flagged form.
+    ///
+    /// So the guards' paths get a floor of their own. Nothing else here can
+    /// tell "this exemption is load-bearing" from "this exemption resolves to
+    /// nothing", and that is the difference the whole #553 window hid.
+    fn assert_every_exemption_resolves(source_root: &std::path::Path, allowed: &[&str]) {
+        for relative in allowed {
+            assert!(
+                source_root.join(relative).is_file(),
+                "the exemption {relative:?} names no file under {}. An exemption that \
+                 resolves to nothing does not fail this guard by itself -- it just stops \
+                 exempting, so either the file moved (fix the path) or the exemption is \
+                 dead (delete it), but it may not sit here meaning neither.",
+                source_root.display()
+            );
+        }
+    }
+
     /// The structural half of the #259 round-2 fix, and the answer to "what
     /// happens when someone adds a fifth read surface".
     ///
@@ -2288,6 +2316,7 @@ mod tests {
         const ALLOWED: [&str; 2] = ["server/asset_bucket.rs", "server/asset_presign.rs"];
 
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_every_exemption_resolves(&source_root, &ALLOWED);
         let mut offenders: Vec<String> = Vec::new();
         let mut scanned = 0_usize;
         let mut pending = vec![source_root.clone()];
@@ -2364,7 +2393,12 @@ mod tests {
         ///   needle it searches for.
         //
         // The `server/` prefixes are the #553 stage 3b location; see the
-        // allow-list above for why they were stale.
+        // allow-list above for why they were stale. Three of these four moved,
+        // not all of them -- `state_assets.rs` is top level and kept matching
+        // throughout, which is worth saying precisely, because "the whole list
+        // broke" and "most of the list broke, so the guard's message named the
+        // wrong offenders" are different failures and only the second happened
+        // here.
         const ALLOWED: [&str; 4] = [
             "server/asset_admission.rs",
             "server/asset_bucket.rs",
@@ -2373,6 +2407,7 @@ mod tests {
         ];
 
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_every_exemption_resolves(&source_root, &ALLOWED);
         let mut offenders: Vec<String> = Vec::new();
         let mut scanned = 0_usize;
         let mut pending = vec![source_root.clone()];
@@ -2442,7 +2477,15 @@ mod tests {
     /// makes the second spelling fail by file and line.
     #[test]
     fn the_admission_permit_is_never_discarded_at_a_split() {
+        /// This file hosts the scan, so its own source carries the needle; the
+        /// same exemption the two guards above take. It read
+        /// `gateway/asset_bucket.rs` from #553 stage 3b until #561 -- and this
+        /// guard stayed GREEN throughout, which is why nothing found it. That
+        /// is what `assert_every_exemption_resolves` is for.
+        const SELF_EXEMPTION: &str = "server/asset_bucket.rs";
+
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_every_exemption_resolves(&source_root, &[SELF_EXEMPTION]);
         let mut offenders: Vec<String> = Vec::new();
         let mut splits = 0_usize;
         let mut scanned = 0_usize;
@@ -2468,9 +2511,7 @@ mod tests {
                     .expect("path under src")
                     .to_string_lossy()
                     .replace('\\', "/");
-                // This file hosts the scan, so its own source carries the
-                // needle; the same exemption the two guards above take.
-                if relative == "server/asset_bucket.rs" {
+                if relative == SELF_EXEMPTION {
                     continue;
                 }
                 scanned += 1;
@@ -2525,8 +2566,12 @@ mod tests {
         /// a forwarding that drifts further than this from the call is one a
         /// reader can no longer see is there.
         const WINDOW: usize = 3;
+        /// This file hosts the scan, so its own source carries the needle; the
+        /// same exemption the guards above take.
+        const SELF_EXEMPTION: &str = "server/asset_bucket.rs";
 
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_every_exemption_resolves(&source_root, &[SELF_EXEMPTION]);
         let mut offenders: Vec<String> = Vec::new();
         let mut call_sites = 0_usize;
         let mut pending = vec![source_root.clone()];
@@ -2551,9 +2596,7 @@ mod tests {
                     .expect("path under src")
                     .to_string_lossy()
                     .replace('\\', "/");
-                // This file hosts the scan, so its own source carries the
-                // needle; the same exemption the guards above take.
-                if relative == "server/asset_bucket.rs" {
+                if relative == SELF_EXEMPTION {
                     continue;
                 }
                 let body = std::fs::read_to_string(&path).expect("readable source file");
