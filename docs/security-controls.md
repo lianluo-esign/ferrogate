@@ -290,6 +290,21 @@ skip a file silently (#344, #487). `scripts/test-check-secret-scan.sh` drives
 the script with each tool shadowed out of `PATH` and diffs both engines over a
 planted-credential corpus.
 
+A handful of test fixtures legitimately match — a synthetic token a leak test
+asserts never leaves the Worker, for instance. Those are reviewed exceptions in
+a table inside the scan (`--list-allowlist` prints it), and each one exempts a
+single line, pinned by the SHA-256 of that line's own content, with a written
+reason (#566). The digest is what keeps an exception from becoming a hole: a
+file-scoped exemption would let a real key pasted anywhere in a credential test
+scan clean, and the test suite plants a realistic key in an allowlisted file —
+both beside the reviewed line and on top of it — and requires the scan to
+report it. An entry that stops matching fails the scan as stale rather than
+lingering, and an allowlisted line that has *changed* is reported as a finding
+with a note saying so, because "this file was edited" and "a credential leaked"
+have opposite fixes. Nothing else can suppress a match. The first choice is
+still to make the fixture not look like a credential at all, which is how #566
+itself was closed.
+
 Published release images (`.github/workflows/ci-image.yml` and
 `.github/workflows/package.yml`, both reached only from a published release)
 are additionally covered by a shared `.github/actions/image-supply-chain`

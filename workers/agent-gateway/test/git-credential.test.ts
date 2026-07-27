@@ -773,7 +773,14 @@ describe("#501 at the route: 400, 413, 502 — never an uncaught Worker exceptio
     const calls: string[] = [];
     const env = {
       GITHUB_APP_ID: "123456",
-      GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----",
+      // Deliberately NOT PEM-shaped (#566). The only thing this route does with
+      // the key is `Boolean(env.GITHUB_APP_PRIVATE_KEY)` -- the `appBound`
+      // fail-closed check in `handleGitCredential` -- so any non-empty string
+      // exercises exactly what this test needs. The PEM shape is read only by
+      // `appJwt`, on the mint path, which the throwing RPC stub below never
+      // reaches. A PEM header here bought the test nothing and cost the repo a
+      // secret-scan match that had to be adjudicated by hand.
+      GITHUB_APP_PRIVATE_KEY: "app-bound-marker-this-route-never-parses-a-key",
       AGENT_GATEWAY: {
         idFromName: (name: string) => ({ name }),
         get: () => ({

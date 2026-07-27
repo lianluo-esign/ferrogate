@@ -21,6 +21,7 @@
 #   scripts/check-secret-scan.sh                 # scan this checkout
 #   scripts/check-secret-scan.sh --root DIR      # scan another git checkout
 #   scripts/check-secret-scan.sh --list-files    # print the resolved scan list
+#   scripts/check-secret-scan.sh --list-allowlist  # print the reviewed exceptions
 #
 # Engine equivalence: rg is invoked with --line-number --no-heading and no
 # other regex flags, so every pattern below is plain (non-PCRE) regex matched
@@ -43,6 +44,7 @@ set -euo pipefail
 
 root_dir=""
 list_files_only=0
+list_allowlist_only=0
 scanning_this_repo=1
 
 while [[ "$#" -gt 0 ]]; do
@@ -57,8 +59,15 @@ while [[ "$#" -gt 0 ]]; do
       list_files_only=1
       shift
       ;;
+    --list-allowlist)
+      # The reviewed-exception table, one TAB-separated row per entry, so
+      # scripts/test-check-secret-scan.sh can drive the real table instead of
+      # restating it -- a copy in the test is a copy that stops matching.
+      list_allowlist_only=1
+      shift
+      ;;
     -h | --help)
-      sed -n '8,30p' "${BASH_SOURCE[0]}"
+      sed -n '8,31p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -77,6 +86,41 @@ if [[ -z "$root_dir" ]]; then
 fi
 cd "$root_dir"
 root_dir="$PWD"
+
+# Reviewed non-secret matches: "<label>\t<path>\t<sha256>\t<reason>".
+#
+# An entry exempts ONE LINE, pinned by the SHA-256 of the matched line's own
+# content -- not the file (#566). A file-scoped exemption means a real key
+# pasted anywhere in an allowlisted file scans clean, and the two files here are
+# credential tests, exactly where a real value is most likely to be pasted by
+# mistake. The digest is over the line's text only, so the entry survives the
+# line moving and dies the moment its content changes.
+#
+# Two ways an entry fails rather than rots. One that matches nothing at all is
+# reported as stale below (same discipline as REVIEWED_BINARY_FILES in
+# scripts/check-binary-source-files.py). One whose file and label still match
+# but whose line has CHANGED grants nothing: the match is reported as a finding,
+# with a note naming the entry so the reader knows to re-review the line and
+# update the digest rather than to hunt a breach.
+#
+# Never put the literal value here -- the allowlist file is itself scanned, and
+# a digest is not the value. Recompute one with:
+#
+#   scripts/check-secret-scan.sh 2>&1 | sed -n 's/^[^:]*:[0-9]*://p' |
+#     while IFS= read -r l; do printf '%s' "$l" | sha256sum; done
+secret_scan_allowlist=(
+  $'GitHub token\tcrates/ferrogate-runtime/src/coding_agent/materialize_test.rs\t316f47ed71425cec4cab1629059b6d69d36ec7e20e291f6d4be41073f3650e00\tsynthetic bare-token literal asserting CredentialReference::parse rejects inline credentials'
+  $'GitHub token\tworkers/agent-gateway/test/git-credential-leak.test.ts\t0196265512882027f8b3308963f78177c1ea15c154b0eab71a3cf5c29622b816\tsynthetic token the leak test asserts never reaches an upstream request'
+  $'private key material\tworkers/agent-gateway/vitest.config.ts\t4bfc0a278b803710d04c8af4b9949dd730d00088d60f0e3104995fbf7e4315c0\tPEM header of the test-only signing key whose body reads "not-a-real-key-tests-never-sign"'
+)
+allowlist_hits=()
+for _ in "${secret_scan_allowlist[@]}"; do allowlist_hits+=(0); done
+allowlist_drift=()
+
+if [[ "$list_allowlist_only" -eq 1 ]]; then
+  printf '%s\n' "${secret_scan_allowlist[@]}"
+  exit 0
+fi
 
 # --- tool preflight -----------------------------------------------------
 # Resolve the search engine before any work happens, and name what is missing.
@@ -99,6 +143,23 @@ fi
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
   echo "secret scan cannot run: $root_dir is not a git checkout" >&2
   exit 1
+fi
+
+# The allowlist pins each reviewed exemption to one line by SHA-256 (#566), so
+# without a digest tool the scan could only choose between granting every
+# exemption unchecked and reporting three known-good lines as findings. Both are
+# wrong, and only this repo's own scan consults the allowlist at all.
+secret_scan_digest_cmd=()
+if [[ "$scanning_this_repo" -eq 1 ]]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    secret_scan_digest_cmd=(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    secret_scan_digest_cmd=(shasum -a 256)
+  else
+    echo "secret scan cannot run: the allowlist pins each reviewed line by SHA-256 and neither 'sha256sum' nor 'shasum' is on PATH" >&2
+    echo "a gate that cannot verify its own exemptions must fail loudly instead of granting them (#525, #566)" >&2
+    exit 1
+  fi
 fi
 
 # --- file list ----------------------------------------------------------
@@ -187,31 +248,37 @@ run_secret_scan_engine() {
   return "$status"
 }
 
-# Reviewed non-secret matches: "<label>\t<path>\t<reason>". An entry that
-# matches nothing is itself a failure, so the table cannot rot into a silent
-# permanent exemption (same discipline as REVIEWED_BINARY_FILES in
-# scripts/check-binary-source-files.py). Never put the literal value here --
-# the allowlist file is itself scanned.
-secret_scan_allowlist=(
-  $'GitHub token\tcrates/ferrogate-runtime/src/coding_agent/materialize_test.rs\tsynthetic bare-token literal asserting CredentialReference::parse rejects inline credentials'
-  $'GitHub token\tworkers/agent-gateway/test/git-credential-leak.test.ts\tsynthetic token the leak test asserts never reaches an upstream request'
-  $'private key material\tworkers/agent-gateway/vitest.config.ts\tPEM header of the test-only signing key whose body reads "not-a-real-key-tests-never-sign"'
-)
-allowlist_hits=()
-for _ in "${secret_scan_allowlist[@]}"; do allowlist_hits+=(0); done
+# SHA-256 of a single line's content, with no trailing newline. `sha256sum` and
+# `shasum -a 256` print "<digest>  <name>"; keep the first field in bash so the
+# scan needs no extra process on PATH.
+secret_scan_line_digest() {
+  local rendered
+  rendered="$(printf '%s' "$1" | "${secret_scan_digest_cmd[@]}")" || return 1
+  printf '%s' "${rendered%% *}"
+}
 
 secret_scan_allowlisted() {
   local label="$1"
   local path="$2"
+  local content="$3"
   local index=0
-  local entry entry_label entry_path
+  local digest="" entry rest entry_label entry_path entry_digest
   for entry in "${secret_scan_allowlist[@]}"; do
-    entry_label="${entry%%$'\t'*}"
-    entry_path="${entry#*$'\t'}"
-    entry_path="${entry_path%%$'\t'*}"
+    rest="$entry"
+    entry_label="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    entry_path="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    entry_digest="${rest%%$'\t'*}"
     if [[ "$label" == "$entry_label" && "$path" == "$entry_path" ]]; then
-      allowlist_hits[index]=1
-      return 0
+      [[ -n "$digest" ]] || digest="$(secret_scan_line_digest "$content")"
+      if [[ "$digest" == "$entry_digest" ]]; then
+        allowlist_hits[index]=1
+        return 0
+      fi
+      # Same file, same pattern, different line. Say so: "an allowlisted file
+      # changed" and "a credential leaked" have opposite fixes.
+      allowlist_drift+=("$label | $path | reviewed digest ${entry_digest:0:12}..., this line ${digest:0:12}...")
     fi
     index=$((index + 1))
   done
@@ -232,10 +299,14 @@ scan_secret_pattern() {
     return 1
   fi
 
-  local line path kept=0
+  # Engine output is "<path>:<line-number>:<content>"; the allowlist is pinned
+  # to the content, so the entry survives the line moving within its file.
+  local line path rest content kept=0
   while IFS= read -r line; do
     path="${line%%:*}"
-    if [[ "$scanning_this_repo" -eq 1 ]] && secret_scan_allowlisted "$label" "$path"; then
+    rest="${line#*:}"
+    content="${rest#*:}"
+    if [[ "$scanning_this_repo" -eq 1 ]] && secret_scan_allowlisted "$label" "$path" "$content"; then
       continue
     fi
     printf '%s\n' "$line" >>"$scan_file"
@@ -263,6 +334,11 @@ if [[ "$scan_failed" -ne 0 ]]; then
   if [[ -s "$scan_file" ]]; then
     echo "Potential secrets found:" >&2
     sed -n '1,120p' "$scan_file" >&2
+    if [[ "${#allowlist_drift[@]}" -ne 0 ]]; then
+      echo "note: an allowlisted file matched on a line the allowlist does not cover:" >&2
+      printf '  %s\n' "${allowlist_drift[@]}" >&2
+      echo "re-review the line; if it is still not a secret, update the entry's digest in ${BASH_SOURCE[0]}" >&2
+    fi
   else
     echo "secret scan did not complete; treat this repository as unscanned" >&2
   fi

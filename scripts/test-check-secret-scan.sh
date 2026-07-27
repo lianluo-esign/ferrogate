@@ -50,8 +50,10 @@ make_shim_path() {
   printf '%s' "$dir"
 }
 
-# Everything check-secret-scan.sh may exec, minus the search tools.
-base_tools=(bash mktemp sed sort comm cat rm)
+# Everything check-secret-scan.sh may exec, minus the search tools. sha256sum
+# is here because the reviewed-exception allowlist pins each entry to one line
+# by digest (#566), so a scan OF THIS REPO needs it; a --root scan does not.
+base_tools=(bash mktemp sed sort comm cat rm sha256sum)
 
 # ---------------------------------------------------------------------------
 # A corpus with planted fake credentials, in its own git checkout.
@@ -414,6 +416,173 @@ elif [[ "$reported_scanned" -lt $(( tracked_total * 9 / 10 )) ]]; then
     "reported ${reported_scanned} of ${tracked_total} tracked files"
 else
   pass "scan reports its coverage and covers ${reported_scanned}/${tracked_total} tracked files"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. The reviewed-exception allowlist (#566).
+#
+#    The allowlist is the only way a match can be dropped, so it is the only
+#    place a real key could hide. It used to be scoped to <label, file>, which
+#    means a real key pasted ANYWHERE in an allowlisted file scanned clean --
+#    and both allowlisted files are credential tests, the likeliest place for
+#    someone to paste a live value while debugging. It is now scoped to one
+#    line, pinned by SHA-256 of that line's content.
+#
+#    These cases drive the real script over a fixture checkout built from the
+#    real allowlisted files, so the exemptions are the production ones. The
+#    allowlist only applies when the script scans its OWN repo, so the fixture
+#    puts a copy of the script at <fixture>/scripts/ and runs it with no
+#    --root.
+# ---------------------------------------------------------------------------
+
+# Assembled at runtime, like every other fake credential in this file: a
+# realistic PKCS#1 line, ~400 characters of base64 body, of the shape a real
+# leak has and the reviewed placeholders do not.
+pem_open="-----BEGIN"
+pem_private="PRIVATE KEY-----"
+realistic_der="MIIEpAIBAAKCAQEA"
+for _ in 1 2 3 4 5 6; do
+  realistic_der+="7bQvXk2LmN9pRs0aZbYcJhGfEeDdCcBbAa9876543210QwErTyUiOpAsDfGhJkL"
+done
+realistic_key_line="  KEY: \"${pem_open} RSA ${pem_private}\\n${realistic_der}\\n\","
+
+# The table itself, from the script rather than restated here: a copy in the
+# test is a copy that stops matching the thing it claims to cover.
+mapfile -t allowlist_rows < <("$script" --list-allowlist)
+if [[ "${#allowlist_rows[@]}" -ge 1 ]]; then
+  pass "the script publishes its allowlist (${#allowlist_rows[@]} reviewed exception(s))"
+else
+  fail "the script publishes its allowlist" "--list-allowlist printed nothing"
+fi
+
+allowlist_paths=()
+allowlist_pem_path=""
+for row in "${allowlist_rows[@]}"; do
+  IFS=$'\t' read -r row_label row_path row_digest row_reason <<<"$row"
+  if [[ ! "$row_digest" =~ ^[0-9a-f]{64}$ ]]; then
+    fail "every allowlist entry pins a line by SHA-256" "$row_label | $row_path | digest: ${row_digest:0:20}"
+  fi
+  if [[ "${#row_reason}" -lt 20 ]]; then
+    fail "every allowlist entry carries a written reason" "$row_label | $row_path"
+  fi
+  if [[ ! -f "$root/$row_path" ]]; then
+    fail "every allowlist entry names a file that exists" "$row_path"
+  fi
+  allowlist_paths+=("$row_path")
+  [[ "$row_label" == "private key material" ]] && allowlist_pem_path="$row_path"
+done
+if [[ -n "$allowlist_pem_path" ]]; then
+  pass "allowlist entries carry a 64-hex digest, a reason, and an existing path"
+else
+  fail "the allowlist still holds a private-key exception to test against" \
+    "no 'private key material' entry; if that is deliberate, delete section 7's plant cases with it"
+fi
+
+# A fixture checkout carrying the script and every allowlisted file, so the
+# production exemptions are the ones under test.
+self_fixture="$work/self"
+build_self_fixture() {
+  rm -rf "$self_fixture"
+  mkdir -p "$self_fixture/scripts"
+  cp "$script" "$self_fixture/scripts/check-secret-scan.sh"
+  local path
+  for path in "${allowlist_paths[@]}"; do
+    mkdir -p "$self_fixture/${path%/*}"
+    cp "$root/$path" "$self_fixture/$path"
+  done
+  (
+    cd "$self_fixture"
+    git init -q .
+    git config user.email scan@test.invalid
+    git config user.name 'scan test'
+    git add -A
+    git commit -qm fixture
+  ) >/dev/null
+}
+run_self_fixture() { "$bash_bin" "$self_fixture/scripts/check-secret-scan.sh" 2>&1; }
+
+# 7a. The control. Without this, every plant below could pass because the
+#     fixture never scans clean in the first place.
+build_self_fixture
+fixture_out="$(run_self_fixture)"
+fixture_status=$?
+if [[ "$fixture_status" -eq 0 && "$fixture_out" == *"secret scan passed"* ]]; then
+  pass "allowlist: the reviewed lines are exempted and the fixture scans clean"
+else
+  fail "allowlist: the reviewed lines are exempted and the fixture scans clean" \
+    "status $fixture_status, output: $fixture_out"
+fi
+
+# 7b. THE GUARD. A real-shaped key added to an allowlisted file is reported.
+#     Under the old <label, file> scoping this case passed the scan.
+build_self_fixture
+printf '%s\n' "$realistic_key_line" >>"$self_fixture/$allowlist_pem_path"
+(cd "$self_fixture" && git commit -qam planted) >/dev/null
+planted_self_out="$(run_self_fixture)"
+planted_self_status=$?
+if [[ "$planted_self_status" -ne 0 ]]; then
+  pass "allowlist: a real-shaped key elsewhere in an allowlisted file fails the scan"
+else
+  fail "allowlist: a real-shaped key elsewhere in an allowlisted file fails the scan" \
+    "the exemption swallowed it; output: $planted_self_out"
+fi
+if [[ "$planted_self_out" == *"$realistic_der"* && "$planted_self_out" == *"$allowlist_pem_path"* ]]; then
+  pass "allowlist: the planted key is printed, with its path"
+else
+  fail "allowlist: the planted key is printed, with its path" "output: $planted_self_out"
+fi
+
+# 7c. The same key ON the reviewed line, which a <label, file, line-number>
+#     exception would still have exempted. The digest is what refuses it.
+build_self_fixture
+printf '%s\n' "$realistic_key_line" >"$self_fixture/$allowlist_pem_path"
+(cd "$self_fixture" && git commit -qam replaced) >/dev/null
+replaced_self_out="$(run_self_fixture)"
+replaced_self_status=$?
+if [[ "$replaced_self_status" -ne 0 && "$replaced_self_out" == *"$realistic_der"* ]]; then
+  pass "allowlist: a real-shaped key replacing the reviewed line fails the scan"
+else
+  fail "allowlist: a real-shaped key replacing the reviewed line fails the scan" \
+    "status $replaced_self_status, output: $replaced_self_out"
+fi
+# "an allowlisted file changed" and "a credential leaked" have opposite fixes,
+# so the report must distinguish them rather than leave the reader guessing.
+if [[ "$replaced_self_out" == *"the allowlist does not cover"* ]]; then
+  pass "allowlist: a changed reviewed line is reported as drift, not just as a hit"
+else
+  fail "allowlist: a changed reviewed line is reported as drift, not just as a hit" \
+    "output: $replaced_self_out"
+fi
+
+# 7d. An entry that stops matching is a failure, so the table cannot rot into a
+#     permanent exemption for a file nobody reviews any more.
+build_self_fixture
+(cd "$self_fixture" && git rm -q "$allowlist_pem_path" && git commit -qm dropped) >/dev/null
+stale_self_out="$(run_self_fixture)"
+stale_self_status=$?
+if [[ "$stale_self_status" -ne 0 && "$stale_self_out" == *"no longer match anything"* ]]; then
+  pass "allowlist: an entry that matches nothing fails the scan as stale"
+else
+  fail "allowlist: an entry that matches nothing fails the scan as stale" \
+    "status $stale_self_status, output: $stale_self_out"
+fi
+
+# 7e. No digest tool means the exemptions cannot be checked. Granting them
+#     unchecked is the silent skip #525 exists to refuse.
+no_digest_path="$(make_shim_path "$work/bin-no-digest" bash mktemp sed sort comm cat rm git)"
+build_self_fixture
+no_digest_out="$(PATH="$no_digest_path" "$bash_bin" "$self_fixture/scripts/check-secret-scan.sh" 2>&1)"
+no_digest_status=$?
+if [[ "$no_digest_status" -ne 0 && "$no_digest_out" == *"sha256sum"* ]]; then
+  pass "allowlist: no digest tool on PATH exits non-zero naming sha256sum"
+else
+  fail "allowlist: no digest tool on PATH exits non-zero naming sha256sum" \
+    "status $no_digest_status, output: $no_digest_out"
+fi
+if [[ "$no_digest_out" != *"secret scan passed"* ]]; then
+  pass "allowlist: no digest tool on PATH never reports a pass"
+else
+  fail "allowlist: no digest tool on PATH never reports a pass" "output: $no_digest_out"
 fi
 
 # Unused status from the very first probe; keep shellcheck and readers honest.
