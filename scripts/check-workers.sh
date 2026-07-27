@@ -36,7 +36,26 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/node-env.sh"
 ferrogate_require_node "workers gate" || exit 1
 
-WORKERS=(agent-gateway mcp-server d1-proxy telemetry-collector)
+# DERIVED, not hand-maintained (#499 review): the list used to be
+# `WORKERS=(agent-gateway mcp-server d1-proxy telemetry-collector)`, and
+# workers/gateway-front -- a real Worker with its own package.json -- was
+# simply not in it. The gate went GREEN while not covering it, which is the
+# same silent-skip class this issue is about, one level up: the gate ran, and
+# the thing it did not run was invisible.
+#
+# Every directory under workers/ carrying a package.json is a Worker and is
+# gated. Adding a Worker cannot now forget to add it here.
+WORKERS=()
+for candidate in "$ROOT"/workers/*/; do
+  [ -f "${candidate}package.json" ] || continue
+  WORKERS+=("$(basename "$candidate")")
+done
+if [ "${#WORKERS[@]}" -eq 0 ]; then
+  echo "ERROR: workers gate found no workers/*/package.json -- refusing to report success" >&2
+  echo "       (a gate that silently covers nothing is the defect this guards against)" >&2
+  exit 1
+fi
+echo "-- gating ${#WORKERS[@]} workers: ${WORKERS[*]}"
 
 echo "== workers gate =="
 for worker in "${WORKERS[@]}"; do

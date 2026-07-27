@@ -393,10 +393,27 @@ if [[ "$self_fallback_status" -eq 0 ]]; then
 else
   fail "this checkout passes the secret scan (git grep fallback)" "$self_fallback_out"
 fi
-if [[ "$self_out" == *"1492"* || "$self_out" == *"tracked files are line-scannable"* ]]; then
-  pass "scan reports its coverage instead of staying silent"
-else
+# #525 review: this used to be
+#   [[ "$self_out" == *"1492"* || "$self_out" == *"tracked files are line-scannable"* ]]
+# and the second branch is always true, because the scan always prints that
+# sentence. So the assertion could never notice the scan SHRINKING -- which,
+# for a secret scan, is the only failure that matters. Coverage IS the product.
+#
+# Assert the reported count against the tree instead of against a literal: a
+# hard-coded 1492 rots on the next commit, and a substring of the sentence
+# asserts that the sentence exists.
+reported_scanned="$(printf '%s' "$self_out" | grep -oE '[0-9]+ tracked files are line-scannable' | grep -oE '^[0-9]+' | head -1)"
+tracked_total="$(git -C "$root" ls-files | wc -l | tr -d ' ')"
+if [[ -z "$reported_scanned" ]]; then
   fail "scan reports its coverage instead of staying silent" "$self_out"
+elif [[ "$reported_scanned" -lt $(( tracked_total * 9 / 10 )) ]]; then
+  # A scan that silently stops covering a tenth of the tree is the regression
+  # this file exists to catch. The floor is deliberately a ratio, not a
+  # literal, so it survives the tree growing.
+  fail "the scan covers at least 90% of tracked files" \
+    "reported ${reported_scanned} of ${tracked_total} tracked files"
+else
+  pass "scan reports its coverage and covers ${reported_scanned}/${tracked_total} tracked files"
 fi
 
 # Unused status from the very first probe; keep shellcheck and readers honest.

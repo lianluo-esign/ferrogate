@@ -400,14 +400,29 @@ existing Dockerfile deploys as-is.
 4. **CF-native tier (conditional).** D1 control-plane backend (#419/#420) and
    deeper binding integration — only if phase 3 demonstrates demand.
 
-**On citations in this document (#484).** Code references here name
-*symbols*, not line numbers. The line-anchored form drifted twice: once between
-`10ec6f4` and the #484 review, and again before that review's fix landed --
-`gateway/mod.rs:191` now points at a version-string comparison and
-`ferrogate-storage/src/lib.rs:9939` at a closing brace. A spike document is read
-months after it is written, by someone following its anchors into unrelated
-code and concluding the document is stale. Symbols move with the code; line
-numbers rot silently and there is no gate that can catch it.
+**On citations in this document (#484).** Roughly 30 code references here are
+still **line-anchored, and they will rot.** Treat any `file.rs:NNN` below as a
+hint about which file to open, never as a place to look — if it lands on
+something unrelated, that is the anchor being stale, not the document being
+wrong about the mechanism.
+
+Only the three anchors that had already rotted were converted to symbols
+(`serve()`, the `RuntimeControlPlaneBackend` enum): they drifted twice, once
+between `10ec6f4` and the #484 review and again before that review's fix
+landed, and by then `gateway/mod.rs:191` pointed at a version-string
+comparison and `ferrogate-storage/src/lib.rs:9939` at a closing brace.
+
+The earlier version of this note claimed the whole document named symbols
+rather than line numbers. That was false while ~30 line anchors sat below it --
+a document asserting something its own body contradicts, which is the defect
+#484 was filed about, committed inside the fix for it.
+
+**Rule for new text:** name symbols. Converting the remaining anchors is
+worthwhile and is not done here; it needs each symbol verified against the
+tree, which is a separate pass rather than something to claim in a sentence.
+A spike document is read months after it is written, by someone following its
+anchors into unrelated code and concluding the whole thing is stale -- and no
+gate can catch that, because there is nothing to compile.
 
 **Follow-up implementation issues to file (list only — deliberately not
 created here).** **Status as of 2026-07-27: tracked in #539**, which carries all six as a
