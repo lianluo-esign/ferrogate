@@ -23,7 +23,7 @@ const SCHEDULER_CATCHUP_ITER_CAP: u64 = 10_000;
 /// Deterministic dispatch id for a (schedule, slot) fire so two gateway
 /// instances that race the same due slot enqueue the SAME dispatch -- the lease
 /// queue dedups on id, yielding exactly one dispatch per slot.
-fn scheduled_dispatch_id(schedule_id: &str, slot: i64) -> String {
+pub(crate) fn scheduled_dispatch_id(schedule_id: &str, slot: i64) -> String {
     format!("schedule-dispatch-{schedule_id}-{slot}")
 }
 
@@ -399,65 +399,102 @@ impl AppState {
         persist_self_hosted_dispatch_records(&self.repositories, records)
     }
 
-    /// How many `start_run` dispatches this tenant still holds OPEN against a
-    /// caller-facing submit budget.
+    /// Run ids of the tenant's unacknowledged submit-surface start dispatches,
+    /// projected out under the queue lock rather than deep-cloning every record
+    /// of every tenant on every submit (#502 rework: the read side of the cap
+    /// was O(total dispatches) with a deep clone, on the request path, holding
+    /// the lock every worker poll and ack shares).
+    fn unacked_start_run_ids(&self, tenant_id: &str, dispatch_id_prefix: &str) -> Vec<String> {
+        match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime
+                .queue
+                .unacked_start_run_ids(tenant_id, dispatch_id_prefix),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .queue
+                .unacked_start_run_ids(tenant_id, dispatch_id_prefix),
+        }
+    }
+
+    /// Admit ONE caller-submitted start dispatch against the tenant's open-job
+    /// budget and enqueue it in the SAME critical section.
     ///
-    /// #474 (rework): the caller-facing job surface uses this to cap the number
-    /// of open jobs one tenant can hold, so an ordinary tenant API key cannot
-    /// grow the shared dispatch table without bound by submitting in a loop.
-    ///
-    /// #502 fixes what that first cut counted. A dispatch is only OPEN when ALL
-    /// of these hold:
+    /// #474 (rework) introduced the budget so an ordinary tenant API key could
+    /// not drive the shared dispatch queue without bound. A dispatch counts
+    /// against it when ALL of these hold:
     ///
     /// * it belongs to `tenant_id` -- one tenant's backlog never throttles
     ///   another's submits;
-    /// * it is UNACKNOWLEDGED -- a tenant whose runtime keeps finishing its work
+    /// * it is UNACKNOWLEDGED -- a tenant whose runtime keeps settling its work
     ///   is never throttled;
     /// * its dispatch id starts with `dispatch_id_prefix`, i.e. the SUBMIT
     ///   surface minted it. Schedule fires (#426) and worker-registration seeds
     ///   enqueue `start_run` dispatches into the same queue, and background work
     ///   the caller never asked for must not silently eat the caller's budget;
-    /// * no `cancel_run` dispatch exists for the same run. Cancelling is the
-    ///   remedy the 429 names, so it must actually return the slot: nothing else
-    ///   ever clears a start dispatch, so a tenant with no worker (or whose
-    ///   workers stopped acking) was otherwise locked out of the surface
-    ///   PERMANENTLY once it reached the cap.
+    /// * its RUN HAS NOT SETTLED. This is the release condition, and #502 makes
+    ///   it the run row rather than the dispatch: the production completion path
+    ///   is worker telemetry ([`AppState::apply_worker_reported_run_state`]),
+    ///   which terminalizes `agent_runs.status` and never writes
+    ///   `acknowledged_status`, so keying the release on the ack locked a tenant
+    ///   with a perfectly HEALTHY worker out of the surface after `max_open`
+    ///   finished jobs. Cancel terminalizes the same row, so every remedy the
+    ///   refusal names releases through one rule.
     ///
-    /// Node-local by construction: the count reads this process's lease queue,
-    /// so with N replicas the effective cap is N x the caller's cap. That is a
-    /// deliberately retained limitation (a cluster-wide count needs a durable
-    /// aggregate the control-plane store does not expose) and is why the refusal
-    /// text promises only what a single node can honour.
-    pub(crate) fn self_hosted_open_start_dispatch_count(
+    /// The settled read is DURABLE and batched
+    /// ([`AppState::settled_agent_run_ids`]), which is what makes the release
+    /// cluster-wide: a job finished or cancelled through a PEER replica stops
+    /// counting here even though this node still holds its start dispatch in
+    /// memory. Only the opposite direction stays node-local -- this node cannot
+    /// see a peer's still-OPEN dispatches -- so with N replicas the effective
+    /// cap is at most N x the caller's cap. That over-permissive residue is a
+    /// deliberately retained limitation (a cluster-wide OPEN count needs a
+    /// durable aggregate the control-plane store does not expose); the refusal
+    /// text promises only releases that always work.
+    ///
+    /// Gate and enqueue are ONE operation because #502's first cut left them
+    /// check-then-act: the count took the queue lock, released it, and the
+    /// enqueue took a fresh one ~50 lines later, so K concurrent submits at
+    /// `max_open - 1` all read "below the cap" and all landed. Recounting under
+    /// the guard that performs the insert makes the per-node cap an invariant
+    /// instead of an observation.
+    ///
+    /// The durable settled-run read is deliberately taken BEFORE the guard: it
+    /// is blocking I/O and the queue lock is shared with every worker poll and
+    /// ack. A run that settles inside that window is simply counted as open,
+    /// which can refuse one submit that would have been admitted -- conservative
+    /// in the safe direction, never over-admitting.
+    pub(crate) fn admit_and_enqueue_agent_job_dispatch(
         &self,
         tenant_id: &str,
         dispatch_id_prefix: &str,
-    ) -> usize {
-        let records = match self.self_hosted_dispatch.lock() {
-            Ok(runtime) => runtime.queue.run_records(),
-            Err(poisoned) => poisoned.into_inner().queue.run_records(),
+        max_open: usize,
+        dispatch: SelfHostedRunDispatch,
+    ) -> AgentJobDispatchAdmission {
+        let candidates = self.unacked_start_run_ids(tenant_id, dispatch_id_prefix);
+        let settled = self.settled_agent_run_ids(&candidates);
+        let dispatch_id = dispatch.dispatch_id.clone();
+        let mut runtime = match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime,
+            Err(poisoned) => poisoned.into_inner(),
         };
-        // Runs this tenant has already asked the runtime to cancel. The cancel
-        // dispatch is the durable evidence of the release, so the slot stays
-        // free across a restart exactly like the start dispatch it releases.
-        let cancelled_runs: HashSet<&str> = records
-            .iter()
-            .filter(|record| {
-                record.dispatch.action == SelfHostedRunAction::CancelRun
-                    && record.dispatch.tenant_id == tenant_id
-            })
-            .map(|record| record.dispatch.run_id.as_str())
-            .collect();
-        records
-            .iter()
-            .filter(|record| record.acknowledged_status.is_none())
-            .filter(|record| {
-                record.dispatch.action == SelfHostedRunAction::StartRun
-                    && record.dispatch.tenant_id == tenant_id
-            })
-            .filter(|record| record.dispatch.dispatch_id.starts_with(dispatch_id_prefix))
-            .filter(|record| !cancelled_runs.contains(record.dispatch.run_id.as_str()))
-            .count()
+        let open = runtime
+            .queue
+            .unacked_start_run_ids(tenant_id, dispatch_id_prefix)
+            .into_iter()
+            .filter(|run_id| !settled.contains(run_id.as_str()))
+            .count();
+        if open >= max_open {
+            return AgentJobDispatchAdmission::OverBudget { open };
+        }
+        if let Err(error) = runtime.enqueue_scheduled_dispatch(dispatch) {
+            return AgentJobDispatchAdmission::TransportRefused(error);
+        }
+        let records = runtime.storage_records_for(&dispatch_id);
+        drop(runtime);
+        match persist_self_hosted_dispatch_records(&self.repositories, records) {
+            Ok(()) => AgentJobDispatchAdmission::Enqueued,
+            Err(error) => AgentJobDispatchAdmission::TransportRefused(error),
+        }
     }
 
     /// Whether `dispatch_id` is still queued and unacknowledged.
@@ -467,6 +504,21 @@ impl AppState {
             Err(poisoned) => poisoned.into_inner().dispatch_unacked(dispatch_id),
         }
     }
+}
+
+/// The outcome of [`AppState::admit_and_enqueue_agent_job_dispatch`] (#502).
+///
+/// Three states, not a `Result<(), E>`: "refused by the budget" and "the
+/// transport would not take it" are different answers to the caller (429 vs
+/// 503) and must not collapse into one error string.
+#[derive(Debug)]
+pub(crate) enum AgentJobDispatchAdmission {
+    /// Admitted: the dispatch is in the queue and its durable row is written.
+    Enqueued,
+    /// Refused by the per-tenant open-job budget, which held `open` jobs.
+    OverBudget { open: usize },
+    /// The lease queue or its durable store rejected the dispatch.
+    TransportRefused(SelfHostedWorkerError),
 }
 
 /// The result of executing a schedule's target action for one fire, before it

@@ -1911,6 +1911,14 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             })
     }
 
+    async fn delete_self_hosted_run_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.delete_self_hosted_run_dispatch_async(dispatch_id)
+            .await
+    }
+
     // --- Per-entity module surfaces (#437, UNIMPLEMENTED) ---
     //
     // These families are not part of the first D1 slice (issue #420); each

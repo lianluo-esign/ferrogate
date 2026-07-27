@@ -157,7 +157,7 @@ export interface paths {
         put?: never;
         /**
          * Submit a long-running agent job and get a durable run_id back immediately, without holding the connection open.
-         * @description Idempotent submission. The job id is DERIVED from (tenant, idempotency key) -- supply the key via the `Idempotency-Key` header or the `idempotency_key` body field -- so a retried submit addresses the ORIGINAL run and answers 200 with `deduplicated: true` instead of spawning a second run. Without an explicit key the request id is used, which makes each submit its own job. The run row and its runtime dispatch are both durable, so the job survives the request that created it and a restart of the serving component. Retention: a tenant may hold at most 200 jobs OPEN -- submitted through this route, not yet acknowledged by the runtime and not yet cancelled -- and a further NEW submit is refused with 429 `agent_job_open_limit_reached` (a retry of an existing idempotency key deduplicates and is never refused). Both remedies free a slot: the runtime acknowledging a job, and `POST /v1/agent-jobs/{run_id}/cancel`. Runs started by a schedule do not consume this budget.
+         * @description Idempotent submission. The job id is DERIVED from (tenant, idempotency key) -- supply the key via the `Idempotency-Key` header or the `idempotency_key` body field -- so a retried submit addresses the ORIGINAL run and answers 200 with `deduplicated: true` instead of spawning a second run. Without an explicit key the request id is used, which makes each submit its own job. The run row and its runtime dispatch are both durable, so the job survives the request that created it and a restart of the serving component. Concurrency: a tenant may hold at most 200 jobs OPEN -- submitted through this route, not yet acknowledged by the runtime, and whose run has not reached a terminal state -- and a further NEW submit is refused with 429 `agent_job_open_limit_reached` (a retry of an existing idempotency key deduplicates and is never refused). A job stops counting the moment its run SETTLES, by any of: the runtime reporting it finished or failed, the runtime acknowledging the dispatch, or `POST /v1/agent-jobs/{run_id}/cancel`. Settlement is read from the durable run row, so a job settled through another gateway replica releases its slot here too; the OPEN count itself is per-replica, so a cluster of N replicas admits at most N x this limit. A settled job's runtime dispatch rows are reclaimed, so submitting and cancelling in a loop leaves nothing behind. Runs started by a schedule do not consume this budget.
          */
         post: operations["submitAgentJob"];
         delete?: never;
@@ -4275,7 +4275,7 @@ export interface components {
             terminal: boolean;
             /** @description true when this call terminalized the run; false when it was already terminal. */
             cancelled: boolean;
-            /** @description true when a cancel_run dispatch was handed to the runtime transport. */
+            /** @description true when a cancel_run dispatch was handed to the runtime transport, which happens only when a worker had already leased the job. Queued work nobody has picked up is withdrawn from the lease queue instead, so false means nothing was executing it -- not that the cancel did not take effect. */
             runtime_cancel_dispatched: boolean;
             cancelled_at_unix: number | null;
             request_id: string;

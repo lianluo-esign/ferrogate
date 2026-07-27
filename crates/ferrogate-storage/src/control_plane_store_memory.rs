@@ -1677,6 +1677,17 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .unwrap_or_default()
     }
 
+    async fn delete_self_hosted_run_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .self_hosted_run_dispatches
+            .lock()
+            .map(|mut dispatches| dispatches.remove(dispatch_id).is_some())
+            .unwrap_or(false))
+    }
+
     // --- Per-entity module surfaces (#437): lock the control-plane state ---
     //
     // Each body is the pre-#437 Memory match-arm verbatim (same lock-poison

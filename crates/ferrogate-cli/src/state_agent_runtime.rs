@@ -695,6 +695,17 @@ impl AppState {
         if let Some(records) = records {
             persist_self_hosted_dispatch_records(&self.repositories, records)?;
         }
+        // #502: an acknowledged `cancel_run` means the worker has accepted that
+        // the run is over, so the run's rows -- the cancel AND the start
+        // dispatch the cancel superseded -- have no reader left and are
+        // reclaimed. Nothing analogous happens on a `start_run` ack: #503's
+        // lease-ownership proof reads that row for the whole life of the run,
+        // so it is reclaimed only when the run itself settles.
+        if let Ok(ack) = result.as_ref() {
+            if ack.action == SelfHostedRunAction::CancelRun {
+                self.reclaim_settled_run_dispatches(&ack.run_id);
+            }
+        }
         result
     }
 
@@ -1590,6 +1601,98 @@ impl AppState {
             .find(|dispatch| dispatch.action == action)
     }
 
+    /// Drop ONE dispatch from this process's lease queue AND from the durable
+    /// `self_hosted_run_dispatches` table.
+    ///
+    /// #502: before this existed, nothing ever deleted a dispatch row -- the
+    /// table was read back in full at every startup and reload
+    /// (`rebuild_registries`) and grew for the lifetime of the deployment, with
+    /// only the per-tenant open-job cap standing between an ordinary tenant API
+    /// key and unbounded growth. The durable delete is issued even when this
+    /// node did not hold the row in memory, because the node that settles a run
+    /// is not necessarily the one that enqueued it.
+    ///
+    /// Returns whether anything was actually removed anywhere.
+    pub(crate) fn discard_self_hosted_dispatch(&self, dispatch_id: &str) -> bool {
+        let removed_locally = match self.self_hosted_dispatch.lock() {
+            Ok(mut runtime) => runtime.queue.remove_run(dispatch_id),
+            Err(poisoned) => poisoned.into_inner().queue.remove_run(dispatch_id),
+        };
+        match crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .delete_self_hosted_run_dispatch(dispatch_id),
+        ) {
+            Ok(removed_durably) => removed_locally || removed_durably,
+            Err(error) => {
+                // A failed reclaim is a retention leak, not a correctness bug:
+                // the budget is derived from the run's terminal state, so the
+                // slot is already free either way. Surfaced rather than
+                // swallowed silently.
+                warn!(
+                    dispatch_id,
+                    error = %error,
+                    "failed to reclaim a settled self-hosted dispatch row; \
+                     the row will be reclaimed by the next settle of the same run"
+                );
+                removed_locally
+            }
+        }
+    }
+
+    /// Reclaim every dispatch row a SETTLED run still holds.
+    ///
+    /// A run that has reached a terminal state has no remaining reader for its
+    /// dispatches: no worker may lease one (which is what stopped a cancelled
+    /// job from being started anyway), no ack can arrive for one, and the
+    /// submit budget does not count one. #502 makes settlement -- not the ack,
+    /// which the production completion path never writes -- the single event
+    /// that both frees the caller's slot and returns the rows.
+    ///
+    /// Falls back to the durable table only when this node holds nothing for
+    /// the run, so the common (same-node) settle costs no extra query.
+    pub(crate) fn reclaim_settled_run_dispatches(&self, run_id: &str) -> usize {
+        let mut dispatch_ids = match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime.queue.dispatch_ids_for_run(run_id),
+            Err(poisoned) => poisoned.into_inner().queue.dispatch_ids_for_run(run_id),
+        };
+        if dispatch_ids.is_empty() {
+            dispatch_ids = crate::gateway::block_on_sync_bridge(
+                self.repositories.self_hosted_run_dispatches(),
+            )
+            .into_iter()
+            .filter(|record| record.run_id == run_id)
+            .map(|record| record.dispatch_id)
+            .collect();
+        }
+        dispatch_ids
+            .iter()
+            .filter(|dispatch_id| self.discard_self_hosted_dispatch(dispatch_id))
+            .count()
+    }
+
+    /// The subset of `run_ids` whose canonical `agent_runs` row has reached a
+    /// TERMINAL state.
+    ///
+    /// Read DURABLY and in ONE batched query (`agent_runs_by_ids`), which is
+    /// what makes the submit budget's release condition cluster-wide: the run
+    /// row is the shared record every replica writes and reads, so a job
+    /// completed (or cancelled) through a peer stops counting here even though
+    /// this node still holds its start dispatch in memory. A run id with no row
+    /// is deliberately NOT settled -- absence of evidence never releases a slot.
+    pub(crate) fn settled_agent_run_ids(&self, run_ids: &[String]) -> HashSet<String> {
+        if run_ids.is_empty() {
+            return HashSet::new();
+        }
+        // The cancel/complete paths write the run row through the evidence
+        // writer, so an unflushed terminalization must not read back as open.
+        self.flush_evidence_writer();
+        crate::gateway::block_on_sync_bridge(self.repositories.agent_runs_by_ids(run_ids))
+            .into_iter()
+            .filter(|run| agent_run_status_is_terminal(&run.status))
+            .map(|run| run.id)
+            .collect()
+    }
+
     /// #503: the worker_id currently (or ever) holding the lease on `run_id`'s
     /// `action` dispatch, if any -- the run-state bridge's ownership proof.
     ///
@@ -1605,7 +1708,7 @@ impl AppState {
     /// created through a non-worker path) or the dispatch exists but has not
     /// yet been leased to any worker; both must be treated as "no owner", not
     /// "any worker may act."
-    fn self_hosted_dispatch_lease_owner(
+    pub(crate) fn self_hosted_dispatch_lease_owner(
         &self,
         run_id: &str,
         action: SelfHostedRunAction,
@@ -1748,6 +1851,14 @@ impl AppState {
             decision_reason: None,
             output_disposition: None,
         });
+        // #502: worker telemetry is the ONLY thing that terminalizes a job in
+        // production -- it never touches `acknowledged_status`, so before this
+        // the caller's submit slot stayed consumed by every job its own healthy
+        // worker had finished, and the dispatch row stayed in the table for the
+        // lifetime of the deployment. Settlement returns both.
+        if terminal {
+            self.reclaim_settled_run_dispatches(run_id);
+        }
         Some(report.status)
     }
 

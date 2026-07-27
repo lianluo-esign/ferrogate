@@ -57,6 +57,17 @@
 //! the SAME run row and the SAME run timeline this surface reads, so `/result`
 //! returns the runtime's real output rather than a permanent
 //! `409 agent_job_not_terminal`.
+//!
+//! **Retention (#502).** A run reaching a terminal state is a single event with
+//! two consequences, and both hang off `agent_runs.status` rather than off the
+//! dispatch transport: it releases the submitter's slot against
+//! [`AGENT_JOB_MAX_OPEN_PER_TENANT`], and it reclaims the run's rows from the
+//! lease queue and from `self_hosted_run_dispatches`
+//! ([`AppState::reclaim_settled_run_dispatches`]). Keying either on the
+//! runtime's ack was wrong in opposite directions: the ack is not what the
+//! production completion path writes, so slots leaked; and nothing deleted a
+//! dispatch row at all, so the table only ever grew and the concurrency cap was
+//! doing double duty as its only bound.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -106,15 +117,21 @@ const AGENT_JOB_WRITE_SCOPE: &str = "agent.runs.create";
 const AGENT_JOB_READ_SCOPE: &str = "agent.runs.read";
 
 /// Max jobs one tenant may hold OPEN at once (#474 rework): submitted through
-/// THIS surface, not yet acknowledged by the runtime, and not yet cancelled by
-/// the caller.
+/// THIS surface, unacknowledged, and whose run has not SETTLED.
 ///
-/// Every submit writes a durable dispatch row, and `/v1/agent-jobs` is the
-/// first surface that lets an ordinary tenant API key create those at will. The
-/// cap is per tenant and counts only in-flight work, so a tenant that keeps
-/// finishing (or cancelling) its jobs is never throttled, while a runaway
-/// submit loop is refused with 429 instead of growing the shared dispatch table
-/// without bound.
+/// `/v1/agent-jobs` is the first surface that lets an ordinary tenant API key
+/// enqueue runtime dispatches at will, so it bounds concurrency per tenant: a
+/// tenant whose jobs keep reaching a terminal state -- by finishing, failing or
+/// being cancelled -- is never throttled, while a runaway submit loop is
+/// refused with 429.
+///
+/// The cap is a CONCURRENCY bound and is no longer load-bearing for retention
+/// (#502): a settled run's dispatch rows are reclaimed from the lease queue and
+/// from `self_hosted_run_dispatches`
+/// ([`AppState::reclaim_settled_run_dispatches`]), so a submit/cancel loop
+/// leaves nothing behind rather than trading one permanent row per iteration
+/// for a freed slot. Before that, the cap WAS the only thing standing between
+/// a caller and a table nothing ever deleted.
 const AGENT_JOB_MAX_OPEN_PER_TENANT: usize = 200;
 
 /// Error code of the retention refusal. Named once so the handler, the
@@ -172,38 +189,62 @@ fn agent_job_cancel_dispatch_id(run_id: &str) -> String {
     format!("agent-job-cancel-{run_id}")
 }
 
-/// The submit retention gate, as a value: `None` means "admit this submit",
-/// `Some((status, code, message))` is the VERBATIM refusal the handler writes
-/// back. Split out of the handler so the boundary (cap-1 admits, cap refuses,
-/// a cancel re-admits) is testable as the response a caller observes rather
-/// than as an internal counter (#502; #500's rule that an assertion which
-/// cannot fail is not coverage).
+/// The concurrency gate AND the enqueue, as one operation: `Ok(())` means the
+/// job's start dispatch is queued and durable, `Err((status, code, message))`
+/// is the VERBATIM refusal the handler writes back.
+///
+/// Gate and enqueue are fused deliberately (#502 rework). Splitting them left
+/// the admission check-then-act -- the count took the queue lock, released it,
+/// and the enqueue took a fresh one ~50 lines later, so K concurrent submits at
+/// `cap - 1` all read "below the cap" and all landed. Nothing spanned the two
+/// and no test could see it. [`AppState::admit_and_enqueue_agent_job_dispatch`]
+/// recounts under the guard that performs the insert.
+///
+/// It is still the seam the boundary is tested through, as the response a
+/// caller observes rather than as an internal counter (#500's rule that an
+/// assertion which cannot fail is not coverage) -- now with the side effect
+/// included, so a probe can no longer claim a slot the concurrent submit took.
 ///
 /// Reached only on a genuinely NEW job -- a retry of an existing idempotency
 /// key deduplicates before this point and is never refused -- so a caller can
 /// always re-poll and cancel what it already has.
-fn agent_job_submit_refusal(
+fn agent_job_admit_submit(
     state: &AppState,
     tenant_id: &str,
-) -> Option<(StatusCode, &'static str, String)> {
-    let open_jobs =
-        state.self_hosted_open_start_dispatch_count(tenant_id, AGENT_JOB_START_DISPATCH_PREFIX);
-    if open_jobs < AGENT_JOB_MAX_OPEN_PER_TENANT {
-        return None;
+    dispatch: SelfHostedRunDispatch,
+) -> Result<(), (StatusCode, &'static str, String)> {
+    match state.admit_and_enqueue_agent_job_dispatch(
+        tenant_id,
+        AGENT_JOB_START_DISPATCH_PREFIX,
+        AGENT_JOB_MAX_OPEN_PER_TENANT,
+        dispatch,
+    ) {
+        crate::state::AgentJobDispatchAdmission::Enqueued => Ok(()),
+        crate::state::AgentJobDispatchAdmission::OverBudget { open } => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            AGENT_JOB_OPEN_LIMIT_CODE,
+            // Every remedy this names is real, which is the whole point of
+            // #502. A job stops counting the moment its RUN settles, and the
+            // three ways a run settles are: the runtime reporting it finished
+            // or failed (worker telemetry -- the production completion path,
+            // which the pre-#502 ack-keyed release never observed, so a tenant
+            // with a healthy worker was locked out after `cap` finished jobs),
+            // the runtime acknowledging the dispatch, and the caller cancelling
+            // it. The settled check is a durable read of the run row, so a job
+            // settled through another replica releases here too.
+            format!(
+                "tenant already has {open} agent jobs in flight (limit \
+                 {AGENT_JOB_MAX_OPEN_PER_TENANT}); a job stops counting as soon as its run \
+                 reaches a terminal state, so wait for a running job to finish or release one \
+                 now with POST /v1/agent-jobs/{{run_id}}/cancel"
+            ),
+        )),
+        crate::state::AgentJobDispatchAdmission::TransportRefused(error) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agent_job_dispatch_unavailable",
+            format!("agent job could not be handed to the runtime transport: {error}"),
+        )),
     }
-    Some((
-        StatusCode::TOO_MANY_REQUESTS,
-        AGENT_JOB_OPEN_LIMIT_CODE,
-        // Both remedies this names are real: the runtime's ack releases a slot,
-        // and so does `POST /v1/agent-jobs/{run_id}/cancel` (#502 -- before that
-        // fix cancelling freed nothing and this sentence was a lie for any
-        // tenant whose workers were not acking).
-        format!(
-            "tenant already has {open_jobs} agent jobs in flight (limit \
-             {AGENT_JOB_MAX_OPEN_PER_TENANT}); wait for or cancel an existing job before \
-             submitting another"
-        ),
-    ))
 }
 
 /// The caller's submission document. `input` is the task; everything else
@@ -332,7 +373,11 @@ struct AgentJobCancelResponse {
     /// `true` when this call terminalized the run; `false` when it was already
     /// terminal (cancel is idempotent).
     cancelled: bool,
-    /// `true` when a `cancel_run` dispatch was handed to the runtime transport.
+    /// `true` when a `cancel_run` dispatch was handed to the runtime transport,
+    /// which happens only when a worker had already LEASED the job. Queued work
+    /// nobody has picked up is withdrawn from the lease queue instead, so
+    /// `false` here means "nothing was executing it", not "the cancel did not
+    /// take effect" (#502).
     runtime_cancel_dispatched: bool,
     cancelled_at_unix: Option<u64>,
     request_id: String,
@@ -544,11 +589,6 @@ impl FerroGateway {
             return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
         }
 
-        // Retention gate (#474 rework, corrected by #502).
-        if let Some((status, code, message)) = agent_job_submit_refusal(&state, &tenant_id) {
-            return write_json_error(session, status, code, message, &ctx.request_id).await;
-        }
-
         let now = now_unix_seconds();
         let workspace_id = auth
             .workspace_id
@@ -590,20 +630,14 @@ impl FerroGateway {
             // the parent stays an explicit None (never fabricated).
             parent_action_fingerprint: None,
         };
-        // Enqueue FIRST, then claim the run row -- the same ordering the
-        // scheduler uses. If the row were written first and the enqueue then
-        // failed, every retry would be deduped against a job the runtime was
-        // never told about. Enqueue is idempotent on the deterministic id, so
-        // re-running this path is safe.
-        if let Err(error) = state.enqueue_scheduled_self_hosted_dispatch(dispatch) {
-            return write_json_error(
-                session,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "agent_job_dispatch_unavailable",
-                format!("agent job could not be handed to the runtime transport: {error}"),
-                &ctx.request_id,
-            )
-            .await;
+        // The concurrency gate and the enqueue, as ONE operation (#502 rework),
+        // and BEFORE the run row is claimed -- the same ordering the scheduler
+        // uses. If the row were written first and the enqueue then failed,
+        // every retry would be deduped against a job the runtime was never told
+        // about. Enqueue is idempotent on the deterministic id, so re-running
+        // this path is safe.
+        if let Err((status, code, message)) = agent_job_admit_submit(&state, &tenant_id, dispatch) {
+            return write_json_error(session, status, code, message, &ctx.request_id).await;
         }
 
         state.record_agent_run(StoredAgentRun {
@@ -864,6 +898,15 @@ impl FerroGateway {
             .await;
         };
         if agent_job_status_is_terminal(&run.status) {
+            // Nothing to cancel -- but this is also the REPAIR path (#502). The
+            // run settled through some other route (worker telemetry, most
+            // often) and this node may still be holding its dispatch rows: on
+            // the replica that served the submit but not the completion, those
+            // rows are exactly what an admission count would otherwise keep
+            // reading. Draining them here makes a retried cancel a real remedy
+            // instead of a no-op that returns `cancelled: false` and leaves the
+            // rows where they were.
+            state.reclaim_settled_run_dispatches(run_id);
             let response = AgentJobCancelResponse {
                 object: "agent_job_cancel",
                 run_id: run_id.to_string(),
@@ -911,9 +954,15 @@ impl FerroGateway {
             outcome: "cancelled".to_string(),
             tool_call_id: None,
             message: Some(if runtime_cancel_dispatched {
-                format!("agent job {run_id} cancelled; cancel_run dispatched to the runtime")
+                format!(
+                    "agent job {run_id} cancelled; a worker held it, so cancel_run was \
+                     dispatched to the runtime"
+                )
             } else {
-                format!("agent job {run_id} cancelled before any runtime dispatch existed")
+                format!(
+                    "agent job {run_id} cancelled; no worker had leased it, so its start \
+                     dispatch was withdrawn from the queue"
+                )
             }),
             occurred_at_unix: Some(now),
             action_fingerprint: None,
@@ -944,12 +993,34 @@ impl FerroGateway {
     }
 }
 
-/// Hand a `cancel_run` (#414) to the runtime for `run`, addressing the SAME
-/// worker/session/adapter the start dispatch targeted so the cancel is leasable
-/// by the worker that owns the run. Returns whether a dispatch was enqueued: a
-/// job whose start dispatch is already gone (acked and pruned, or never
-/// created) has nothing to cancel in the transport, which is not an error --
-/// the run is still terminalized by the caller.
+/// Stop `run` in the runtime, and reclaim what it leaves behind.
+///
+/// Two shapes, chosen by whether any worker has EVER leased the start dispatch
+/// (#502 rework):
+///
+/// * NOT leased -- nothing is executing the job, so there is nobody to tell.
+///   The start dispatch is WITHDRAWN: removed from the lease queue and deleted
+///   from `self_hosted_run_dispatches`. A submit/cancel loop therefore leaves
+///   no permanent row behind, where before #502 it left two per iteration in a
+///   table nothing ever deleted.
+/// * LEASED -- a worker holds it and may be running it, so a `cancel_run`
+///   (#414) is enqueued addressing the SAME worker/session/adapter the start
+///   dispatch targeted. The start dispatch is left in place so the holder's ack
+///   still resolves, but it is now SUPERSEDED: the lease queue refuses to hand
+///   out a `start_run` whose run carries a `cancel_run`, so the expiry of that
+///   lease can no longer let a second worker pick up and START work the caller
+///   cancelled. Both rows are reclaimed when the worker acknowledges the
+///   cancel.
+///
+/// Lease ownership is read through
+/// [`AppState::self_hosted_dispatch_lease_owner`], which falls back to the
+/// durable row, so a cancel served by a replica that never held the dispatch
+/// still distinguishes the two cases.
+///
+/// Returns whether a `cancel_run` was enqueued. `false` covers both "there was
+/// nothing to cancel" and "the queued work was withdrawn without needing to
+/// tell anyone"; neither is an error, and the run is terminalized by the caller
+/// either way.
 fn cancel_agent_job_in_runtime(
     state: &AppState,
     run: &StoredAgentRun,
@@ -960,6 +1031,14 @@ fn cancel_agent_job_in_runtime(
     else {
         return Ok(false);
     };
+    let start_dispatch_id = start.dispatch_id.clone();
+    if state
+        .self_hosted_dispatch_lease_owner(&run.id, SelfHostedRunAction::StartRun)
+        .is_none()
+    {
+        state.discard_self_hosted_dispatch(&start_dispatch_id);
+        return Ok(false);
+    }
     let cancel = SelfHostedRunDispatch {
         dispatch_id: agent_job_cancel_dispatch_id(&run.id),
         action: SelfHostedRunAction::CancelRun,

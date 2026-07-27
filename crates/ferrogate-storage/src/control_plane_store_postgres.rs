@@ -1202,6 +1202,13 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
             .unwrap_or_default()
     }
 
+    async fn delete_self_hosted_run_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> Result<bool, StorageError> {
+        PostgresControlPlaneStore::delete_self_hosted_run_dispatch(self, dispatch_id).await
+    }
+
     // --- Per-entity module surfaces (#437): forward to inherent SQL ---
 
     async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError> {

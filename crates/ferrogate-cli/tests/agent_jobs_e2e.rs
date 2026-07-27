@@ -509,7 +509,10 @@ fn an_agent_job_is_submitted_idempotently_observed_collected_and_cancelled() {
     assert!(cancel_live.contains("HTTP/1.1 200"), "{cancel_live}");
     let cancel_live = response_json(&cancel_live);
     assert_eq!(cancel_live["cancelled"], true);
-    assert_eq!(cancel_live["runtime_cancel_dispatched"], true);
+    // No worker ever leased this second job, so there is nobody to hand a
+    // `cancel_run` to: its start dispatch is withdrawn from the queue instead
+    // of being left leasable behind a cancel nobody will read (#502).
+    assert_eq!(cancel_live["runtime_cancel_dispatched"], false);
     let (_, cancelled_status) = get_json(
         &gateway_addr,
         &format!("/v1/agent-jobs/{live_run_id}"),
@@ -707,7 +710,9 @@ fn cancelling_frees_a_submit_slot_so_a_workerless_tenant_is_never_locked_out() {
     assert!(cancel.contains("HTTP/1.1 200"), "{cancel}");
     let cancel = response_json(&cancel);
     assert_eq!(cancel["cancelled"], true);
-    assert_eq!(cancel["runtime_cancel_dispatched"], true);
+    // No worker exists at all here, so nothing had leased the job: the start
+    // dispatch is withdrawn rather than superseded by a `cancel_run` (#502).
+    assert_eq!(cancel["runtime_cancel_dispatched"], false);
 
     // ...and the slot is genuinely free: the SAME submit that was refused a
     // moment ago now succeeds. This is the assertion the defect fails.
@@ -724,6 +729,98 @@ fn cancelling_frees_a_submit_slot_so_a_workerless_tenant_is_never_locked_out() {
     assert!(
         refused_again.contains("429"),
         "one cancel frees one slot, not the whole cap: {refused_again} {refused_body}"
+    );
+    assert_eq!(
+        refused_body["error"]["code"],
+        "agent_job_open_limit_reached"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
+fn a_finished_job_frees_a_submit_slot_for_a_tenant_whose_worker_is_healthy() {
+    // Issue #502, the MAJORITY deployment, over the REAL HTTP surface. A tenant
+    // whose worker is working perfectly never calls `/runs/ack` for a finished
+    // job: the production completion path is worker TELEMETRY
+    // (`POST /v1/self-hosted-workers/events`), which terminalizes
+    // `agent_runs.status` and does not touch `acknowledged_status`. Keying the
+    // slot release on the ack therefore locked such a tenant out of
+    // `POST /v1/agent-jobs` after `OPEN_JOB_CAP` FINISHED jobs -- the identical
+    // 429, with the identical remedy text, for the common case.
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let gateway_addr = free_addr();
+    std::fs::write(&config_path, gateway_config(&gateway_addr)).unwrap();
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    let (worker_id, transport_secret) = register_worker(&gateway_addr);
+
+    // One job the worker will actually pick up...
+    let (status, body) = submit_job(&gateway_addr, "healthy-0");
+    assert!(status.contains("202"), "{status} {body}");
+    let leased_run_id = body["run_id"].as_str().unwrap().to_string();
+    let lease = lease_dispatch_for(&gateway_addr, &worker_id, &transport_secret, &leased_run_id);
+
+    // ...and enough more to reach exactly the cap.
+    for index in 1..OPEN_JOB_CAP {
+        let (status, body) = submit_job(&gateway_addr, &format!("healthy-{index}"));
+        assert!(
+            status.contains("202"),
+            "submit {index} (below the cap) must be accepted: {status} {body}"
+        );
+    }
+    let (over_status, over_body) = submit_job(&gateway_addr, "healthy-over");
+    assert!(
+        over_status.contains("429"),
+        "the cap must refuse the {}th open job: {over_status} {over_body}",
+        OPEN_JOB_CAP + 1
+    );
+    assert_eq!(over_body["error"]["code"], "agent_job_open_limit_reached");
+    // The refusal must not name a remedy that does not work -- that is the
+    // defect this issue is about, not the number.
+    let message = over_body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("terminal state") && message.contains("/cancel"),
+        "the 429 must name only remedies that release a slot: {message}"
+    );
+
+    // The worker finishes the job the only way production ever does. No ack,
+    // no cancel.
+    report_run_state(
+        &gateway_addr,
+        &worker_id,
+        &transport_secret,
+        &lease,
+        &leased_run_id,
+        serde_json::json!({"state": "completed", "output": "finished cleanly"}),
+    );
+    let (_, finished) = get_json(
+        &gateway_addr,
+        &format!("/v1/agent-jobs/{leased_run_id}"),
+        &CALLER,
+    );
+    assert_eq!(finished["status"], "completed");
+    assert_eq!(finished["terminal"], true);
+
+    // ...and the slot the finished job held is genuinely free: the SAME submit
+    // that was refused a moment ago now succeeds. This is the assertion the
+    // defect fails.
+    let (after_finish, after_finish_body) = submit_job(&gateway_addr, "healthy-over");
+    assert!(
+        after_finish.contains("202"),
+        "a job the runtime FINISHED must free a slot the caller can use: \
+         {after_finish} {after_finish_body}"
+    );
+    assert_eq!(after_finish_body["deduplicated"], false);
+
+    // Exactly one slot -- the cap still holds for the next submit.
+    let (refused_again, refused_body) = submit_job(&gateway_addr, "healthy-over-again");
+    assert!(
+        refused_again.contains("429"),
+        "one completion frees one slot, not the whole cap: {refused_again} {refused_body}"
     );
     assert_eq!(
         refused_body["error"]["code"],

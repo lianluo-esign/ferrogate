@@ -11,7 +11,7 @@
 //! proof that FerroGate enforced the local execution environment.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     error::Error,
     fmt,
     io::{Read, Write},
@@ -1054,6 +1054,49 @@ impl InMemorySelfHostedRunQueue {
             .collect()
     }
 
+    /// Run ids of the UNACKNOWLEDGED `StartRun` dispatches `tenant_id` holds
+    /// whose dispatch id starts with `dispatch_id_prefix`.
+    ///
+    /// A projection rather than a filter over [`Self::run_records`] (#502
+    /// rework): the caller is a per-request admission check, and cloning every
+    /// dispatch of every tenant to count a handful of one tenant's made the
+    /// cost of one submit scale with the lifetime size of the queue, while
+    /// holding the lock every worker poll and ack shares.
+    pub fn unacked_start_run_ids(&self, tenant_id: &str, dispatch_id_prefix: &str) -> Vec<String> {
+        self.runs
+            .values()
+            .filter(|queued| {
+                queued.acknowledged_status.is_none()
+                    && queued.dispatch.action == SelfHostedRunAction::StartRun
+                    && queued.dispatch.tenant_id == tenant_id
+                    && queued.dispatch.dispatch_id.starts_with(dispatch_id_prefix)
+            })
+            .map(|queued| queued.dispatch.run_id.clone())
+            .collect()
+    }
+
+    /// Dispatch ids of every entry carrying `run_id`, whatever its action or
+    /// ack state. The reclaim path (#502) uses this to drain a settled run's
+    /// rows out of the queue.
+    pub fn dispatch_ids_for_run(&self, run_id: &str) -> Vec<String> {
+        self.runs
+            .values()
+            .filter(|queued| queued.dispatch.run_id == run_id)
+            .map(|queued| queued.dispatch.dispatch_id.clone())
+            .collect()
+    }
+
+    /// Drop `dispatch_id` from the queue, reporting whether an entry existed.
+    ///
+    /// The counterpart of [`Self::enqueue_run`], added by #502: a dispatch
+    /// whose run has settled has no remaining reader -- no worker may lease it,
+    /// no ack can arrive for it, and no budget should count it -- so the queue
+    /// (and the durable table its caller keeps in step) reclaims the row
+    /// instead of retaining it for the lifetime of the deployment.
+    pub fn remove_run(&mut self, dispatch_id: &str) -> bool {
+        self.runs.remove(dispatch_id).is_some()
+    }
+
     pub fn enqueue_run(
         &mut self,
         dispatch: SelfHostedRunDispatch,
@@ -1088,8 +1131,25 @@ impl InMemorySelfHostedRunQueue {
         let worker = registry.validate_identity(&request.identity)?;
         validate_run_poll_request(&request)?;
         let supported_capabilities = normalized_capabilities(request.supported_capabilities);
+        // #502: runs the control plane has already told the runtime to CANCEL.
+        // A `start_run` for one of these must never be handed out again -- its
+        // holder's lease expiring would otherwise let a second worker lease and
+        // START work the caller cancelled, because nothing else `can_lease_to`
+        // tests (ack status, tenant, workspace, adapter, capabilities, lease
+        // expiry) knows the run is over.
+        let superseded_runs: HashSet<String> = self
+            .runs
+            .values()
+            .filter(|queued| queued.dispatch.action == SelfHostedRunAction::CancelRun)
+            .map(|queued| queued.dispatch.run_id.clone())
+            .collect();
         let Some((_, queued)) = self.runs.iter_mut().find(|(_, queued)| {
-            queued.can_lease_to(worker, &supported_capabilities, request.now_unix)
+            queued.can_lease_to(
+                worker,
+                &supported_capabilities,
+                request.now_unix,
+                &superseded_runs,
+            )
         }) else {
             return Ok(None);
         };
@@ -1199,8 +1259,13 @@ impl QueuedSelfHostedRun {
         worker: &RegisteredSelfHostedWorker,
         supported_capabilities: &[String],
         now_unix: u64,
+        superseded_runs: &HashSet<String>,
     ) -> bool {
         self.acknowledged_status.is_none()
+            // #502: a `start_run` whose run already carries a `cancel_run` is
+            // superseded -- the cancel is leasable, the start is not.
+            && !(self.dispatch.action == SelfHostedRunAction::StartRun
+                && superseded_runs.contains(&self.dispatch.run_id))
             && self.dispatch.tenant_id == worker.tenant_id
             && self.dispatch.workspace_id == worker.workspace_id
             && self.dispatch.framework_adapter == worker.framework_adapter

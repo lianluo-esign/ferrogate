@@ -540,6 +540,20 @@ impl D1ControlPlaneStore {
         .map(|_| ())
     }
 
+    /// #502: reclaim one settled dispatch row. D1 keeps the whole dispatch as
+    /// one JSON document, so there is no child table to drain first.
+    pub(super) async fn delete_self_hosted_run_dispatch_async(
+        &self,
+        dispatch_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.execute_control(
+            "DELETE FROM self_hosted_run_dispatches WHERE dispatch_id = ?",
+            vec![dispatch_id.to_string()],
+        )
+        .await
+        .map(|result| result.changes() > 0)
+    }
+
     pub(super) async fn self_hosted_run_dispatches_async(
         &self,
     ) -> Result<Vec<StoredSelfHostedRunDispatch>, StorageError> {

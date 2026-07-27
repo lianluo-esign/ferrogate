@@ -8498,6 +8498,43 @@ impl PostgresControlPlaneStore {
             .collect())
     }
 
+    /// #502: reclaim one settled dispatch. The capability child rows go first
+    /// in the SAME transaction, so the pair can never be left half-deleted the
+    /// way the upsert's delete-then-reinsert already guards against.
+    async fn delete_self_hosted_run_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> Result<bool, StorageError> {
+        let operation = self.worker_operation("delete self hosted run dispatch");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM self_hosted_run_dispatch_capabilities WHERE dispatch_id = $1",
+                &[&dispatch_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let deleted = transaction
+            .execute(
+                "DELETE FROM self_hosted_run_dispatches WHERE dispatch_id = $1",
+                &[&dispatch_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(deleted > 0)
+    }
+
     async fn billing_events_page(
         &self,
         offset: usize,
@@ -14780,6 +14817,16 @@ impl RuntimeStorageRepositories {
         self.control_plane
             .store()
             .self_hosted_run_dispatches()
+            .await
+    }
+
+    pub async fn delete_self_hosted_run_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.control_plane
+            .store()
+            .delete_self_hosted_run_dispatch(dispatch_id)
             .await
     }
 }

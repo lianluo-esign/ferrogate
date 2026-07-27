@@ -4230,7 +4230,7 @@ fn self_hosted_worker_runtime_identity(
     }
 }
 
-fn self_hosted_seed_dispatch_id(worker_id: &str) -> String {
+pub(crate) fn self_hosted_seed_dispatch_id(worker_id: &str) -> String {
     format!("self-hosted-dispatch-{worker_id}")
 }
 
@@ -6981,7 +6981,13 @@ mod state_guardrail_evidence;
 #[path = "state_scheduler.rs"]
 mod state_scheduler;
 // #305: the run-now correlation context is constructed by the gateway handler.
-pub(crate) use state_scheduler::ScheduleFireCorrelation;
+pub(crate) use state_scheduler::{AgentJobDispatchAdmission, ScheduleFireCorrelation};
+// #502: the agent-job budget tests derive the background producers' dispatch-id
+// namespaces from the producers themselves rather than restating the literals,
+// so renaming one reddens the test instead of silently charging schedule fires
+// to the caller's budget.
+#[cfg(test)]
+pub(crate) use state_scheduler::scheduled_dispatch_id;
 // #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
 #[path = "state_asset_lifecycle.rs"]
 mod state_asset_lifecycle;

@@ -573,6 +573,19 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         dispatch: StoredSelfHostedRunDispatch,
     ) -> Result<(), StorageError>;
     async fn self_hosted_run_dispatches(&self) -> Vec<StoredSelfHostedRunDispatch>;
+    /// Reclaim one dispatch row, reporting whether a row existed.
+    ///
+    /// #502: `self_hosted_run_dispatches` had no delete at all, so every
+    /// dispatch ever enqueued was read back in full at every startup and
+    /// reload for the lifetime of the deployment. A dispatch whose run has
+    /// SETTLED has no remaining reader -- no worker may lease it, no ack can
+    /// arrive for it, and no submit budget counts it -- so the settle path
+    /// drops the row rather than relying on a per-tenant in-flight cap to keep
+    /// the table small.
+    async fn delete_self_hosted_run_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> Result<bool, StorageError>;
 
     // --- Per-entity module surfaces (#437) ---
     //
