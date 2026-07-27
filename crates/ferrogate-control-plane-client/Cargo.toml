@@ -6,15 +6,21 @@
 
 [package]
 # Renamed from `ferrogate-cli-core` (#553 rework). The old name asserted a
-# containment relation that was false in both directions: at `4c2ba43`, the
-# parent of the commit that writes this line, the crate is 20,961 `.rs` lines
+# containment relation that was false in both directions: at `4c2ba43`, an
+# ancestor of the commit that writes this line, the crate is 20,961 `.rs` lines
 # against `crates/ferrogate-cli/src`'s 6,200 -- 3.38x -- so it was not the
 # "core" of anything it was named after, and "core" said nothing about what is
 # inside. The measurement names a commit rather than saying "this tree": the
 # figures that stood here were three rounds of review stale, each time because
-# the tree moved under a claim written as if it could not. Reproduce with
-# `git ls-files 'crates/<dir>/*.rs' | xargs cat | wc -l` -- git's pathspec `*`
-# crosses `/`, so that one glob is the whole subtree. The new
+# the tree moved under a claim written as if it could not. Reproduce at that
+# commit rather than in the working tree, which is a different number:
+#   git ls-tree -r --name-only 4c2ba43 -- crates/<dir> | grep '\.rs$' \
+#     | xargs -I{} git show 4c2ba43:{} | wc -l
+# The previously published `git ls-files 'crates/<dir>/*.rs' | xargs cat
+# | wc -l` reads whatever is checked out, so it returned 20,965 at `801b449`
+# against the 20,961 this line claims -- a ref-pinned figure beside a command
+# that ignores the ref is how these numbers went stale in the first place. The
+# new
 # name is an assertion that can be checked: every request this crate builds
 # targets the Control Plane API (`/admin/v1/...`), and `src/parity.rs` puts
 # the data plane -- inference, MCP/tool execution, agent invoke/messaging --

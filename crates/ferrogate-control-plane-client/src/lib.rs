@@ -32,13 +32,23 @@
 //!   it talks to.
 //!
 //! The old name asserted neither. Worse, it asserted something false: at
-//! `4c2ba43`, the parent of the commit that writes this line, the crate is
+//! `4c2ba43`, an ancestor of the commit that writes this line, the crate is
 //! **20,961 `.rs` lines across 53 files against `crates/ferrogate-cli/src`'s
 //! 6,200 across 28 — 3.38×** the crate it claimed to be the `-core` of, and
 //! "core" described none of the contents. The figure names a commit instead of
 //! saying "this tree" because every previous phrasing of it went stale inside
-//! one review round; `git ls-files 'crates/<dir>/*.rs' | xargs cat | wc -l`
-//! reproduces both halves. #553's
+//! one review round, and the command beside it has to name the commit too:
+//!
+//! ```text
+//! git ls-tree -r --name-only 4c2ba43 -- crates/<dir> | grep '\.rs$' \
+//!   | xargs -I{} git show 4c2ba43:{} | wc -l
+//! ```
+//!
+//! reproduces both halves. The `git ls-files … | xargs cat | wc -l` published
+//! here before reads the working tree instead, and returns 20,965 and 136,724
+//! at `801b449` for the two figures pinned as 20,961 and 136,681 — the same
+//! stale-number defect, one level down in the instructions for checking it.
+//! #553's
 //! objective is that a module's name and its code agree; the fold below is
 //! refused, so the rename is what carries that objective for this crate.
 //!

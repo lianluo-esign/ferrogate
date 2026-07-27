@@ -166,9 +166,18 @@ run_cli_tooling() {
     --test control_cli_e2e --test control_cli_resource_e2e --test ctl_lifecycle_e2e
   # Mirrors the `control_plane_client` slice of `rust-cli-tooling-tests.yml`
   # (renamed from `cli_core` with the crate in #553). It was missing here, so
-  # the crate's 20,961 lines of hermetic client tests -- measured at `4c2ba43`
-  # with `git ls-files 'crates/ferrogate-control-plane-client/*.rs' | xargs cat
-  # | wc -l` -- had no local invocation at all.
+  # the crate's hermetic client tests had no local invocation at all. 20,961
+  # `.rs` lines across 53 files at `4c2ba43`, of which 11,024 across 26
+  # `*_test.rs` files are test code and 9,937 across 27 files are not -- the
+  # first published figure attached "of hermetic client tests" to the whole-
+  # crate count, which is the crate's size, not its suite's. Nor is the 9,937
+  # production: 26 of those 27 files carry an inline `#[cfg(test)] mod` block
+  # too (all but `lib.rs`), so it is an upper bound on production and the true
+  # test share is above 53%. Reproduce the whole-crate number at the ref rather
+  # than in the working tree, which is not the same thing:
+  #   git ls-tree -r --name-only 4c2ba43 -- \
+  #     crates/ferrogate-control-plane-client | grep '\.rs$' \
+  #     | xargs -I{} git show 4c2ba43:{} | wc -l
   cargo test -p ferrogate-control-plane-client --all-features
   cargo test -p ferrogate-test --all-features
   # Mirrors the `cli_all` slice. #561 measured the unfiltered run as red on

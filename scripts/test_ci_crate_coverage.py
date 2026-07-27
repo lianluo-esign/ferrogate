@@ -18,11 +18,32 @@ crate and then selects no test inside it. The crate-level cases above are all
 blind to it by construction -- every one of those invocations names its crate
 correctly -- which is why it survived four review rounds in
 `governed-decision-conformance.yml`.
+
+Ten mutations of `check-ci-crate-coverage.py` were APPLIED and this suite re-run
+against each, rather than argued for in prose (#500):
+
+    TEST_ATTRIBUTE -> `if False`                        caught (11 tests)
+    INLINE_MODULE -> None                               caught (3)
+    `while stack and indent <= stack[-1][0]` -> `while False`   caught (2)
+    `indent = len(...) - len(...)` -> `indent = 0`       caught (3)
+    re-add the per-file `paths.add("::".join(prefix))`   caught (2)
+    re-add the inline-module `paths.add(...)`           caught (1)
+    unbalanced-quote branch -> `return set(), set()`     caught (1)
+    `if not known[name]:` -> `if False:`                 caught (1)
+    `if not any(filter in candidate ...)` -> `if False:` caught (2)
+    drop the `paths.add(...)` for a test function       caught (11)
+
+The two "re-add" entries are the blocking finding on `801b449`: the candidate
+set used to contain module paths, so a filter resolved against a module whose
+only test file had been moved away -- this gate's own failure mode, surviving
+this gate. They are written as re-additions because the fix is a deletion, and a
+deletion is only held by a test that reds when it is undone.
 """
 
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -757,15 +778,27 @@ class CiCrateCoverageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("resolved 1 name filter(s)", result.stdout)
 
-    def test_a_module_path_filter_resolves_without_naming_a_test(self) -> None:
+    def test_a_module_path_filter_resolves_through_the_tests_beneath_it(self) -> None:
         """`config::tests` names a MODULE, not a test, and is the second live
 
         instance of this defect (`rust-quality.yml`, against a `ferrogate-cli`
-        whose `config` module had moved to `ferrogate-config`). Pins the
-        `paths.add("::".join(prefix))` line and the `INLINE_MODULE` branch in
-        `crate_test_paths`: delete either and a filter naming only a module
-        stops resolving, and the two `rust-quality.yml` lines red on a tree
-        where they are correct."""
+        whose `config` module had moved to `ferrogate-config`). It must keep
+        resolving on a tree where it is correct, and it does so through the test
+        path `config::tests::rejects_an_unknown_key`, of which it is a prefix
+        and therefore a substring -- the same rule libtest uses.
+
+        Pins the `paths.add(...)` in the `FUNCTION_DECLARATION` arm and
+        `TEST_ATTRIBUTE`: replacing either with a no-op reds this test (run, not
+        reasoned about).
+
+        It does NOT pin `INLINE_MODULE` -- there is no inline module here -- and
+        it cannot pin a module-path candidate, because there are none any more.
+        The previous version of this docstring claimed both, and the reviewer
+        showed that neither mutation reddened it: with substring matching,
+        `config::tests` is inside `config::tests::rejects_an_unknown_key`
+        whether or not the module path is a candidate.
+        `test_an_inline_test_module_is_part_of_the_path` and its two neighbours
+        pin the reconstruction instead."""
         sources = {
             "src/config/mod.rs": """
                 mod tests;
@@ -783,6 +816,220 @@ class CiCrateCoverageTests(unittest.TestCase):
             local_runner="cargo test -p ferrogate-config --all-features config::tests\n",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_module_path_with_no_test_beneath_it_resolves_nothing(self) -> None:
+        """The negative twin of the case above, and the failure the gate's own
+
+        first version let through. `server/governed_decision.rs` survives; its
+        two test files have been moved out, which is the edit class that caused
+        #553 in the first place. The module path `server::governed_decision`
+        still exists, so a candidate set that admitted module paths resolved
+        `governed_decision` against it and exited 0 while `cargo test -p
+        ferrogate-gateway governed_decision` ran no test at all.
+
+        Pins the absence of the two module-path `paths.add` calls in
+        `crate_test_paths`. Restore either -- the per-file `if prefix:
+        paths.add("::".join(prefix))` or the one in the `INLINE_MODULE` arm --
+        and this test goes green with the gate approving an invocation that runs
+        nothing. `rbac_test.rs` is here so the crate is not empty of tests: an
+        empty crate reds through the vacuity floor instead, which is a different
+        message for a different fault."""
+        sources = {
+            "src/server/governed_decision.rs": """
+                pub fn decide() {}
+
+                mod helpers {
+                    pub fn normalize() {}
+                }
+            """,
+            "src/server/rbac_test.rs": """
+                #[test]
+                fn root_may_read_every_tenant() {}
+            """,
+        }
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={"ferrogate-gateway": sources},
+            ci_workflow="jobs:\n  t:\n    run: "
+            "cargo test -p ferrogate-gateway --all-features governed_decision\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("governed_decision", result.stderr)
+        self.assertIn("matches no test in ferrogate-gateway", result.stderr)
+
+    def test_an_inline_test_module_is_part_of_the_path(self) -> None:
+        """`#[cfg(test)] mod validation_tests { ... }` in the same file as the
+
+        code it tests is the most common Rust test-module form and the exact
+        shape `rust-quality.yml`'s `config::validation_tests` filter names. Not
+        one fixture in this suite contained it before, which is why the whole
+        indentation machinery in `crate_test_paths` was unpinned.
+
+        Pins four mutations. Each was applied to `check-ci-crate-coverage.py`
+        and this suite re-run; each reddens this test:
+
+        * `if TEST_ATTRIBUTE.match(line):` -> `if False:` -- no test path is
+          discovered at all, the candidate set is empty, and the filter matches
+          nothing;
+        * `INLINE_MODULE` -> `None` -- the path collapses to
+          `config::rejects_an_unknown_key` and the filter's middle segment is
+          gone;
+        * `indent = len(line) - len(line.lstrip())` -> `indent = 0` -- every
+          line then satisfies `0 <= stack[-1][0]`, the stack empties on the line
+          after the `mod`, and the path collapses the same way;
+        * dropping the `paths.add(...)` in the `FUNCTION_DECLARATION` arm."""
+        sources = {
+            "src/config.rs": """
+                pub fn load() {}
+
+                #[cfg(test)]
+                mod validation_tests {
+                    #[test]
+                    fn rejects_an_unknown_key() {}
+                }
+            """,
+        }
+        result = self.run_checker(
+            members=["ferrogate-config"],
+            sources={"ferrogate-config": sources},
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-config "
+            "--all-features config::validation_tests::rejects_an_unknown_key\n",
+            local_runner="cargo test -p ferrogate-config\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resolved 1 name filter(s)", result.stdout)
+
+    def test_a_module_body_ends_where_its_indentation_ends(self) -> None:
+        """Two sibling `#[cfg(test)] mod`s in one file. The second must not be
+
+        read as nested inside the first, which is the only thing the `while
+        stack and indent <= stack[-1][0]` pop does.
+
+        Pins that pop: `while False` leaves `validation_tests` on the stack when
+        `mod tests {` pushes, the second module's test becomes
+        `config::validation_tests::tests::accepts_the_default`, and the filter
+        naming `config::tests::accepts_the_default` matches nothing. Applied and
+        re-run: `while False` reds this test and
+        `test_a_nested_module_and_its_parent_both_keep_their_own_depth`, and
+        nothing else in the suite."""
+        sources = {
+            "src/config.rs": """
+                #[cfg(test)]
+                mod validation_tests {
+                    #[test]
+                    fn rejects_an_unknown_key() {}
+                }
+
+                #[cfg(test)]
+                mod tests {
+                    #[test]
+                    fn accepts_the_default() {}
+                }
+            """,
+        }
+        result = self.run_checker(
+            members=["ferrogate-config"],
+            sources={"ferrogate-config": sources},
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-config "
+            "--all-features config::tests::accepts_the_default\n",
+            local_runner="cargo test -p ferrogate-config\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resolved 1 name filter(s)", result.stdout)
+
+    def test_a_nested_module_and_its_parent_both_keep_their_own_depth(self) -> None:
+        """One file, two filters, and they disagree under every mutation of the
+
+        indentation stack. `deep_case` sits two modules down and `shallow_case`
+        one; a stack that never pops gives `shallow_case` the nested name too,
+        and a stack that pops on every line gives `deep_case` neither name.
+
+        Pins the stack in both directions at once:
+
+        * `while False` -- `shallow_case` becomes
+          `config::validation_tests::nested::shallow_case` and its filter reds;
+        * `indent = 0` -- both collapse to `config::<fn>` and both filters red;
+        * `INLINE_MODULE` -> `None` -- same collapse.
+
+        Two filters rather than two tests because the point is that ONE
+        reconstruction has to satisfy both, which is what a depth counter that
+        is merely off by a constant would fail."""
+        sources = {
+            "src/config.rs": """
+                #[cfg(test)]
+                mod validation_tests {
+                    mod nested {
+                        #[test]
+                        fn deep_case() {}
+                    }
+
+                    #[test]
+                    fn shallow_case() {}
+                }
+            """,
+        }
+        result = self.run_checker(
+            members=["ferrogate-config"],
+            sources={"ferrogate-config": sources},
+            ci_workflow="jobs:\n  t:\n    run: |\n"
+            "        cargo test -p ferrogate-config "
+            "config::validation_tests::nested::deep_case\n"
+            "        cargo test -p ferrogate-config "
+            "config::validation_tests::shallow_case\n",
+            local_runner="cargo test -p ferrogate-config\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resolved 2 name filter(s)", result.stdout)
+
+    def test_a_crate_that_reconstructs_no_test_is_named_as_that(self) -> None:
+        """A filtered `cargo test` against a crate this parser finds no test in
+
+        has two possible causes with opposite fixes -- the crate really has no
+        tests, or the reconstruction broke -- and "matches no test" says neither.
+        The vacuity floor names the crate and says which two things to look at.
+
+        Pins the `if not known[name]` branch: delete it and this case still
+        exits 1, but with the message that sent #553 round the loop three times.
+        So the assertion is on the specific words, not on the exit code."""
+        sources = {
+            "src/server/governed_decision.rs": """
+                pub fn decide() {}
+            """,
+        }
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={"ferrogate-gateway": sources},
+            ci_workflow="jobs:\n  t:\n    run: "
+            "cargo test -p ferrogate-gateway --all-features governed_decision\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("ZERO test paths", result.stderr)
+        self.assertIn("ferrogate-gateway", result.stderr)
+
+    def test_an_unbalanced_quote_is_reported_rather_than_skipped(self) -> None:
+        """`shlex` cannot tokenize `cargo test -p x 'governed_decision` and the
+
+        gate then knows nothing about what that line runs. "Could not parse it"
+        and "approved it" must not produce the same exit code, so the unreadable
+        remainder is reported as a filter naming no member.
+
+        Pins the `except ValueError` branch: `return set(), set()` there makes
+        the line carry no filter, `unmatched_name_filters` `continue`s past it,
+        and the gate exits 0 having silently exempted an invocation it could not
+        read -- which is the shape of every defect on this issue."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={"ferrogate-gateway": self.GATEWAY_SOURCES},
+            ci_workflow="jobs:\n  t:\n    run: |\n"
+            "        cargo test -p ferrogate-gateway\n"
+            "        cargo test -p ferrogate-gateway 'governed_decision\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("names no workspace member", result.stderr)
+        self.assertIn("governed_decision", result.stderr)
 
     def test_a_path_attribute_moves_the_module_a_filter_must_match(self) -> None:
         """`#[path = "x_test.rs"] mod tests;` is how half this workspace wires
@@ -875,6 +1122,11 @@ class CiCrateCoverageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("names no workspace member", result.stderr)
+        # Named, not generic: the message has to identify WHICH invocation, or
+        # a reader who has two filtered lines in one job learns nothing from
+        # it. Its sibling above asserts the crate and the filter; so does this.
+        self.assertIn("cargo test -p ferrogate-retired governed_decision", result.stderr)
+        self.assertIn("filters on governed_decision", result.stderr)
 
     def test_the_real_repository_passes_its_own_gate(self) -> None:
         result = subprocess.run(
@@ -930,6 +1182,172 @@ class CiCrateCoverageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"resolved {expected} name filter(s)", result.stdout)
+
+    @staticmethod
+    def reachable_workflow_texts() -> dict[str, str]:
+        """`ci.yml` and everything it `uses:`, walked a second, cruder way.
+
+        Deliberately not imported from the gate: a recount that shares the
+        gate's own reachability walk cannot disagree with it, and disagreeing is
+        the whole job.
+        """
+        texts: dict[str, str] = {}
+        pending = ["ci.yml"]
+        while pending:
+            name = pending.pop()
+            if name in texts:
+                continue
+            path = ROOT / ".github" / "workflows" / name
+            if not path.is_file():
+                continue
+            texts[name] = path.read_text(encoding="utf-8")
+            for line in texts[name].splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#") or "uses:" not in stripped:
+                    continue
+                target = stripped.split("uses:", 1)[1].strip()
+                if target.startswith("./.github/workflows/"):
+                    pending.append(target.rsplit("/", 1)[1])
+        return texts
+
+    def test_the_real_repository_pins_its_matrix_skipped_count(self) -> None:
+        """The skipped count was printed "so it cannot quietly grow" and then
+
+        asserted nowhere, which makes it a number rather than a check. The
+        filter count has had an independent recount since it was added; this is
+        the other half.
+
+        A matrix-templated `cargo test` is the one invocation this gate cannot
+        resolve, so every one of them is a hole of known shape. Growing the
+        number means growing the unchecked surface, and that has to be a
+        deliberate edit to this line rather than a silent one. Seven at
+        `77c921e`, all seven of the form `cargo test -p "${{ matrix.package }}"
+        ${{ matrix.args }}` or the `-p ferrogate-cli ${{ matrix.args }}`
+        variant in `rust-gateway-runtime.yml`."""
+        expected = 0
+        sources = dict(self.reachable_workflow_texts())
+        sources["local-test-modules.sh"] = (
+            ROOT / "scripts" / "local-test-modules.sh"
+        ).read_text(encoding="utf-8")
+        for text in sources.values():
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if "cargo test" in stripped and "${{" in stripped:
+                    expected += 1
+        self.assertEqual(expected, 7, "matrix-templated `cargo test` lines")
+        result = subprocess.run(
+            ["python3", str(CHECKER)], text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{expected} matrix-templated line(s) skipped", result.stdout)
+
+    def test_no_matrix_value_list_hides_a_positional_filter(self) -> None:
+        """The teeth behind the count above. A skipped line is only harmless
+
+        while the matrix it reads from carries no positional name filter: put
+        `governed_decision` in an `args:` value and it is invisible to the gate,
+        invisible to the recount beside it, and runs nothing exactly the way
+        #553 did.
+
+        So every value of every key a templated `cargo test` interpolates is
+        tokenized here with cargo's value-taking flags, and a bare word in one
+        fails. Folded `>-` blocks are followed into their continuation lines,
+        because `rust-cli-tooling-tests.yml`'s `cli_e2e` slice writes its args
+        that way and a scanner that stopped at `>-` would read the emptiest
+        possible value and pass.
+
+        This is a test and not a gate rule because it asserts a property of
+        this repository's workflows rather than of the gate; if it ever reds,
+        the answer is to teach `unmatched_name_filters` to pair `args:` with
+        `package:` through a real YAML parse, not to delete the case."""
+        takes_a_value = {
+            "-p",
+            "--package",
+            "--test",
+            "--bin",
+            "--bench",
+            "--example",
+            "--features",
+            "-F",
+            "--skip",
+            "--test-threads",
+        }
+        scanned = 0
+        for name, text in self.reachable_workflow_texts().items():
+            keys = set()
+            for line in text.splitlines():
+                if "cargo test" not in line or line.strip().startswith("#"):
+                    continue
+                for match in re.finditer(
+                    r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", line
+                ):
+                    keys.add(match.group(1))
+                # A key interpolated into a `-p` slot supplies a crate name, not
+                # an argument list. `ferrogate-cli` is a bare word and would read
+                # as a positional filter in every one of these files.
+                for match in re.finditer(
+                    r"(?:-p|--package)[= ]+['\"]?\$\{\{\s*matrix\.([A-Za-z0-9_-]+)",
+                    line,
+                ):
+                    keys.discard(match.group(1))
+            if not keys:
+                continue
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                match = re.match(r"^(\s*)-?\s*([A-Za-z0-9_-]+):\s*(.*)$", line)
+                if match is None or match.group(2) not in keys:
+                    continue
+                value = match.group(3).strip()
+                if value in (">-", ">", "|", "|-"):
+                    value = ""
+                    indent = len(match.group(1))
+                    for following in lines[index + 1 :]:
+                        if not following.strip():
+                            continue
+                        if len(following) - len(following.lstrip()) <= indent:
+                            break
+                        value += " " + following.strip()
+                scanned += 1
+                skip = False
+                for token in value.split():
+                    if skip:
+                        skip = False
+                    elif token == "--":
+                        break
+                    elif token in takes_a_value:
+                        skip = True
+                    else:
+                        self.assertTrue(
+                            token.startswith("-"),
+                            f"{name}: matrix `{match.group(2)}` value `{value}` "
+                            f"carries the positional filter `{token}`, which the "
+                            "coverage gate skips and therefore cannot resolve",
+                        )
+        # And the scan has to have found the values, not zero of them.
+        self.assertGreaterEqual(scanned, 30, "matrix values read")
+
+    def test_the_real_repository_reconstructs_a_floor_of_test_paths(self) -> None:
+        """`crate_test_paths` can break in the quiet direction: return fewer
+
+        paths, or none, and every filter it then fails to match reports as the
+        filter's fault. On a clean tree it returns them all and nothing says how
+        many, so `TEST_ATTRIBUTE` -> `if False` left all 30 tests green before
+        this floor existed.
+
+        1,417 at `77c921e` -- 1,073 in `ferrogate-gateway` and 344 in
+        `ferrogate-config`, the two crates the three live filters name -- and
+        the floor is set well under that so ordinary churn does not move it. Any
+        mutation that stops the reconstruction discovering tests drops this to
+        near zero and reds here even where a filter still happens to match."""
+        result = subprocess.run(
+            ["python3", str(CHECKER)], text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        match = re.search(r"against (\d+) reconstructed test path\(s\)", result.stdout)
+        self.assertIsNotNone(match, result.stdout)
+        self.assertGreaterEqual(int(match.group(1)), 1200, result.stdout)
 
 
 if __name__ == "__main__":

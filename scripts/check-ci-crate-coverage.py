@@ -37,9 +37,23 @@ introduced by file moves, none visible to anything.
 
 So every literal `cargo test` invocation's positional name filters are resolved
 against the test paths its `-p` crates actually contain, and a filter that
-matches none of them is an error. `--test`/`--bin`/`--bench` selectors are NOT
-checked here: cargo already fails loudly on a target name that does not exist,
-which is why the same three moves did not break those.
+matches none of them is an error. A test path here means a `#[test]` function's
+full `module::path::fn_name` and nothing else: a filter naming a MODULE resolves
+through the tests beneath it (`config::tests` through
+`config::tests::rejects_an_unknown_key`), because libtest matches substrings and
+a module with tests under it is a prefix of each of their paths. Module paths
+are deliberately not candidates in their own right -- admitting them let a
+filter resolve against a module whose only test file had been moved away, which
+is this gate's own failure mode surviving this gate. See `crate_test_paths`.
+
+Resolution is CRATE-wide, not target-wide, and this matters for the line that
+shipped the defect. `-p ferrogate-cli --bin ferrogate governed_decision` is
+accepted by this gate as soon as any test anywhere in `ferrogate-cli` matches
+`governed_decision`, including one in a `tests/` target that `--bin` excludes.
+Pairing filters with the targets a selector leaves live would need cargo's own
+target resolution; what is here is a floor. `--test`/`--bin`/`--bench` selectors
+are NOT themselves checked: cargo already fails loudly on a target name that
+does not exist, which is why the same three moves did not break those.
 
 Carving out a new crate now fails here until someone points a slice at it. The
 gate checks two independent surfaces --
@@ -91,13 +105,27 @@ And one thing the filter check deliberately does not attempt, stated so its
 scope is not overread: a run line whose arguments come from a matrix
 (`cargo test -p "${{ matrix.package }}" ${{ matrix.args }}`) is skipped, because
 pairing an `args:` value with the `package:` in the same matrix ENTRY needs a
-real YAML parse and this gate has none. The count of skipped invocations is
-printed on success so the number cannot quietly grow. On this tree every
-positional name filter -- all six of them, three in the workflows and three in
-the local runner -- is on a literal line and is checked. Filters are matched as
-substrings of a reconstructed `module::path::fn_name`, the same way libtest
-matches them, and the reconstruction reads rustfmt indentation rather than
-counting braces, so a `{` inside a raw string cannot shift a module boundary.
+real YAML parse and this gate has none. That is a hole with a shape: a
+positional filter written into a matrix `args:` value is invisible here, and a
+printed count is not an assertion. Both halves are pinned in
+`scripts/test_ci_crate_coverage.py` instead -- one test recounts the skipped
+invocations off the reachable workflows a second way and requires the printed
+number to match, and another reads every templated matrix's value lists and
+fails if any of them grows a positional filter. At `77c921e` there are seven
+skipped invocations and none of the value lists carries one; all six positional
+filters -- three in the workflows, three in the local runner -- are on literal
+lines and are checked.
+
+Filters are matched as substrings of a reconstructed `module::path::fn_name`,
+the same way libtest matches them. The reconstruction reads rustfmt indentation
+rather than counting braces, so a stray `{` in data -- the JSON these tests are
+full of -- cannot shift a module boundary. What it does NOT survive is a line
+that literally reads `mod name {` inside a raw string or a `/* */` block: that
+is read as a module and opens one. Zero instances across the 706 `.rs` files
+under `crates/` at `4c2ba43`, `cargo fmt --all -- --check` is a gate so the
+indentation it depends on holds, and the failure direction is a wrong module
+prefix rather than a missed test -- but it is a parser, not a compiler, and the
+claim is that narrow.
 """
 
 from __future__ import annotations
@@ -623,6 +651,31 @@ def module_prefix(relative: pathlib.PurePosixPath) -> list[str] | None:
 def crate_test_paths(directory: pathlib.Path) -> set[str]:
     """Every `module::path::test_name` libtest could print for this crate.
 
+    A TEST path, and only a test path. The first version of this function also
+    returned the module paths it walked through -- every file's own prefix and
+    every inline `mod` it opened -- so that a filter naming a module rather
+    than a test still resolved. That admitted a module path with no test under
+    it, which is the exact failure this gate exists to refuse, surviving the
+    gate. Delete `server/governed_decision_test.rs` and
+    `server/governed_decision_conformance_test.rs` and leave the production
+    `server/governed_decision.rs` (763 lines at `4c2ba43`, zero `#[test]`) in
+    place -- a file move, the same edit class that caused #553 -- and the
+    filter `governed_decision` resolved against the surviving
+    `server::governed_decision` module path while `cargo test -p
+    ferrogate-gateway governed_decision` ran nothing. At `77c921e`, 184 of
+    `ferrogate-gateway`'s 1,271 candidates were proper prefixes of another,
+    i.e. module paths standing in for tests that might or might not exist.
+
+    Dropping them loses nothing, because libtest matches a filter as a
+    SUBSTRING of the full path: a module that does have tests beneath it is a
+    prefix -- therefore a substring -- of each of their paths, so `config::tests`
+    still resolves through `config::tests::rejects_an_unknown_key`. Rejecting
+    the module path when no test lies beneath it and admitting it when one does
+    are the same rule as simply not admitting module paths at all, and the
+    second is the one that cannot be got wrong. All three filters live at
+    `77c921e` keep many candidates under this rule: `governed_decision` 18,
+    `config::tests` 27, `config::validation_tests` 193.
+
     Nesting is read from rustfmt indentation, not from brace counting: `cargo
     fmt --all -- --check` is a gate in this repo, so indentation is reliable,
     while a `{` inside one of the JSON fixtures these tests are full of would
@@ -675,7 +728,6 @@ def crate_test_paths(directory: pathlib.Path) -> set[str]:
             module = INLINE_MODULE.match(line)
             if module is not None:
                 stack.append((len(module.group(1)), module.group(2)))
-                paths.add("::".join(prefix + [name for _, name in stack]))
                 continue
             if TEST_ATTRIBUTE.match(line):
                 is_test = True
@@ -690,8 +742,6 @@ def crate_test_paths(directory: pathlib.Path) -> set[str]:
                 continue
             if not line.lstrip().startswith(("#", "//")):
                 is_test = False
-        if prefix:
-            paths.add("::".join(prefix))
     return paths
 
 
@@ -699,13 +749,23 @@ def unmatched_name_filters(
     regions: list[tuple[str, str]],
     packages: dict[str, str],
     root: pathlib.Path,
-) -> tuple[list[str], int, int]:
-    """Filters selecting no test, filters checked, and templated lines skipped.
+) -> tuple[list[str], int, int, int]:
+    """Filters selecting no test, filters checked, templated lines skipped, and
+    the number of test paths those filters were resolved against.
 
-    The middle number is reported because this half of the gate is invisible
-    when it finds nothing: a refactor that stopped recognizing `cargo test`
-    lines at all would print the same success line as a clean tree. The count
-    makes "checked nothing" and "checked everything" different outputs.
+    The last two numbers exist because this half of the gate is invisible when
+    it finds nothing, in two independent ways, and neither shows up in the exit
+    code. A refactor that stopped recognizing `cargo test` lines at all would
+    print the same success line as a clean tree -- `checked` makes "checked
+    nothing" and "checked everything" different outputs. And a `crate_test_paths`
+    that stopped RECONSTRUCTING tests would leave the filters checked against an
+    empty set; the fourth number is the floor under that, pinned in the suite
+    against the real tree so it cannot silently collapse.
+
+    A crate that reconstructs to zero test paths is called out by name rather
+    than left to surface as "matches no test", because the two have opposite
+    fixes: the first means this parser broke, the second means the filter is
+    pointed at the wrong crate. #553 was the second and was read as neither.
     """
     known: dict[str, set[str]] = {}
     failures: list[str] = []
@@ -733,6 +793,17 @@ def unmatched_name_filters(
             for name in named:
                 if name not in known:
                     known[name] = crate_test_paths(root / packages[name])
+                    if not known[name]:
+                        failures.append(
+                            f"  {label}: `{command.strip()}` filters on "
+                            f"{', '.join(sorted(filters))} against {name} "
+                            f"({packages[name]}), in which this gate reconstructed "
+                            "ZERO test paths -- so every filter naming it would be "
+                            "reported as matching nothing, whether or not it does. "
+                            "Either the crate has no tests and no filter should "
+                            "name it, or the reconstruction in `crate_test_paths` "
+                            "has broken and this gate is checking an empty set."
+                        )
                 reachable |= known[name]
             for name_filter in sorted(filters):
                 checked += 1
@@ -742,7 +813,7 @@ def unmatched_name_filters(
                         f"{name_filter}` matches no test in "
                         f"{', '.join(sorted(named))}"
                     )
-    return failures, checked, skipped
+    return failures, checked, skipped, sum(len(paths) for paths in known.values())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -783,7 +854,7 @@ def main(argv: list[str] | None = None) -> int:
             shell_reachable_text(strip_comments(runner_text), arguments.local_runner),
         )
     )
-    empty_filters, checked_filters, templated = unmatched_name_filters(
+    empty_filters, checked_filters, templated, discovered = unmatched_name_filters(
         regions, packages, root
     )
 
@@ -833,7 +904,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(workflows)} CI workflows and {arguments.local_runner}"
     )
     print(
-        f"resolved {checked_filters} name filter(s) on literal `cargo test` lines; "
+        f"resolved {checked_filters} name filter(s) on literal `cargo test` lines "
+        f"against {discovered} reconstructed test path(s); "
         f"{templated} matrix-templated line(s) skipped"
     )
     return 0

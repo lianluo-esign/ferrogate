@@ -11,9 +11,15 @@
 //!
 //! # What this crate is for
 //!
-//! `ferrogate-cli` grew to 154,329 lines across 200 files -- 42% of the
-//! workspace -- because it was bin-only and therefore had no API boundary that
-//! anything could violate. Stage 1 of issue #553 gave it a `lib.rs`; stage 2
+//! `ferrogate-cli` grew to **154,389 lines across 201 files -- 37.0% of the
+//! 417,477 lines under `crates/`** because it was bin-only and therefore had no
+//! API boundary that anything could violate. Measured at **`3348868`** (#553
+//! stage 1, the commit that gave it a `lib.rs`, i.e. the last tree before
+//! anything moved) over `crates/ferrogate-cli/src`, with the ref-pinned command
+//! at the head of the next section. This file previously said "154,329 lines
+//! across 200 files -- 42%" with no ref attached; that was the one figure here
+//! nobody could re-derive, and it does not reproduce at the natural anchor.
+//! Stage 1 of issue #553 gave it a `lib.rs`; stage 2
 //! created this crate and moved eleven leaf subsystems into it; stage 3a moved
 //! the operator-facing configuration out to `ferrogate-config`. Stage 3b, the
 //! commit this doc describes, is the trunk.
@@ -50,19 +56,40 @@
 //!
 //! # Testing a move this size: `-p ferrogate-gateway` is not enough
 //!
-//! Every count in this section was taken at **`4c2ba43`**, the parent of the
+//! Every count in this section was taken at **`4c2ba43`**, an ancestor of the
 //! commit that last edited it. It names a commit rather than saying "on this
 //! tree" because that phrasing went stale three review rounds running: the
 //! numbers are true of a tree, and the tree moves. Reproduce with
-//! `git ls-files '<dir>/*.rs' | xargs cat | wc -l` -- git's pathspec `*`
-//! crosses `/`, so one glob is the whole subtree.
+//!
+//! ```text
+//! git ls-tree -r --name-only 4c2ba43 -- <dir> | grep '\.rs$' \
+//!   | xargs -I{} git show 4c2ba43:{} | wc -l
+//! ```
+//!
+//! and the same pipeline into `wc -l` on the file list for the file count. The
+//! ref is in the command as well as in the sentence: this file used to publish
+//! `git ls-files '<dir>/*.rs' | xargs cat | wc -l`, which reads the WORKING
+//! TREE no matter which commit the number claims to describe, so a reader
+//! obeying the instruction beside a ref-pinned figure got a different one --
+//! 20,965 and 136,724 at `801b449` against the 20,961 and 136,681 published
+//! here. A number pinned to a ref and a command that ignores the ref is the
+//! same stale-figure defect one level down, and it is the seam this section
+//! exists to close.
+//!
+//! Two counts below are NOT that command's output and say so where they are
+//! made: `crates/ferrogate-cli/tests` is counted over the top level only
+//! (`-maxdepth 1`), and the selected/unselected split has its own derivation.
 //!
 //! Recorded here because it is the instruction a reviewer or a gate gets
 //! wrong. The code moved into this crate, so `cargo test -p
 //! ferrogate-gateway` looks like the right selector. It is not sufficient:
 //! `ferrogate-cli` kept its whole integration-test corpus, which is
 //! **41,095 lines across 63 targets in `crates/ferrogate-cli/tests/`** --
-//! six and a half times the 6,200 lines left in `crates/ferrogate-cli/src/`
+//! TARGETS, so the count is the top level of that directory only; the
+//! subtree is 64 files and 41,420 lines, the difference being
+//! `tests/support/mod.rs` (325 lines), which is a shared helper module every
+//! target `mod support;`es and is not a target of its own. Six and a half
+//! times the 6,200 lines left in `crates/ferrogate-cli/src/`
 //! -- and nearly all of it drives code that now lives here. Those targets
 //! belong to the `ferrogate-cli` package and a `-p ferrogate-gateway` run
 //! cannot see them, so a verification that omits **`-p ferrogate-cli`** leaves
@@ -76,7 +103,14 @@
 //! lines); 50 targets and 26,838 lines are run by no workflow at all** --
 //! including `asset_presign_e2e` (3,278), `tenant_isolation_admin_api`
 //! (1,703), `control_cli_crud_round_trip_e2e` (1,478) and
-//! `config_catalog_scope_admin_api` (1,342). Several of those need live
+//! `config_catalog_scope_admin_api` (1,342). Derived, at `4c2ba43`, by
+//! intersecting two lists rather than by any line count: the stems of the 63
+//! top-level `.rs` files under `crates/ferrogate-cli/tests/`, and the values
+//! matched by `--test[= ]+([A-Za-z0-9_]+)` over every file in
+//! `.github/workflows/`, deduplicated. That second list has 14 entries; the
+//! extra one is `firecracker_boot_validation`, which is not a `ferrogate-cli`
+//! target, which is why 13 and not 14. The line counts are the sums of the two
+//! resulting file lists. Several of those need live
 //! credentials or a Postgres and could not run on a hosted runner as written,
 //! which is a reason the corpus looks the way it does -- but it is not a
 //! reason to describe the suite as covered. Anyone verifying a #553 stage by
@@ -205,7 +239,8 @@
 //!
 //! # What is NOT here, and should be
 //!
-//! This crate is now 136,681 lines and is the blob `ferrogate-cli` used to be,
+//! This crate is now 136,681 lines (at `4c2ba43`, as everywhere in this file
+//! except the `3348868` figure at the top) and is the blob `ferrogate-cli` used to be,
 //! moved. #553 stage 3b bought the crate boundary, not the decomposition:
 //! `server/` still holds the Pingora proxy and the ~50-resource Admin API
 //! handler surface in one directory, and [`state`] is still one `AppState`
