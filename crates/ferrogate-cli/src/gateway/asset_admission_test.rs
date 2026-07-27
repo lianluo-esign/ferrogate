@@ -128,7 +128,6 @@ async fn an_over_budget_read_is_shed_after_the_bounded_wait_not_queued_forever()
     let refusal = budget
         .admit(8 * MIB)
         .await
-        .map_err(|refusal| refusal)
         .err()
         .expect("the second read must be shed, not admitted and not hung");
     let elapsed = started.elapsed();

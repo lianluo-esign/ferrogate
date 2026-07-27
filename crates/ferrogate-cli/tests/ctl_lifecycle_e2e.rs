@@ -275,7 +275,13 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
         "activate rev1 stderr: {}",
         activate_rev1.stderr()
     );
-    assert_eq!(activate_rev1.json()["active_revision"], 1);
+    // #505 wrapped every mutating verb's stdout in a MutationReceipt with the
+    // server document nested under `response`. Assert the envelope too, not
+    // just the nested value: a receipt that lost its `response` would otherwise
+    // read as `null == null` against a mistyped key.
+    assert_eq!(activate_rev1.json()["object"], "mutation_receipt");
+    assert_eq!(activate_rev1.json()["dry_run"], false);
+    assert_eq!(activate_rev1.json()["response"]["active_revision"], 1);
 
     // 3. `ctl guardrail-policies create-revision` appends immutable revision 2.
     let rev2 = serde_json::to_string(&guardrail_revision(policy_id, "leak")).unwrap();
@@ -297,8 +303,9 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
         "create-revision stderr: {}",
         append.stderr()
     );
+    assert_eq!(append.json()["object"], "mutation_receipt");
     assert_eq!(
-        append.json()["policy"]["revision"],
+        append.json()["response"]["policy"]["revision"],
         2,
         "appended revision is 2: {}",
         append.stdout()
@@ -456,7 +463,11 @@ fn agent_schedule_run_now_via_cli_records_run_evidence() {
         "schedule create stderr: {}",
         create.stderr()
     );
-    assert_eq!(create.json()["agent_schedule"]["id"], schedule_id);
+    assert_eq!(create.json()["object"], "mutation_receipt");
+    assert_eq!(
+        create.json()["response"]["agent_schedule"]["id"],
+        schedule_id
+    );
 
     // AC2: `ctl agent-schedules run-now` manually fires the schedule and returns
     // the run evidence. AC4: the fire carries fire_id + dispatch_id + schedule_id
