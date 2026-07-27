@@ -38,6 +38,12 @@
 //!   FERROGATE_D1_TENANT_ID_B           - tenant B id (e.g. gate456bravo)
 //!   FERROGATE_D1_PROXY_BASE_URL        - deployed Worker origin (https://...workers.dev)
 //!   FERROGATE_D1_PROXY_TOKEN           - Worker bearer (resolved via env://)
+//!
+//! SKIPS cleanly (prints a notice, exits 0) when FERROGATE_CF_ACCOUNT_ID is
+//! unset, so running this without credentials is a no-op rather than a failure.
+//! With it set but another required variable missing the probe hard-errors: a
+//! half-configured environment is an operator mistake, not an opt-out
+//! (`support/probe_env.rs`, #495).
 //! Run: cargo run -p ferrogate-storage --example d1_live_456_wallet_ops_probe
 
 use std::collections::BTreeMap;
@@ -53,25 +59,40 @@ use ferrogate_storage::{
     StoredWallet,
 };
 
+#[path = "support/probe_env.rs"]
+mod probe_env;
+
 const SCHEMA: &str = include_str!("../../../sql/d1/001_init_d1.sql");
+const PROBE: &str = "d1_live_456_wallet_ops_probe";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Runtime::new()?.block_on(run())
 }
 
-fn required(var: &str) -> Result<String, Box<dyn std::error::Error>> {
-    std::env::var(var).map_err(|_| format!("{var} is required (live probe is opt-in)").into())
-}
-
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let account_id = required("FERROGATE_CF_ACCOUNT_ID")?;
-    let control_dbid = required("FERROGATE_D1_CONTROL_DATABASE_ID")?;
-    let tenant_a_dbid = required("FERROGATE_D1_TENANT_DATABASE_ID")?;
-    let tenant_a = required("FERROGATE_D1_TENANT_ID")?;
-    let tenant_b_dbid = required("FERROGATE_D1_TENANT_DATABASE_ID_B")?;
-    let tenant_b = required("FERROGATE_D1_TENANT_ID_B")?;
-    let proxy_base = required("FERROGATE_D1_PROXY_BASE_URL")?;
-    required("FERROGATE_D1_PROXY_TOKEN")?;
+    let Some(env) = probe_env::opt_in(
+        PROBE,
+        &[
+            "FERROGATE_CF_API_TOKEN",
+            "FERROGATE_D1_CONTROL_DATABASE_ID",
+            "FERROGATE_D1_TENANT_DATABASE_ID",
+            "FERROGATE_D1_TENANT_ID",
+            "FERROGATE_D1_TENANT_DATABASE_ID_B",
+            "FERROGATE_D1_TENANT_ID_B",
+            "FERROGATE_D1_PROXY_BASE_URL",
+            "FERROGATE_D1_PROXY_TOKEN",
+        ],
+    )?
+    else {
+        return Ok(());
+    };
+    let account_id = env.account_id();
+    let control_dbid = env.var("FERROGATE_D1_CONTROL_DATABASE_ID");
+    let tenant_a_dbid = env.var("FERROGATE_D1_TENANT_DATABASE_ID");
+    let tenant_a = env.var("FERROGATE_D1_TENANT_ID");
+    let tenant_b_dbid = env.var("FERROGATE_D1_TENANT_DATABASE_ID_B");
+    let tenant_b = env.var("FERROGATE_D1_TENANT_ID_B");
+    let proxy_base = env.var("FERROGATE_D1_PROXY_BASE_URL");
 
     let resolver = Arc::new(EnvTokenResolver::from_process_env());
     let config = CloudflareConfig::new(account_id, "env://FERROGATE_CF_API_TOKEN");
@@ -116,7 +137,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = reset_wallet_tables(&proxy, &tenant_b).await;
     result?;
 
-    println!("d1_live_456_wallet_ops_probe: PASS");
+    println!("{PROBE}: PASS");
     Ok(())
 }
 

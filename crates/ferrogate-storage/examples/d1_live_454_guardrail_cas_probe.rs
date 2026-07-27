@@ -32,6 +32,12 @@
 //!   FERROGATE_D1_PROBE_DATABASE_ID- uuid of the probe D1 the Worker is bound to
 //!   FERROGATE_D1_PROXY_BASE_URL   - deployed Worker origin (https://...workers.dev)
 //!   FERROGATE_D1_PROXY_TOKEN      - Worker bearer (resolved via env://)
+//!
+//! SKIPS cleanly (prints a notice, exits 0) when FERROGATE_CF_ACCOUNT_ID is
+//! unset, so running this without credentials is a no-op rather than a failure.
+//! With it set but another required variable missing the probe hard-errors: a
+//! half-configured environment is an operator mistake, not an opt-out
+//! (`support/probe_env.rs`, #495).
 //! Run: cargo run -p ferrogate-storage --example d1_live_454_guardrail_cas_probe
 
 use std::collections::BTreeMap;
@@ -46,23 +52,33 @@ use ferrogate_storage::{
     RuntimeStorageRepositories, StorageError, StoredGuardrailPolicyRevision,
 };
 
+#[path = "support/probe_env.rs"]
+mod probe_env;
+
 const SCHEMA: &str = include_str!("../../../sql/d1/001_init_d1.sql");
+const PROBE: &str = "d1_live_454_guardrail_cas_probe";
 const POLICY: &str = "gate-454-policy";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Runtime::new()?.block_on(run())
 }
 
-fn required(var: &str) -> Result<String, Box<dyn std::error::Error>> {
-    std::env::var(var).map_err(|_| format!("{var} is required (live probe is opt-in)").into())
-}
-
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let account_id = required("FERROGATE_CF_ACCOUNT_ID")?;
-    let dbid = required("FERROGATE_D1_PROBE_DATABASE_ID")?;
-    let proxy_base = required("FERROGATE_D1_PROXY_BASE_URL")?;
-    // Presence check now so the failure is a clear message, not a later resolve error.
-    required("FERROGATE_D1_PROXY_TOKEN")?;
+    let Some(env) = probe_env::opt_in(
+        PROBE,
+        &[
+            "FERROGATE_CF_API_TOKEN",
+            "FERROGATE_D1_PROBE_DATABASE_ID",
+            "FERROGATE_D1_PROXY_BASE_URL",
+            "FERROGATE_D1_PROXY_TOKEN",
+        ],
+    )?
+    else {
+        return Ok(());
+    };
+    let account_id = env.account_id();
+    let dbid = env.var("FERROGATE_D1_PROBE_DATABASE_ID");
+    let proxy_base = env.var("FERROGATE_D1_PROXY_BASE_URL");
 
     let resolver = Arc::new(EnvTokenResolver::from_process_env());
     let config = CloudflareConfig::new(account_id, "env://FERROGATE_CF_API_TOKEN");
@@ -99,7 +115,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = reset(&repos);
     result?;
 
-    println!("d1_live_454_guardrail_cas_probe: PASS");
+    println!("{PROBE}: PASS");
     Ok(())
 }
 

@@ -15,6 +15,12 @@
 //! `UPDATE` + follow-up `SELECT`, `count(*) OVER()` pagination), then clean up.
 //!
 //! Opt-in only — requires FERROGATE_CF_ACCOUNT_ID / FERROGATE_CF_API_TOKEN.
+//!
+//! SKIPS cleanly (prints a notice, exits 0) when FERROGATE_CF_ACCOUNT_ID is
+//! unset, so running this without credentials is a no-op rather than a failure.
+//! With it set but another required variable missing the probe hard-errors: a
+//! half-configured environment is an operator mistake, not an opt-out
+//! (`support/probe_env.rs`, #495).
 //! Run: cargo run -p ferrogate-storage --example d1_live_449_families_probe
 
 use std::collections::BTreeMap;
@@ -32,15 +38,21 @@ use ferrogate_storage::{
     StoredManagedWorkerTemplate, StoredSelfHostedWorkerRegistration,
 };
 
+#[path = "support/probe_env.rs"]
+mod probe_env;
+
 const SCHEMA: &str = include_str!("../../../sql/d1/001_init_d1.sql");
+const PROBE: &str = "d1_live_449_families_probe";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Runtime::new()?.block_on(run())
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let account_id = std::env::var("FERROGATE_CF_ACCOUNT_ID")
-        .map_err(|_| "FERROGATE_CF_ACCOUNT_ID is required (live probe is opt-in)")?;
+    let Some(env) = probe_env::opt_in(PROBE, &["FERROGATE_CF_API_TOKEN"])? else {
+        return Ok(());
+    };
+    let account_id = env.account_id();
     let config = CloudflareConfig::new(account_id, "env://FERROGATE_CF_API_TOKEN");
     let client = CloudflareClient::new(config, Arc::new(EnvTokenResolver::from_process_env()))?;
     let d1 = D1Client::new(Arc::new(client));
@@ -76,7 +88,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("deleted + verified absent");
 
     result?;
-    println!("d1_live_449_families_probe: PASS");
+    println!("{PROBE}: PASS");
     Ok(())
 }
 
