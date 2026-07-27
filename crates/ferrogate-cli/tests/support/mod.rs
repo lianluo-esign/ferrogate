@@ -34,8 +34,226 @@ pub fn start_gateway_with_env(config: &std::path::Path, env: &[(&str, &str)]) ->
     for (key, value) in env {
         command.env(key, value);
     }
+    reap_with_test(&mut command);
+    sweep_orphaned_gateways_once();
     command.spawn().unwrap()
 }
+
+/// Runs the backlog sweep at most once per test binary, on the first gateway
+/// spawn.
+///
+/// [`reap_with_test`] stops the leak from here on but cannot touch the orphans
+/// already on the box -- 106 of them when #568 was filed, a large share of them
+/// spawned by an entirely different checkout, the oldest 14 hours old. Nothing
+/// else will ever reap those: there is no systemd unit behind them. Clearing
+/// them is worth doing exactly once, where a developer will actually run it.
+fn sweep_orphaned_gateways_once() {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| {
+        // Only the backlog, never something that just appeared: a gateway that
+        // was reparented seconds ago may belong to a sibling suite that is at
+        // this instant tearing itself down, and killing it would land as that
+        // suite's flake. A real backlog entry is minutes to hours old.
+        let swept = sweep_orphaned_gateways(Duration::from_secs(120));
+        if !swept.is_empty() {
+            eprintln!(
+                "#568: reaped {} orphaned gateway(s): {swept:?}",
+                swept.len()
+            );
+        }
+    });
+}
+
+/// Kills every `ferrogate run --config /tmp/.tmp*` process that has already been
+/// reparented to init and has been alive at least `min_age`, and returns the
+/// pids it killed.
+///
+/// The conditions in [`is_orphaned_test_gateway`] are what make this safe to run
+/// unconditionally. `PPID == 1` means the process that spawned it is already
+/// gone, which for a test-spawned gateway is the definition of leaked -- a
+/// gateway belonging to a suite that is *running*, here or in a sibling
+/// checkout, is still parented to its test binary. The `/tmp/.tmp` config prefix
+/// is `tempfile::tempdir`'s shape, so an operator's hand-started gateway with a
+/// real config path is out of range.
+#[cfg(target_os = "linux")]
+pub fn sweep_orphaned_gateways(min_age: Duration) -> Vec<u32> {
+    let mut killed = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return killed;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if !is_orphaned_test_gateway(pid) || process_age(pid).is_none_or(|age| age < min_age) {
+            continue;
+        }
+        // SAFETY: plain kill(2) with a signal that has no handler and a pid this
+        // process has just classified from /proc.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+            killed.push(pid);
+        }
+    }
+    killed
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sweep_orphaned_gateways(_min_age: Duration) -> Vec<u32> {
+    Vec::new()
+}
+
+/// How long `pid` has been running, from `/proc/<pid>/stat` field 22 (start
+/// time, in clock ticks since boot) against `/proc/uptime`.
+#[cfg(target_os = "linux")]
+fn process_age(pid: u32) -> Option<Duration> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields are 1-based and `comm` (field 2) may contain spaces and parens, so
+    // count from the last `)`: field 3 is the first token after it, making
+    // starttime (field 22) the 20th.
+    let starttime_ticks: f64 = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
+    // SAFETY: sysconf is a pure query of a compile-time-fixed kernel constant.
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    if ticks_per_second <= 0.0 {
+        return None;
+    }
+    let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
+    let uptime_seconds: f64 = uptime.split_whitespace().next()?.parse().ok()?;
+    Some(Duration::from_secs_f64(
+        (uptime_seconds - starttime_ticks / ticks_per_second).max(0.0),
+    ))
+}
+
+/// Both halves of the sweep's safety condition, read straight from `/proc`.
+///
+/// Public so the safety condition itself can be asserted -- a sweep that
+/// mis-classifies a *live* test's gateway would kill it mid-run and present as
+/// a flake, which is the failure mode #568 says makes this class of bug
+/// invisible.
+#[cfg(target_os = "linux")]
+pub fn is_orphaned_test_gateway(pid: u32) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    // A zombie has an empty cmdline, so it drops out here rather than being
+    // signalled pointlessly.
+    let argv: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+    let is_gateway_run = argv
+        .first()
+        .is_some_and(|program| String::from_utf8_lossy(program).ends_with("/ferrogate"))
+        && argv.iter().any(|arg| *arg == b"run")
+        && argv
+            .iter()
+            .any(|arg| arg.starts_with(b"/tmp/.tmp") && arg.ends_with(b".toml"));
+    is_gateway_run && parent_pid(pid) == Some(1)
+}
+
+/// The pid that will inherit `pid`. `Some(1)` is the #568 signature, and the
+/// reaping tests report it in their failure messages.
+#[cfg(target_os = "linux")]
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `comm` is parenthesised and may itself contain spaces and parens, so
+    // split on the last `)`; ppid is the field after the state character.
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// True while `pid` is a live `ferrogate run` process.
+///
+/// Reads `/proc/<pid>/cmdline` rather than sending signal 0, for two reasons: a
+/// reaped pid can be recycled onto an unrelated process, and a zombie still
+/// answers `kill(pid, 0)`. A zombie's `cmdline` is empty and a recycled pid
+/// belongs to some other program, so both read as dead here.
+#[allow(dead_code)]
+#[cfg(target_os = "linux")]
+pub fn gateway_process_alive(pid: u32) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let argv = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+    argv.contains("ferrogate") && argv.contains(" run ")
+}
+
+/// Smallest config that reaches a listening state: no storage, no upstream,
+/// auth explicitly off (#542) so the process has nothing to wait on. Used by
+/// the #568 lifetime tests, which care only that a gateway is running.
+#[allow(dead_code)]
+pub fn minimal_listening_config(addr: &str) -> String {
+    format!("listen = \"{addr}\"\n\n[auth]\ndisabled = true\n")
+}
+
+/// Binds a long-lived child process's lifetime to the test that spawns it, so
+/// it cannot outlive that test (#568).
+///
+/// Every long-running process a test starts must go through this. The suite's
+/// only other cleanup is a plain `child.kill()` statement at the bottom of each
+/// test body, and *that statement is the bug*: `std::process::Child` does not
+/// kill on `Drop`, it detaches. A failed `assert!`, an `.unwrap()` on a
+/// timed-out `http_request`, or the readiness panic all jump straight over the
+/// `kill()` line, and the gateway is reparented to init and runs forever. On one
+/// box that reached 106 orphans, the oldest 14 hours old, ~10.6% of memory and
+/// the bulk of a load average above 300. `cargo test` killed by `timeout` or
+/// Ctrl-C is worse still: no destructor runs at all, so no `Drop` guard --
+/// however careful -- could have covered it.
+///
+/// The mechanism is `prctl(PR_SET_PDEATHSIG, SIGKILL)`, set in the child between
+/// `fork` and `exec`. The kernel then kills the child when the *thread* that
+/// spawned it terminates. That is precisely the lifetime wanted here: libtest
+/// runs each `#[test]` on its own thread, so the gateway dies when its test
+/// returns, panics, or is torn down with the harness -- and, because the kernel
+/// owns the rule, it holds when the harness is `SIGKILL`ed, which is the one
+/// case userspace cannot reach.
+///
+/// Killing the process group (the alternative in #568) was rejected: sending the
+/// group signal still requires the harness to be alive to send it, so it leaves
+/// the `SIGKILL` case exactly as leaky as `Drop` does.
+///
+/// **Non-Linux:** this is a no-op. `PR_SET_PDEATHSIG` is Linux-specific and has
+/// no portable equivalent (macOS would need a `kqueue`/`EVFILT_PROC` watchdog
+/// thread, which itself dies with a `SIGKILL`ed harness). CI is Linux, so the
+/// gate holds where it is enforced; on a macOS or Windows workstation the
+/// explicit `kill()` calls remain the only cleanup and the crash paths still
+/// leak.
+#[cfg(target_os = "linux")]
+pub fn reap_with_test(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs in the forked child before `exec`, where only
+    // async-signal-safe calls are permitted. `prctl`, `getppid` and `_exit` all
+    // are; nothing here allocates, locks, or touches inherited state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // `fork` and the `prctl` above are not atomic. If the whole test
+            // process died in that window the death signal was armed against a
+            // parent that no longer exists and would never fire, so leave now
+            // rather than become the orphan this function exists to prevent.
+            // (A window remains where only the spawning *thread* died -- the
+            // child cannot observe that -- but it is bounded by the few
+            // microseconds between `fork` and `prctl`.)
+            if libc::getppid() == 1 {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+}
+
+/// See the Linux implementation for why this cannot be provided portably.
+#[cfg(not(target_os = "linux"))]
+pub fn reap_with_test(_command: &mut Command) {}
 
 /// Suites that boot through [`start_ready_gateway`] never call this directly,
 /// so it is dead code in those test binaries.

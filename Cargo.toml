@@ -93,6 +93,10 @@ http = "1"
 jsonschema = { version = "0.47", default-features = false }
 instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }
 jsonwebtoken = "9"
+# Test-only today (#568): `prctl(PR_SET_PDEATHSIG)` is the one mechanism that
+# makes a test-spawned gateway die even when the test harness is SIGKILLed, and
+# it has no std equivalent. Already in the lock file transitively.
+libc = "0.2"
 matchit = "0.8"
 # Pingora 0.8.1 still ships prometheus 0.13/protobuf 2.x. Keep the runtime on
 # the audited 0.8.0 source while the path patch below applies the upstream

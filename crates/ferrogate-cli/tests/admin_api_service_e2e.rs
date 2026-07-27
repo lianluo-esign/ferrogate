@@ -56,12 +56,22 @@ organization_id = "adminapi-tenant-a"
 }
 
 fn start_admin_api(config: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    ferrogate()
         .args(["admin-api", "serve", "--config", config.to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap()
+}
+
+/// The `ferrogate` binary, pre-armed so a service started here dies with the
+/// test that started it (#568) rather than being reparented to init. These are
+/// long-lived listeners like the gateway itself, and their cleanup is the same
+/// easily-skipped `kill()` statement.
+fn ferrogate() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    support::reap_with_test(&mut command);
+    command
 }
 
 /// Same key roster as `write_config`, but wired through the CANONICAL
@@ -106,7 +116,7 @@ organization_id = "adminapi-tenant-a"
 }
 
 fn start_control_api(config: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    ferrogate()
         .args(["control-api", "serve", "--config", config.to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -519,7 +529,7 @@ platform_operator = true
     )
     .unwrap();
 
-    let mut control_api = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    let mut control_api = ferrogate()
         .args([
             "control-api",
             "serve",

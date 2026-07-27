@@ -70,5 +70,12 @@ tracing-subscriber.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 
+# `tests/support` arms PR_SET_PDEATHSIG on every spawned gateway (#568) so the
+# kernel reaps it when the test that started it dies, including under SIGKILL.
+# There is no std equivalent and no portable one, so the dependency is scoped to
+# the platform that has the call.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true
+
 [features]
 default = []

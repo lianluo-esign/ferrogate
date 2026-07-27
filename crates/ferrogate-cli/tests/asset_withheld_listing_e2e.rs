@@ -72,7 +72,11 @@ fn start_threshold_gateway(config_path: &std::path::Path) -> (Child, String) {
     for _ in 0..20 {
         let addr = free_addr();
         std::fs::write(config_path, config_body(&addr)).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+        // Same #568 death-signal arming `support::start_gateway` applies; this
+        // spawner only exists to inject the env var onto the child.
+        support::reap_with_test(&mut command);
+        let mut child = command
             .args(["run", "--config", config_path.to_str().unwrap()])
             .env("FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES", "10")
             .stdout(Stdio::null())

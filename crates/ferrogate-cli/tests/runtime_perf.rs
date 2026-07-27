@@ -15,8 +15,17 @@ use std::{
 const REQUESTS: usize = 100;
 const CONCURRENT_REQUESTS: usize = 16;
 
+// This target predates `support` and keeps its own helpers; it is pulled in
+// only for the #568 death-signal arming below.
+#[allow(dead_code)]
+mod support;
+
+/// Pre-armed so a gateway started here dies with its test even when the test
+/// panics past the `kill()` line or the harness is SIGKILLed (#568).
 fn ferrogate() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    support::reap_with_test(&mut command);
+    command
 }
 
 fn free_addr() -> String {
