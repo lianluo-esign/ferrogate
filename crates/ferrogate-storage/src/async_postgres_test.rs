@@ -55,31 +55,25 @@ fn async_pool_retains_typed_timeout_and_transaction_search_path() {
 /// test makes the same audit run with no database at all: a transaction may
 /// pin directly, or through a helper that composes the pin
 /// (`coordination_session_sql`, `enter_guardrail_evidence_transaction`).
+///
+/// #480 moved the analysis into `transaction_pin_scan_test_support::scan_source`
+/// so it can also be pointed at sources that MUST be rejected (see
+/// `transaction_pin_scan_test.rs`); this test is the same audit aimed at the
+/// real tree. The scan there counts both transaction-opening idioms and reads
+/// only code, never comments or string literals.
 #[test]
 fn every_postgres_control_plane_transaction_pins_the_configured_search_path() {
-    const PIN_MARKERS: [&str; 3] = [
-        "transaction_search_path_sql",
-        "coordination_session_sql",
-        "enter_guardrail_evidence_transaction",
-    ];
-    /// The end of the method that opened the transaction: the first `}` at the
-    /// enclosing item's indentation (method bodies nest deeper). The pin may
-    /// legitimately come several statements in -- `initialize_schema` first
-    /// takes an advisory lock and creates the schema -- so the window is the
-    /// whole method rather than a fixed number of lines.
-    fn method_end(lines: &[&str], start: usize) -> usize {
-        lines
-            .iter()
-            .enumerate()
-            .skip(start + 1)
-            .find(|(_, line)| matches!(line.trim_end(), "}" | "    }"))
-            .map(|(index, _)| index)
-            .unwrap_or(lines.len())
-    }
+    /// Today's tree opens 236 transactions across 41 files. A scan that finds a
+    /// small fraction of that has broken, not shrunk: this crate does not lose
+    /// a third of its control-plane statements in one change. Failing on the
+    /// count is what stops a future refactor from turning the audit into a
+    /// no-op that still reports success.
+    const MINIMUM_PLAUSIBLE_SITES: usize = 150;
+    const MINIMUM_PLAUSIBLE_FILES: usize = 20;
 
     let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut unpinned = Vec::new();
-    let mut scanned = 0_usize;
+    let mut sites = Vec::new();
+    let mut files = 0_usize;
     let mut pending = vec![source_dir];
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory).expect("read the storage source directory") {
@@ -91,29 +85,47 @@ fn every_postgres_control_plane_transaction_pins_the_configured_search_path() {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            // Test modules build their own throwaway transactions.
-            if !name.ends_with(".rs") || name.ends_with("_test.rs") || name.contains("test_support")
-            {
+            if !crate::transaction_pin_scan_test_support::is_control_plane_source(name) {
                 continue;
             }
+            files += 1;
             let source = std::fs::read_to_string(&path).expect("read a storage source file");
-            let lines = source.lines().collect::<Vec<_>>();
-            for (index, line) in lines.iter().enumerate() {
-                if !line.contains("client.transaction()") {
-                    continue;
-                }
-                scanned += 1;
-                let window = lines[index..method_end(&lines, index)].join("\n");
-                if !PIN_MARKERS.iter().any(|marker| window.contains(marker)) {
-                    unpinned.push(format!("{}:{}", path.display(), index + 1));
-                }
-            }
+            sites.extend(crate::transaction_pin_scan_test_support::scan_source(
+                &path.display().to_string(),
+                &source,
+            ));
         }
     }
 
+    let unpinned = sites
+        .iter()
+        .filter(|site| !site.pinned)
+        .map(|site| site.location())
+        .collect::<Vec<_>>();
+    let builder_sites = sites
+        .iter()
+        .filter(|site| {
+            site.opener == crate::transaction_pin_scan_test_support::TransactionOpener::Builder
+        })
+        .count();
+
     assert!(
-        scanned > 0,
-        "the scan found no Postgres transactions at all; it has stopped protecting anything",
+        files >= MINIMUM_PLAUSIBLE_FILES,
+        "the audit only read {files} storage source files; it has stopped protecting anything",
+    );
+    assert!(
+        sites.len() >= MINIMUM_PLAUSIBLE_SITES,
+        "the audit found only {} Postgres transactions in {files} files (expected at least \
+         {MINIMUM_PLAUSIBLE_SITES}); either the crate lost most of its control plane or the scan \
+         stopped matching -- an audit that matches nothing passes vacuously (#480)",
+        sites.len(),
+    );
+    assert!(
+        builder_sites > 0,
+        "the audit found no `build_transaction()` site, but the crate has one \
+         (`mcp_identity.rs`, the read-only MCP authorization transaction). Before #480 that idiom \
+         was invisible to this scan, so an unpinned one could ship green; if the last such site \
+         really is gone, `transaction_pin_scan_test.rs` still holds the idiom's coverage",
     );
     assert!(
         unpinned.is_empty(),

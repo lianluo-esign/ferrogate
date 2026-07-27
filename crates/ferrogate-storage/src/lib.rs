@@ -15175,6 +15175,14 @@ mod billing_outbox_replay_test;
 mod wallet_reservation_sweep_x402_test;
 
 #[cfg(test)]
+#[path = "transaction_pin_scan_test_support.rs"]
+mod transaction_pin_scan_test_support;
+
+#[cfg(test)]
+#[path = "transaction_pin_scan_test.rs"]
+mod transaction_pin_scan_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
