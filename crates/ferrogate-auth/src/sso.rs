@@ -795,7 +795,11 @@ fn complete_sso_login(
         effective_role,
     ) {
         Ok(secret) => secret,
-        Err(error) => return internal_error(&error.to_string()),
+        // #514: a suspended/deleted tenancy is a 403 with the gateway's own
+        // `tenancy_suspended` code, not a 500 -- and, crucially, not a live
+        // `fg_...` secret, which is what this path returned before the gate
+        // became reachable from `ferrogate-auth`.
+        Err(error) => return error.into_response(),
     };
     match issue_session(console, &user.id, email, tenant_id, effective_role.as_str()) {
         Ok((access_token, refresh_token)) => HttpResponse::json(

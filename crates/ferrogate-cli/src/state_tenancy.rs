@@ -7,9 +7,8 @@
 
 use super::*;
 
-use crate::lifecycle_gate::{
-    check_lifecycle_chain, LifecycleGateError, LifecycleRef, LifecycleSeam,
-};
+use crate::auth::AuthError;
+use crate::lifecycle_gate::{LifecycleSeam, TenancyRefs};
 
 impl AppState {
     pub(crate) async fn list_tenant_accounts(&self) -> anyhow::Result<Vec<StoredTenantAccount>> {
@@ -147,64 +146,24 @@ impl AppState {
             .await?)
     }
 
-    /// Resolve the lifecycle `status` of every row a `tenant -> project ->
-    /// workspace` triple names, shallowest first (issue #514).
+    /// The gateway's entry into the shared #514 lifecycle gate.
     ///
-    /// This is the ONE reader of the lifecycle columns for both enforcement
-    /// seams: [`AppState::require_usable_tenancy`] is built on it, and nothing
-    /// else compares `status` strings. Ids that are `None`, blank, or that name
-    /// no row are skipped -- absence is not suspension (see [`LifecycleRef`]).
-    pub(crate) async fn resolve_lifecycle_chain(
-        &self,
-        tenant_id: Option<&str>,
-        project_id: Option<&str>,
-        workspace_id: Option<&str>,
-    ) -> anyhow::Result<Vec<LifecycleRef>> {
-        fn present(value: Option<&str>) -> Option<&str> {
-            value.map(str::trim).filter(|value| !value.is_empty())
-        }
-
-        let mut chain = Vec::new();
-        if let Some(tenant_id) = present(tenant_id) {
-            if let Some(account) = self.repositories.get_tenant_account(tenant_id).await? {
-                chain.push(LifecycleRef::new("tenant", account.id, &account.status));
-            }
-        }
-        if let Some(project_id) = present(project_id) {
-            if let Some(project) = self.repositories.get_project(project_id).await? {
-                chain.push(LifecycleRef::new("project", project.id, &project.status));
-            }
-        }
-        if let Some(workspace_id) = present(workspace_id) {
-            if let Some(workspace) = self.repositories.get_workspace(workspace_id).await? {
-                chain.push(LifecycleRef::new(
-                    "workspace",
-                    workspace.id,
-                    &workspace.status,
-                ));
-            }
-        }
-        Ok(chain)
-    }
-
-    /// The single chokepoint both #514 seams call: resolve the chain, then run
-    /// the shared pure decision over it.
-    ///
-    /// A storage failure is reported as [`LifecycleGateError::Unavailable`]
-    /// (retryable 503), never swallowed into "active" -- otherwise a flapping
-    /// control plane would be a suspension bypass.
+    /// Everything of substance -- the hierarchy walk that backfills ancestors
+    /// a credential never named, the pure per-seam decision, and the
+    /// fail-CLOSED mapping of a control-plane read failure onto a retryable
+    /// 503 -- lives in `ferrogate_storage::check_usable_tenancy`, shared with
+    /// `ferrogate-auth`'s admin-console credential mints. This method exists
+    /// only to hand back this crate's [`AuthError`], so a lifecycle refusal is
+    /// rendered by the same three lines every `authenticate()` refusal is.
     pub(crate) async fn require_usable_tenancy(
         &self,
         seam: LifecycleSeam,
-        tenant_id: Option<&str>,
-        project_id: Option<&str>,
-        workspace_id: Option<&str>,
-    ) -> Result<(), LifecycleGateError> {
-        let chain = self
-            .resolve_lifecycle_chain(tenant_id, project_id, workspace_id)
+        refs: TenancyRefs<'_>,
+    ) -> Result<(), AuthError> {
+        self.repositories
+            .require_usable_tenancy(seam, refs)
             .await
-            .map_err(|error| LifecycleGateError::Unavailable(error.to_string()))?;
-        check_lifecycle_chain(seam, &chain).map_err(LifecycleGateError::Inactive)
+            .map_err(AuthError::from)
     }
 
     pub(crate) async fn list_virtual_api_keys(&self) -> anyhow::Result<Vec<StoredApiKey>> {

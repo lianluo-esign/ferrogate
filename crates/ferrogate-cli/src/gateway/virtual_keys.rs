@@ -16,16 +16,50 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ferrogate_auth::virtual_api_key_material;
 use ferrogate_core::TenantContext;
 use ferrogate_storage::{
-    DeleteProjectOutcome, DeleteWorkspaceOutcome, StoredApiKey, StoredProject, StoredTenantAccount,
-    StoredWorkspace,
+    DeleteProjectOutcome, DeleteWorkspaceOutcome, LifecycleStatus, StoredApiKey, StoredProject,
+    StoredTenantAccount, StoredWorkspace,
 };
+
+/// Validate and canonicalize a `status` field on a tenant-account / project /
+/// workspace write (issue #514, finding 3).
+///
+/// The read side deliberately fails OPEN: `LifecycleStatus::parse` resolves
+/// anything it does not recognize to `Active`, because these columns were
+/// decorative until #514 and refusing legacy rows would revoke every
+/// pre-existing tenant. Paired with an unvalidated WRITE, though, that default
+/// reproduced the exact failure the issue exists to kill:
+/// `PUT /admin/v1/tenant-accounts/{id} {"status":"suspend"}` answered
+/// `200 OK`, the console rendered `suspend`, and the tenant kept serving --
+/// a green confirmation for a control that was never applied.
+///
+/// So: unrecognized tokens are refused at the boundary with a 400, and
+/// accepted ones are stored in their canonical spelling (`"SUSPENDED"` is
+/// persisted as `"suspended"`) so the column cannot drift from the vocabulary
+/// the gate reads. Blank/absent is still "field not supplied" -- the callers
+/// below already treat it that way and fall back to the existing value.
+fn canonical_lifecycle_status(raw: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    match LifecycleStatus::parse_strict(&raw) {
+        Some(status) => Ok(Some(status.as_str().to_string())),
+        None => Err(format!(
+            "status {raw:?} is not a recognized lifecycle state; expected one of {}",
+            LifecycleStatus::ALL
+                .iter()
+                .map(|status| status.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
 
 use super::admin_list_query::{list_response, matches_search, query_value};
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
-    auth::authenticate,
+    auth::{authenticate, authenticate_for_lifecycle_recovery},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, AdminList, AdminProject,
         AdminProjectCreateRequest, AdminProjectMutationResponse, AdminTenantAccount,
@@ -215,11 +249,24 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                let status = match canonical_lifecycle_status(payload.status) {
+                    Ok(status) => status,
+                    Err(message) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_tenant",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
                 let account = StoredTenantAccount {
                     id: id.clone(),
                     name,
                     slug,
-                    status: payload.status.unwrap_or_else(|| "active".into()),
+                    status: status.unwrap_or_else(|| "active".into()),
                     plan_id: payload
                         .plan_id
                         .filter(|plan_id| !plan_id.trim().is_empty())
@@ -344,8 +391,21 @@ impl FerroGateway {
             // generic resource-edit form (which always sends PUT) can
             // reassign a tenant's plan_id without a bespoke endpoint or
             // frontend special-case (issue #168).
+            // #514 finding 5: this is a lifecycle-status REVERSAL route, so it
+            // authenticates against the Recovery seam. The request-time gate
+            // runs inside `authenticate()`, before any handler body, and the
+            // admin console's own key is tenant-scoped -- so gating `disabled`
+            // here would make the tenant's own self-service off switch a
+            // one-way door, reversible only by a platform operator.
+            // `suspended`/`deleted` still deny: those are platform actions.
             Method::PUT | Method::PATCH => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                let auth = match authenticate_for_lifecycle_recovery(
+                    &state,
+                    headers,
+                    "admin.write",
+                    &ctx.request_id,
+                )
+                .await
                 {
                     Ok(auth) => auth,
                     Err(error) => {
@@ -426,15 +486,32 @@ impl FerroGateway {
                 // rather than "does it carry an organization_id?", so a
                 // credential that merely omitted its tenant is held to the
                 // tenant-scoped rule instead of being waved through as root.
+                let status = match canonical_lifecycle_status(payload.status) {
+                    Ok(status) => status,
+                    Err(message) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_tenant",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
                 if !auth.is_platform_operator() {
                     let changes_plan = payload
                         .plan_id
                         .as_deref()
                         .is_some_and(|plan_id| plan_id != existing.plan_id);
-                    let changes_status = payload
-                        .status
-                        .as_deref()
-                        .is_some_and(|status| status != existing.status);
+                    // Compared through the shared vocabulary rather than as raw
+                    // strings, so re-sending the tenant's current state in a
+                    // different spelling is not mistaken for an escalation
+                    // attempt (and so an invalid token can never slip past this
+                    // check by looking "unchanged").
+                    let changes_status = status.as_deref().is_some_and(|status| {
+                        status != LifecycleStatus::parse(&existing.status).as_str()
+                    });
                     if changes_plan || changes_status {
                         return write_json_error(
                             session,
@@ -450,7 +527,7 @@ impl FerroGateway {
                     id: id.to_string(),
                     name: payload.name.unwrap_or(existing.name),
                     slug: payload.slug.unwrap_or(existing.slug),
-                    status: payload.status.unwrap_or(existing.status),
+                    status: status.unwrap_or(existing.status),
                     plan_id: payload.plan_id.unwrap_or(existing.plan_id),
                     created_at_unix: existing.created_at_unix,
                     updated_at_unix: now_unix_seconds(),
@@ -883,17 +960,15 @@ impl FerroGateway {
                 if let Err(error) = state
                     .require_usable_tenancy(
                         crate::lifecycle_gate::LifecycleSeam::Attach,
-                        Some(&tenant_id),
-                        None,
-                        None,
+                        crate::lifecycle_gate::TenancyRefs::tenant(&tenant_id),
                     )
                     .await
                 {
                     return write_json_error(
                         session,
-                        error.status(),
-                        error.code(),
-                        error.message(),
+                        error.status,
+                        error.code,
+                        error.message,
                         &ctx.request_id,
                     )
                     .await;
@@ -929,12 +1004,25 @@ impl FerroGateway {
                     .id
                     .filter(|id| !id.trim().is_empty())
                     .unwrap_or_else(|| next_hierarchy_id("project"));
+                let status = match canonical_lifecycle_status(payload.status) {
+                    Ok(status) => status,
+                    Err(message) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_project",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
                 let project = StoredProject {
                     id: id.clone(),
                     tenant_id,
                     name,
                     slug,
-                    status: payload.status.unwrap_or_else(|| "active".into()),
+                    status: status.unwrap_or_else(|| "active".into()),
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
@@ -1054,8 +1142,21 @@ impl FerroGateway {
             },
             // PUT and PATCH share the same merge semantics: every field is
             // optional and falls back to the existing value.
+            // #514 finding 5: this is a lifecycle-status REVERSAL route, so it
+            // authenticates against the Recovery seam. The request-time gate
+            // runs inside `authenticate()`, before any handler body, and the
+            // admin console's own key is tenant-scoped -- so gating `disabled`
+            // here would make the tenant's own self-service off switch a
+            // one-way door, reversible only by a platform operator.
+            // `suspended`/`deleted` still deny: those are platform actions.
             Method::PUT | Method::PATCH => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                let auth = match authenticate_for_lifecycle_recovery(
+                    &state,
+                    headers,
+                    "admin.write",
+                    &ctx.request_id,
+                )
+                .await
                 {
                     Ok(auth) => auth,
                     Err(error) => {
@@ -1130,6 +1231,19 @@ impl FerroGateway {
                         .await;
                     }
                 }
+                let status = match canonical_lifecycle_status(payload.status) {
+                    Ok(status) => status,
+                    Err(message) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_project",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
                 let project = StoredProject {
                     id: existing.id,
                     tenant_id: existing.tenant_id,
@@ -1141,10 +1255,7 @@ impl FerroGateway {
                         .slug
                         .filter(|slug| !slug.trim().is_empty())
                         .unwrap_or(existing.slug),
-                    status: payload
-                        .status
-                        .filter(|status| !status.trim().is_empty())
-                        .unwrap_or(existing.status),
+                    status: status.unwrap_or(existing.status),
                     created_at_unix: existing.created_at_unix,
                     updated_at_unix: now_unix_seconds(),
                 };
@@ -1463,17 +1574,19 @@ impl FerroGateway {
                 if let Err(error) = state
                     .require_usable_tenancy(
                         crate::lifecycle_gate::LifecycleSeam::Attach,
-                        Some(&project.tenant_id),
-                        Some(&project_id),
-                        None,
+                        crate::lifecycle_gate::TenancyRefs::new(
+                            Some(&project.tenant_id),
+                            Some(&project_id),
+                            None,
+                        ),
                     )
                     .await
                 {
                     return write_json_error(
                         session,
-                        error.status(),
-                        error.code(),
-                        error.message(),
+                        error.status,
+                        error.code,
+                        error.message,
                         &ctx.request_id,
                     )
                     .await;
@@ -1509,6 +1622,19 @@ impl FerroGateway {
                     .id
                     .filter(|id| !id.trim().is_empty())
                     .unwrap_or_else(|| next_hierarchy_id("workspace"));
+                let status = match canonical_lifecycle_status(payload.status) {
+                    Ok(status) => status,
+                    Err(message) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_workspace",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
                 let workspace = StoredWorkspace {
                     id: id.clone(),
                     project_id,
@@ -1516,7 +1642,7 @@ impl FerroGateway {
                     name,
                     slug,
                     environment: payload.environment.unwrap_or_else(|| "default".into()),
-                    status: payload.status.unwrap_or_else(|| "active".into()),
+                    status: status.unwrap_or_else(|| "active".into()),
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
@@ -1633,8 +1759,21 @@ impl FerroGateway {
                     .await
                 }
             },
+            // #514 finding 5: this is a lifecycle-status REVERSAL route, so it
+            // authenticates against the Recovery seam. The request-time gate
+            // runs inside `authenticate()`, before any handler body, and the
+            // admin console's own key is tenant-scoped -- so gating `disabled`
+            // here would make the tenant's own self-service off switch a
+            // one-way door, reversible only by a platform operator.
+            // `suspended`/`deleted` still deny: those are platform actions.
             Method::PUT | Method::PATCH => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                let auth = match authenticate_for_lifecycle_recovery(
+                    &state,
+                    headers,
+                    "admin.write",
+                    &ctx.request_id,
+                )
+                .await
                 {
                     Ok(auth) => auth,
                     Err(error) => {
@@ -1708,6 +1847,19 @@ impl FerroGateway {
                         .await;
                     }
                 }
+                let status = match canonical_lifecycle_status(payload.status) {
+                    Ok(status) => status,
+                    Err(message) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_workspace",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
                 let workspace = StoredWorkspace {
                     id: existing.id,
                     project_id: existing.project_id,
@@ -1724,10 +1876,7 @@ impl FerroGateway {
                         .environment
                         .filter(|environment| !environment.trim().is_empty())
                         .unwrap_or(existing.environment),
-                    status: payload
-                        .status
-                        .filter(|status| !status.trim().is_empty())
-                        .unwrap_or(existing.status),
+                    status: status.unwrap_or(existing.status),
                     created_at_unix: existing.created_at_unix,
                     updated_at_unix: now_unix_seconds(),
                 };
@@ -2170,17 +2319,19 @@ impl FerroGateway {
         if let Err(error) = state
             .require_usable_tenancy(
                 crate::lifecycle_gate::LifecycleSeam::Attach,
-                Some(&scope.tenant_id),
-                Some(&scope.project_id),
-                Some(&scope.workspace_id),
+                crate::lifecycle_gate::TenancyRefs::new(
+                    Some(&scope.tenant_id),
+                    Some(&scope.project_id),
+                    Some(&scope.workspace_id),
+                ),
             )
             .await
         {
             return write_json_error(
                 session,
-                error.status(),
-                error.code(),
-                error.message(),
+                error.status,
+                error.code,
+                error.message,
                 &ctx.request_id,
             )
             .await;
@@ -2317,6 +2468,40 @@ impl FerroGateway {
             .await;
         };
         if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &key.tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
+        // #514 attach-time seam. Rotation issues FRESH secret material against
+        // the same tenancy chain, so it is a mint in every way that matters to
+        // suspension: without this, "suspend the tenant" is undone by rotating
+        // an existing key instead of creating a new one. (This site was missed
+        // when the seam first landed, which is what four hand-wired call sites
+        // costs.)
+        if let Err(error) = state
+            .require_usable_tenancy(
+                crate::lifecycle_gate::LifecycleSeam::Attach,
+                crate::lifecycle_gate::TenancyRefs::new(
+                    Some(&key.tenant_id),
+                    Some(&key.project_id),
+                    Some(&key.workspace_id),
+                ),
+            )
+            .await
+        {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "virtual_key.rotate",
+                id,
+                "rejected",
+                error.message.clone(),
+            ));
             return write_json_error(
                 session,
                 error.status,

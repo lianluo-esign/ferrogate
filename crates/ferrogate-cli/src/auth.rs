@@ -491,6 +491,80 @@ pub(crate) async fn authenticate(
     required_scope: &str,
     request_id: &str,
 ) -> std::result::Result<AuthContext, AuthError> {
+    authenticate_with_admission(
+        state,
+        headers,
+        required_scope,
+        request_id,
+        LifecycleAdmission::Strict,
+    )
+    .await
+}
+
+/// [`authenticate`] for the handful of routes that exist to turn an off
+/// hierarchy back ON: the lifecycle `status` PUT/PATCH on a tenant account,
+/// project or workspace (issue #514, finding 5).
+///
+/// The #514 request-time gate runs inside `finalize_auth`, i.e. BEFORE any
+/// handler body, and the admin console's own key is tenant-scoped. So a tenant
+/// that used its self-service `disabled` switch on the project its session key
+/// is scoped to was refused at `authenticate()` and could never reach the PUT
+/// that reverses it: a one-way door out of a reversible state, undoable only by
+/// a platform operator. These routes therefore run the
+/// [`LifecycleSeam::Recovery`] variant of the same gate, which admits
+/// `disabled` and nothing else -- `suspended`/`deleted` remain platform actions
+/// that a tenant cannot self-serve out of.
+///
+/// This is the narrower of the two ways to close finding 5. The alternative --
+/// dropping `disabled` from the request-time deny set entirely -- would let a
+/// disabled project keep serving `/v1/chat/completions`, which is the whole
+/// point of the switch. Scoping the carve-out to the reversal routes keeps the
+/// switch real and keeps it reversible.
+pub(crate) async fn authenticate_for_lifecycle_recovery(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: &str,
+    request_id: &str,
+) -> std::result::Result<AuthContext, AuthError> {
+    authenticate_with_admission(
+        state,
+        headers,
+        required_scope,
+        request_id,
+        LifecycleAdmission::Recovery,
+    )
+    .await
+}
+
+/// Which #514 request-time seam this authentication runs. Carried as a
+/// parameter rather than derived from the route inside `finalize_auth` because
+/// `finalize_auth` is reached from every auth source and knows nothing about
+/// routing; the three recovery routes opt in explicitly at their call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleAdmission {
+    /// Every ordinary route: `suspended`, `disabled` and `deleted` all deny.
+    Strict,
+    /// A lifecycle-status reversal route: `disabled` is admitted so the state
+    /// is not a one-way door. See [`authenticate_for_lifecycle_recovery`].
+    Recovery,
+}
+
+impl LifecycleAdmission {
+    fn seam(self) -> crate::lifecycle_gate::LifecycleSeam {
+        match self {
+            Self::Strict => crate::lifecycle_gate::LifecycleSeam::Request,
+            Self::Recovery => crate::lifecycle_gate::LifecycleSeam::Recovery,
+        }
+    }
+}
+
+async fn authenticate_with_admission(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: &str,
+    request_id: &str,
+    admission: LifecycleAdmission,
+) -> std::result::Result<AuthContext, AuthError> {
     if !state.auth_required() {
         return Ok(AuthContext {
             region_allowlist: HashSet::new(),
@@ -536,7 +610,7 @@ pub(crate) async fn authenticate(
             required_scope,
             request_id,
         )?;
-        return finalize_auth(state, auth, request_id).await;
+        return finalize_auth(state, auth, request_id, admission).await;
     }
 
     if let Some(auth) = authenticate_durable(state, &provided_key)? {
@@ -547,7 +621,7 @@ pub(crate) async fn authenticate(
                 message: format!("API key does not have required scope {required_scope}"),
             });
         }
-        return finalize_auth(state, auth, request_id).await;
+        return finalize_auth(state, auth, request_id, admission).await;
     }
 
     for configured_key in &state.config.api_keys {
@@ -617,7 +691,7 @@ pub(crate) async fn authenticate(
                     message: format!("API key does not have required scope {required_scope}"),
                 });
             }
-            return finalize_auth(state, auth, request_id).await;
+            return finalize_auth(state, auth, request_id, admission).await;
         }
     }
 
@@ -802,6 +876,7 @@ async fn finalize_auth(
     state: &AppState,
     mut auth: AuthContext,
     request_id: &str,
+    admission: LifecycleAdmission,
 ) -> std::result::Result<AuthContext, AuthError> {
     // #515, the identity seam. Every auth source funnels through here, so this
     // is the one place that can guarantee no request is ever served by a
@@ -839,12 +914,23 @@ async fn finalize_auth(
     // Platform-operator keys carry no `organization_id`/`project_id`/
     // `workspace_id`, so the chain is empty and this is a no-op for them --
     // which is exactly what keeps un-suspending a tenant possible.
+    //
+    // The chain is WALKED, not read off the credential: the ids below are what
+    // the key DECLARES, and `organization_id` is optional on a native api-key,
+    // so a key naming only a project would otherwise be checked against a
+    // one-row chain with its (suspended) tenant never read. See
+    // `ferrogate_storage::resolve_lifecycle_chain`.
+    //
+    // `admission` selects the seam: `Recovery` (the lifecycle-status PUT/PATCH
+    // routes) admits `disabled` so a tenant's own off switch is reversible.
     state
         .require_usable_tenancy(
-            crate::lifecycle_gate::LifecycleSeam::Request,
-            auth.organization_id.as_deref(),
-            auth.project_id.as_deref(),
-            auth.workspace_id.as_deref(),
+            admission.seam(),
+            crate::lifecycle_gate::TenancyRefs::new(
+                auth.organization_id.as_deref(),
+                auth.project_id.as_deref(),
+                auth.workspace_id.as_deref(),
+            ),
         )
         .await?;
     let quota = state

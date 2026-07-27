@@ -61,6 +61,19 @@ pub(crate) fn forbidden(message: &str) -> HttpResponse {
     )
 }
 
+/// Renders a shared #514 tenancy-lifecycle refusal with the SAME status and
+/// machine-readable code the gateway returns for it, so a client cannot tell
+/// which FerroGate process refused it (`tenancy_suspended` from
+/// `POST /v1/admin/login` and from `/v1/chat/completions` mean the same thing).
+/// A control-plane read failure arrives here as a retryable 503, never as a
+/// silent success.
+pub(crate) fn lifecycle_error(error: &ferrogate_storage::LifecycleGateError) -> HttpResponse {
+    HttpResponse::json(
+        error.http_status(),
+        json!({ "error": { "code": error.code(), "message": error.message() } }),
+    )
+}
+
 pub(crate) fn not_found(message: &str) -> HttpResponse {
     HttpResponse::json(
         404,

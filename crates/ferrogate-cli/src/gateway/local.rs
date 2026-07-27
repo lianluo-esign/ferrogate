@@ -8262,30 +8262,36 @@ impl FerroGateway {
         // a 201 with a live secret). One shared validation, so this holds for
         // every storage backend; the row's OWN lifecycle transitions are
         // untouched, so un-suspending still works.
+        //
+        // The chain is walked from the rows, not from the declared triple:
+        // `organization_id` is optional here, so a key naming only a project
+        // must still be refused when the tenant ABOVE that project is
+        // suspended (the defect this seam originally shipped with).
         let refs = ApiKeyTenancyRefs::from_key(&key);
         if let Err(error) = state
             .require_usable_tenancy(
                 crate::lifecycle_gate::LifecycleSeam::Attach,
-                refs.organization_id,
-                refs.project_id,
-                refs.workspace_id,
+                crate::lifecycle_gate::TenancyRefs::new(
+                    refs.organization_id,
+                    refs.project_id,
+                    refs.workspace_id,
+                ),
             )
             .await
         {
-            let message = error.message();
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                 ctx,
                 &auth,
                 "api_key.upsert",
                 &key.id,
                 "rejected",
-                message.clone(),
+                error.message.clone(),
             ));
             return write_json_error(
                 session,
-                error.status(),
-                error.code(),
-                message,
+                error.status,
+                error.code,
+                error.message,
                 &ctx.request_id,
             )
             .await;

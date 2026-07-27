@@ -10,8 +10,9 @@
 use anyhow::anyhow;
 use ferrogate_core::{TenantContext, WorkspaceScope};
 use ferrogate_storage::{
-    RuntimeStorageRepositories, StoredAdminUser, StoredAdminUserMembership,
-    StoredAdminUserRefreshToken, StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace,
+    LifecycleGateError, LifecycleSeam, RuntimeStorageRepositories, StoredAdminUser,
+    StoredAdminUserMembership, StoredAdminUserRefreshToken, StoredApiKey, StoredProject,
+    StoredTenantAccount, StoredWorkspace, TenancyRefs,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -22,8 +23,8 @@ use crate::api_key::{
     generate_virtual_api_key_secret, hash_virtual_api_key_secret, virtual_api_key_material,
 };
 use crate::http::{
-    conflict, forbidden, internal_error, not_found, storage_error, unauthorized, unprocessable,
-    HttpResponse,
+    conflict, forbidden, internal_error, lifecycle_error, not_found, storage_error, unauthorized,
+    unprocessable, HttpResponse,
 };
 use crate::membership_role::MembershipRole;
 use crate::rbac::{Permission, PolicyBinding, PolicySubject, Role};
@@ -356,7 +357,11 @@ pub(crate) fn handle_admin_register(
         MembershipRole::Owner,
     ) {
         Ok(secret) => secret,
-        Err(error) => return internal_error(&error.to_string()),
+        // #514: a suspended/deleted tenancy is a 403 with the gateway's own
+        // `tenancy_suspended` code, not a 500 -- and, crucially, not a live
+        // `fg_...` secret, which is what this path returned before the gate
+        // became reachable from `ferrogate-auth`.
+        Err(error) => return error.into_response(),
     };
 
     match issue_session(
@@ -457,7 +462,11 @@ pub(crate) fn handle_admin_login(
         session_role,
     ) {
         Ok(secret) => secret,
-        Err(error) => return internal_error(&error.to_string()),
+        // #514: a suspended/deleted tenancy is a 403 with the gateway's own
+        // `tenancy_suspended` code, not a 500 -- and, crucially, not a live
+        // `fg_...` secret, which is what this path returned before the gate
+        // became reachable from `ferrogate-auth`.
+        Err(error) => return error.into_response(),
     };
 
     let mut updated_user = user.clone();
@@ -564,6 +573,16 @@ pub(crate) fn handle_admin_refresh(
     else {
         return unauthorized("this account is no longer a member of the session's tenant");
     };
+    // #514: refresh is the endpoint that keeps a console session alive
+    // indefinitely, so gating login without gating refresh would only bound the
+    // bypass by the access token's TTL. Same Recovery seam as
+    // `current_admin_session`, for the same reason.
+    if let Err(error) = block_on_sync_bridge(console.repositories.require_usable_tenancy(
+        LifecycleSeam::Recovery,
+        TenancyRefs::tenant(&membership.tenant_id),
+    )) {
+        return lifecycle_error(&error);
+    }
     match issue_session(
         console,
         &user.id,
@@ -685,13 +704,29 @@ pub(crate) fn current_admin_session(
         Ok(memberships) => memberships,
         Err(error) => return Err(storage_error(&error)),
     };
-    match memberships
+    let Some(membership) = memberships
         .into_iter()
         .find(|membership| membership.tenant_id == claims.tenant_id)
-    {
-        Some(membership) => Ok((user, membership)),
-        None => Err(unauthorized("session tenant membership no longer exists")),
+    else {
+        return Err(unauthorized("session tenant membership no longer exists"));
+    };
+    // #514: an admin-console session JWT is a live credential for every
+    // team-management and RBAC endpoint below, and until now it checked user
+    // existence + membership only -- so a suspended tenant's console session
+    // kept working for its full TTL, and could keep re-issuing itself through
+    // `POST /v1/admin/refresh`.
+    //
+    // `Recovery`, not `Request`: this seam is tenant-level only, and a tenant's
+    // `disabled` state is one the console itself must be reachable to reverse
+    // (see `LifecycleStatus::allows_recovery`). Suspension and soft-deletion
+    // still end the session.
+    if let Err(error) = block_on_sync_bridge(console.repositories.require_usable_tenancy(
+        LifecycleSeam::Recovery,
+        TenancyRefs::tenant(&membership.tenant_id),
+    )) {
+        return Err(lifecycle_error(&error));
     }
+    Ok((user, membership))
 }
 
 /// Lists every teammate in the caller's own tenant (issue #162). Any member
@@ -1220,7 +1255,27 @@ pub(crate) fn provision_gateway_api_key(
     tenant_id: &str,
     admin_user_id: &str,
     role: MembershipRole,
-) -> anyhow::Result<String> {
+) -> Result<String, ProvisionSessionKeyError> {
+    // #514, the attach-time seam -- reached from `ferrogate-auth`, which is why
+    // the decision had to move down into `ferrogate-storage`. This function is
+    // a credential MINT: it writes a live `StoredApiKey` with a freshly
+    // generated `fg_...` secret. While the gate lived in `ferrogate-cli` it was
+    // unreachable from here, so `POST /v1/admin/login` (and register, and SSO)
+    // against a suspended tenant still returned a working gateway key -- the
+    // exact probe row the issue enumerates, and the reason the "every caller"
+    // claim was false.
+    //
+    // The seam is `Recovery`, not `Attach`: `disabled` is the tenant's OWN off
+    // switch, and refusing to mint a console session under a disabled project
+    // would lock the tenant out of the console it needs to re-enable it (see
+    // `LifecycleStatus::allows_recovery`). `suspended`/`deleted` deny -- those
+    // are platform actions, and an operator reverses them with an operator key
+    // that carries no tenancy chain.
+    block_on_sync_bridge(console.repositories.require_usable_tenancy(
+        LifecycleSeam::Recovery,
+        TenancyRefs::new(Some(tenant_id), Some(project_id), Some(workspace_id)),
+    ))
+    .map_err(ProvisionSessionKeyError::Inactive)?;
     revoke_admin_console_session_keys(console, tenant_id, admin_user_id)?;
     let secret = generate_virtual_api_key_secret()?;
     let material = virtual_api_key_material(&secret)
@@ -1258,6 +1313,40 @@ pub(crate) fn provision_gateway_api_key(
     };
     block_on_sync_bridge(console.repositories.upsert_api_key_record(key))?;
     Ok(secret)
+}
+
+/// Why a console session key was not minted (issue #514).
+///
+/// The two arms exist because they are DIFFERENT answers to the client: a
+/// suspended tenancy is a 403 with the same machine-readable code the gateway
+/// uses, not the 500 that every `provision_gateway_api_key` failure used to
+/// collapse into. Rendering a policy refusal as an internal error would tell an
+/// operator "FerroGate is broken" when the truth is "this tenant is suspended".
+#[derive(Debug)]
+pub(crate) enum ProvisionSessionKeyError {
+    Inactive(LifecycleGateError),
+    Failed(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ProvisionSessionKeyError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<ferrogate_storage::StorageError> for ProvisionSessionKeyError {
+    fn from(error: ferrogate_storage::StorageError) -> Self {
+        Self::Failed(anyhow!(error.to_string()))
+    }
+}
+
+impl ProvisionSessionKeyError {
+    pub(crate) fn into_response(self) -> HttpResponse {
+        match self {
+            Self::Inactive(error) => lifecycle_error(&error),
+            Self::Failed(error) => internal_error(&error.to_string()),
+        }
+    }
 }
 
 pub(crate) fn issue_session(

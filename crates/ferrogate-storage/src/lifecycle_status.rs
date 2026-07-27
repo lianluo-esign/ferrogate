@@ -53,6 +53,31 @@ impl LifecycleStatus {
         }
     }
 
+    /// The WRITE-side counterpart to [`LifecycleStatus::parse`]: `None` for
+    /// anything outside the closed vocabulary.
+    ///
+    /// The read-side fail-open above is right for rows that already exist, but
+    /// paired with an unvalidated write it re-created the exact failure this
+    /// issue exists to kill: `PUT .../tenant-accounts/{id} {"status":"suspend"}`
+    /// (note the missing `-ed`) answered `200 OK`, the console rendered
+    /// `suspend`, and the tenant kept serving -- a green confirmation for a
+    /// control that was never applied. Admin write handlers reject the token
+    /// here, at the boundary, so an operator learns immediately; nothing that
+    /// is already in the database is affected.
+    pub fn parse_strict(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "active" => Some(Self::Active),
+            "suspended" => Some(Self::Suspended),
+            "disabled" => Some(Self::Disabled),
+            "deleted" => Some(Self::Deleted),
+            _ => None,
+        }
+    }
+
+    /// Every token a write handler will accept, for the rejection message and
+    /// the OpenAPI enum.
+    pub const ALL: [Self; 4] = [Self::Active, Self::Suspended, Self::Disabled, Self::Deleted];
+
     /// The canonical token, for error messages and audit records.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -89,6 +114,28 @@ impl LifecycleStatus {
     /// call the admin API.
     pub fn allows_attach(self) -> bool {
         self.is_active()
+    }
+
+    /// Recovery seam: may a credential whose tenancy chain contains a row in
+    /// this state still reach the handful of requests that exist to turn the
+    /// hierarchy back ON (the lifecycle `status` PUT/PATCH routes, and the
+    /// admin-console session key those routes are called with)?
+    ///
+    /// [`LifecycleStatus::Disabled`] is documented right above as the TENANT's
+    /// own "turn this project off" switch, as distinct from the platform's
+    /// billing action. If the request-time seam denied it everywhere, it would
+    /// be a one-way door: the console key a tenant holds is scoped to its
+    /// project, so disabling that project would revoke the very credential
+    /// needed to re-enable it, and a self-service toggle would require a
+    /// support ticket to undo. So `disabled` is admitted here and ONLY here.
+    ///
+    /// `suspended` and `deleted` still deny. Both are platform-operator
+    /// actions; reversing them is meant to require an operator key, which
+    /// carries no tenancy chain and is therefore never gated at all. Letting a
+    /// suspended tenant reach its own status PUT would make suspension
+    /// self-serviceable, i.e. not a control.
+    pub fn allows_recovery(self) -> bool {
+        matches!(self, Self::Active | Self::Disabled)
     }
 }
 

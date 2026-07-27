@@ -50,6 +50,12 @@ pub use rbac::{tenant_role_binding_id, StoredPermission, StoredRole, StoredTenan
 mod lifecycle_status;
 pub use lifecycle_status::LifecycleStatus;
 
+mod lifecycle_gate;
+pub use lifecycle_gate::{
+    check_lifecycle_chain, check_usable_tenancy, resolve_lifecycle_chain, LifecycleGateError,
+    LifecycleRef, LifecycleRejection, LifecycleRowSource, LifecycleSeam, TenancyRefs,
+};
+
 mod mcp_identity;
 pub use mcp_identity::{
     McpCredentialRepository, McpIdentityAccessOutcome, McpIdentityAccessRequest,
