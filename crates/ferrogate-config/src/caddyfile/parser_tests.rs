@@ -288,6 +288,10 @@ fn a_caddyfile_key_that_declares_no_tenancy_is_refused_rather_than_defaulted() {
 
 /// The tenancy directives are closed the same way the rest of the grammar is: a
 /// misspelled argument is refused with a span, never read as either answer.
+///
+/// #540-undeclared-on-purpose: key `k` below declares no identity in either
+/// loop -- that is the input, since a directive that fails to parse is a
+/// directive that declared nothing.
 #[test]
 fn platform_operator_directive_refuses_an_argument_it_does_not_understand() {
     for bad in [
@@ -324,6 +328,9 @@ fn platform_operator_directive_refuses_an_argument_it_does_not_understand() {
 /// Pins the `Some(value) if !value.trim().is_empty()` guard on the
 /// `organization_id` arm in `parser.rs`. Restore `args.first().cloned()` and
 /// both loop cases red -- `unwrap_err` panics, because the parse succeeds.
+///
+/// #540-undeclared-on-purpose: key `k` below declares no identity in either
+/// loop case; a malformed declaration IS the input here.
 #[test]
 fn organization_id_directive_refuses_a_missing_argument_instead_of_ignoring_it() {
     for bad in ["organization_id", "organization_id \"\""] {
@@ -351,6 +358,59 @@ fn organization_id_directive_refuses_a_missing_argument_instead_of_ignoring_it()
     assert_eq!(
         parsed.api_keys[0].organization_id.as_deref(),
         Some("tenant-a")
+    );
+}
+
+/// #540 rework 2, review minor 14: a directive FerroGate supports, written with
+/// an argument it does not, is no longer reported as unsupported.
+///
+/// `organization_id` with no value printed "unsupported directive
+/// `organization_id`: not part of the FerroGate Caddyfile MVP subset" and then
+/// suggested writing `organization_id <tenants.id>` -- the directive it had
+/// just called unsupported. #540 ADDED that directive; the operator reading
+/// that message cannot tell "delete this line" from "fix this argument", and
+/// deleting it leaves the key undeclared, which is the state this whole issue
+/// exists to stop.
+///
+/// Pins `Parser::invalid_argument` and both call sites. Route either arm back
+/// to `self.unsupported(...)` and the corresponding assertion reds. The last
+/// two assertions hold the other direction: a genuinely unknown directive still
+/// says "unsupported", so this is not a build that simply deleted the word.
+///
+/// #540-undeclared-on-purpose: key `k` below declares no identity -- a
+/// malformed declaration is the input.
+#[test]
+fn a_supported_directive_with_a_bad_argument_is_not_called_unsupported() {
+    for bad in ["organization_id", "platform_operator yes"] {
+        let error = parse_caddyfile(
+            &format!(
+                "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            {bad}\n        }}\n    }}\n}}\n"
+            ),
+            "Ferrogate/Caddyfile",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("invalid argument"),
+            "`{bad}` names a directive FerroGate supports: {error}"
+        );
+        assert!(
+            !error.contains("unsupported directive"),
+            "...so telling the operator to delete it is the one answer that must not be given: \
+             {error}"
+        );
+    }
+
+    let unknown = parse_caddyfile(
+        "\n:8080 {\n    ai_gateway {\n        api_key k {\n            key s\n            \
+         organization_id tenant-a\n            nonsense yes\n        }\n    }\n}\n",
+        "Ferrogate/Caddyfile",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        unknown.contains("unsupported directive") && unknown.contains("nonsense"),
+        "a directive that really is outside the subset still says so: {unknown}"
     );
 }
 

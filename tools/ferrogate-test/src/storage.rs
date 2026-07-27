@@ -1794,6 +1794,7 @@ api_keys:
   - id: admin
     name: Admin
     key: admin-secret
+    platform_operator: true
     scopes:
       - admin.read
       - admin.write
@@ -1848,6 +1849,7 @@ api_keys:
   - id: admin
     name: Admin
     key: admin-secret
+    platform_operator: true
     scopes:
       - admin.read
       - admin.write

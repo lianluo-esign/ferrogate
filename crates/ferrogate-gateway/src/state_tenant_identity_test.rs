@@ -105,6 +105,91 @@ fn two_pre_515_durable_rows_do_not_block_an_admin_write_that_never_touches_them(
     }
 }
 
+/// #540 rework 2, review minor 1: the warning that PAYS for the relaxation
+/// above, at the moment it is worth something.
+///
+/// Relaxing a security refusal into a log line is only defensible if the log
+/// line exists and reaches the operator. Neither held: deleting the whole
+/// `tracing::warn!` reddened nothing in the tree, and it could not fire at boot
+/// at all, because `try_new_with_repositories` applies the durable snapshot and
+/// never re-validates while `serve` runs only `ensure_auth_posture_is_declared`.
+/// A node whose store held pre-#515 rows therefore started in silence and first
+/// mentioned them on the operator's next admin write -- the exact "find out
+/// from live traffic" failure #540 exists to prevent, reintroduced by #540's
+/// own fix.
+///
+/// This drives a real restart: a second `SharedAppState` over the SAME
+/// repositories handle, which is the boot path
+/// (`try_new_with_repositories(..., apply_durable_snapshot = true)`).
+///
+/// Pins three lines, each with its own mutation:
+///
+/// * delete `config.warn_undeclared_control_plane_api_keys()` from
+///   `apply_control_plane_snapshot_to_config_from_repositories` and the
+///   captured-log assertions red (nothing is emitted at boot);
+/// * delete the `tracing::warn!` inside
+///   `Config::warn_undeclared_control_plane_api_keys` and the same two red,
+///   while the returned-ids assertion still passes -- which is why both forms
+///   are asserted;
+/// * delete `config.api_keys_are_control_plane_documents = true` from that same
+///   boot function (review minor 10 called that assignment redundant and
+///   unpinned) and every assertion here reds, because the method returns empty
+///   for a config that is not a durable snapshot.
+///
+/// It cannot be satisfied by annotating a fixture: the fixture is written into
+/// the control-plane store as raw JSON with no identity, and an annotation
+/// would red the assertions instead of quieting them.
+#[test]
+fn a_pre_515_durable_row_is_reported_at_boot_not_only_at_the_next_admin_write() {
+    let mut config = Config::default();
+    config.api_keys = vec![declared_key("config-key")];
+    config.validate().expect("the config file itself is clean");
+
+    let first_boot = SharedAppState::with_source_path(config.clone(), None);
+    seed_legacy_undeclared_durable_key(&first_boot, "legacy-one");
+    seed_legacy_undeclared_durable_key(&first_boot, "legacy-two");
+    let store = first_boot.current().repositories.clone();
+
+    // The restart. Same store, a config document that is itself clean -- which
+    // is precisely the deployment that used to boot without a word.
+    let mut restarted = None;
+    let logged = crate::auth::auth_admission_test::capture_tracing_output(|| {
+        restarted = Some(SharedAppState::with_source_path_and_repositories(
+            config, None, store,
+        ));
+    });
+
+    assert!(
+        logged.contains("legacy-one") && logged.contains("legacy-two"),
+        "boot must name every pre-#515 durable row by id, or the operator's first news of them \
+         is a 403 on live traffic: {logged}"
+    );
+    assert!(
+        logged.contains("PUT /admin/v1/api-keys"),
+        "...and say how to repair one, since it is a row and not a line in a file: {logged}"
+    );
+
+    let restarted = restarted.expect("the restart itself must succeed");
+    assert_eq!(
+        restarted
+            .current()
+            .config
+            .warn_undeclared_control_plane_api_keys(),
+        vec!["legacy-one", "legacy-two"],
+        "and the same answer is available without scraping a log"
+    );
+    assert!(
+        restarted
+            .current()
+            .config
+            .api_keys
+            .iter()
+            .any(|key| key.id == "config-key"),
+        "the node really did boot with its config document, so the assertions above are about a \
+         warning and not about a failed startup"
+    );
+}
+
 /// The other door, and the reason the change above is not a hole: the mint
 /// refusal #540 established for `POST`/`PUT /admin/v1/api-keys` still fires,
 /// aimed at the one key the request produces.

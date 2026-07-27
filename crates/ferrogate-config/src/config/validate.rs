@@ -2002,6 +2002,37 @@ impl Config {
             return Ok(());
         }
         if self.api_keys_are_control_plane_documents {
+            self.warn_undeclared_control_plane_api_keys();
+            return Ok(());
+        }
+        bail!("{}", undeclared_tenant_identity_refusal(&undeclared));
+    }
+
+    /// The durable branch's entire compensating control, as a function that
+    /// returns what it warned about (#540 rework 2, review minor 1).
+    ///
+    /// Two defects, one shape. It was a bare `tracing::warn!` inline in
+    /// [`Self::ensure_every_key_declares_tenant_identity`], so deleting the
+    /// call reddened nothing anywhere in the tree -- the only compensation for
+    /// relaxing a security refusal was itself unheld. And it could not fire at
+    /// the moment it matters most: `AppState::try_new_with_repositories`
+    /// applies the durable snapshot and never re-validates, so a node whose
+    /// store holds pre-#515 rows booted in complete silence and first mentioned
+    /// them on the next admin write. The boot path now calls this directly
+    /// (`apply_control_plane_snapshot_to_config_from_repositories`), which is
+    /// also what makes the flag assignment there load-bearing rather than
+    /// defensive (review minor 10).
+    ///
+    /// Returns the ids so the behaviour is assertable without scraping a log,
+    /// exactly as [`Self::warn_implicit_platform_operators`] does. Empty unless
+    /// these keys really are durable rows: a config *document* in this state is
+    /// refused outright, and the legacy opt-in short-circuits both.
+    pub fn warn_undeclared_control_plane_api_keys(&self) -> Vec<&str> {
+        if self.tenancy.implicit_platform_operator || !self.api_keys_are_control_plane_documents {
+            return Vec::new();
+        }
+        let undeclared = self.api_keys_without_tenant_identity();
+        if !undeclared.is_empty() {
             tracing::warn!(
                 api_key_ids = %undeclared.join(", "),
                 "these durable control-plane API keys declare neither organization_id nor \
@@ -2012,9 +2043,8 @@ impl Config {
                  repairs them. Fix each with PUT /admin/v1/api-keys/<id> naming an \
                  organization_id, or platform_operator: true (issues #515, #540)."
             );
-            return Ok(());
         }
-        bail!("{}", undeclared_tenant_identity_refusal(&undeclared));
+        undeclared
     }
 
     /// The same refusal, aimed at one key, for the runtime mint path.

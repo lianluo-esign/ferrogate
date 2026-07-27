@@ -1275,6 +1275,72 @@ fn the_undeclared_key_refusal_is_written_in_the_caddyfile_grammar_too() {
     );
 }
 
+/// #540 rework 2, review finding 4: YAML is a live dialect and nothing in the
+/// tree said so.
+///
+/// `Config::from_yaml_str` exists, `Config::load` dispatches on `.yaml`/`.yml`,
+/// `POST /admin/v1/config/validate` takes a `config_yaml` body, and #540's own
+/// refusal message says "In TOML or YAML" -- but every #540 fixture was TOML,
+/// Caddyfile or JSON, and the repository-wide declaration scan had no YAML arm
+/// at all. A YAML `api_keys:` list was a way to write an undeclared key that
+/// nothing in this issue could see.
+///
+/// Pins the YAML half of `Config::from_yaml_str` -> `validate` ->
+/// `ensure_every_key_declares_tenant_identity`, and is the repository anchor
+/// for the scan's YAML arm (`tenant_identity_declaration_scan.rs`), which
+/// before this test had no real file to find. Delete the
+/// `ensure_every_key_declares_tenant_identity` call in `validate` and the first
+/// assertion reds; annotating the fixture cannot satisfy it, because the input
+/// is a config that declares nothing on purpose.
+#[test]
+fn the_undeclared_key_refusal_fires_on_the_yaml_dialect_too() {
+    let error = Config::from_yaml_str(
+        r#"
+listen: "127.0.0.1:8080"
+api_keys:
+  # #540-undeclared-on-purpose: the YAML shape the refusal must also catch
+  - id: yaml-undeclared
+    name: Undeclared
+    key: yaml-secret
+    scopes:
+      - chat.completions
+"#,
+    )
+    .expect_err("#540: a YAML key that declares nothing must not load either")
+    .to_string();
+    assert!(
+        error.contains("yaml-undeclared"),
+        "the refusal names the key that has to change: {error}"
+    );
+    assert!(
+        error.contains("In TOML or YAML"),
+        "and the message already claims to cover this dialect, so it had better fire in it: \
+         {error}"
+    );
+
+    // The control: the same document with the declaration loads, so the
+    // assertion above is about the missing field and not about YAML being
+    // rejected wholesale.
+    let declared = Config::from_yaml_str(
+        r#"
+listen: "127.0.0.1:8080"
+api_keys:
+  - id: yaml-declared
+    name: Declared
+    key: yaml-secret
+    organization_id: tenant-a
+    scopes:
+      - chat.completions
+"#,
+    )
+    .expect("a YAML key that names its tenant loads under the #540 default");
+    assert_eq!(
+        declared.api_keys[0].organization_id.as_deref(),
+        Some("tenant-a")
+    );
+    assert!(declared.api_keys_without_tenant_identity().is_empty());
+}
+
 /// #540 rework, review minor 7: `undeclared.join(", ")` is load-bearing and
 /// nothing held it -- no test had ever put more than one undeclared key in a
 /// config, so `undeclared[0]` would have passed every assertion in the tree
@@ -1283,6 +1349,13 @@ fn the_undeclared_key_refusal_is_written_in_the_caddyfile_grammar_too() {
 /// Pins the `join` in `undeclared_tenant_identity_refusal`. Replace it with
 /// `undeclared[0]` (or `.first().unwrap()`) and the `second-undeclared`
 /// assertion reds.
+///
+/// #540 rework 2, review finding 1: the third assertion could not pass as
+/// committed. It asserted `!error.contains("declared,")` while the rendered
+/// list is `first-undeclared, second-undeclared` -- and `declared,` occurs
+/// *inside* `first-undeclared,`, so the test was red on the unmutated tree and
+/// pinned nothing. The declared fixture's id is now `tenant-bound`, which is a
+/// substring of neither undeclared id in either order.
 #[test]
 fn the_refusal_names_every_undeclared_key_not_just_the_first() {
     let error = Config::from_toml_str(
@@ -1296,9 +1369,9 @@ name = "First"
 key = "first-secret"
 
 [[api_keys]]
-id = "declared"
+id = "tenant-bound"
 name = "Declared"
-key = "declared-secret"
+key = "tenant-bound-secret"
 organization_id = "tenant-a"
 
 # #540-undeclared-on-purpose: the second one the message must also name
@@ -1320,7 +1393,7 @@ key = "second-secret"
         "every undeclared key is named, or the operator restarts once per key: {error}"
     );
     assert!(
-        !error.contains("declared,") && !error.contains(", declared"),
+        !error.contains("tenant-bound"),
         "and a key that DID declare a tenant is not swept into the list: {error}"
     );
 }

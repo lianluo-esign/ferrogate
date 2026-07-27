@@ -564,6 +564,69 @@ mod tests {
         assert!(report.contains("cloudflare_d1"), "{report}");
     }
 
+    /// #540 rework 2, review minor 2: the previous round moved the tenancy
+    /// posture into `ferrogate check` and then pinned it with three assertions
+    /// that called `Config::tenancy_posture_warnings()` directly, inside
+    /// `ferrogate-config`. None of them could see this file, so deleting
+    /// `warnings.extend(config.tenancy_posture_warnings())` above re-created --
+    /// untested -- the exact defect that finding named: an operator holding the
+    /// legacy opt-in reads `FerroGate config OK`, exit 0, forever.
+    ///
+    /// Pins that one line. Delete it and the first two assertions red. It
+    /// cannot be satisfied by annotating a fixture: the input IS an
+    /// un-annotated key under the opt-in, and the third assertion holds the
+    /// other direction, so a build that simply printed every warning always
+    /// would red too.
+    #[test]
+    fn check_prints_the_tenancy_posture_an_operator_would_otherwise_never_see() {
+        let opted_in = Config::from_toml_str(
+            r#"
+listen = "127.0.0.1:8080"
+
+[tenancy]
+implicit_platform_operator = true
+
+# #540-undeclared-on-purpose: the key the pre-flight has to name
+[[api_keys]]
+id = "bootstrap"
+name = "Bootstrap"
+key = "bootstrap-secret"
+"#,
+        )
+        .expect("the documented escape hatch loads");
+
+        let report =
+            format_validate_report(&opted_in).expect("the opt-in is a warning, not a refusal");
+        assert!(report.contains("FerroGate config OK"), "{report}");
+        assert!(
+            report.contains("warning: ") && report.contains("implicit_platform_operator"),
+            "`ferrogate check` must name the switch that reverts #540 for this deployment: \
+             {report}"
+        );
+        assert!(
+            report.contains("bootstrap"),
+            "...and every key it is silently promoting to platform root: {report}"
+        );
+
+        // The other direction: a deployment that declared its keys gets no
+        // tenancy warning at all, so this is not a banner every operator learns
+        // to skip.
+        let declared = Config::from_toml_str(
+            r#"
+listen = "127.0.0.1:8080"
+
+[[api_keys]]
+id = "operator"
+name = "Operator"
+key = "operator-secret"
+platform_operator = true
+"#,
+        )
+        .expect("a fully declared config");
+        let report = format_validate_report(&declared).expect("a declared config reports OK");
+        assert!(!report.contains("implicit_platform_operator"), "{report}");
+    }
+
     /// #542 migration: the deployment that used to run in the implicit open
     /// posture -- no `[[api_keys]]`, no `[auth_service]`, no durable backend --
     /// does not start silently and does not flip silently. It stops, and the

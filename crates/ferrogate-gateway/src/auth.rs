@@ -1426,17 +1426,28 @@ async fn finalize_auth(
     // either way, so this is not an escalation; it is the difference between
     // that constant being unforgeable by construction and being unforgeable by
     // coincidence.
-    let names_a_tenant = auth
-        .organization_id
-        .as_deref()
-        .is_some_and(|organization_id| !organization_id.trim().is_empty());
+    //
+    // #540 rework 2, review minor 3: the two shapes get different words. An
+    // operator whose auth service answered `organization_id: ""` is not
+    // helped by being told their API key "declares neither" -- it declared an
+    // `organization_id`, and the value is the problem. Same `code`, because
+    // the refusal and its conformance fixture are one contract.
+    let declared_organization_id = auth.organization_id.as_deref();
+    let names_a_tenant =
+        declared_organization_id.is_some_and(|organization_id| !organization_id.trim().is_empty());
     if !auth.platform_operator && !names_a_tenant {
         return Err(AuthError {
             status: StatusCode::FORBIDDEN,
             code: "tenant_identity_required",
-            message: "API key declares neither an organization_id nor platform_operator = true, \
-                      so it has no tenant identity to authorize against"
-                .into(),
+            message: if declared_organization_id.is_some() {
+                "the organization_id this credential carries is blank, so it names no tenant to \
+                 authorize against and is not platform_operator = true"
+                    .into()
+            } else {
+                "API key declares neither an organization_id nor platform_operator = true, so it \
+                 has no tenant identity to authorize against"
+                    .to_string()
+            },
         });
     }
     // #514, the request-time seam. This is the ONE place it lives: every auth
@@ -1574,4 +1585,4 @@ mod auth_test;
 
 #[cfg(test)]
 #[path = "auth_admission_test.rs"]
-mod auth_admission_test;
+pub(crate) mod auth_admission_test;

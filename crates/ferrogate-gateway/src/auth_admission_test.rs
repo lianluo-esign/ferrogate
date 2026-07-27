@@ -1031,8 +1031,21 @@ fn undeclared_platform_root_is_off_by_default_and_the_resolver_agrees() {
 /// Pins `auth.rs`'s `platform_operator: resolve_platform_operator(
 /// implicit_platform_operator, None, decision.tenant.organization_id
 /// .as_deref())`. Replace it with `true` and the first assertion reds; replace
-/// it with `false` and the third reds; drop the `organization_id` argument and
-/// the second reds.
+/// it with `false` and the third reds; drop the `organization_id` argument
+/// (`resolve_platform_operator(implicit_platform_operator, None, None)`) and
+/// the FOURTH reds.
+///
+/// #540 rework 2, review finding 2: the previous round claimed the second
+/// assertion caught the dropped-argument mutation. It did not. `scoped
+/// .organization_id` is assigned from `decision.tenant.organization_id`
+/// several lines below the resolver and is not the resolver's output, and
+/// every other input pair here either names no tenant or has the switch off --
+/// so all four assertions survived it. The pair that distinguishes "reads the
+/// tenant" from "reads only the switch" is a tenant-scoped answer WITH the
+/// switch on, and it was the one pair missing. It is not decorative: at a
+/// deployment holding `implicit_platform_operator = true` -- the hatch this
+/// whole issue provides -- the mutation makes every tenant-scoped external
+/// caller an unrestricted platform operator.
 #[test]
 fn an_external_auth_service_cannot_mint_a_platform_operator_by_omission() {
     fn decision(organization_id: Option<&str>) -> ferrogate_auth_service::AuthDecision {
@@ -1080,6 +1093,19 @@ fn an_external_auth_service_cannot_mint_a_platform_operator_by_omission() {
         legacy.platform_operator,
         "the legacy opt-in must reach this source too, or `implicit_platform_operator = true` \
          would silently mean something different here than everywhere else"
+    );
+
+    // ...and the switch reaches ONLY the unclassified answer. This is the one
+    // input pair that tells "the resolver reads the decision's tenant" apart
+    // from "the resolver reads the deployment switch and nothing else": with
+    // the argument dropped, a tenant-scoped external caller at an opted-in
+    // deployment becomes an unrestricted platform operator.
+    let scoped_under_the_hatch =
+        crate::auth::external_auth_context(decision(Some("tenant-a")), true);
+    assert!(
+        !scoped_under_the_hatch.platform_operator,
+        "the legacy opt-in is for credentials that declared NOTHING; a decision that named a \
+         tenant already said what it is, and the hatch must not promote it"
     );
 }
 
@@ -1166,7 +1192,7 @@ fn config_validate_refuses_a_key_with_no_declared_tenant_identity() {
 /// thread only. Needed because the migration warning's only user-visible form
 /// IS a log line -- there is nothing else to assert on once you insist on
 /// driving the real caller.
-fn capture_tracing_output(run: impl FnOnce()) -> String {
+pub(crate) fn capture_tracing_output(run: impl FnOnce()) -> String {
     #[derive(Clone, Default)]
     struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -1348,6 +1374,81 @@ fn static_config_key_without_any_declared_identity_is_governed_by_the_switch() {
         auth.is_platform_operator(),
         "the escape hatch has to actually restore the old behaviour, or nobody can use it to buy \
          time"
+    );
+}
+
+/// #540 rework 2, review minor 3: the blank-tenant half of `finalize_auth` was
+/// a live-traffic behaviour change with no test at all.
+///
+/// A credential carrying `organization_id: ""` -- the shape an external auth
+/// service produces when it fills the field with whatever it has -- used to
+/// serve traffic as `CallerScope::Tenant("")`, which is the same value
+/// `UNSCOPED_TENANT_ID` uses for "could not be classified". It is now refused.
+/// That is the difference between the unscoped constant being unforgeable by
+/// construction and being unforgeable by coincidence, and it is worth a test
+/// precisely because it is the one shape whose answer this rework CHANGED.
+///
+/// The `AppState` is built from a `Config` literal on purpose: `validate`
+/// refuses a blank `organization_id` at load, so the request-time half is only
+/// reachable for a credential the config never saw -- a durable row or an
+/// external decision -- and this is how the tree models one.
+///
+/// Pins the `.is_some_and(|organization_id| !organization_id.trim()
+/// .is_empty())` in `auth.rs`'s `names_a_tenant`. Revert it to `.is_none()`
+/// (i.e. `let names_a_tenant = auth.organization_id.is_some();`) and the first
+/// assertion reds -- the blank key authenticates. It cannot be satisfied by
+/// annotating a fixture: the fixture's annotation IS the blank string.
+#[test]
+fn a_blank_organization_id_is_not_a_tenant_identity() {
+    let mut blank = undeclared_yaml_key();
+    blank.organization_id = Some("   ".into());
+    let state = AppState::new(Config {
+        api_keys: vec![blank],
+        ..Config::default()
+    });
+    let error = authenticate(
+        &state,
+        &bearer_headers("decoy-secret"),
+        "chat.completions",
+        "req-1",
+    )
+    .expect_err("#540 rework: a blank organization_id names no tenant, so it authorizes nothing");
+    assert_eq!(error.code, "tenant_identity_required");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert!(
+        error.message.contains("blank"),
+        "and the operator is told what is actually wrong -- their credential DID carry an \
+         organization_id, so `declares neither` would send them looking in the wrong place: {}",
+        error.message
+    );
+
+    // The control: the same key with a real tenant id authenticates, so the
+    // assertion above is about the blank value and not about this path always
+    // refusing.
+    let mut named = undeclared_yaml_key();
+    named.organization_id = Some("tenant-a".into());
+    let named_state = AppState::new(Config {
+        api_keys: vec![named],
+        ..Config::default()
+    });
+    let auth = authenticate(
+        &named_state,
+        &bearer_headers("decoy-secret"),
+        "chat.completions",
+        "req-2",
+    )
+    .expect("a credential that names a real tenant is unaffected");
+    assert!(!auth.is_platform_operator());
+
+    // And the legacy opt-in does NOT cover this shape -- stated here rather
+    // than assumed, because the previous round's commit message claimed it
+    // did. The hatch answers the `(None, None)` pair; a blank string is
+    // `(None, Some(""))`, which resolves to "not root" and is then refused
+    // above. An operator on the hatch whose auth service sends blanks has to
+    // fix the auth service.
+    assert!(
+        !crate::auth::resolve_platform_operator(true, None, Some("")),
+        "the escape hatch is for credentials that declared nothing at all"
     );
 }
 

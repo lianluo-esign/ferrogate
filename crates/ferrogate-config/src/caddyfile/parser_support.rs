@@ -22,8 +22,40 @@ impl<'a> Parser<'a> {
             file: self.file.to_string(),
             line: token.line,
             column: token.column,
+            message: format!(
+                "unsupported directive `{directive}`: not part of the FerroGate Caddyfile MVP \
+                 subset"
+            ),
             directive,
-            message: "not part of the FerroGate Caddyfile MVP subset".to_string(),
+            suggestion,
+        }
+    }
+
+    /// A directive FerroGate does support, written with an argument it does not
+    /// (#540 rework 2, review minor 14).
+    ///
+    /// `unsupported` was doing double duty, so `organization_id` with a missing
+    /// value was reported as "unsupported directive `organization_id`: not part
+    /// of the FerroGate Caddyfile MVP subset" -- and then suggested writing
+    /// `organization_id <tenants.id>`, i.e. the directive it had just called
+    /// unsupported. An operator reading that has no way to tell "delete this
+    /// line" from "fix this argument", and for the two tenancy directives #540
+    /// added, "delete this line" is the answer that leaves the key undeclared.
+    pub(super) fn invalid_argument(
+        &self,
+        token: &Token,
+        directive: String,
+        suggestion: String,
+    ) -> CaddyfileDiagnostic {
+        CaddyfileDiagnostic {
+            file: self.file.to_string(),
+            line: token.line,
+            column: token.column,
+            message: format!(
+                "invalid argument for `{directive}`: the directive is supported, its argument is \
+                 not"
+            ),
+            directive,
             suggestion,
         }
     }

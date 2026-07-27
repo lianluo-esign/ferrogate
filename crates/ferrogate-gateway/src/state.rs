@@ -1086,9 +1086,22 @@ impl SharedAppState {
             // re-applies an existing key's tenant binding: a PATCH that renames
             // a key without restating `organization_id` keeps the tenant it
             // already had, and refusing that would be a new lockout of its own.
-            if let Some(stored) = candidate.api_keys.iter().find(|stored| stored.id == key.id) {
-                candidate.ensure_api_key_declares_tenant_identity(stored)?;
-            }
+            // #540 rework 2, review minor 9: `if let Some(...)` skipped the sole
+            // mint refusal whenever the row just written was absent from the
+            // snapshot. Read-your-writes makes that unreachable today, which is
+            // exactly why it must not be spelled as a silent fallthrough: the
+            // only check standing between `POST /admin/v1/api-keys` and a
+            // credential with no tenant identity cannot be conditional on a
+            // lookup succeeding.
+            let Some(stored) = candidate.api_keys.iter().find(|stored| stored.id == key.id) else {
+                anyhow::bail!(
+                    "api key `{}` was written to the control-plane store but is absent from the \
+                     snapshot read back, so its tenant identity could not be checked; refusing \
+                     the mutation rather than admitting an unchecked credential",
+                    key.id
+                );
+            };
+            candidate.ensure_api_key_declares_tenant_identity(stored)?;
             candidate.validate()?;
             let result = self.reload_process_local(candidate);
             if result.committed {
@@ -1913,6 +1926,25 @@ fn tenant_refs_from_api_keys(api_keys: &[ApiKey]) -> Vec<crate::responses::Admin
         .collect()
 }
 
+/// Re-applies each stored tenant binding onto the api-key document of the same
+/// id, after a control-plane snapshot has been read back.
+///
+/// **The tenants documents win, unconditionally, and that is a defect worth
+/// naming** (#540 rework 2, review minor 8). #540's per-key mint refusal is
+/// asked of the shape this function produces, on purpose: a `PATCH` that renames
+/// a key without restating `organization_id` keeps the tenant it already had,
+/// and refusing that would be a lockout of its own. But the same overwrite has
+/// another face: `PUT /admin/v1/api-keys/{id}` **cannot change an existing
+/// key's tenant**. The request body's `organization_id` is written to the store,
+/// then the stale tenants document overwrites it here, and the handler answers
+/// `200 OK` echoing the value the caller sent. It is pre-existing and not #540's
+/// doing -- but #540's mint refusal now rests on it, so it is written down here
+/// rather than left to be rediscovered.
+///
+/// It is safe for the refusal specifically: this re-merge only ever writes the
+/// four tenancy attribution fields, and never `platform_operator`, so nothing it
+/// does can turn an undeclared key into platform root. What it can do is make a
+/// tenant change look like it succeeded.
 fn apply_tenant_refs_to_api_keys(
     api_keys: &mut [ApiKey],
     tenant_refs: Vec<crate::responses::AdminTenantRef>,
@@ -1991,6 +2023,17 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     if !tenant_refs.is_empty() {
         apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
     }
+    // #540 rework 2, review minors 1 and 10: this is the ONLY place a pre-#515
+    // durable row can be reported at boot. `try_new_with_repositories` does not
+    // re-validate after applying the snapshot, and `serve` runs only
+    // `ensure_auth_posture_is_declared` -- so before this call a node whose
+    // store held such rows started in silence and first mentioned them on the
+    // next admin write, which is the opposite of #540's own thesis that the
+    // operator finds out before the traffic does. It runs AFTER
+    // `apply_tenant_refs_to_api_keys`, so a row the tenants documents bind is
+    // not reported as undeclared, and it is what makes the flag assignment
+    // above observable rather than merely defensive.
+    config.warn_undeclared_control_plane_api_keys();
     config.materialize_skill_package_resources_with_previous(&previous_skill_packages);
     Ok(())
 }

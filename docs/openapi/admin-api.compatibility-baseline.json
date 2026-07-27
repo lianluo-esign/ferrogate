@@ -12160,6 +12160,7 @@
                   "id": "key_dev",
                   "name": "Development key",
                   "key_env": "FERROGATE_DEV_API_KEY",
+                  "organization_id": "org_acme",
                   "scopes": [
                     "models.read",
                     "chat.completions",

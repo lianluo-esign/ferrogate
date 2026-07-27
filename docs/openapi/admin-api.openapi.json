@@ -16442,6 +16442,7 @@
                   "id": "key_dev",
                   "name": "Development key",
                   "key_env": "FERROGATE_DEV_API_KEY",
+                  "organization_id": "org_acme",
                   "scopes": [
                     "models.read",
                     "chat.completions",
@@ -18900,7 +18901,7 @@
           },
           "platform_operator": {
             "type": "boolean",
-            "description": "Explicit platform-root opt-in (issue #515). Mutually exclusive with organization_id; omitting it leaves the key on the deployment's [tenancy] implicit_platform_operator setting."
+            "description": "Explicit platform-root opt-in (issues #515, #540). Mutually exclusive with organization_id. Since #540 one of the two MUST be stated: a body that omits both is refused with 400 invalid_api_key, because an omitted field used to mean unrestricted cross-tenant access. A deployment mid-migration can still set [tenancy] implicit_platform_operator = true to accept an unstated body, which restores the pre-#515 rule for every key that states nothing."
           },
           "team_id": {
             "type": "string"

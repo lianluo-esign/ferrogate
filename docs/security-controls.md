@@ -84,10 +84,22 @@ defaulted to `true` to preserve it. That default is now `false`:
   (`Config::ensure_every_key_declares_tenant_identity`,
   `crates/ferrogate-config/src/config/validate.rs`), so an upgrade stops at
   `ferrogate check`/`ferrogate run` rather than 403-ing live traffic afterwards;
+- the same refusal applies in every dialect a config can be written in — TOML,
+  YAML, and a Caddyfile — because it lives in `Config::validate`, which all
+  three loaders and `POST /admin/v1/config/validate` run;
 - a credential the config cannot enumerate — a durable/virtual key, or one from
   the external auth service — is refused at authentication with
   `403 tenant_identity_required` (`finalize_auth`,
-  `crates/ferrogate-gateway/src/auth.rs`);
+  `crates/ferrogate-gateway/src/auth.rs`), and an `organization_id` that is
+  present but blank is refused there too: it names no tenant, and the blank
+  string is what `UNSCOPED_TENANT_ID` means;
+- a pre-#515 row already in the **durable control plane** is not a config
+  document an operator can edit, so it does not stop the gateway or the admin
+  API — refusing there would block the `PUT` that repairs it. It is named by id
+  in a startup warning instead (`Config::warn_undeclared_control_plane_api_keys`,
+  called from the boot snapshot path in
+  `crates/ferrogate-gateway/src/state.rs`), and it is still refused at
+  authentication like any other unclassified credential;
 - `resolve_platform_operator` (same file) is the single chokepoint every auth
   source funnels through, so a new source cannot reintroduce "no tenant means
   root";
@@ -105,7 +117,7 @@ one, and whether a tenant row exists is a fact about the control-plane store
 that no load-time check can warn about first. Stated precisely rather than as
 "fails closed": such a key still serves the data plane, and because
 `resolve_lifecycle_chain`
-(`crates/ferrogate-gateway/src/server/lifecycle_gate.rs`) skips an id that
+(`crates/ferrogate-storage/src/lifecycle_gate.rs`) skips an id that
 names no row, it also escapes the tenant suspension gate and every
 tenant-scoped quota policy. It is unreachable *by* other tenants and ungoverned
 *by* its own, which is why the setting exists at all.

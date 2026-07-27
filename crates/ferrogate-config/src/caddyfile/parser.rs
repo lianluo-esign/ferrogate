@@ -642,7 +642,7 @@ impl<'a> Parser<'a> {
                         api_key.organization_id = Some(value.clone());
                     }
                     _ => {
-                        return Err(self.unsupported(
+                        return Err(self.invalid_argument(
                             &token,
                             directive,
                             "expected `organization_id <tenants.id>` (this key belongs to that \
@@ -656,7 +656,7 @@ impl<'a> Parser<'a> {
                     Some("on" | "true") => api_key.platform_operator = Some(true),
                     Some("off" | "false") => api_key.platform_operator = Some(false),
                     _ => {
-                        return Err(self.unsupported(
+                        return Err(self.invalid_argument(
                             &token,
                             directive,
                             "expected `platform_operator on` (this key administers EVERY tenant) \
