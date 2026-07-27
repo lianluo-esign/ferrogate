@@ -188,7 +188,10 @@ pub fn run() -> AnyResult<()> {
         Commands::Storage(args) => storage::execute_storage_command(args.command),
         Commands::Validate(args) => {
             let config = Config::load(&args.config)?;
-            println!("{}", format_validate_report(&config));
+            // #542 rework: `format_validate_report` runs the authentication
+            // posture gate first, so `ferrogate check`/`validate` exits non-zero
+            // for exactly the configs `ferrogate run` refuses to boot.
+            println!("{}", format_validate_report(&config)?);
             Ok(())
         }
         Commands::Reload(args) => {

@@ -297,6 +297,30 @@ Minimal Caddyfile-style AI gateway shape:
 }
 ```
 
+Authentication is **required by default and stated, never inferred** (#542): a
+config with no credential source — no `[[api_keys]]`, no enabled
+`[auth_service]`, no durable `[storage]` backend (`postgres`, `supabase`,
+`cloudflare_d1`) holding virtual keys — refuses to start rather than admitting
+every unauthenticated request as a platform operator. A gateway that really is
+open says so by name. In TOML/YAML that is `[auth] disabled = true`; a
+Caddyfile says it in the global options block, which is the whole remedy for a
+migrated reverse proxy that has no `ai_gateway` block:
+
+```caddyfile
+{
+    auth off
+}
+
+:8080 {
+    handle_path /proxy/* {
+        reverse_proxy https://httpbin.org
+    }
+}
+```
+
+`ferrogate check --config <file>` runs the same gate the gateway does, so an
+undeclared posture surfaces before a restart rather than during one.
+
 Use these as the main configuration references:
 
 - Default development config: [`Ferrogate/Caddyfile`](Ferrogate/Caddyfile)

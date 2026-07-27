@@ -76,6 +76,28 @@ impl<'a> Parser<'a> {
                         self.config.admin = Some(address.clone());
                     }
                 }
+                // #542 rework: the authentication posture, spelled the Caddy way
+                // (`admin off` is the model). Without this a Caddyfile-bridged
+                // reverse proxy with no `ai_gateway { api_key ... }` block could
+                // not express the open posture at all, and the startup gate's
+                // refusal pointed it at a `[auth]` TOML section its config
+                // format cannot contain. `auth off` is the only way a bridged
+                // config runs without a credential source; omitting the
+                // directive still means authentication is required.
+                "auth" => {
+                    match args.first().map(String::as_str) {
+                        Some("off") => self.config.auth_disabled = true,
+                        Some("on") => self.config.auth_disabled = false,
+                        _ => return Err(self.unsupported(
+                            &token,
+                            directive,
+                            "expected `auth off` (this gateway requires no credential -- every \
+                             request is admitted as an unrestricted platform operator) or \
+                             `auth on` (the default: every request must present a credential)"
+                                .to_string(),
+                        )),
+                    }
+                }
                 "debug" | "log" => {}
                 _ => return Err(self.unsupported(&token, directive, global_suggestion(&args))),
             }

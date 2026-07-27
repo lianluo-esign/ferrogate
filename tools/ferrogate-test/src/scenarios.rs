@@ -1816,8 +1816,12 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         },
     )?;
 
+    // #542: `/admin/v1/config/validate` runs the gateway's own startup posture
+    // gate, so a candidate config states whether it authenticates. Without the
+    // `[auth]` section this candidate has no credential source at all and is
+    // reported invalid -- the same answer `ferrogate run` would give it.
     let config_candidate = serde_json::json!({
-        "config_toml": format!("listen = \"{}\"\n", case.gateway_addr)
+        "config_toml": format!("listen = \"{}\"\n[auth]\ndisabled = true\n", case.gateway_addr)
     })
     .to_string();
     case.expect_json(

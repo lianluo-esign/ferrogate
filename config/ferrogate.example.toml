@@ -83,8 +83,15 @@ require_registered_tenant = false
 # operator, no credential required. Appropriate for a laptop, a demo, or a
 # gateway used purely as an L7 reverse proxy on a trusted network. A config
 # with no credential source (no [[api_keys]], no enabled [auth_service], no
-# durable postgres/supabase [storage] backend) refuses to start without it,
-# rather than running open by default.
+# durable [storage] backend -- postgres, supabase or cloudflare_d1 -- to hold
+# virtual keys) refuses to start without it, rather than running open by
+# default. `ferrogate check` refuses it too, so you find out before the
+# restart. In a Caddyfile the same statement is `auth off` in the global
+# options block.
+#
+# Leaving this on next to a durable [storage] backend is allowed but warned
+# about at startup: every virtual key in that control plane is ignored and
+# every caller is admitted as an unrestricted platform operator.
 # [auth]
 # disabled = true
 

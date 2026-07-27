@@ -11387,7 +11387,28 @@ fn policy_from_mutation(
     })
 }
 
+/// Parse a candidate config out of an admin payload AND settle its
+/// authentication posture (#542 rework).
+///
+/// The posture gate belongs here, not in the handler, because this is the one
+/// place `/admin/v1/config/validate` and `/admin/v1/config/reload` share: a
+/// candidate that `ferrogate run` would refuse to boot must not be reported
+/// `"valid":true` by the endpoint an operator uses to pre-flight it, and must
+/// not be swapped in by a process-local reload either. Warnings are logged
+/// rather than returned, since the wire shape of the validate response is a
+/// bool plus an error string.
 fn config_from_admin_payload(
+    payload: &AdminConfigValidateRequest,
+    state: &crate::state::SharedAppState,
+) -> anyhow::Result<Config> {
+    let config = parse_config_from_admin_payload(payload, state)?;
+    for warning in crate::lifecycle::ensure_auth_posture_is_declared(&config)? {
+        tracing::warn!("{warning}");
+    }
+    Ok(config)
+}
+
+fn parse_config_from_admin_payload(
     payload: &AdminConfigValidateRequest,
     state: &crate::state::SharedAppState,
 ) -> anyhow::Result<Config> {

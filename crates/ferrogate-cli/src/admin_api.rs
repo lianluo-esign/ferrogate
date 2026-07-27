@@ -35,13 +35,11 @@ use std::{
     time::Duration,
 };
 
+use crate::auth::{authenticate_admin_gate, build_auth_service_target, AuthError};
 use ferrogate_auth::{
     read_http_request_bounded, serve_connections, ApiKeyAuthenticator, HttpRequest, HttpResponse,
     RequestLengthError, StorageApiKeyAuthenticator,
 };
-use ferrogate_storage::StorageProviderKind;
-
-use crate::auth::{authenticate_admin_gate, build_auth_service_target, AuthError};
 use ferrogate_config::Config;
 
 /// Canonical wire/log identity of the standalone FerroGate Control Plane API
@@ -213,29 +211,33 @@ pub(crate) fn execute_control_api_serve(config: Config) -> anyhow::Result<()> {
     // #542: the credential-source question is now asked through the shared
     // `Config::has_credential_source` predicate, so this service and the
     // gateway's own startup gate cannot drift apart about what counts as one.
-    let has_durable_backend = matches!(
-        config.storage.provider,
-        StorageProviderKind::Postgres | StorageProviderKind::Supabase
-    );
+    //
+    // #542 rework: and the DURABLE half of it is asked through
+    // `Config::durable_api_key_store` for the same reason. This line used to
+    // re-list `Postgres | Supabase` by hand, which meant a Cloudflare D1
+    // control plane passed the credential-source check above and then got no
+    // durable authenticator at all -- the service would start and refuse every
+    // virtual key it was configured to resolve.
+    let durable_key_store = config.durable_api_key_store();
     if !config.has_credential_source() {
         anyhow::bail!(
             "refusing to start an open Control Plane API proxy: the config has no credential \
-             source (no [[api_keys]], no enabled [auth_service], and no durable Postgres/Supabase \
-             [storage] backend for virtual keys); the FerroGate Control Plane API service \
-             authenticates every request before forwarding and cannot do so without one"
+             source (no [[api_keys]], no enabled [auth_service], and no durable [storage] backend \
+             -- postgres, supabase or cloudflare_d1 -- for virtual keys); the FerroGate Control \
+             Plane API service authenticates every request before forwarding and cannot do so \
+             without one"
         );
     }
 
-    // Resolve durable virtual keys against the SAME shared Postgres/
-    // Supabase control plane the gateway reads (`[storage]` from the same
-    // config file), through the same authenticator type the gateway's
-    // AppState uses -- reuse, not a parallel implementation. With a
-    // memory-only storage provider there is nothing shared to resolve
-    // against (runtime-minted keys live inside the gateway process), so
-    // only static [[api_keys]] and the external auth service apply; a
-    // production admin-console deployment always has a shared durable
+    // Resolve durable virtual keys against the SAME shared control plane the
+    // gateway reads (`[storage]` from the same config file), through the same
+    // authenticator type the gateway's AppState uses -- reuse, not a parallel
+    // implementation. With a memory-only storage provider there is nothing
+    // shared to resolve against (runtime-minted keys live inside the gateway
+    // process), so only static [[api_keys]] and the external auth service
+    // apply; a production admin-console deployment always has a shared durable
     // backend (the console itself requires one).
-    let durable_authenticator = if has_durable_backend {
+    let durable_authenticator = if durable_key_store.is_some() {
         let repositories = Arc::new(
             crate::state::runtime_storage_repositories(&config)
                 .context("failed to open the shared control-plane storage backend")?,

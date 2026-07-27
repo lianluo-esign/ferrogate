@@ -184,11 +184,14 @@ pub struct AuthConfig {
     /// anywhere a credential would have mattered.
     ///
     /// Migration: a deployment that has no credential source at all (no
-    /// `[[api_keys]]`, no enabled `[auth_service]`, no durable Postgres/Supabase
-    /// `[storage]` backend to hold virtual keys) used to run in the implicit
-    /// open posture. It no longer starts silently: `ferrogate run` refuses with
-    /// an error naming this field, so the posture is chosen rather than
-    /// inherited.
+    /// `[[api_keys]]`, no enabled `[auth_service]`, no durable `[storage]`
+    /// backend to hold virtual keys -- see
+    /// [`Config::durable_api_key_store`]) used to run in the implicit open
+    /// posture. It no longer starts silently: `ferrogate run` refuses with an
+    /// error naming this field, so the posture is chosen rather than inherited.
+    /// A Caddyfile spells the same thing as `auth off` in the global options
+    /// block (`ferrogate-config/src/caddyfile/parser.rs`), because a bridged
+    /// config has no `[auth]` section to write it in.
     #[serde(default)]
     pub disabled: bool,
 }
@@ -212,8 +215,8 @@ impl Config {
 
     /// Whether this config can resolve a presented credential to *anything*
     /// (issue #542): a static `[[api_keys]]` entry, an enabled external
-    /// `[auth_service]`, or a durable Postgres/Supabase `[storage]` backend
-    /// holding virtual keys.
+    /// `[auth_service]`, or a durable `[storage]` backend holding virtual keys
+    /// ([`Config::durable_api_key_store`]).
     ///
     /// This is a startup question, not a request-time one -- deliberately so.
     /// The alternative, "authentication is required if the control plane
@@ -227,10 +230,51 @@ impl Config {
     pub fn has_credential_source(&self) -> bool {
         !self.api_keys.is_empty()
             || self.auth_service.enabled
-            || matches!(
-                self.storage.provider,
-                StorageProviderKind::Postgres | StorageProviderKind::Supabase
-            )
+            || self.durable_api_key_store().is_some()
+    }
+
+    /// The configured `[storage]` backend, if it is one that can hold durable
+    /// virtual API keys -- i.e. one whose control-plane store implements the
+    /// `find_api_key_records_by_prefix` lookup the durable authenticator makes
+    /// (issue #542 rework).
+    ///
+    /// Returns the provider itself rather than a bare `bool` so the two callers
+    /// that must *name* the key store in operator-facing text -- the "no
+    /// credential source" refusal and the `[auth] disabled = true` warning in
+    /// `lifecycle::ensure_auth_posture_is_declared` -- cannot drift from the
+    /// predicate that decided there was one.
+    ///
+    /// The match is exhaustive on purpose. The first version of this predicate
+    /// spelled the answer as `matches!(provider, Postgres | Supabase)` and
+    /// silently omitted `CloudflareD1`, which *is* an implemented durable
+    /// control-plane backend (`ferrogate_storage::StorageProviderKind::
+    /// implemented`, `control_plane_store_d1`): a gateway whose keys were all
+    /// virtual on D1 -- the hosted-on-Cloudflare posture -- was told at startup
+    /// that it had "no credential source" and pointed at `[auth] disabled =
+    /// true`, i.e. at switching authentication off. Adding a backend variant now
+    /// stops this compiling until the new backend states whether it holds keys.
+    pub fn durable_api_key_store(&self) -> Option<StorageProviderKind> {
+        let provider = self.storage.provider;
+        let holds_durable_api_keys = match provider {
+            // Implemented durable control-plane stores: all three resolve a
+            // presented key through `find_api_key_records_by_prefix`.
+            StorageProviderKind::Postgres
+            | StorageProviderKind::Supabase
+            | StorageProviderKind::CloudflareD1 => true,
+            // In-process only: runtime-minted keys die with the process and
+            // nothing outside it can have minted one, so a memory-backed
+            // deployment with no static key really has nothing to authenticate
+            // against.
+            StorageProviderKind::Memory => false,
+            // Deliberately excluded because they are not implemented at all
+            // (`StorageProviderKind::implemented()` omits both), so there is no
+            // control-plane store behind them to hold a key. If either is ever
+            // implemented, flip it here -- `credential_sources_cover_every_
+            // storage_provider` in `config/tests.rs` cross-checks this list
+            // against `implemented()` and reds when it stops being true.
+            StorageProviderKind::TursoLibsql | StorageProviderKind::Mysql => false,
+        };
+        holds_durable_api_keys.then_some(provider)
     }
 }
 

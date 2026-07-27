@@ -155,7 +155,7 @@ costed without it. This is the ordered traversal of a single
 
 | # | Step | Seam / line |
 |---|---|---|
-| 13 | **authenticate** across four key sources — external auth service, durable/virtual key, static config key, and the zero-config auth-disabled wildcard — each with its own scope semantics (`WILDCARD_SCOPE` for static config keys, empty-set-is-not-admin for durable keys) | `auth.rs:383` |
+| 13 | **authenticate** across three key sources — external auth service, durable/virtual key, static config key — each with its own scope semantics (`WILDCARD_SCOPE` for static config keys, empty-set-is-not-admin for durable keys), preceded by the stated `[auth] disabled` posture check that short-circuits to an unrestricted wildcard (#542; it is a *named* mode now, not a zero-config inference) | `auth.rs:597` |
 | 14 | scope check for the endpoint's scope (`chat.completions` / `responses.create`) | `auth.rs:383` |
 | 15 | **`finalize_auth`**: resolve effective quota over the scope chain (org→team→project→workspace→key, `min` per dimension, recording which scope won), `quota_scope_disabled` deny, monthly-budget check *against the winning scope's aggregate spend*, prepaid-wallet balance check, then per-window RPM consumption | `auth.rs:660` |
 | 16 | agent-run-id header parse/derive; four workflow headers + the "version/node/iteration require workflow-id" coherence rule | `chat.rs:2612` |

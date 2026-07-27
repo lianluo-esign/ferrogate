@@ -1351,8 +1351,10 @@ fn expect_clickhouse_analytics_rows() -> Result<()> {
 }
 
 fn emit_analytics_audit_event(port: u16) -> Result<()> {
+    // #542: a candidate config states its authentication posture, or
+    // `/admin/v1/config/validate` refuses it exactly as `ferrogate run` would.
     let config_candidate = serde_json::json!({
-        "config_toml": "listen = \"0.0.0.0:8080\"\n"
+        "config_toml": "listen = \"0.0.0.0:8080\"\n[auth]\ndisabled = true\n"
     })
     .to_string();
     expect_json(

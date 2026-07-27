@@ -110,6 +110,76 @@ fn parses_ai_gateway_provider_model_and_api_key_blocks() {
     assert_eq!(config.api_keys[0].request_limit_per_minute, Some(60));
 }
 
+/// #542 rework, finding 2: the Caddyfile grammar can state the authentication
+/// posture, so a Caddy-migrated reverse proxy with no `ai_gateway` block has an
+/// expressible remedy for the startup gate instead of being told to write a
+/// TOML section its config format cannot hold.
+///
+/// Pins the `"auth"` arm of `Parser::parse_global_options`
+/// (`caddyfile/parser.rs`). Delete the arm and the first two parses become
+/// "unsupported directive" errors; make `off` a no-op and the first assertion
+/// reds; make the default `true` and the third reds.
+#[test]
+fn global_auth_directive_states_the_posture_a_caddyfile_could_not_say() {
+    let open = parse_caddyfile(
+        r#"
+{
+    admin localhost:2019
+    auth off
+}
+
+:8080 {
+    reverse_proxy https://api.openai.com
+}
+"#,
+        "Ferrogate/Caddyfile",
+    )
+    .unwrap();
+    assert!(open.auth_disabled);
+
+    let explicitly_required = parse_caddyfile(
+        r#"
+{
+    auth on
+}
+
+:8080 {
+    reverse_proxy https://api.openai.com
+}
+"#,
+        "Ferrogate/Caddyfile",
+    )
+    .unwrap();
+    assert!(!explicitly_required.auth_disabled);
+
+    // The omitted directive is the safe answer, not an inherited one.
+    let silent = parse_caddyfile(
+        r#"
+:8080 {
+    reverse_proxy https://api.openai.com
+}
+"#,
+        "Ferrogate/Caddyfile",
+    )
+    .unwrap();
+    assert!(!silent.auth_disabled);
+}
+
+/// The posture directive is closed the same way the rest of the grammar is: a
+/// misspelled argument is refused with a span, never read as "off".
+#[test]
+fn global_auth_directive_refuses_an_argument_it_does_not_understand() {
+    for bad in ["auth disabled", "auth", "auth false"] {
+        let error = parse_caddyfile(&format!("{{\n    {bad}\n}}\n"), "Ferrogate/Caddyfile")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("auth off") && error.contains("auth on"),
+            "`{bad}` must be refused with the two spellings that work: {error}"
+        );
+    }
+}
+
 #[test]
 fn unsupported_directive_reports_file_line_column_and_suggestion() {
     let error = parse_caddyfile(

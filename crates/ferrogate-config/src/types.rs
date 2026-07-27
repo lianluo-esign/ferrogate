@@ -23,6 +23,21 @@ pub struct GatewayConfig {
     pub models: Vec<GatewayModel>,
     pub api_keys: Vec<GatewayApiKey>,
     pub logs: Vec<GatewayLog>,
+    /// `auth off` in the global options block (#542 rework): this Caddyfile
+    /// states that its gateway requires no credential.
+    ///
+    /// `false` -- the default, and what an omitted directive means -- is
+    /// "authentication required", matching `[auth] disabled = false` in the
+    /// native config. The directive exists because the startup gate refuses a
+    /// config that requires authentication with nothing to authenticate against,
+    /// and before this a Caddyfile with no `ai_gateway { api_key ... }` block
+    /// (a plain L7 reverse proxy, the exact shape Caddy users migrate) had NO
+    /// way to say which posture it meant: the grammar has no `auth` surface, it
+    /// errors on unknown directives, and `Config::load` never reads a sibling
+    /// TOML. The refusal named `[auth] disabled = true`, a section a Caddyfile
+    /// cannot contain.
+    #[serde(default)]
+    pub auth_disabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

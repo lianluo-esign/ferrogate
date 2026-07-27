@@ -276,7 +276,10 @@ enabled = false
             "Authorization: Bearer admin-secret",
             "Content-Type: application/json",
         ],
-        r#"{"config_toml":"listen = \"127.0.0.1:19090\"\n"}"#,
+        // #542: a candidate config states its authentication posture like any
+        // other config -- `/admin/v1/config/validate` now runs the same startup
+        // gate `ferrogate run` does, so a keyless candidate is not "valid".
+        r#"{"config_toml":"listen = \"127.0.0.1:19090\"\n[auth]\ndisabled = true\n"}"#,
     );
     assert!(valid_candidate.contains("200 OK"));
     assert!(valid_candidate.contains("\"valid\":true"));
@@ -286,8 +289,10 @@ enabled = false
     assert!(valid_candidate.contains("listen address changes require listener-level reload"));
     assert!(!valid_candidate.contains("admin-secret"));
 
-    let process_local_candidate_body =
-        serde_json::json!({ "config_toml": format!("listen = \"{gateway_addr}\"\n") }).to_string();
+    let process_local_candidate_body = serde_json::json!({
+        "config_toml": format!("listen = \"{gateway_addr}\"\n[auth]\ndisabled = true\n")
+    })
+    .to_string();
     let process_local_candidate = http_request(
         &gateway_addr,
         "POST",
@@ -317,6 +322,26 @@ enabled = false
     assert!(source_file_candidate.contains("\"valid\":true"));
     assert!(source_file_candidate.contains("\"reload_mode\":\"process-local\""));
     assert!(source_file_candidate.contains("\"listener_reload_required\":false"));
+
+    // #542 rework, finding 3: the endpoint an operator pre-flights a config
+    // with refuses exactly what `ferrogate run` refuses. Before this, a
+    // candidate with no credential source and no stated posture was reported
+    // `"valid":true` and then failed to boot at the next restart. Delete the
+    // posture gate in `config_from_admin_payload` and this block reds.
+    let undeclared_posture_candidate = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/validate",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"config_toml":"listen = \"127.0.0.1:19091\"\n"}"#,
+    );
+    assert!(undeclared_posture_candidate.contains("200 OK"));
+    assert!(undeclared_posture_candidate.contains("\"valid\":false"));
+    assert!(undeclared_posture_candidate.contains("no credential source"));
+    assert!(undeclared_posture_candidate.contains("auth off"));
 
     let invalid_candidate = http_request(
         &gateway_addr,

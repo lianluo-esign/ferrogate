@@ -118,8 +118,13 @@ fn validate_uses_ferrogate_config_environment_variable() {
     let path = dir.path().join("ferrogate.toml");
     std::fs::write(
         &path,
+        // #542: a pure L7 reverse proxy with no credential source states its
+        // posture, or `validate` refuses it exactly as `run` would.
         r#"
 listen = "127.0.0.1:0"
+
+[auth]
+disabled = true
 
 [[upstreams]]
 name = "env"
@@ -146,6 +151,94 @@ path_prefixes = ["/env"]
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("listen=127.0.0.1:0"));
+}
+
+/// #542 rework, finding 3: `ferrogate check` is the documented pre-flight for a
+/// release that intentionally stops existing deployments, so it must be where an
+/// operator finds out -- not the next restart.
+///
+/// Pins the `ensure_auth_posture_is_declared(config)?` call in
+/// `lifecycle::format_validate_report` and the `?` on it in `lib.rs`. Delete
+/// either and this config prints `FerroGate config OK ... auth_required=true`
+/// and exits 0, for a config `ferrogate run` refuses to boot.
+#[test]
+fn check_refuses_a_config_with_no_credential_source_and_names_both_remedies() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &path,
+        r#"
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "env"
+url = "http://127.0.0.1:18080"
+
+[[routes]]
+name = "env"
+upstream = "env"
+path_prefixes = ["/env"]
+"#,
+    )
+    .unwrap();
+
+    let output = ferrogate()
+        .args(["check", "--config", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains("FerroGate config OK"), "{stdout}");
+    assert!(stderr.contains("no credential source"), "{stderr}");
+    assert!(stderr.contains("disabled = true"), "{stderr}");
+}
+
+/// #542 rework, finding 2: the Caddy-migrated deployment. A keyless Caddyfile
+/// reverse proxy is refused with a remedy its own config format can express,
+/// and accepted once it says `auth off` -- the case that had no test at all.
+///
+/// Pins the `"auth"` global-options arm in `caddyfile/parser.rs`, the bridge
+/// mapping in `config/loader.rs`, and the Caddyfile spelling in the refusal.
+#[test]
+fn check_offers_a_keyless_caddyfile_a_remedy_it_can_actually_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Caddyfile");
+    let reverse_proxy_only = r#"
+:8080 {
+    handle_path /proxy/* {
+        reverse_proxy https://httpbin.org
+    }
+}
+"#;
+    std::fs::write(&path, reverse_proxy_only).unwrap();
+
+    let refused = ferrogate()
+        .args(["check", "--config", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("no credential source"), "{stderr}");
+    assert!(stderr.contains("auth off"), "{stderr}");
+
+    std::fs::write(&path, format!("{{\n    auth off\n}}\n{reverse_proxy_only}")).unwrap();
+
+    let accepted = ferrogate()
+        .args(["check", "--config", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        accepted.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&accepted.stdout);
+    assert!(stdout.contains("FerroGate config OK"), "{stdout}");
+    assert!(stdout.contains("auth_required=false"), "{stdout}");
 }
 
 #[test]

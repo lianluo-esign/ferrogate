@@ -29,11 +29,26 @@ unrestricted platform operator — is reachable only by writing
 keys only: a deployment whose credentials were all durable/virtual keys, or one
 that simply omitted `[[api_keys]]`, had authentication switched off by that
 omission. A config that requires authentication but has no credential source at
-all (no `[[api_keys]]`, no enabled `[auth_service]`, no durable
-Postgres/Supabase `[storage]` backend) refuses to start, naming the switch,
-rather than running open (`crates/ferrogate-cli/src/lifecycle.rs`
-`ensure_auth_posture_is_declared`, mirroring the same gate on the Control Plane
-API service).
+all refuses to start, naming the switch, rather than running open
+(`crates/ferrogate-cli/src/lifecycle.rs` `ensure_auth_posture_is_declared`,
+mirroring the same gate on the Control Plane API service, and run by
+`ferrogate check` as well as by `ferrogate run` so the refusal surfaces before
+a restart rather than during one).
+
+A **credential source** is a static `[[api_keys]]` entry, an enabled
+`[auth_service]`, or a durable `[storage]` backend that can hold virtual keys:
+`postgres`, `supabase` or `cloudflare_d1` (`Config::durable_api_key_store`,
+`crates/ferrogate-config/src/config/types.rs`, an exhaustive match over
+`StorageProviderKind` so a new backend cannot be omitted by accident — the
+first version of this predicate listed only Postgres and Supabase and refused
+to start a fully-authenticating D1 deployment). In a Caddyfile, which has no
+`[auth]` section to write, the open posture is stated as `auth off` in the
+global options block; omitting it means authentication is required, as
+everywhere else. `[auth] disabled = true` is refused outright next to a
+declared static credential source, and allowed — with a startup warning naming
+the store whose keys are being ignored — next to a durable `[storage]` backend,
+since such a backend also holds request logs, audit events and routes and so is
+not by itself a statement about authentication.
 
 Admin-console user passwords are hashed with Argon2 (`argon2` crate) before
 storage — never stored or compared in plain text

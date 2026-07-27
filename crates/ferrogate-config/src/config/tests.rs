@@ -6,6 +6,7 @@
 
 use super::*;
 use ferrogate_providers::RoutingStrategy;
+use ferrogate_storage::StorageProviderKind;
 
 #[test]
 fn default_config_uses_localhost_8080() {
@@ -81,6 +82,143 @@ fn credential_sources_are_static_keys_external_auth_or_a_durable_backend() {
         with_durable_backend.has_credential_source(),
         "#542: virtual keys live in the durable control plane and are a credential source"
     );
+}
+
+/// Every `StorageProviderKind`, paired with whether a deployment on it can
+/// resolve a durable/virtual API key -- the #542 question -- and with the reason
+/// that answer is what it is.
+///
+/// This table is the point of the section below. The first version of
+/// `has_credential_source` spelled its storage arm as
+/// `matches!(provider, Postgres | Supabase)`, and the tests that covered it
+/// exercised one variant each; nothing pinned the SET, so `CloudflareD1` was
+/// simply absent and deleting `Postgres |` changed no assertion anywhere. A
+/// table enumerated from the enum itself cannot have that hole: every variant
+/// appears, with a stated answer, or `every_storage_provider_is_in_the_table`
+/// stops compiling.
+const DURABLE_KEY_STORE_BY_PROVIDER: [(StorageProviderKind, bool, &str); 6] = [
+    (
+        StorageProviderKind::Memory,
+        false,
+        "process-local; runtime-minted keys die with the process",
+    ),
+    (
+        StorageProviderKind::Supabase,
+        true,
+        "implemented durable control plane (postgres wire)",
+    ),
+    (
+        StorageProviderKind::TursoLibsql,
+        false,
+        "not implemented(); no control-plane store exists behind it",
+    ),
+    (
+        StorageProviderKind::Postgres,
+        true,
+        "implemented durable control plane",
+    ),
+    (
+        StorageProviderKind::Mysql,
+        false,
+        "not implemented(); no control-plane store exists behind it",
+    ),
+    (
+        StorageProviderKind::CloudflareD1,
+        true,
+        "implemented durable control plane (control_plane_store_d1); the \
+         hosted-on-Cloudflare posture #542's first fix locked out",
+    ),
+];
+
+/// Compile-time proof that the table above names every variant: a new backend
+/// makes this match non-exhaustive, so it cannot be added to the enum without
+/// stating whether it can hold a credential.
+fn every_storage_provider_is_in_the_table(provider: StorageProviderKind) -> usize {
+    match provider {
+        StorageProviderKind::Memory => 0,
+        StorageProviderKind::Supabase => 1,
+        StorageProviderKind::TursoLibsql => 2,
+        StorageProviderKind::Postgres => 3,
+        StorageProviderKind::Mysql => 4,
+        StorageProviderKind::CloudflareD1 => 5,
+    }
+}
+
+/// #542 rework, finding 1: the credential-source predicate is pinned as a SET,
+/// per storage provider, with no other credential source in the config.
+///
+/// Pins `Config::durable_api_key_store` (`config/types.rs`) and, through it, the
+/// storage arm of `has_credential_source`.
+///
+/// Mutations this catches:
+/// - deleting `StorageProviderKind::Postgres |` from the true-arm (the mutation
+///   the review found surviving): the Postgres row asserts a credential source;
+/// - the shipped omission of `CloudflareD1`: the D1 row asserts one, and asserts
+///   that a D1 gateway with no static key still REQUIRES authentication rather
+///   than being told to disable it;
+/// - promoting `Memory` to a key store: the Memory row asserts none;
+/// - letting a variant fall through a wildcard: the table's answers are checked
+///   against `StorageProviderKind::implemented()`, a source of truth in a
+///   different crate, so an unimplemented backend claiming to hold keys (or an
+///   implemented durable one silently excluded) reds here.
+#[test]
+fn credential_sources_cover_every_storage_provider() {
+    assert_eq!(
+        DURABLE_KEY_STORE_BY_PROVIDER.len(),
+        6,
+        "the table must list every StorageProviderKind variant"
+    );
+
+    for (index, (provider, holds_keys, why)) in DURABLE_KEY_STORE_BY_PROVIDER.iter().enumerate() {
+        assert_eq!(
+            every_storage_provider_is_in_the_table(*provider),
+            index,
+            "the table is out of step with the enum at {}",
+            provider.as_str()
+        );
+
+        let mut config = Config::default();
+        config.storage.provider = *provider;
+        assert!(config.api_keys.is_empty());
+        assert!(!config.auth_service.enabled);
+
+        assert_eq!(
+            config.durable_api_key_store(),
+            holds_keys.then_some(*provider),
+            "storage.provider = {} must {}hold durable virtual keys ({why})",
+            provider.as_str(),
+            if *holds_keys { "" } else { "not " }
+        );
+        assert_eq!(
+            config.has_credential_source(),
+            *holds_keys,
+            "storage.provider = {} is the only possible credential source here ({why})",
+            provider.as_str()
+        );
+        // ...and one that has one boots REQUIRING authentication, which is the
+        // whole of #542: the keys are in the control plane, not in the file.
+        assert!(config.auth_required());
+
+        // Cross-check against a different source of truth: nothing may be
+        // treated as a durable key store unless the storage crate says it is
+        // implemented, and the two exclusions below are excluded FOR that
+        // reason -- implement either and this reds, forcing the decision.
+        if *holds_keys {
+            assert!(
+                provider.implemented(),
+                "{} cannot hold keys it has no implementation to store",
+                provider.as_str()
+            );
+            assert!(provider.is_durable());
+        } else if !matches!(provider, StorageProviderKind::Memory) {
+            assert!(
+                !provider.implemented(),
+                "{} is now implemented; decide whether it holds durable API keys \
+                 in Config::durable_api_key_store",
+                provider.as_str()
+            );
+        }
+    }
 }
 
 #[test]
