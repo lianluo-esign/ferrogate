@@ -4169,11 +4169,8 @@ export interface components {
             idempotency_key?: string | null;
             /** @description Runtime framework adapter to lease this job to. Defaults to native-harness. */
             framework_adapter?: string | null;
-            /**
-             * @description Capabilities a worker must advertise to lease this job. Defaults to ["shell"].
-             * @default []
-             */
-            required_capabilities: string[];
+            /** @description Capabilities a worker must advertise to lease this job. Optional: omit or send [] to let the runtime apply its own default (currently ["shell"]). */
+            required_capabilities?: string[];
             /** @description Opaque workload reference handed to the runtime. Defaults to agent-job://{run_id}. */
             workload_ref?: string | null;
         };
