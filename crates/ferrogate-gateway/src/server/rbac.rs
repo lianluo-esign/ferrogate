@@ -31,7 +31,7 @@ use crate::{
     state::AppState,
 };
 use ferrogate_config::{
-    AgentUpstreamConfig, GatewayConfigProfile, Model, PolicyRule, SkillPackage,
+    AgentUpstreamConfig, AgentWorkflowPolicy, GatewayConfigProfile, Model, PolicyRule, SkillPackage,
 };
 
 impl FerroGateway {
@@ -1185,7 +1185,7 @@ async fn write_rbac_scope_denied(session: &mut Session, request_id: &str) -> Pin
 /// | `SkillPackage` | `api_key_ids` | `/admin/v1/skill-packages[/{id}]` | scoped, [`Self::visible_skill_package`] |
 /// | `AgentUpstreamConfig` | `tenant_ids` | `/admin/v1/agent-upstreams[/{id}]` | scoped, [`Self::visible_agent_upstream`] |
 /// | `Model` | `visible_organization_ids`, `visible_project_ids` | `/admin/v1/models` | scoped, [`Self::visible_model`] |
-/// | `AgentWorkflowPolicy` | `organization_ids`, `project_ids`, `api_key_ids` | `/admin/v1/agent-workflows[/{id}]` | split out as **#546** (its reads also join runtime counters, so the narrowing is not a one-line reuse) |
+/// | `AgentWorkflowPolicy` | `organization_ids`, `project_ids`, `api_key_ids` | `/admin/v1/agent-workflows[/{id}]` | scoped, [`Self::visible_agent_workflow`] (**#546**) |
 /// | `ApiKey` | `organization_id`, `project_id`, `workspace_id`, `team_id`, `user_id` | `/admin/v1/api-keys[/{id}]` | **excluded**: both GET arms call `require_platform_operator` before reading, so no tenant-scoped caller reaches the serializer at all |
 /// | `GuardrailRule` | `organization_ids`, `project_ids`, `api_key_ids` | *(none)* | **excluded**: no read surface exists -- `git grep GuardrailRule` reaches only `compile_static_guardrail_policy`; the rule is compiled into a `PolicyRevision` and never serialised to a response |
 ///
@@ -1398,12 +1398,56 @@ impl ConfigCatalogScope {
             ..profile.clone()
         })
     }
+
+    /// The caller's view of one `[[agent_workflows]]` entry, or `None` if the
+    /// workflow can never be invoked by this tenant (issue #546).
+    ///
+    /// `AgentWorkflowPolicy` carries the *same three selector lists* as
+    /// `PolicyRule` -- `organization_ids`, `project_ids`, `api_key_ids` -- and
+    /// the runtime reads them in `can_use_workflow` (`server/chat.rs`, and its
+    /// twin in `server/agent_runs.rs`): each non-empty list must name the
+    /// caller's own id and an empty list is a wildcard, the three ANDed. That
+    /// is exactly [`Self::visible_policy`]'s shape, so this is the same two
+    /// narrowings in the same order rather than a second pattern -- the `?`
+    /// on each field is the AND, and [`Self::narrow`] returning `None` (never
+    /// an emptied vector) is what stops a workflow scoped to another tenant
+    /// from re-rendering as a wildcard that reads as "runnable by everyone".
+    ///
+    /// The data plane was already scoped; only the admin read was not, and it
+    /// is the only surface that renders the three id lists themselves.
+    ///
+    /// Only the *selectors* are narrowed. `AdminAgentWorkflow` also joins
+    /// runtime counters (request/error/billing/audit totals for the workflow
+    /// id+version), which are computed by the caller of this helper from
+    /// platform-wide logs. Those counters are aggregate integers, not
+    /// cross-tenant identifiers, and #546 is scoped to the id families; they
+    /// are left as they are rather than silently given a different treatment
+    /// here.
+    pub(super) fn visible_agent_workflow(
+        &self,
+        workflow: &AgentWorkflowPolicy,
+    ) -> Option<AgentWorkflowPolicy> {
+        let Self::Tenant {
+            tenant_id,
+            api_key_ids,
+            project_ids,
+        } = self
+        else {
+            return Some(workflow.clone());
+        };
+        Some(AgentWorkflowPolicy {
+            organization_ids: Self::narrow_organizations(&workflow.organization_ids, tenant_id)?,
+            project_ids: Self::narrow(&workflow.project_ids, project_ids)?,
+            api_key_ids: Self::narrow(&workflow.api_key_ids, api_key_ids)?,
+            ..workflow.clone()
+        })
+    }
 }
 
 /// Resolves the caller's [`ConfigCatalogScope`] -- the ONE place the
 /// tenant/platform-operator split is decided for the static config catalog,
-/// mirroring [`rbac_catalog_scope`] so the four read sites cannot drift
-/// (four copies of the check is precisely how this class survived #518).
+/// mirroring [`rbac_catalog_scope`] so the read sites cannot drift (a copy of
+/// the check per handler is precisely how this class survived #518).
 ///
 /// The classification comes from [`AuthContext::caller_scope`], never from
 /// `organization_id.is_none()`: only a credential that *declared* platform

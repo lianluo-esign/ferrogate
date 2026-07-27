@@ -17,7 +17,9 @@
 //   /admin/v1/models                    Model.visible_{organization,project}_ids
 //
 // (`/admin/v1/agent-workflows` is the eighth carrier of the same selector
-// family and is split out as #546; `/admin/v1/api-keys` is operator-gated and
+// family; it was split out as #546 and is covered by the sibling file
+// tests/agent_workflow_scope_admin_api.rs, because its rows also join runtime
+// counters. `/admin/v1/api-keys` is operator-gated and
 // `GuardrailRule` has no read surface at all -- see the derivation table on
 // `ConfigCatalogScope` in gateway/rbac.rs.)
 //

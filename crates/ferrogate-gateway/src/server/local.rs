@@ -1298,68 +1298,109 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/agent-workflows/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let data = state
-                            .config
-                            .agent_workflows
-                            .iter()
-                            .map(|workflow| admin_agent_workflow(&state, workflow))
-                            .collect();
-                        write_json_response(
-                            session,
-                            StatusCode::OK,
-                            &AdminList::new(data),
-                            &ctx.request_id,
-                        )
-                        .await
-                    }
+                // Issue #546: this arm was the eighth `Ok(_) => ...` of the
+                // #518/#535 family -- it authenticated, threw the AuthContext
+                // away and serialized every workflow's `organization_ids`,
+                // `project_ids` and `api_key_ids` to any tenant-scoped
+                // `admin.read` key. The data plane already scopes workflows
+                // per caller (`can_use_workflow`); this read did not.
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
-                }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let data: Vec<_> = state
+                    .config
+                    .agent_workflows
+                    .iter()
+                    .filter_map(|workflow| scope.visible_agent_workflow(workflow))
+                    .map(|workflow| admin_agent_workflow(&state, &workflow))
+                    .collect();
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminList::new(data),
+                    &ctx.request_id,
+                )
+                .await
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let Some(workflow) = crate::state::select_agent_workflow(
-                            &state.config.agent_workflows,
-                            id,
-                            None,
-                        ) else {
-                            return write_json_error(
-                                session,
-                                StatusCode::NOT_FOUND,
-                                "agent_workflow_not_found",
-                                format!("agent workflow {id} was not found"),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        };
-                        let body = AdminAgentWorkflowMutationResponse {
-                            object: "agent_workflow",
-                            agent_workflow: admin_agent_workflow(&state, workflow),
-                        };
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                // Issue #546, as #535: out-of-scope reads exactly like
+                // nonexistent for a tenant-scoped caller, so the by-id read
+                // cannot be walked as an existence oracle to rebuild the
+                // catalog the list no longer discloses. `!scope.is_full()`
+                // preserves the operator's 404 for a genuinely absent id.
+                let visible =
+                    crate::state::select_agent_workflow(&state.config.agent_workflows, id, None)
+                        .and_then(|workflow| scope.visible_agent_workflow(workflow));
+                if visible.is_none() && !scope.is_full() {
+                    return write_config_scope_denied(session, "agent workflow", &ctx.request_id)
+                        .await;
                 }
+                let Some(workflow) = visible else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "agent_workflow_not_found",
+                        format!("agent workflow {id} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                let body = AdminAgentWorkflowMutationResponse {
+                    object: "agent_workflow",
+                    agent_workflow: admin_agent_workflow(&state, &workflow),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             (&Method::POST, None) => {
                 self.handle_admin_agent_workflow_upsert(session, ctx, headers, None)

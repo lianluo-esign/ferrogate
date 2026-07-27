@@ -1229,7 +1229,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List configured agent workflow policies with runtime counters. */
+        /**
+         * List configured agent workflow policies with runtime counters.
+         * @description Lists the agent workflow policies visible to the caller, each with its runtime counters. Scoped to the caller (issue #546, the same narrowing as issue #535): a platform-operator key receives every workflow verbatim; a tenant-scoped admin.read key receives only the workflows it could actually invoke, with other tenants' ids removed. The selector semantics match the runtime's own can_use_workflow check: an empty organization_ids/project_ids/api_key_ids is a wildcard, so a workflow with no selectors at all is genuinely platform-wide and is returned unchanged; a non-empty selector is an allow-list, so the workflow is hidden unless it names an organization, project or api key the caller owns, and is then rendered with only the caller's own ids -- a selector that would narrow to nothing hides the workflow rather than being emptied, because an empty selector reads as a wildcard. The counters are not narrowed: they are aggregate request, error, billing and audit totals for the workflow id and version, not tenant identifiers.
+         */
         get: operations["listAdminAgentWorkflows"];
         put?: never;
         /** Create an agent workflow policy and apply it through process-local reload. */
@@ -1249,7 +1252,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get one agent workflow policy with runtime counters. */
+        /**
+         * Get one agent workflow policy with runtime counters.
+         * @description Returns one agent workflow policy with its runtime counters, scoped exactly as GET /admin/v1/agent-workflows is (issue #546) and rendered with only the caller's own organization, project and api-key ids. A tenant-scoped admin.read key asking for a workflow it could not invoke receives 403 tenant_scope_denied -- the identical answer it receives for an id that does not exist, so this endpoint cannot be walked as an existence oracle to rebuild the list. A platform-operator key still receives 404 agent_workflow_not_found for a genuinely absent id.
+         */
         get: operations["getAdminAgentWorkflow"];
         /** Replace or create an agent workflow policy by id. */
         put: operations["putAdminAgentWorkflow"];
