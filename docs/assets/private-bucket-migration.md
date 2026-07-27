@@ -119,15 +119,16 @@ surfaces ignored it.
 
 Peak gateway memory for buffered asset work is
 **`max_total_gateway_buffer_bytes`** — an enforced ceiling, not a
-multiplication you have to estimate.
+multiplication you have to estimate. This holds for all four read surfaces and
+the buffered commit leg, in the same sense for each.
 
 `max_gateway_buffer_bytes` bounds one operation; `max_total_gateway_buffer_bytes`
 bounds their sum. Every buffering read is admitted against the total before it
-starts, is charged the size its registry row declares, and holds that charge
-until its bytes are dropped (through the hash re-verification and the response
-write, not just the bucket GET). When the budget is committed a read waits up to
-`buffer_admission_wait_ms` for capacity and is then **shed**, not queued
-indefinitely and never truncated:
+starts, is charged **what it will actually hold**, and keeps that charge until
+those bytes are gone — through the hash re-verification, any encoding, and the
+response write, not just the bucket GET. When the budget is committed a read
+waits up to `buffer_admission_wait_ms` for capacity and is then **shed**, not
+queued indefinitely and never truncated:
 
 | Surface | Aggregate budget exhausted |
 |---|---|
@@ -142,6 +143,39 @@ The message names the ceiling, the size requested, how long the request waited,
 and `GET /v1/assets/presign/download/...`, which streams from the bucket and
 does not use the budget at all. A shed is a load condition, not a fault of the
 request: the identical call succeeds once in-flight reads drain.
+
+**What a read is charged.** Not every surface holds one copy of the object, so
+not every surface is charged one:
+
+| Surface | Charged | Why |
+|---|---|---|
+| `GET /v1/assets/{asset_type}/{name}/{version}` | 1x the object | the buffer is written into the response as-is |
+| Static-site serve (`serve_site_file`) | 1x the object | same |
+| Presigned commit, buffered leg | 1x the object | the buffer is re-PUT as-is |
+| `fetch_asset` built-in tool | ~3.7x the object | the buffer, **plus** the `text`/base64 `blob` copy inlined into the JSON response, **plus** `serde_json`'s serialized copy of that response — all three resident at once |
+| MCP `resources/read` | ~3.7x the object | same |
+
+The two inlining surfaces charge ~3.7x because that is what they hold: a
+`~1.34x` base64 copy is the worst case for one inlined copy, and there are two
+of them alive alongside the buffer at the peak. Charging them 1x would have made
+this section's opening sentence false for exactly those two rows — an
+under-count of the same shape as the pre-#529 "peak = per-op bound x
+concurrency". The practical consequence is that an MCP read consumes roughly
+four times the aggregate budget a registry pull of the same object does, so a
+deployment whose traffic is mostly MCP asset reads should size
+`max_total_gateway_buffer_bytes` accordingly.
+
+The charge is held until the bytes are **gone**, which on the two inlining
+surfaces means until the response value is dropped by the code that writes it,
+not until the read returns. That distinction is the whole point: a client that
+stalls after reading the response header keeps its copy of the object resident
+in the gateway, and that copy is inside the ceiling.
+
+**The ceiling is global, not per tenant.** One process-wide pool means one
+tenant's burst can shed another tenant's reads with a `503`. That is a memory
+ceiling behaving as a memory ceiling, not a fairness mechanism; if you need
+per-tenant isolation of asset-read memory, run separate gateway processes. This
+is recorded here so it is a known property rather than a production discovery.
 
 The streaming commit path is deliberately **outside** the budget. Its resident
 cost is one HTTP chunk regardless of object size, so charging it the object's

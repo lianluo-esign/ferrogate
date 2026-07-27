@@ -87,8 +87,14 @@ fn test_ctx() -> ProxyContext {
     }
 }
 
-fn seed(state: &AppState, tenant: &str, asset_type: &str, name: &str, version: &str, body: &[u8]) {
-    block_on(state.upsert_asset(StoredAsset {
+fn seeded_asset(
+    tenant: &str,
+    asset_type: &str,
+    name: &str,
+    version: &str,
+    body: &[u8],
+) -> StoredAsset {
+    StoredAsset {
         id: stored_asset_id(tenant, asset_type, name, version),
         tenant_id: tenant.into(),
         project_id: None,
@@ -105,8 +111,11 @@ fn seed(state: &AppState, tenant: &str, asset_type: &str, name: &str, version: &
         visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
-    }))
-    .unwrap();
+    }
+}
+
+fn seed(state: &AppState, tenant: &str, asset_type: &str, name: &str, version: &str, body: &[u8]) {
+    block_on(state.upsert_asset(seeded_asset(tenant, asset_type, name, version, body))).unwrap();
 }
 
 #[test]
@@ -160,6 +169,85 @@ fn resources_read_returns_content_with_matching_fingerprint() {
     assert_eq!(contents[0]["uri"], "asset://cli_tool/deploy/1.0.0");
     assert_eq!(contents[0]["text"], "echo hello");
     assert_eq!(contents[0]["_meta"]["sha256"], sha256_hex(b"echo hello"));
+}
+
+/// Issue #529 rework: `resources/read` inlines a full second copy of the object
+/// into a response value that somebody else serializes and writes. Round 1
+/// released the admission charge at the end of the handler's match arm, so N
+/// stalled clients each held a copy the ceiling had stopped counting -- the
+/// registry pull and the site serve, which bind their permit across the
+/// response write, did not have this hole.
+///
+/// This drives the production response builder with a genuinely charged buffer
+/// and asserts the charge survives the call and dies with the response. The
+/// enclosing handler is not reachable with one (it needs a live bucket), which
+/// is why the builder is its own function.
+#[test]
+fn a_resources_read_response_holds_its_charge_until_the_response_is_dropped() {
+    use crate::gateway::asset_admission::{BufferedObject, GatewayBufferBudget, ReadResidency};
+
+    const OBJECT_BYTES: u64 = 64 * 1024;
+    let budget = GatewayBufferBudget::new(
+        4 * OBJECT_BYTES,
+        OBJECT_BYTES,
+        std::time::Duration::from_millis(0),
+    );
+    let body = vec![b'x'; OBJECT_BYTES as usize];
+    let permit = block_on(budget.admit(ReadResidency::BufferOnly, OBJECT_BYTES))
+        .map_err(|_| ())
+        .expect("the fixture read fits its budget");
+    let free_while_held = budget.available_bytes();
+    assert_eq!(
+        free_while_held,
+        3 * OBJECT_BYTES,
+        "the fixture must actually be charged, or nothing below proves anything"
+    );
+
+    let asset = StoredAsset {
+        content_type: "text/plain".into(),
+        content_hash: sha256_hex(&body),
+        size_bytes: OBJECT_BYTES,
+        ..seeded_asset("tenant-1", "cli_tool", "deploy", "1.0.0", b"")
+    };
+    let response =
+        asset_resource_read_result(Some(json!(1)), &asset, BufferedObject::new(body, permit));
+
+    assert!(
+        response.holds_a_buffer_charge(),
+        "the response must carry the charge for the copy of the object inside it"
+    );
+    assert_eq!(
+        budget.available_bytes(),
+        free_while_held,
+        "building the response must NOT return the charge: the object is still resident, now as \
+         JSON, and is about to be serialized and written"
+    );
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        value["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .len(),
+        OBJECT_BYTES as usize,
+        "the copy being charged for must actually be in the response"
+    );
+    assert!(
+        value.get("budget").is_none(),
+        "the charge is gateway bookkeeping and must never be serialized to a client"
+    );
+    assert_eq!(
+        budget.available_bytes(),
+        free_while_held,
+        "serializing it does not release it either -- that copy is resident too"
+    );
+
+    drop(response);
+    assert_eq!(
+        budget.available_bytes(),
+        4 * OBJECT_BYTES,
+        "dropping the response -- which the writer does after the socket write -- returns the \
+         charge"
+    );
 }
 
 #[test]

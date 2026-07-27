@@ -474,12 +474,19 @@ fn object_over_buffer_budget(size_bytes: u64, limit_bytes: u64) -> String {
 /// the bytes a read may hold are the bytes it was charged for. A bucket whose
 /// object exceeds what its registry row claims is refused here rather than
 /// being allowed to hold up to the (larger) per-operation bound uncharged.
+///
+/// `residency` is how the caller will hold those bytes, and therefore what it
+/// is charged. A surface that inlines the object into a JSON response holds up
+/// to three copies of it at once and says so
+/// ([`ReadResidency::InlinedInJsonResponse`](super::asset_admission::ReadResidency::InlinedInJsonResponse));
+/// one that writes the buffer straight out holds one.
 pub(crate) async fn read_object_bounded(
     bucket: &dyn AssetObjectStore,
     key: &str,
     declared_size_bytes: u64,
     max_buffer_bytes: u64,
     admission: &super::asset_admission::GatewayBufferBudget,
+    residency: super::asset_admission::ReadResidency,
     asset_id: &str,
     request_id: &str,
 ) -> Result<super::asset_admission::BufferedObject, BufferedReadRefusal> {
@@ -489,7 +496,7 @@ pub(crate) async fn read_object_bounded(
             limit_bytes: max_buffer_bytes,
         });
     }
-    let permit = match admission.admit(declared_size_bytes).await {
+    let permit = match admission.admit(residency, declared_size_bytes).await {
         Ok(permit) => permit,
         Err(refusal) => {
             tracing::warn!(
@@ -2008,6 +2015,256 @@ mod tests {
         }
     }
 
+    /// A store that actually serves bytes, and reports what the aggregate
+    /// budget looked like at the instant the transport was called. That
+    /// observation is the difference between "the charge is taken" and "the
+    /// charge is taken before the object is in memory".
+    struct ServingStore {
+        body: Vec<u8>,
+        budget: &'static super::super::asset_admission::GatewayBufferBudget,
+        free_bytes_during_get: Arc<Mutex<Option<u64>>>,
+    }
+
+    #[async_trait]
+    impl AssetObjectStore for ServingStore {
+        async fn put_object(
+            &self,
+            _key: &str,
+            _body: &[u8],
+            _content_type: &str,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn put_object_owned(
+            &self,
+            _key: &str,
+            _body: Vec<u8>,
+            _content_type: &str,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn get_object(&self, _key: &str, _max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+            *self.free_bytes_during_get.lock().unwrap() = Some(self.budget.available_bytes());
+            Ok(self.body.clone())
+        }
+        async fn get_object_if_present(
+            &self,
+            _key: &str,
+            _max_bytes: u64,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            unimplemented!()
+        }
+        async fn get_object_stream(&self, _key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
+            unimplemented!()
+        }
+        async fn put_object_stream(
+            &self,
+            _key: &str,
+            _content_type: &str,
+            _content_length: u64,
+            _content_sha256_hex: &str,
+            _body: ObjectByteStream,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn delete_object(&self, _key: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn head_object(&self, _key: &str) -> anyhow::Result<Option<u64>> {
+            unimplemented!()
+        }
+        async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
+            unimplemented!()
+        }
+        fn presign_put(
+            &self,
+            _key: &str,
+            _expires_secs: u64,
+            _timestamp_unix: u64,
+            _size_bytes: u64,
+            _content_sha256_hex: &str,
+        ) -> anyhow::Result<PresignedUpload> {
+            unimplemented!()
+        }
+        fn presign_get(
+            &self,
+            _key: &str,
+            _expires_secs: u64,
+            _timestamp_unix: u64,
+        ) -> anyhow::Result<String> {
+            unimplemented!()
+        }
+    }
+
+    /// A leaked enforcing budget, because [`ServingStore`] needs a `'static`
+    /// handle to observe it from inside the transport. One per test, so no
+    /// test can be perturbed by another's charges.
+    fn enforcing_budget(
+        total_bytes: u64,
+        per_read_bytes: u64,
+    ) -> &'static super::super::asset_admission::GatewayBufferBudget {
+        Box::leak(Box::new(
+            super::super::asset_admission::GatewayBufferBudget::new(
+                total_bytes,
+                per_read_bytes,
+                std::time::Duration::ZERO,
+            ),
+        ))
+    }
+
+    /// Issue #529 review finding 2: the whole feature was pinned only through a
+    /// hand-built `BufferedObject::new(vec![...], permit)`. Nothing asserted
+    /// that THE CHOKEPOINT takes a charge and keeps it, and every landed
+    /// `read_object_bounded` test passed a *disabled* budget -- so
+    /// `Ok(bytes) => { drop(permit); Ok(BufferedObject::unbudgeted(bytes)) }`
+    /// survived the entire suite, demoting a memory ceiling to a bucket-GET
+    /// rate limiter without a single failure.
+    ///
+    /// Three separate claims, because they fail separately:
+    ///
+    /// 1. the charge is taken BEFORE the transport is asked for bytes (observed
+    ///    from inside `get_object`, so it cannot be satisfied by charging after
+    ///    the object is already resident);
+    /// 2. the charge is STILL HELD when the call returns, i.e. for as long as
+    ///    the caller holds the buffer; and
+    /// 3. it comes back when, and only when, the buffer is dropped.
+    #[tokio::test]
+    async fn the_chokepoint_takes_the_charge_before_the_read_and_holds_it_after() {
+        const OBJECT_BYTES: u64 = 64 * 1024;
+        let budget = enforcing_budget(1024 * 1024, OBJECT_BYTES);
+        let free_bytes_during_get = Arc::new(Mutex::new(None));
+        let store = ServingStore {
+            body: vec![7_u8; OBJECT_BYTES as usize],
+            budget,
+            free_bytes_during_get: Arc::clone(&free_bytes_during_get),
+        };
+        assert!(
+            budget.is_enforced(),
+            "a disabled budget would make every assertion below vacuous"
+        );
+        let free_before = budget.available_bytes();
+
+        let object = read_object_bounded(
+            &store,
+            "any-key",
+            OBJECT_BYTES,
+            OBJECT_BYTES,
+            budget,
+            super::super::asset_admission::ReadResidency::BufferOnly,
+            "id",
+            "req",
+        )
+        .await
+        .map_err(|_| ())
+        .expect("an in-budget read against an idle budget must be admitted");
+        assert_eq!(object.len(), OBJECT_BYTES as usize);
+
+        assert_eq!(
+            free_bytes_during_get
+                .lock()
+                .unwrap()
+                .expect("the transport must have been called"),
+            free_before - OBJECT_BYTES,
+            "the charge must be taken BEFORE the bucket GET: admitting after the bytes are \
+             already in memory bounds nothing"
+        );
+        assert_eq!(
+            budget.available_bytes(),
+            free_before - OBJECT_BYTES,
+            "the charge must still be held when the read RETURNS -- releasing it here is the \
+             difference between a memory ceiling and a rate limiter on bucket GETs"
+        );
+
+        drop(object);
+        assert_eq!(
+            budget.available_bytes(),
+            free_before,
+            "dropping the buffer -- and only that -- returns the charge"
+        );
+    }
+
+    /// The other half of the same property: a read that never produces bytes
+    /// must not keep the capacity it reserved for them. Without this, a bucket
+    /// outage would leak the whole budget one failed read at a time and the
+    /// gateway would shed everything until restart.
+    #[tokio::test]
+    async fn a_failed_chokepoint_read_returns_its_charge() {
+        let budget = enforcing_budget(1024 * 1024, 64 * 1024);
+        let store = LeakyStore {
+            reads: Arc::new(Mutex::new(0)),
+        };
+        let free_before = budget.available_bytes();
+
+        let refusal = read_object_bounded(
+            &store,
+            "any-key",
+            64 * 1024,
+            64 * 1024,
+            budget,
+            super::super::asset_admission::ReadResidency::BufferOnly,
+            "id",
+            "req",
+        )
+        .await
+        .expect_err("a failing bucket cannot produce bytes");
+
+        assert!(matches!(refusal, BufferedReadRefusal::Transport));
+        assert_eq!(
+            budget.available_bytes(),
+            free_before,
+            "a transport failure must return the charge it reserved"
+        );
+    }
+
+    /// A read the chokepoint sheds must cost the budget nothing at all -- the
+    /// permit is never taken, so a shed cannot itself contribute to the
+    /// condition that caused it.
+    #[tokio::test]
+    async fn a_shed_chokepoint_read_takes_no_charge_and_no_bucket_round_trip() {
+        const OBJECT_BYTES: u64 = 64 * 1024;
+        let budget = enforcing_budget(OBJECT_BYTES, OBJECT_BYTES);
+        let reads = Arc::new(Mutex::new(0));
+        let store = LeakyStore {
+            reads: Arc::clone(&reads),
+        };
+        let _committed = budget
+            .admit(
+                super::super::asset_admission::ReadResidency::BufferOnly,
+                OBJECT_BYTES,
+            )
+            .await
+            .map_err(|_| ())
+            .expect("the first read commits the whole budget");
+        assert_eq!(budget.available_bytes(), 0);
+
+        let refusal = read_object_bounded(
+            &store,
+            "any-key",
+            OBJECT_BYTES,
+            OBJECT_BYTES,
+            budget,
+            super::super::asset_admission::ReadResidency::BufferOnly,
+            "id",
+            "req",
+        )
+        .await
+        .expect_err("a read against a fully committed budget must be shed");
+
+        assert!(matches!(
+            refusal,
+            BufferedReadRefusal::Overloaded {
+                requested_bytes: 65_536,
+                ..
+            }
+        ));
+        assert_eq!(
+            *reads.lock().unwrap(),
+            0,
+            "a shed read must not issue a bucket GET"
+        );
+        assert_eq!(budget.available_bytes(), 0, "and must not take a charge");
+    }
+
     /// The declared size is refused BEFORE the bucket is touched: an
     /// over-budget object costs the gateway one comparison, not a request.
     #[tokio::test]
@@ -2023,6 +2280,7 @@ mod tests {
             100 * 1024 * 1024,
             1024,
             super::super::asset_admission::GatewayBufferBudget::disabled(),
+            super::super::asset_admission::ReadResidency::BufferOnly,
             "id",
             "req",
         )
@@ -2057,6 +2315,7 @@ mod tests {
             10,
             1024,
             super::super::asset_admission::GatewayBufferBudget::disabled(),
+            super::super::asset_admission::ReadResidency::BufferOnly,
             "id",
             "req",
         )
@@ -2306,6 +2565,175 @@ mod tests {
             "these mint an asset buffer that is never charged against \
              [asset_bucket].max_total_gateway_buffer_bytes -- take the bytes through \
              asset_bucket::read_object_bounded, which charges them:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The third structural guard, and the one issue #529's review named
+    /// directly: on the surfaces that write their own response, the entire
+    /// aggregate-residency guarantee is the difference between
+    ///
+    /// ```ignore
+    /// let (content, _budget) = content.into_parts();  // charge held across the write
+    /// let (content, _)       = content.into_parts();  // charge dropped right here
+    /// ```
+    ///
+    /// Nothing but a comment stood between those two spellings. Both compile,
+    /// both pass every behavioral test in the suite (the e2e's contention
+    /// window sits inside the bucket GET, so an early release hides there), and
+    /// one of them silently converts the ceiling into a rate limiter. This scan
+    /// makes the second spelling fail by file and line.
+    #[test]
+    fn the_admission_permit_is_never_discarded_at_a_split() {
+        let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut splits = 0_usize;
+        let mut scanned = 0_usize;
+        let mut pending = vec![source_root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("readable source directory") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !name.ends_with(".rs")
+                    || name.ends_with("_test.rs")
+                    || name.ends_with("_tests.rs")
+                {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&source_root)
+                    .expect("path under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                // This file hosts the scan, so its own source carries the
+                // needle; the same exemption the two guards above take.
+                if relative == "gateway/asset_bucket.rs" {
+                    continue;
+                }
+                scanned += 1;
+                let body = std::fs::read_to_string(&path).expect("readable source file");
+                for (index, line) in body.lines().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                        continue;
+                    }
+                    if !trimmed.contains(".into_parts()") {
+                        continue;
+                    }
+                    splits += 1;
+                    if trimmed.contains(", _)") || trimmed.contains(",_)") {
+                        offenders.push(format!("{relative}:{}: {}", index + 1, trimmed));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            scanned > 50,
+            "the scan found only {scanned} source files, so it is not actually looking at the \
+             crate and would pass vacuously"
+        );
+        assert!(
+            splits > 0,
+            "the scan found no BufferedObject::into_parts call at all; either the read surfaces \
+             stopped splitting their buffers (in which case delete this guard deliberately) or \
+             the needle no longer matches the code"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these split a BufferedObject and throw the admission permit away, releasing the \
+             aggregate charge while the bytes are still resident and still being written. Bind \
+             it to a named `_budget` local that outlives the response write:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The same guard for the other half of the four surfaces. `fetch_asset`
+    /// and MCP `resources/read` do not write bytes; they inline a JSON copy of
+    /// the object into a response value somebody else serializes. The charge
+    /// must be forwarded ONTO that value
+    /// ([`InlinedAssetEntry::budget`](crate::builtin_tools::InlinedAssetEntry)),
+    /// and a caller that uses `entry.value` and quietly drops `entry` compiles,
+    /// passes, and reintroduces exactly the bug this rework fixes.
+    #[test]
+    fn every_inlined_asset_entry_forwards_its_charge_to_the_response() {
+        /// How many lines after the call the forwarding may appear on. Small
+        /// on purpose: both call sites destructure the entry on the spot, and
+        /// a forwarding that drifts further than this from the call is one a
+        /// reader can no longer see is there.
+        const WINDOW: usize = 3;
+
+        let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut call_sites = 0_usize;
+        let mut pending = vec![source_root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("readable source directory") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !name.ends_with(".rs")
+                    || name.ends_with("_test.rs")
+                    || name.ends_with("_tests.rs")
+                {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&source_root)
+                    .expect("path under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                // This file hosts the scan, so its own source carries the
+                // needle; the same exemption the guards above take.
+                if relative == "gateway/asset_bucket.rs" {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).expect("readable source file");
+                let lines: Vec<&str> = body.lines().collect();
+                for (index, line) in lines.iter().enumerate() {
+                    let trimmed = line.trim();
+                    // The definition itself, and doc comments naming it, are
+                    // not call sites.
+                    if trimmed.starts_with("//")
+                        || trimmed.starts_with("///")
+                        || trimmed.contains("pub(crate) fn asset_resource_content_entry")
+                    {
+                        continue;
+                    }
+                    if !trimmed.contains("asset_resource_content_entry(") {
+                        continue;
+                    }
+                    call_sites += 1;
+                    let window = lines[index..lines.len().min(index + WINDOW)].join("\n");
+                    if !window.contains("budget") {
+                        offenders.push(format!("{relative}:{}: {}", index + 1, trimmed));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            call_sites >= 2,
+            "the scan found {call_sites} inlining call sites; issue #529 names two \
+             (`fetch_asset` and MCP `resources/read`), so the needle has stopped matching and \
+             this guard is passing vacuously"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these inline a full copy of an asset into a response without forwarding the \
+             admission charge that copy is holding, so the charge is released while the copy is \
+             still resident and still being written:\n{}",
             offenders.join("\n")
         );
     }

@@ -2128,7 +2128,14 @@ async fn verify_committed_object(
     // before asking for the bytes. The permit is held for as long as the
     // verified buffer is -- it travels out on `CommitVerification::Verified`
     // and is only dropped after the final PUT has consumed the bytes.
-    let budget = match request.admission.admit(actual_size).await {
+    let budget = match request
+        .admission
+        .admit(
+            super::asset_admission::ReadResidency::BufferOnly,
+            actual_size,
+        )
+        .await
+    {
         Ok(permit) => permit,
         Err(refusal) => {
             // Staging is left INTACT: this commit never started, and the

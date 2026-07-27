@@ -69,6 +69,14 @@ pub(crate) struct ToolExecutionResponse {
     pub(crate) request_id: String,
     pub(crate) session_id: Option<String>,
     pub(crate) latency_ms: u64,
+    /// Issue #529: the gateway-buffer admission charge for asset bytes inlined
+    /// into `content`, released when this response is dropped -- i.e. after it
+    /// has been serialized and written. `fetch_asset` is the only backend that
+    /// sets it; every other tool response carries
+    /// [`ResponseBufferBudget::none`]. Never serialized: it is accounting the
+    /// gateway owes itself, not part of the tool result.
+    #[serde(skip)]
+    pub(crate) budget: crate::gateway::asset_admission::ResponseBufferBudget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +356,8 @@ impl ExtensionRegistry {
             request_id: request_id.clone(),
             session_id: request.session_id.clone(),
             latency_ms,
+            // An extension tool's output never contains admitted asset bytes.
+            budget: crate::gateway::asset_admission::ResponseBufferBudget::none(),
         };
         self.emit_tool_event(ToolEventDraft {
             request_id,

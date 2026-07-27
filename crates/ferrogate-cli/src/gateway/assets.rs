@@ -22,7 +22,7 @@ use ferrogate_storage::{
 };
 
 use super::admin_list_query::{list_response, matches_search, query_value};
-use super::asset_admission::BufferedObject;
+use super::asset_admission::{BufferedObject, ReadResidency};
 use super::asset_bucket::{
     asset_too_large_for_buffering_message, gateway_buffer_budget_exhausted_message,
     read_object_bounded, BufferedReadRefusal, ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE,
@@ -102,11 +102,14 @@ impl AssetError {
 /// own copy.
 ///
 /// Aggregate concurrency is covered too, since issue #529: every one of those
-/// reads is charged its declared size against
-/// `[asset_bucket].max_total_gateway_buffer_bytes` and holds the charge until
-/// its bytes are dropped, so peak asset-read memory is that ceiling rather than
-/// this constant times an unbounded in-flight count. Over-budget concurrency is
-/// shed with a typed `503 gateway_buffer_budget_exhausted`.
+/// reads is charged what it will actually hold against
+/// `[asset_bucket].max_total_gateway_buffer_bytes` -- its declared size for the
+/// pull and the site serve, and ~3.7x that for the two surfaces that inline the
+/// object into a JSON response and therefore hold three copies of it -- and
+/// holds the charge until those bytes are dropped by the code that WRITES them.
+/// Peak asset-read memory is that ceiling rather than this constant times an
+/// unbounded in-flight count. Over-budget concurrency is shed with a typed
+/// `503 gateway_buffer_budget_exhausted`.
 ///
 /// The tenant's cumulative `asset_storage_quota_bytes` is enforced separately,
 /// on top of this.
@@ -1959,6 +1962,9 @@ impl FerroGateway {
             asset.size_bytes,
             buffer_limit,
             state.asset_buffer_admission(),
+            // The pull and the site serve write the buffer itself into the
+            // response, so one copy is the whole residency.
+            ReadResidency::BufferOnly,
             &asset.id,
             request_id,
         )

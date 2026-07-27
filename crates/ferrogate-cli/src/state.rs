@@ -6736,6 +6736,8 @@ fn tool_response_from_mcp(
         request_id,
         session_id: request.session_id,
         latency_ms,
+        // An upstream MCP tool result never contains admitted asset bytes.
+        budget: crate::gateway::asset_admission::ResponseBufferBudget::none(),
     }
 }
 

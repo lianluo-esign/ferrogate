@@ -21,6 +21,7 @@ use crate::auth::AuthContext;
 use crate::extensions::{
     RegisteredTool, ToolExecutionError, ToolExecutionRequest, ToolExecutionResponse,
 };
+use crate::gateway::asset_admission::{BufferedObject, ResponseBufferBudget};
 use crate::state::{AppState, AssetReadError};
 
 /// The single built-in tool name. Namespaced with a `builtin.` prefix so it can
@@ -130,10 +131,31 @@ pub(crate) fn asset_resource_descriptor(asset: &StoredAsset) -> Value {
     })
 }
 
+/// An MCP resource-contents entry together with the admission charge the
+/// object it inlines is still holding.
+///
+/// The two are returned as one value on purpose. The bytes inside `value` are a
+/// full copy of the object that outlives the [`BufferedObject`] they came from,
+/// so releasing the charge when the buffer drops would leave that copy resident
+/// and uncounted -- the shape issue #529 exists to prevent, reintroduced on the
+/// two surfaces the runbook lists alongside the two that get it right. `budget`
+/// has to be parked on whatever response carries `value` until it is written.
+pub(crate) struct InlinedAssetEntry {
+    pub(crate) value: Value,
+    pub(crate) budget: ResponseBufferBudget,
+}
+
 /// A single MCP resource-contents entry for an asset's verified bytes. Textual
 /// content is inlined as `text`; anything else is inlined as base64 `blob` --
 /// which costs ~1.33x the object, on top of the bytes themselves and the
-/// `serde_json` copy of the encoded string.
+/// `serde_json` copy of the encoded string. All three are charged against the
+/// aggregate budget by [`ReadResidency::InlinedInJsonResponse`](crate::gateway::asset_admission::ReadResidency::InlinedInJsonResponse).
+///
+/// It takes the [`BufferedObject`] by value rather than a `&[u8]` for two
+/// reasons: the textual branch can then MOVE the buffer into the `String`
+/// instead of copying it (one fewer full copy of the object resident at the
+/// peak), and the charge cannot be dropped on the floor by a caller that
+/// forgets it is holding one.
 ///
 /// Inlining is only acceptable because the caller has already been through
 /// [`AppState::read_asset_content`](crate::state::AppState::read_asset_content),
@@ -141,7 +163,10 @@ pub(crate) fn asset_resource_descriptor(asset: &StoredAsset) -> Value {
 /// (10 MiB by default). Issue #259 removed the flat 10 MB asset cap this used
 /// to lean on, so the bound is now the memory budget, not the asset size limit:
 /// larger assets are served by presigned direct download, not inlined here.
-pub(crate) fn asset_resource_content_entry(asset: &StoredAsset, content: &[u8]) -> Value {
+pub(crate) fn asset_resource_content_entry(
+    asset: &StoredAsset,
+    content: BufferedObject,
+) -> InlinedAssetEntry {
     let uri = asset_uri(&asset.asset_type, &asset.name, &asset.version);
     let mut entry = json!({
         "uri": uri,
@@ -151,22 +176,29 @@ pub(crate) fn asset_resource_content_entry(asset: &StoredAsset, content: &[u8]) 
             "sizeBytes": asset.size_bytes,
         }
     });
-    match textual_content(&asset.content_type, content) {
-        Some(text) => {
-            entry["text"] = json!(text);
+    let (bytes, budget) = content.into_response_parts();
+    match textual_content(&asset.content_type, bytes) {
+        Ok(text) => {
+            entry["text"] = Value::String(text);
         }
-        None => {
-            entry["blob"] = json!(BASE64_STANDARD.encode(content));
+        Err(bytes) => {
+            entry["blob"] = Value::String(BASE64_STANDARD.encode(&bytes));
         }
     }
-    entry
+    InlinedAssetEntry {
+        value: entry,
+        budget,
+    }
 }
 
-fn textual_content(content_type: &str, content: &[u8]) -> Option<String> {
+/// `Ok(text)` when the object can be inlined as `text` -- reusing the buffer's
+/// allocation rather than copying it -- and `Err(bytes)` (the original buffer,
+/// intact) when it has to go out as base64.
+fn textual_content(content_type: &str, content: Vec<u8>) -> Result<String, Vec<u8>> {
     if !looks_textual(content_type) {
-        return None;
+        return Err(content);
     }
-    std::str::from_utf8(content).ok().map(ToOwned::to_owned)
+    String::from_utf8(content).map_err(|error| error.into_bytes())
 }
 
 fn looks_textual(content_type: &str) -> bool {
@@ -229,10 +261,13 @@ pub(crate) async fn execute_fetch_asset(
     match state.read_asset_content(&id, request_id).await {
         Ok((asset, content)) => {
             let latency_ms = elapsed_ms(started);
-            let entry = asset_resource_content_entry(&asset, &content);
+            // Destructured on the spot so the charge cannot be left behind on a
+            // value that goes out of scope while the copy it paid for travels
+            // on inside the response (issue #529 rework).
+            let InlinedAssetEntry { value, budget } = asset_resource_content_entry(&asset, content);
             let content = json!({
                 "content": [
-                    { "type": "resource", "resource": entry }
+                    { "type": "resource", "resource": value }
                 ],
                 "_meta": {
                     "uri": asset_uri(&asset.asset_type, &asset.name, &asset.version),
@@ -249,6 +284,12 @@ pub(crate) async fn execute_fetch_asset(
                 request_id: request_id.to_string(),
                 session_id: request.session_id.clone(),
                 latency_ms,
+                // #529 rework: the inlined copy of the object is resident until
+                // this response is serialized and written, which happens in the
+                // tool chokepoint's caller, not here. The charge rides along so
+                // it is returned then -- not at the end of this match arm, with
+                // the copy still in flight.
+                budget,
             })
         }
         Err(AssetReadError::NotFound) => Err(ToolExecutionError::NotFound(format!(

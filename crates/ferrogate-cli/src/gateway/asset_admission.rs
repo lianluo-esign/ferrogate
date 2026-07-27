@@ -33,11 +33,18 @@
 //! (`[asset_bucket].buffer_admission_wait_ms`, default 250 ms), which absorbs
 //! bursts without turning overload into an unbounded queue. When the wait
 //! expires the read is refused with a typed 503 that names the condition; it is
-//! never served truncated and never left waiting silently. The underlying
-//! [`Semaphore`] is FIFO, so a large read at the head of the queue cannot be
-//! starved by a stream of small ones.
+//! never served truncated and never left waiting silently.
 //!
-//! # The permit outlives the transport read
+//! The queue is FIFO, so a large read at the head cannot be starved by a stream
+//! of small ones -- but that takes more than tokio's semaphore being FIFO among
+//! its *waiters*. `try_acquire_many_owned` does not consult the wait queue at
+//! all, so the no-wait fast path would let every newly arriving 4 KiB read
+//! barge past a 10 MiB read already queued, which under sustained small-read
+//! load burns the large read's whole wait and sheds it. [`Self::waiting`]
+//! counts queued readers and the fast path is skipped while it is non-zero, so
+//! the documented property is the enforced one.
+//!
+//! # The permit outlives the RESPONSE, not the transport read
 //!
 //! [`BufferedObject`] pairs the bytes with the permit that authorized them, and
 //! the permit is released when the bytes are dropped -- not when the bucket GET
@@ -46,7 +53,33 @@
 //! pass admission in turn and then hold their buffers concurrently through
 //! hashing, base64 encoding and the response write, which is exactly the
 //! aggregate this exists to bound.
+//!
+//! "Dropped" means dropped by the *response writer*, on all four read surfaces:
+//!
+//! - the registry pull and the static-site serve bind the permit to a local
+//!   that outlives `write_cacheable_response`;
+//! - the `fetch_asset` tool and MCP `resources/read` do not write the bytes
+//!   themselves -- they inline a JSON copy of the object into a response value
+//!   that some other code writes -- so the permit is parked ON that value as a
+//!   [`ResponseBufferBudget`] and released when the response is dropped, after
+//!   the socket write.
+//!
+//! Issue #529's first round released the permit at the end of the match arm on
+//! those two surfaces while a full second copy of the object travelled on
+//! inside the JSON. Resident asset bytes then grew with the number of stalled
+//! clients rather than with the ceiling.
+//!
+//! # What an inlining surface is charged
+//!
+//! The two JSON surfaces do not hold one copy of the object, they hold up to
+//! three at once: the buffer, the inlined `text`/base64 `blob` copy inside the
+//! response value, and `serde_json`'s serialized copy of that response. So they
+//! are charged for all three ([`ReadResidency::InlinedInJsonResponse`]).
+//! Charging them one object's worth would have made
+//! `max_total_gateway_buffer_bytes` a number the gateway exceeded by ~3.7x on
+//! its own documented surfaces.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -90,6 +123,59 @@ pub(crate) struct GatewayBufferBudget {
     /// single read can never be permanently inadmissible.
     budget_units: u32,
     wait: Duration,
+    /// Readers currently queued on the semaphore. The no-wait fast path is
+    /// skipped while this is non-zero; see the FIFO paragraph in the module
+    /// doc. It is an ordering hint, not accounting -- a stale read only costs
+    /// one arrival a trip through the (still bounded) wait.
+    waiting: AtomicUsize,
+}
+
+/// How much memory a read of `n` object bytes actually leaves resident, which
+/// is what it is charged. The two shapes exist because they differ by ~3.7x and
+/// the aggregate ceiling is meant to be a number, not an underestimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadResidency {
+    /// The bytes leave the gateway as they arrived: the registry pull, the
+    /// static-site serve, and the presigned commit's buffered leg write the
+    /// buffer itself. One copy.
+    BufferOnly,
+    /// The bytes are additionally inlined into a JSON response value (the
+    /// `fetch_asset` tool and MCP `resources/read`): the buffer, a `text` or
+    /// base64 `blob` copy of it inside the response, and `serde_json`'s
+    /// serialized copy of that response are all resident at the same time.
+    InlinedInJsonResponse,
+}
+
+/// Standard padded base64 expansion: 4 output bytes per 3 input bytes, rounded
+/// up. Used as the worst case for an inlined copy, since a body that is not
+/// valid UTF-8 (or not a textual mime type) takes the `blob` branch.
+fn base64_encoded_len(bytes: u64) -> u64 {
+    bytes.div_ceil(3).saturating_mul(4)
+}
+
+impl ReadResidency {
+    /// The bytes to charge for a read of `object_bytes`.
+    ///
+    /// The inlined case is deliberately the SUM rather than the max of the
+    /// three residents: they overlap in time (the response value is serialized
+    /// while it is still alive, and the base64 branch encodes from a buffer it
+    /// has not dropped), and an aggregate memory ceiling that is occasionally
+    /// optimistic is not a ceiling.
+    ///
+    /// Known residual, stated rather than hidden: a `text` body dense in
+    /// control characters escapes to more than its base64 size inside
+    /// `serde_json` (a NUL becomes six bytes). Assets like that are not a
+    /// realistic shape for this surface, and the alternative -- charging 6x for
+    /// every textual read -- would shed ordinary traffic to price in a body
+    /// nobody publishes.
+    pub(crate) fn residency_bytes(self, object_bytes: u64) -> u64 {
+        match self {
+            Self::BufferOnly => object_bytes,
+            Self::InlinedInJsonResponse => {
+                object_bytes.saturating_add(base64_encoded_len(object_bytes).saturating_mul(2))
+            }
+        }
+    }
 }
 
 /// Proof that the bytes it accompanies were admitted against the budget.
@@ -103,6 +189,63 @@ impl BufferPermit {
         Self(None)
     }
 }
+
+/// A [`BufferPermit`] parked on a response VALUE, for the surfaces that do not
+/// write the object's bytes themselves.
+///
+/// The registry pull and the static-site serve own their response write, so
+/// they can hold a plain `BufferPermit` in a local across it. The `fetch_asset`
+/// tool and MCP `resources/read` cannot: they build a JSON value containing an
+/// inlined copy of the object and hand it back to a caller that serializes and
+/// writes it later. The charge has to travel with that value, or the ceiling
+/// stops covering the two surfaces the runbook names alongside the other two.
+///
+/// `Arc` because the response types carrying this derive `Clone` (a guardrail
+/// rewrite in the tool chokepoint rebuilds the response with `..response`), and
+/// a cloned response must extend the charge rather than fail to compile or
+/// silently drop it. `PartialEq` is deliberately vacuous: this field is
+/// accounting attached to a response, never part of its identity.
+#[derive(Clone, Default)]
+pub(crate) struct ResponseBufferBudget(Option<Arc<BufferPermit>>);
+
+impl ResponseBufferBudget {
+    /// For responses that carry no admitted asset bytes at all -- every
+    /// response in the gateway except an asset inlined into JSON.
+    pub(crate) fn none() -> Self {
+        Self(None)
+    }
+
+    /// Whether this response is actually holding a charge. Instrumentation the
+    /// tests assert through; a release build sees it as dead.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_charged(&self) -> bool {
+        matches!(&self.0, Some(permit) if permit.0.is_some())
+    }
+}
+
+impl From<BufferPermit> for ResponseBufferBudget {
+    fn from(permit: BufferPermit) -> Self {
+        Self(Some(Arc::new(permit)))
+    }
+}
+
+/// Never prints the object, only whether a charge is parked here.
+impl std::fmt::Debug for ResponseBufferBudget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResponseBufferBudget")
+            .field("charged", &self.is_charged())
+            .finish()
+    }
+}
+
+impl PartialEq for ResponseBufferBudget {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ResponseBufferBudget {}
 
 /// An object buffered in gateway memory, carrying the admission permit that
 /// authorized it. The permit is released when this value is dropped, so the
@@ -128,10 +271,21 @@ impl BufferedObject {
     }
 
     /// Splits the bytes from the permit. Callers MUST keep the returned permit
-    /// alive for as long as they hold the bytes -- bind it to a `_permit` local
-    /// in the scope that owns the buffer, not to `_`.
+    /// alive for as long as they hold the bytes -- bind it to a `_budget` local
+    /// in the scope that owns the buffer, never to `_`. That distinction is the
+    /// whole aggregate-residency guarantee on the two surfaces that write their
+    /// own response, so it is enforced by
+    /// `asset_bucket`'s `the_admission_permit_is_never_discarded_at_a_split`
+    /// scan rather than by this comment.
     pub(crate) fn into_parts(self) -> (Vec<u8>, BufferPermit) {
         (self.bytes, self.permit)
+    }
+
+    /// Like [`Self::into_parts`], but hands the charge back in the form the
+    /// JSON-inlining surfaces need: something they can park on the response
+    /// value that outlives them.
+    pub(crate) fn into_response_parts(self) -> (Vec<u8>, ResponseBufferBudget) {
+        (self.bytes, self.permit.into())
     }
 }
 
@@ -181,6 +335,7 @@ impl GatewayBufferBudget {
                 budget_bytes: 0,
                 budget_units: 0,
                 wait,
+                waiting: AtomicUsize::new(0),
             };
         }
         let effective = budget_bytes.max(per_read_ceiling_bytes);
@@ -191,6 +346,7 @@ impl GatewayBufferBudget {
             budget_bytes: effective,
             budget_units,
             wait,
+            waiting: AtomicUsize::new(0),
         }
     }
 
@@ -230,26 +386,44 @@ impl GatewayBufferBudget {
         }
     }
 
-    /// Charges `bytes` against the budget, waiting at most the configured
-    /// interval for capacity.
+    /// Charges a read of `bytes` object bytes against the budget, waiting at
+    /// most the configured interval for capacity.
+    ///
+    /// What is charged is `residency.residency_bytes(bytes)` -- what the read
+    /// will actually hold -- while the refusal reports `bytes`, the size of the
+    /// object the caller asked for, because that is the number the caller and
+    /// the operator can act on.
     ///
     /// Returns the permit to hold alongside the buffer, or an
     /// [`AdmissionRefusal`] the caller maps to a typed 503. The wait is bounded
     /// by construction: `timeout` cannot become an unbounded queue, and a
     /// closed semaphore (unreachable -- nothing closes it) fails **open**
     /// rather than turning a bookkeeping bug into a total read outage.
-    pub(crate) async fn admit(&self, bytes: u64) -> Result<BufferPermit, AdmissionRefusal> {
+    pub(crate) async fn admit(
+        &self,
+        residency: ReadResidency,
+        bytes: u64,
+    ) -> Result<BufferPermit, AdmissionRefusal> {
         let Some(permits) = self.permits.clone() else {
             return Ok(BufferPermit::unbudgeted());
         };
-        let charge = self.charge_units(bytes);
-        match Arc::clone(&permits).try_acquire_many_owned(charge) {
-            Ok(permit) => return Ok(BufferPermit(Some(permit))),
-            Err(TryAcquireError::NoPermits) => {}
-            Err(TryAcquireError::Closed) => return Ok(BufferPermit::unbudgeted()),
+        let charge = self.charge_units(residency.residency_bytes(bytes));
+        // The fast path is skipped while anyone is queued. `try_acquire_many_owned`
+        // never consults tokio's wait queue, so taking it unconditionally lets
+        // an arriving small read barge past a large read already waiting --
+        // which is the documented FIFO property inverted, not merely unproven.
+        if self.waiting.load(Ordering::Acquire) == 0 {
+            match Arc::clone(&permits).try_acquire_many_owned(charge) {
+                Ok(permit) => return Ok(BufferPermit(Some(permit))),
+                Err(TryAcquireError::NoPermits) => {}
+                Err(TryAcquireError::Closed) => return Ok(BufferPermit::unbudgeted()),
+            }
         }
         let started = Instant::now();
-        match tokio::time::timeout(self.wait, permits.acquire_many_owned(charge)).await {
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        let outcome = tokio::time::timeout(self.wait, permits.acquire_many_owned(charge)).await;
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        match outcome {
             Ok(Ok(permit)) => Ok(BufferPermit(Some(permit))),
             Ok(Err(_closed)) => Ok(BufferPermit::unbudgeted()),
             Err(_elapsed) => Err(AdmissionRefusal {

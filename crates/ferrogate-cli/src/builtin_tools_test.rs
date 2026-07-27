@@ -156,7 +156,11 @@ fn content_entry_inlines_text_but_base64_encodes_binary() {
         content: text.to_vec(),
         ..blank_asset()
     };
-    let entry = asset_resource_content_entry(&text_asset, text);
+    let entry = asset_resource_content_entry(
+        &text_asset,
+        crate::gateway::asset_admission::BufferedObject::unbudgeted(text.to_vec()),
+    )
+    .value;
     assert_eq!(entry["text"], "line one\nline two\n");
     assert!(entry.get("blob").is_none());
     assert_eq!(entry["_meta"]["sha256"], sha256_hex(text));
@@ -169,9 +173,77 @@ fn content_entry_inlines_text_but_base64_encodes_binary() {
         content: binary.to_vec(),
         ..blank_asset()
     };
-    let entry = asset_resource_content_entry(&binary_asset, binary);
+    let entry = asset_resource_content_entry(
+        &binary_asset,
+        crate::gateway::asset_admission::BufferedObject::unbudgeted(binary.to_vec()),
+    )
+    .value;
     assert!(entry.get("text").is_none());
     assert_eq!(entry["blob"], BASE64_STANDARD.encode(binary));
+}
+
+/// The #529 rework's core property, at the function that builds the copy.
+///
+/// `asset_resource_content_entry` produces a full second copy of the object
+/// inside a JSON value that outlives the buffer it was built from. If the
+/// charge were released when that buffer dropped, the two MCP/tool surfaces
+/// would be admission-controlled rate limiters rather than memory ceilings --
+/// the exact asymmetry with the registry pull and the site serve that bounced
+/// round 1. Asserted on BOTH branches, because the textual branch moves the
+/// buffer and the base64 branch does not.
+#[test]
+fn inlining_an_asset_keeps_its_charge_until_the_entry_is_dropped() {
+    use crate::gateway::asset_admission::{
+        BufferedObject, GatewayBufferBudget, ReadResidency, ADMISSION_UNIT_BYTES,
+    };
+
+    for (content_type, body) in [
+        ("text/plain", vec![b'x'; 4 * ADMISSION_UNIT_BYTES as usize]),
+        (
+            "application/octet-stream",
+            vec![0xff_u8; 4 * ADMISSION_UNIT_BYTES as usize],
+        ),
+    ] {
+        let budget = GatewayBufferBudget::new(
+            64 * ADMISSION_UNIT_BYTES,
+            4 * ADMISSION_UNIT_BYTES,
+            std::time::Duration::ZERO,
+        );
+        let permit = block_on(budget.admit(ReadResidency::BufferOnly, body.len() as u64))
+            .map_err(|_| ())
+            .expect("the fixture read fits its budget");
+        let free_before = budget.available_bytes();
+        assert!(
+            free_before < 64 * ADMISSION_UNIT_BYTES,
+            "the fixture must actually be charged, or the assertions below prove nothing"
+        );
+
+        let asset = StoredAsset {
+            content_type: content_type.into(),
+            content_hash: sha256_hex(&body),
+            size_bytes: body.len() as u64,
+            ..blank_asset()
+        };
+        let entry = asset_resource_content_entry(&asset, BufferedObject::new(body, permit));
+
+        assert!(
+            entry.budget.is_charged(),
+            "{content_type}: the entry must carry the charge for the copy it holds"
+        );
+        assert_eq!(
+            budget.available_bytes(),
+            free_before,
+            "{content_type}: the charge must NOT come back when the buffer is consumed -- a full \
+             copy of the object is still resident inside the entry"
+        );
+
+        drop(entry);
+        assert_eq!(
+            budget.available_bytes(),
+            64 * ADMISSION_UNIT_BYTES,
+            "{content_type}: dropping the entry must return the charge"
+        );
+    }
 }
 
 fn blank_asset() -> StoredAsset {

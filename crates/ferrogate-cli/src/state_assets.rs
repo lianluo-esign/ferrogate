@@ -118,6 +118,10 @@ impl AppState {
                 asset.size_bytes,
                 buffer_limit,
                 self.asset_buffer_admission(),
+                // Both callers of this helper inline the object into a JSON
+                // response, so they are charged for the inlined copy and the
+                // serialized body as well as the buffer (issue #529 rework).
+                crate::gateway::asset_admission::ReadResidency::InlinedInJsonResponse,
                 id,
                 request_id,
             )
@@ -493,6 +497,21 @@ impl AppState {
     /// semaphore's permits while new reads draw on a fresh one). The cost is
     /// that changing the two knobs takes a restart, which is documented in the
     /// runbook next to the knobs themselves.
+    ///
+    /// The same `OnceLock` is process-wide inside the LIB TEST BINARY, where
+    /// "the process" is the whole suite: the first `AppState` that reaches this
+    /// fixes the budget for every test that runs after it, whatever config they
+    /// were built with. It is benign today because the smallest reachable
+    /// `max_gateway_buffer_bytes` in the suite is the 8 MiB default (a 256 MiB
+    /// aggregate, which nothing contends), but a future test that configures a
+    /// deliberately small budget AND reaches a bucket read would silently
+    /// retune every other test in the binary. Tests that need a specific
+    /// ceiling must therefore build a [`GatewayBufferBudget`] directly (as
+    /// `asset_admission_test.rs` and the `read_object_bounded` tests do) rather
+    /// than going through this accessor -- the aggregate budget's own behavior
+    /// is unit-tested against explicit budgets, and the wired-up production
+    /// resolution is proven end-to-end in `asset_presign_e2e.rs`, which gets a
+    /// real process per run.
     pub(crate) fn asset_buffer_admission(
         &self,
     ) -> &'static crate::gateway::asset_admission::GatewayBufferBudget {

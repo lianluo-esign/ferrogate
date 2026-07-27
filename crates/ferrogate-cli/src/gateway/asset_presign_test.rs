@@ -618,7 +618,10 @@ async fn the_streaming_commit_leg_consumes_no_buffering_budget() {
     // shed would be unmistakable in the elapsed time if this path waited at all.
     let budget = GatewayBufferBudget::new(64 * 1024, 4096, std::time::Duration::from_secs(30));
     let _committed = budget
-        .admit(64 * 1024)
+        .admit(
+            crate::gateway::asset_admission::ReadResidency::BufferOnly,
+            64 * 1024,
+        )
         .await
         .map_err(|_| ())
         .expect("the whole budget is taken by this permit");
@@ -661,7 +664,10 @@ async fn the_buffered_commit_leg_is_shed_when_the_aggregate_budget_is_exhausted(
     let bucket = test_bucket(endpoint);
     let budget = GatewayBufferBudget::new(64 * 1024, 1024, std::time::Duration::from_millis(20));
     let _committed = budget
-        .admit(64 * 1024)
+        .admit(
+            crate::gateway::asset_admission::ReadResidency::BufferOnly,
+            64 * 1024,
+        )
         .await
         .map_err(|_| ())
         .expect("the whole budget is taken by this permit");

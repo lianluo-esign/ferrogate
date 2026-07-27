@@ -2443,6 +2443,97 @@ organization_id = "tenant-presign-e2e"
     .unwrap();
 }
 
+/// Publishes the 4 MiB `text/plain` object both admission tests read, through
+/// the real presigned upload + commit lifecycle, and returns its sha256.
+///
+/// Deliberately printable ASCII: the same bytes have to survive a raw HTTP body
+/// comparison on the registry-pull run AND a JSON `text` inlining on the MCP
+/// run, so the object must be valid UTF-8 that takes the `text` branch rather
+/// than the base64 one.
+#[cfg(target_os = "linux")]
+fn publish_burst_object(gateway_addr: &str) -> (Vec<u8>, String) {
+    let register = http_request(
+        gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+    let quota = http_request(
+        gateway_addr,
+        "PUT",
+        "/admin/v1/quota-policies/tenant/tenant-presign-e2e",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"asset_storage_quota_bytes":{},"enabled":true}}"#,
+            BURST_OBJECT_BYTES * 8
+        ),
+    );
+    assert_status(&quota, 200);
+
+    // Printable ASCII so the response body survives a text-shaped comparison,
+    // and deterministic so the hash is stable.
+    let content: Vec<u8> = (0..BURST_OBJECT_BYTES)
+        .map(|index| b'!' + (index % 90) as u8)
+        .collect();
+    let sha256 = sha256_hex(&content);
+
+    let intent_response = http_request(
+        gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/burst-object/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(r#"{{"size_bytes":{BURST_OBJECT_BYTES},"sha256":"{sha256}"}}"#),
+    );
+    assert_status(&intent_response, 200);
+    let intent = response_json(&intent_response);
+    let upload_id = intent["upload_id"].as_str().expect("upload_id").to_string();
+    let upload_url = intent["upload_url"]
+        .as_str()
+        .expect("upload_url")
+        .to_string();
+    let upload = direct_bucket_request(
+        "PUT",
+        &upload_url,
+        &content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "direct upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+
+    let commit_response = http_request(
+        gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/burst-object/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"upload_id":"{upload_id}","size_bytes":{BURST_OBJECT_BYTES},"sha256":"{sha256}","content_type":"text/plain"}}"#
+        ),
+    );
+    assert_status(&commit_response, 200);
+
+    (content, sha256)
+}
+
 /// #529 acceptance: more concurrent over-budget readers than the ceiling
 /// allows, and the enforced behavior asserted with a measured memory ceiling.
 ///
@@ -2483,84 +2574,7 @@ fn concurrent_over_budget_reads_are_shed_with_a_typed_refusal_and_a_flat_rss() {
     let _gateway = GatewayGuard(gateway);
     support::wait_for_gateway(&gateway_addr);
 
-    let register = http_request(
-        &gateway_addr,
-        "POST",
-        "/admin/v1/tenant-accounts",
-        &[
-            "Authorization: Bearer admin-secret",
-            "Content-Type: application/json",
-        ],
-        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
-    );
-    assert!(
-        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
-        "tenant registration failed: {register}"
-    );
-    let quota = http_request(
-        &gateway_addr,
-        "PUT",
-        "/admin/v1/quota-policies/tenant/tenant-presign-e2e",
-        &[
-            "Authorization: Bearer admin-secret",
-            "Content-Type: application/json",
-        ],
-        &format!(
-            r#"{{"asset_storage_quota_bytes":{},"enabled":true}}"#,
-            BURST_OBJECT_BYTES * 8
-        ),
-    );
-    assert_status(&quota, 200);
-
-    // Printable ASCII so the response body survives a text-shaped comparison,
-    // and deterministic so the hash is stable.
-    let content: Vec<u8> = (0..BURST_OBJECT_BYTES)
-        .map(|index| b'!' + (index % 90) as u8)
-        .collect();
-    let sha256 = sha256_hex(&content);
-
-    let intent_response = http_request(
-        &gateway_addr,
-        "POST",
-        "/v1/assets/presign/upload/cli_tool/burst-object/1.0.0",
-        &[
-            "Authorization: Bearer asset-secret",
-            "Content-Type: application/json",
-        ],
-        &format!(r#"{{"size_bytes":{BURST_OBJECT_BYTES},"sha256":"{sha256}"}}"#),
-    );
-    assert_status(&intent_response, 200);
-    let intent = response_json(&intent_response);
-    let upload_id = intent["upload_id"].as_str().expect("upload_id").to_string();
-    let upload_url = intent["upload_url"]
-        .as_str()
-        .expect("upload_url")
-        .to_string();
-    let upload = direct_bucket_request(
-        "PUT",
-        &upload_url,
-        &content,
-        &[("x-amz-content-sha256", sha256.as_str())],
-    );
-    assert!(
-        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
-        "direct upload failed: {}",
-        String::from_utf8_lossy(&upload)
-    );
-
-    let commit_response = http_request(
-        &gateway_addr,
-        "POST",
-        "/v1/assets/presign/commit/cli_tool/burst-object/1.0.0",
-        &[
-            "Authorization: Bearer asset-secret",
-            "Content-Type: application/json",
-        ],
-        &format!(
-            r#"{{"upload_id":"{upload_id}","size_bytes":{BURST_OBJECT_BYTES},"sha256":"{sha256}","content_type":"text/plain"}}"#
-        ),
-    );
-    assert_status(&commit_response, 200);
+    let (_content, sha256) = publish_burst_object(&gateway_addr);
 
     // Slow the bucket down so the concurrent reads genuinely overlap inside the
     // gateway. Without this the reads complete faster than they arrive and the
@@ -3092,4 +3106,170 @@ fn issuing_a_presigned_url_audits_the_key_tenant_and_asset_identity() {
             "the download audit target must identify the asset by {coordinate}: {download_event}"
         );
     }
+}
+
+// ---- The ceiling holds while the CLIENT is the slow part (issue #529 rework) ----
+
+/// How long each reader refuses to drain its socket after reading the response
+/// head. The whole contended window has to sit in the RESPONSE WRITE, which is
+/// the leg the first round of #529 left uncharged on the two MCP/tool surfaces.
+#[cfg(target_os = "linux")]
+const STALL: Duration = Duration::from_millis(1500);
+
+/// Reads the response head, then stops reading for `stall`, then drains.
+///
+/// This is the client the review's repro describes. A 4 MiB response does not
+/// fit a socket buffer, so the gateway is left holding whatever it allocated
+/// for this response -- the buffer, the inlined JSON copy, and the serialized
+/// body -- for the whole stall. A client that reads straight through never
+/// exercises that, which is why the existing burst fixture (a deliberately slow
+/// BUCKET, a fast client) cannot see an early permit release: its contended
+/// window is entirely inside the bucket GET.
+#[cfg(target_os = "linux")]
+fn stalled_request(addr: &str, method: &str, path: &str, body: &str, stall: Duration) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Authorization: Bearer asset-secret\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .unwrap();
+    stream.write_all(body.as_bytes()).unwrap();
+
+    let mut head = [0_u8; 512];
+    let read = stream.read(&mut head).unwrap_or(0);
+    std::thread::sleep(stall);
+    let mut response = head[..read].to_vec();
+    let mut rest = Vec::new();
+    let _ = stream.read_to_end(&mut rest);
+    response.extend_from_slice(&rest);
+    response
+}
+
+/// #529 rework acceptance: the aggregate ceiling holds on MCP `resources/read`
+/// when the bucket is FAST and the clients are slow.
+///
+/// This is the run that separates a real ceiling from a bucket-GET rate
+/// limiter. `concurrent_over_budget_reads_are_shed_...` slows the bucket by
+/// 400 ms, so every read's contended window sits inside `get_object`, and a
+/// permit released the moment that call returned would still look like a
+/// ceiling. Here the bucket returns immediately and the readers stall for 1.5 s
+/// after the response head, so the ONLY way resident asset bytes can exceed the
+/// ceiling is by releasing the charge before the response is written -- which
+/// is precisely what `resources/read` did before this rework, while a full
+/// `text` copy of the object and its serialized form travelled on inside the
+/// JSON value.
+///
+/// The surface is deliberately MCP rather than the registry pull: the pull
+/// binds its permit across `write_cacheable_response` and always passed this.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stalled_mcp_reader_cannot_hold_asset_bytes_outside_the_ceiling() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, _bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_admission_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let gateway_pid = gateway.id();
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let (content, _sha256) = publish_burst_object(&gateway_addr);
+
+    // NO bucket delay: every read completes its GET instantly, so the whole
+    // contended window is in the response write.
+    let baseline_rss = resident_bytes(gateway_pid);
+    assert!(
+        baseline_rss > 8 * 1024 * 1024,
+        "refusing to trust an RSS reading of {baseline_rss} bytes for pid {gateway_pid}: \
+         that is not a running gateway, so the ceiling below would pass vacuously"
+    );
+    let sampler = RssSampler::start(gateway_pid);
+    let readers: Vec<_> = (0..BURST_READERS)
+        .map(|_| {
+            let addr = gateway_addr.clone();
+            std::thread::spawn(move || {
+                stalled_request(
+                    &addr,
+                    "POST",
+                    "/v1/mcp",
+                    r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"asset://cli_tool/burst-object/1.0.0"}}"#,
+                    STALL,
+                )
+            })
+        })
+        .collect();
+    let responses: Vec<Vec<u8>> = readers
+        .into_iter()
+        .map(|reader| reader.join().expect("reader thread"))
+        .collect();
+    let peak_rss = sampler.finish();
+
+    let mut served = 0_usize;
+    let mut shed = 0_usize;
+    for response in &responses {
+        let head = String::from_utf8_lossy(&response[..response.len().min(4096)]).to_string();
+        assert_eq!(
+            status_code(&head),
+            200,
+            "JSON-RPC reports application errors in the body, not the status line: {head}"
+        );
+        let body = String::from_utf8_lossy(raw_response_body(response)).to_string();
+        if body.contains("\"result\"") {
+            served += 1;
+            // No truncation: an admitted read inlines the WHOLE object.
+            assert!(
+                body.len() >= content.len(),
+                "an admitted read must inline the whole {}-byte object, but the response body \
+                 was {} bytes",
+                content.len(),
+                body.len()
+            );
+            assert!(
+                body.contains("\"text\""),
+                "the object is text/plain, so it must be inlined as text rather than base64: {}",
+                &body[..body.len().min(512)]
+            );
+            continue;
+        }
+        shed += 1;
+        assert!(
+            body.contains("-32005"),
+            "a shed MCP read must carry the typed aggregate-budget code, not a generic error: {}",
+            &body[..body.len().min(512)]
+        );
+        assert!(
+            body.contains("max_total_gateway_buffer_bytes"),
+            "the shed must name the knob that caused it: {}",
+            &body[..body.len().min(512)]
+        );
+    }
+
+    assert!(
+        shed > 0,
+        "{BURST_READERS} concurrent stalled MCP reads of a {BURST_OBJECT_BYTES}-byte object \
+         against a {BURST_TOTAL_BUFFER_BYTES}-byte aggregate budget must shed at least one"
+    );
+    assert!(
+        served > 0,
+        "the ceiling must SHED excess load, not close the door: every one of {BURST_READERS} \
+         MCP reads was refused"
+    );
+
+    let growth = peak_rss.saturating_sub(baseline_rss);
+    assert!(
+        growth < BURST_RSS_CEILING_BYTES,
+        "{BURST_READERS} stalled MCP readers grew gateway RSS by {growth} bytes (baseline \
+         {baseline_rss}, peak {peak_rss}); the ceiling is {BURST_RSS_CEILING_BYTES} and the \
+         aggregate budget is {BURST_TOTAL_BUFFER_BYTES}. Growth on this scale means the \
+         admission charge is being released before the response is written, so resident asset \
+         bytes track the number of slow clients instead of the ceiling."
+    );
 }

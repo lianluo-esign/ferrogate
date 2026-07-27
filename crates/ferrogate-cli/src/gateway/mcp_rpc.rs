@@ -17,6 +17,7 @@ use crate::{
     state::{AdminAuditEventDraft, AppState, AssetReadError},
 };
 
+use super::asset_admission::ResponseBufferBudget;
 use super::local::{
     tool_execution_entitlement_denial, validate_skill_tool_capability, SkillExecutionContext,
     ToolExecuteBackend, ToolExecutionContext,
@@ -63,6 +64,27 @@ pub(super) struct McpJsonRpcResponse {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<McpJsonRpcError>,
+    /// Issue #529: the aggregate-budget charge for asset bytes inlined into
+    /// `result`, held until this response value is dropped -- which happens
+    /// after `write_json_response` has serialized it AND written it to the
+    /// socket. `resources/read` and a `tools/call` of `builtin.fetch_asset` set
+    /// it; everything else is [`ResponseBufferBudget::none`]. Never serialized.
+    ///
+    /// Held for its `Drop` and nothing else, which is exactly why it looks dead
+    /// to the compiler outside tests.
+    #[serde(skip)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    budget: ResponseBufferBudget,
+}
+
+impl McpJsonRpcResponse {
+    /// Whether this response is still holding an aggregate-budget charge for
+    /// asset bytes it carries. Test instrumentation for the property that the
+    /// charge outlives the read (issue #529).
+    #[cfg(test)]
+    pub(super) fn holds_a_buffer_charge(&self) -> bool {
+        self.budget.is_charged()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -131,11 +153,24 @@ pub(super) async fn handle_request(
 }
 
 pub(super) fn result(id: Option<Value>, result: Value) -> McpJsonRpcResponse {
+    result_holding(id, result, ResponseBufferBudget::none())
+}
+
+/// [`result`] for a payload that contains asset bytes admitted against the
+/// gateway buffer budget (issue #529). `budget` rides on the response so the
+/// charge is returned when the response -- and the inlined copy of the object
+/// inside it -- is dropped by the writer, not when this function returns.
+pub(super) fn result_holding(
+    id: Option<Value>,
+    result: Value,
+    budget: ResponseBufferBudget,
+) -> McpJsonRpcResponse {
     McpJsonRpcResponse {
         jsonrpc: "2.0",
         id,
         result: Some(result),
         error: None,
+        budget,
     }
 }
 
@@ -152,6 +187,7 @@ pub(super) fn error(
             code,
             message: message.into(),
         }),
+        budget: ResponseBufferBudget::none(),
     }
 }
 
@@ -342,14 +378,7 @@ async fn resources_read(
                     asset.id, asset.size_bytes
                 ),
             ));
-            result(
-                id,
-                json!({
-                    "contents": [
-                        crate::builtin_tools::asset_resource_content_entry(&asset, &content)
-                    ]
-                }),
-            )
+            asset_resource_read_result(id, &asset, content)
         }
         Err(AssetReadError::NotFound) => error(
             id,
@@ -373,6 +402,27 @@ async fn resources_read(
             error(id, -32000, format!("asset storage unavailable: {message}"))
         }
     }
+}
+
+/// Builds the `resources/read` success response from a verified buffer.
+///
+/// Split out of [`resources_read`] because it is the exact step issue #529's
+/// review bounced: `asset_resource_content_entry` produces a full second copy
+/// of the object inside `contents`, and that copy outlives the
+/// [`BufferedObject`](super::asset_admission::BufferedObject) it was built
+/// from. The charge therefore has to be parked on the response -- released
+/// when the writer drops it, after the socket write -- rather than at the end
+/// of the match arm with the copy still in flight. As its own function it is
+/// reachable from a test with a genuinely charged buffer, which the surrounding
+/// handler is not (it needs a live bucket).
+fn asset_resource_read_result(
+    id: Option<Value>,
+    asset: &StoredAsset,
+    content: super::asset_admission::BufferedObject,
+) -> McpJsonRpcResponse {
+    let crate::builtin_tools::InlinedAssetEntry { value, budget } =
+        crate::builtin_tools::asset_resource_content_entry(asset, content);
+    result_holding(id, json!({ "contents": [value] }), budget)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -478,12 +528,17 @@ async fn tools_call(
                 .get("content")
                 .cloned()
                 .unwrap_or_else(|| response.content.clone());
-            result(
+            // `builtin.fetch_asset` reaches this arm too, carrying a charge for
+            // the asset bytes inlined in `content`. Forward it onto the
+            // JSON-RPC response rather than dropping `response` (and the
+            // charge) while a copy of those bytes travels on (issue #529).
+            result_holding(
                 id,
                 json!({
                     "content": content,
                     "isError": response.is_error
                 }),
+                response.budget,
             )
         }
         Err(error_response) => error(

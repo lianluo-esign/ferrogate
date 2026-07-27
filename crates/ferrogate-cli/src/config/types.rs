@@ -649,12 +649,23 @@ pub(crate) struct AssetBucketConfig {
     /// buffering, bucket-backed reads at one instant (issue #529).
     ///
     /// `max_gateway_buffer_bytes` bounds ONE operation; this bounds their sum,
-    /// which is what an operator actually sizes a box from. A read is charged
-    /// the size its registry row declares and holds that charge until its bytes
-    /// are dropped; when the budget is committed a read waits at most
+    /// which is what an operator actually sizes a box from. A read holds its
+    /// charge until its bytes are dropped; when the budget is committed a read
+    /// waits at most
     /// `buffer_admission_wait_ms` and is then refused with a typed
     /// `503 gateway_buffer_budget_exhausted` -- never truncated, never queued
     /// indefinitely.
+    ///
+    /// WHAT A READ IS CHARGED is not always the object size. A read that only
+    /// buffers -- the REST pull, static-site serve, the buffered commit leg --
+    /// is charged the size its registry row declares. A read whose bytes are
+    /// INLINED INTO A JSON RESPONSE (`fetch_asset`, MCP `resources/read`) is
+    /// charged roughly 3.7x that: the buffer, the base64 copy, and the
+    /// serialized body are all resident at the peak. Charging those surfaces
+    /// the object size alone is what made the ceiling untrue for them before
+    /// the #529 rework -- the budget was honest about admission and wrong
+    /// about residency. See `docs/assets/private-bucket-migration.md` for the
+    /// per-surface table.
     ///
     /// Unset defaults to `32 x max_gateway_buffer_bytes` (320 MiB at the
     /// defaults), which is above any concurrency a healthy box reaches, so an
