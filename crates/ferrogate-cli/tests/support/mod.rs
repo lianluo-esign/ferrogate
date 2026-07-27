@@ -37,6 +37,9 @@ pub fn start_gateway_with_env(config: &std::path::Path, env: &[(&str, &str)]) ->
     command.spawn().unwrap()
 }
 
+/// Suites that boot through [`start_ready_gateway`] never call this directly,
+/// so it is dead code in those test binaries.
+#[allow(dead_code)]
 pub fn wait_for_gateway(addr: &str) {
     // Generous readiness window: a Supabase-backed gateway re-runs the full
     // idempotent schema batch and the ~150-probe validate_schema pass against

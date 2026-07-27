@@ -26,10 +26,40 @@
 // the handlers to `Ok(_) => ...` and the matching assertion sees the
 // out-of-scope rows come back and fails. Runs against a real gateway process
 // with in-memory storage -- no Postgres, no Docker.
+//
+// BRANCH SPECIFICITY (issue #500's standing bar). Nine handler branches call
+// `config_catalog_scope`, and each is pinned by exactly one test -- reverting
+// that one branch to `Ok(_) => ...` reds that test and no other, because no
+// two tests read the same route+arm:
+//
+//   local.rs:8756  GET /admin/v1/policies              -> tenant_scoped_key_lists_only_policies_that_can_act_on_it
+//   local.rs:8798  GET /admin/v1/policies/{name}       -> tenant_scoped_key_cannot_fetch_an_out_of_scope_policy_by_name
+//   local.rs:891   GET /admin/v1/gateway-configs       -> tenant_scoped_key_lists_only_gateway_profiles_its_keys_may_select
+//   local.rs:934   GET /admin/v1/gateway-configs/{id}  -> tenant_scoped_key_cannot_fetch_an_out_of_scope_gateway_profile_by_id
+//   local.rs:8115  GET /admin/v1/models                -> tenant_scoped_key_lists_only_models_visible_to_it
+//   local.rs:1686  GET /admin/v1/skill-packages        -> tenant_scoped_key_lists_only_skill_packages_its_keys_may_load
+//   local.rs:1729  GET /admin/v1/skill-packages/{id}   -> (same test, list half vs by-id half)
+//   local.rs:9283  GET /admin/v1/agent-upstreams       -> tenant_scoped_key_lists_only_agent_upstreams_its_keys_may_reach
+//   local.rs:9316  GET /admin/v1/agent-upstreams/{id}  -> (same test, list half vs by-id half)
+//
+// The four by-id branches additionally carry `&& !scope.is_full()`; deleting
+// it turns the OPERATOR's 404 for an absent id into a 403, which is asserted
+// once per by-id branch, so that clause is pinned four times over and never
+// by implication from a sibling route.
+//
+// The eighth test pins a different axis -- the two durable listings that feed
+// the scope itself -- and is the one place the matrix is not one-to-one: it
+// reads through the policy and agent-upstream lists, so those two handler
+// mutations red it as well as their own test. That is intrinsic (a scope-
+// SOURCE test has to observe through some scoped surface) and it does not
+// make either test redundant: deleting `api_key_ids.extend(
+// list_virtual_api_keys(..))` or `project_ids.extend(list_projects(..))` reds
+// ONLY the eighth test, and deleting the static `own_static_keys()` seeding
+// beside them reds the other seven and NOT the eighth.
 
 mod support;
 
-use support::{free_addr, http_request, start_gateway, wait_for_gateway};
+use support::{http_request, start_ready_gateway};
 
 const ADMIN: [&str; 2] = [
     "Authorization: Bearer admin-secret",
@@ -65,6 +95,28 @@ const TENANT_B: [&str; 2] = [
 /// `agent_upstream_visible_to_auth` matches the field against at request
 /// time -- the field name is a misnomer, and copying it into an
 /// organization-shaped narrowing would hide every upstream from everyone.
+///
+/// # Load-time invariants this fixture has to satisfy
+///
+/// The first cut of this file declared `[[skill_packages]]` and
+/// `[[agent_upstreams]]` with only their identity fields, so
+/// `Config::validate` refused the file and the gateway exited before binding
+/// -- every test in the suite then spent the harness's 300s readiness window
+/// waiting for a process that was already dead. The three non-obvious
+/// constraints, read off `config/validate.rs` rather than guessed:
+///
+/// * `validate_skill_packages` (`validate.rs:2295`) rejects a package with an
+///   empty `capabilities` list, so each `[[skill_packages]]` entry carries a
+///   `[[skill_packages.capabilities]]` sub-table. A capability is a *table*
+///   (`SkillPackageCapability { kind, id }`), never a bare string.
+/// * a `kind = "plugin"` capability id must name a registered plugin
+///   (`validate.rs:2337`; the id set is `plugins` + `extensions` + resources
+///   embedded in packages), which is what the single `[[plugins]]` entry
+///   below is for. `tool.echo` is one of the builtin ids
+///   `validate_builtin_plugin_shape` accepts, and it must be declared
+///   `kind = "tool_provider"`.
+/// * `validate_agent_upstreams` (`validate.rs:2959`) rejects an empty
+///   `capabilities` list too; there a capability is a plain enum string.
 fn write_config(path: &std::path::Path, gateway_addr: &str) {
     std::fs::write(
         path,
@@ -196,10 +248,24 @@ provider = "openai"
 provider_model = "o4-mini"
 visible_project_ids = ["project-pol-b"]
 
+[[plugins]]
+id = "tool.echo"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+
+[plugins.permissions]
+tools = ["tool.echo"]
+
 [[skill_packages]]
 id = "skill-shared"
 name = "Shared skill package"
 version = "1.0.0"
+
+[[skill_packages.capabilities]]
+kind = "plugin"
+id = "tool.echo"
 
 [[skill_packages]]
 id = "skill-a"
@@ -207,11 +273,19 @@ name = "Tenant A skill package"
 version = "1.0.0"
 api_key_ids = ["key-a-data"]
 
+[[skill_packages.capabilities]]
+kind = "plugin"
+id = "tool.echo"
+
 [[skill_packages]]
 id = "skill-b"
 name = "Tenant B skill package"
 version = "1.0.0"
 api_key_ids = ["key-b-data"]
+
+[[skill_packages.capabilities]]
+kind = "plugin"
+id = "tool.echo"
 
 [[skill_packages]]
 id = "skill-both"
@@ -219,11 +293,16 @@ name = "Shared-by-key skill package"
 version = "1.0.0"
 api_key_ids = ["key-a-data", "key-b-data"]
 
+[[skill_packages.capabilities]]
+kind = "plugin"
+id = "tool.echo"
+
 [[agent_upstreams]]
 id = "upstream-shared"
 name = "Shared upstream"
 protocol = "a2a"
 endpoint = "http://127.0.0.1:65535/a2a"
+capabilities = ["invoke", "read"]
 
 [[agent_upstreams]]
 id = "upstream-a"
@@ -231,6 +310,7 @@ name = "Tenant A upstream"
 protocol = "a2a"
 endpoint = "http://127.0.0.1:65535/a2a"
 tenant_ids = ["key-a-data"]
+capabilities = ["invoke", "read"]
 
 [[agent_upstreams]]
 id = "upstream-b"
@@ -238,6 +318,7 @@ name = "Tenant B upstream"
 protocol = "a2a"
 endpoint = "http://127.0.0.1:65535/a2a"
 tenant_ids = ["key-b-data"]
+capabilities = ["invoke", "read"]
 
 [[agent_upstreams]]
 id = "upstream-both"
@@ -245,6 +326,7 @@ name = "Shared-by-key upstream"
 protocol = "a2a"
 endpoint = "http://127.0.0.1:65535/a2a"
 tenant_ids = ["key-a-data", "key-b-data"]
+capabilities = ["invoke", "read"]
 "#
         ),
     )
@@ -263,11 +345,24 @@ fn status_line(response: &str) -> &str {
     response.lines().next().unwrap_or_default()
 }
 
-/// The `data` array of a list response as a plain `Vec<String>` of one field
-/// -- the assertions below compare ROW SETS by identity, never counts.
+/// The `data` array of a list response as a SORTED `Vec<String>` of one field
+/// -- the assertions below compare ROW SETS by identity, never counts and
+/// never arrival order.
+///
+/// Sorted, not verbatim, and not by taste: `AppState::try_new` seeds the
+/// control-plane store from the file and then reads the catalog straight back
+/// out of it (`apply_control_plane_snapshot_to_config_from_repositories`), and
+/// `sorted_control_plane_documents` keys that store by resource id. So
+/// `config.policies` / `gateway_configs` / `skill_packages` /
+/// `agent_upstreams` reach a handler in LEXICOGRAPHIC id order, not in the
+/// order the fixture below declares them -- while `models`, which is not a
+/// control-plane collection, does keep file order. Comparing sorted sets makes
+/// every expectation here read the same way regardless of which side of that
+/// line a collection falls on, and keeps the assertion about *which rows a
+/// caller receives*, which is the whole of #535.
 fn listed_field(response: String, field: &str) -> Vec<String> {
     let body = response_json(response);
-    body["data"]
+    let mut values: Vec<String> = body["data"]
         .as_array()
         .unwrap_or_else(|| panic!("list response has no data array: {body}"))
         .iter()
@@ -277,7 +372,9 @@ fn listed_field(response: String, field: &str) -> Vec<String> {
                 .unwrap_or_else(|| panic!("row is missing {field}: {row}"))
                 .to_string()
         })
-        .collect()
+        .collect();
+    values.sort();
+    values
 }
 
 fn string_list(value: &serde_json::Value) -> Vec<String> {
@@ -298,13 +395,17 @@ fn row_named<'a>(body: &'a serde_json::Value, name: &str) -> &'a serde_json::Val
         .unwrap_or_else(|| panic!("row {name} is missing from {body}"))
 }
 
+/// Boots a gateway on the fixture above.
+///
+/// `start_ready_gateway` rather than `start_gateway` + `wait_for_gateway`
+/// deliberately: it watches for an early child exit, so a config the gateway
+/// *refuses* fails this helper in the time it takes the process to die
+/// instead of parking each test on the harness's 300s readiness window. That
+/// is precisely the failure mode that hid this suite's broken fixture behind
+/// a five-minute timeout, and it closes the `free_addr()` bind race too.
 fn start(dir: &tempfile::TempDir) -> (std::process::Child, String) {
-    let gateway_addr = free_addr();
     let config_path = dir.path().join("ferrogate.toml");
-    write_config(&config_path, &gateway_addr);
-    let gateway = start_gateway(&config_path);
-    wait_for_gateway(&gateway_addr);
-    (gateway, gateway_addr)
+    start_ready_gateway(&config_path, |addr| write_config(&config_path, addr))
 }
 
 /// Site 1 -- `GET /admin/v1/policies` (local.rs:8589 in the issue). Before the
@@ -334,10 +435,10 @@ fn tenant_scoped_key_lists_only_policies_that_can_act_on_it() {
     assert_eq!(
         names,
         vec![
-            "global-deny".to_string(),
-            "deny-tenant-a".to_string(),
-            "deny-both-tenants".to_string(),
             "deny-both-keys".to_string(),
+            "deny-both-tenants".to_string(),
+            "deny-tenant-a".to_string(),
+            "global-deny".to_string(),
         ],
         "tenant A must see exactly the rules that can act on tenant A"
     );
@@ -374,12 +475,12 @@ fn tenant_scoped_key_lists_only_policies_that_can_act_on_it() {
     assert_eq!(
         listed_field(tenant_b, "name"),
         vec![
-            "global-deny".to_string(),
-            "deny-tenant-b".to_string(),
+            "deny-both-keys".to_string(),
             "deny-both-tenants".to_string(),
             "deny-key-b".to_string(),
-            "deny-both-keys".to_string(),
             "deny-project-b".to_string(),
+            "deny-tenant-b".to_string(),
+            "global-deny".to_string(),
         ],
         "tenant B must see exactly the rules that can act on tenant B"
     );
@@ -389,8 +490,16 @@ fn tenant_scoped_key_lists_only_policies_that_can_act_on_it() {
     let operator = http_request(&addr, "GET", "/admin/v1/policies", &ADMIN, "");
     let operator_body = response_json(operator.clone());
     assert_eq!(
-        listed_field(operator, "name").len(),
-        7,
+        listed_field(operator, "name"),
+        vec![
+            "deny-both-keys".to_string(),
+            "deny-both-tenants".to_string(),
+            "deny-key-b".to_string(),
+            "deny-project-b".to_string(),
+            "deny-tenant-a".to_string(),
+            "deny-tenant-b".to_string(),
+            "global-deny".to_string(),
+        ],
         "platform operator lost rules from the full catalog"
     );
     assert_eq!(
@@ -517,7 +626,7 @@ fn tenant_scoped_key_lists_only_gateway_profiles_its_keys_may_select() {
     );
     assert_eq!(
         listed_field(raw.clone(), "id"),
-        vec!["profile-shared".to_string(), "profile-a".to_string()],
+        vec!["profile-a".to_string(), "profile-shared".to_string()],
         "tenant A must see only the profiles one of its own keys may select"
     );
     let body = response_json(raw);
@@ -537,16 +646,16 @@ fn tenant_scoped_key_lists_only_gateway_profiles_its_keys_may_select() {
     );
     assert_eq!(
         listed_field(tenant_b, "id"),
-        vec!["profile-shared".to_string(), "profile-b".to_string()]
+        vec!["profile-b".to_string(), "profile-shared".to_string()]
     );
 
     let operator = http_request(&addr, "GET", "/admin/v1/gateway-configs", &ADMIN, "");
     assert_eq!(
         listed_field(operator, "id"),
         vec![
-            "profile-shared".to_string(),
             "profile-a".to_string(),
             "profile-b".to_string(),
+            "profile-shared".to_string(),
         ],
         "platform operator lost profiles from the full catalog"
     );
@@ -653,9 +762,9 @@ fn tenant_scoped_key_lists_only_models_visible_to_it() {
     assert_eq!(
         listed_field(raw.clone(), "name"),
         vec![
-            "model-shared".to_string(),
             "model-a".to_string(),
             "model-both".to_string(),
+            "model-shared".to_string(),
         ],
         "tenant A must see exactly the models its tenant may call"
     );
@@ -682,10 +791,10 @@ fn tenant_scoped_key_lists_only_models_visible_to_it() {
     assert_eq!(
         listed_field(tenant_b, "name"),
         vec![
-            "model-shared".to_string(),
             "model-b".to_string(),
             "model-both".to_string(),
             "model-project-b".to_string(),
+            "model-shared".to_string(),
         ],
         "tenant B must see exactly the models its tenant may call"
     );
@@ -693,8 +802,14 @@ fn tenant_scoped_key_lists_only_models_visible_to_it() {
     let operator = http_request(&addr, "GET", "/admin/v1/models", &ADMIN, "");
     let operator_body = response_json(operator.clone());
     assert_eq!(
-        listed_field(operator, "name").len(),
-        5,
+        listed_field(operator, "name"),
+        vec![
+            "model-a".to_string(),
+            "model-b".to_string(),
+            "model-both".to_string(),
+            "model-project-b".to_string(),
+            "model-shared".to_string(),
+        ],
         "platform operator lost models from the full catalog"
     );
     assert_eq!(
@@ -723,9 +838,9 @@ fn tenant_scoped_key_lists_only_skill_packages_its_keys_may_load() {
     assert_eq!(
         listed_field(raw.clone(), "id"),
         vec![
-            "skill-shared".to_string(),
             "skill-a".to_string(),
             "skill-both".to_string(),
+            "skill-shared".to_string(),
         ],
         "tenant A must see only the packages one of its own keys may load"
     );
@@ -748,9 +863,9 @@ fn tenant_scoped_key_lists_only_skill_packages_its_keys_may_load() {
     assert_eq!(
         listed_field(tenant_b, "id"),
         vec![
-            "skill-shared".to_string(),
             "skill-b".to_string(),
             "skill-both".to_string(),
+            "skill-shared".to_string(),
         ]
     );
 
@@ -758,10 +873,10 @@ fn tenant_scoped_key_lists_only_skill_packages_its_keys_may_load() {
     assert_eq!(
         listed_field(operator, "id"),
         vec![
-            "skill-shared".to_string(),
             "skill-a".to_string(),
             "skill-b".to_string(),
             "skill-both".to_string(),
+            "skill-shared".to_string(),
         ],
         "platform operator lost packages from the full catalog"
     );
@@ -847,9 +962,9 @@ fn tenant_scoped_key_lists_only_agent_upstreams_its_keys_may_reach() {
     assert_eq!(
         listed_field(raw.clone(), "id"),
         vec![
-            "upstream-shared".to_string(),
             "upstream-a".to_string(),
             "upstream-both".to_string(),
+            "upstream-shared".to_string(),
         ],
         "tenant A must see only the upstreams one of its own keys may reach"
     );
@@ -872,9 +987,9 @@ fn tenant_scoped_key_lists_only_agent_upstreams_its_keys_may_reach() {
     assert_eq!(
         listed_field(tenant_b, "id"),
         vec![
-            "upstream-shared".to_string(),
             "upstream-b".to_string(),
             "upstream-both".to_string(),
+            "upstream-shared".to_string(),
         ]
     );
 
@@ -883,10 +998,10 @@ fn tenant_scoped_key_lists_only_agent_upstreams_its_keys_may_reach() {
     assert_eq!(
         listed_field(operator, "id"),
         vec![
-            "upstream-shared".to_string(),
             "upstream-a".to_string(),
             "upstream-b".to_string(),
             "upstream-both".to_string(),
+            "upstream-shared".to_string(),
         ],
         "platform operator lost upstreams from the full catalog"
     );
@@ -968,10 +1083,28 @@ fn post_as_operator(addr: &str, path: &str, body: &str) -> serde_json::Value {
 /// durable/virtual key.
 ///
 /// So: create a real project and a real virtual key for each tenant through
-/// the admin API, then create policy rules that name ONLY those runtime ids.
-/// Tenant A must see its own two and neither of B's. Delete either `extend`
-/// and A's own rule stops being visible; keep the `extend` but drop its
-/// `tenant_id` filter and B's rule becomes visible to A.
+/// the admin API, then create catalog entries selected ONLY by those runtime
+/// ids. Tenant A must see its own two and neither of B's. Delete either
+/// `extend` and A's own entry stops being visible; keep the `extend` but drop
+/// its `tenant_id` filter and B's entry becomes visible to A.
+///
+/// The two halves have to ride on DIFFERENT selectors, and not by taste:
+///
+/// * the project half is a `[[policies]]` rule carrying only `project_ids`,
+///   because `PolicyRule` is the one catalog type with a project selector and
+///   `validate_policies` does not cross-check `project_ids` against anything;
+/// * the virtual-key half is an `[[agent_upstreams]]` entry carrying only
+///   `tenant_ids`. It CANNOT be a policy: every admin write re-runs
+///   `Config::validate` on the candidate, and `validate_policies`
+///   (`validate.rs:1945`) rejects any `api_key_ids` entry that is not a
+///   static `[[api_keys]]` id -- a durable virtual key lives in the
+///   `api_key_records` store and never enters `config.api_keys`, so such a
+///   rule can never be committed. `validate_agent_upstreams` takes its api-key
+///   set as `_api_key_ids` and never consults it, and
+///   `ConfigCatalogScope::visible_agent_upstream` narrows `tenant_ids`
+///   against exactly the `api_key_ids` set `list_virtual_api_keys` feeds --
+///   so this is the one surface on which a durable key id can be both stored
+///   and scoped.
 #[test]
 fn config_catalog_scope_resolves_durable_virtual_keys_and_projects() {
     let dir = tempfile::tempdir().unwrap();
@@ -1017,17 +1150,10 @@ fn config_catalog_scope_resolves_durable_virtual_keys_and_projects() {
         );
     }
 
-    // Rules whose ONLY selector is a runtime-created id -- invisible to a
-    // scope that resolves ownership from static config alone.
+    // Catalog entries whose ONLY selector is a runtime-created id -- each one
+    // invisible to a scope that resolves ownership from static config alone.
     for suffix in ["a", "b"] {
         let virtual_key_id = &virtual_key_ids[suffix];
-        post_as_operator(
-            &addr,
-            "/admin/v1/policies",
-            &format!(
-                r#"{{"name":"deny-durable-key-{suffix}","effect":"deny","api_key_ids":["{virtual_key_id}"]}}"#
-            ),
-        );
         post_as_operator(
             &addr,
             "/admin/v1/policies",
@@ -1035,53 +1161,100 @@ fn config_catalog_scope_resolves_durable_virtual_keys_and_projects() {
                 r#"{{"name":"deny-durable-project-{suffix}","effect":"deny","project_ids":["project-durable-{suffix}"]}}"#
             ),
         );
+        post_as_operator(
+            &addr,
+            "/admin/v1/agent-upstreams",
+            &format!(
+                r#"{{"id":"upstream-durable-{suffix}","name":"Durable {suffix} upstream","protocol":"a2a","endpoint":"http://127.0.0.1:65535/a2a","tenant_ids":["{virtual_key_id}"]}}"#
+            ),
+        );
     }
 
+    // --- `project_ids.extend(list_projects(..))`, read through the policy
+    // list. Delete that `extend` and `deny-durable-project-a` disappears from
+    // tenant A's view; keep it but drop the `tenant_id` filter and
+    // `deny-durable-project-b` appears in it.
     let raw = http_request(&addr, "GET", "/admin/v1/policies", &TENANT_A, "");
-    let names = listed_field(raw.clone(), "name");
-    assert!(
-        names.contains(&"deny-durable-key-a".to_string()),
-        "the durable virtual key tenant A owns did not reach the scope -- \
-         list_virtual_api_keys is not feeding it: {names:?}"
-    );
-    assert!(
-        names.contains(&"deny-durable-project-a".to_string()),
-        "the durable project tenant A owns did not reach the scope -- \
-         list_projects is not feeding it: {names:?}"
-    );
-    assert!(
-        !names.contains(&"deny-durable-key-b".to_string())
-            && !names.contains(&"deny-durable-project-b".to_string()),
-        "tenant A saw a rule scoped to tenant B's durable rows: {names:?}"
-    );
-    assert!(
-        !raw.contains(&virtual_key_ids["b"]) && !raw.contains("project-durable-b"),
-        "tenant A's policy list leaked tenant B's durable ids: {raw}"
-    );
-
-    // The ids are rendered, not merely used for the visibility decision.
-    let body = response_json(raw);
     assert_eq!(
-        string_list(&row_named(&body, "deny-durable-key-a")["api_key_ids"]),
-        vec![virtual_key_ids["a"].clone()]
+        listed_field(raw.clone(), "name"),
+        vec![
+            "deny-both-keys".to_string(),
+            "deny-both-tenants".to_string(),
+            "deny-durable-project-a".to_string(),
+            "deny-tenant-a".to_string(),
+            "global-deny".to_string(),
+        ],
+        "tenant A's policy view must gain exactly its own durable-project rule"
     );
+    assert!(
+        !raw.contains("project-durable-b"),
+        "tenant A's policy list leaked tenant B's durable project id: {raw}"
+    );
+    // The id is rendered, not merely used for the visibility decision.
     assert_eq!(
-        string_list(&row_named(&body, "deny-durable-project-a")["project_ids"]),
+        string_list(&row_named(&response_json(raw), "deny-durable-project-a")["project_ids"]),
         vec!["project-durable-a".to_string()]
     );
 
-    // Symmetric control: B sees B's, so the two listings are filtered on the
-    // CALLER's tenant id and not merely appended.
-    let tenant_b = http_request(&addr, "GET", "/admin/v1/policies", &TENANT_B, "");
-    let b_names = listed_field(tenant_b.clone(), "name");
-    assert!(
-        b_names.contains(&"deny-durable-key-b".to_string())
-            && b_names.contains(&"deny-durable-project-b".to_string()),
-        "tenant B lost its own durable-scoped rules: {b_names:?}"
+    // --- `api_key_ids.extend(list_virtual_api_keys(..))`, read through the
+    // agent-upstream list, the one catalog surface whose selector may name a
+    // durable key id at all.
+    let upstreams = http_request(&addr, "GET", "/admin/v1/agent-upstreams", &TENANT_A, "");
+    assert_eq!(
+        listed_field(upstreams.clone(), "id"),
+        vec![
+            "upstream-a".to_string(),
+            "upstream-both".to_string(),
+            "upstream-durable-a".to_string(),
+            "upstream-shared".to_string(),
+        ],
+        "the durable virtual key tenant A owns did not reach the scope -- \
+         list_virtual_api_keys is not feeding it"
     );
     assert!(
-        !tenant_b.contains(&virtual_key_ids["a"]) && !tenant_b.contains("project-durable-a"),
-        "tenant B's policy list leaked tenant A's durable ids: {tenant_b}"
+        !upstreams.contains(&virtual_key_ids["b"]),
+        "tenant A's agent-upstream list leaked tenant B's durable key id: {upstreams}"
+    );
+    assert_eq!(
+        string_list(&row_named(&response_json(upstreams), "upstream-durable-a")["tenant_ids"]),
+        vec![virtual_key_ids["a"].clone()]
+    );
+
+    // Symmetric control on both halves: B sees B's, so the two listings are
+    // filtered on the CALLER's tenant id and not merely appended.
+    let tenant_b_policies = http_request(&addr, "GET", "/admin/v1/policies", &TENANT_B, "");
+    assert_eq!(
+        listed_field(tenant_b_policies.clone(), "name"),
+        vec![
+            "deny-both-keys".to_string(),
+            "deny-both-tenants".to_string(),
+            "deny-durable-project-b".to_string(),
+            "deny-key-b".to_string(),
+            "deny-project-b".to_string(),
+            "deny-tenant-b".to_string(),
+            "global-deny".to_string(),
+        ],
+        "tenant B lost its own durable-project rule, or gained tenant A's"
+    );
+    assert!(
+        !tenant_b_policies.contains("project-durable-a"),
+        "tenant B's policy list leaked tenant A's durable project id: {tenant_b_policies}"
+    );
+
+    let tenant_b_upstreams = http_request(&addr, "GET", "/admin/v1/agent-upstreams", &TENANT_B, "");
+    assert_eq!(
+        listed_field(tenant_b_upstreams.clone(), "id"),
+        vec![
+            "upstream-b".to_string(),
+            "upstream-both".to_string(),
+            "upstream-durable-b".to_string(),
+            "upstream-shared".to_string(),
+        ],
+        "tenant B lost its own durable-key upstream, or gained tenant A's"
+    );
+    assert!(
+        !tenant_b_upstreams.contains(&virtual_key_ids["a"]),
+        "tenant B's agent-upstream list leaked tenant A's durable key id: {tenant_b_upstreams}"
     );
 
     gateway.kill().unwrap();
