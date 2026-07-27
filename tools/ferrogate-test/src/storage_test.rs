@@ -136,9 +136,17 @@ fn head_of_ledger(sql: &str) -> (u64, String) {
             .rsplit('.')
             .next()
             .unwrap_or_default()
-            .trim()
-            .trim_matches('"');
-        if !table.eq_ignore_ascii_case("storage_schema_migrations") {
+            .trim();
+        // Postgres folds an UNQUOTED identifier and compares a QUOTED one byte
+        // for byte, so `"Storage_Schema_Migrations"` is a DIFFERENT table. This
+        // reader used to strip the quotes and fold anyway, which made it read a
+        // row `ferrogate-storage` deliberately ignores and red the assertion
+        // below falsely -- the scenario blocked on its own bookkeeping again.
+        let is_ledger = match table.strip_prefix('"').and_then(|q| q.strip_suffix('"')) {
+            Some(quoted) => quoted == "storage_schema_migrations",
+            None => table.eq_ignore_ascii_case("storage_schema_migrations"),
+        };
+        if !is_ledger {
             continue;
         }
         let mut clause = after_table
@@ -188,16 +196,24 @@ fn after_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
     (!rest.starts_with(|char: char| char.is_ascii_alphanumeric() || char == '_')).then_some(rest)
 }
 
-/// Drop `--` to end-of-line and nested `/* ... */`, keeping `'...'` literals
-/// (a migration name lives in one). ONE left-to-right pass, earliest marker
-/// first: `sql/001_init_postgres.sql:1205` reads `-- Gates /v1/assets/* ...` and
-/// the file contains no `*/` at all, so stripping block comments in a pass of
-/// their own would swallow the file.
+/// Drop what Postgres would not EXECUTE while loading this file -- `--` to
+/// end-of-line, nested `/* ... */`, and dollar-quoted bodies that are not `DO`
+/// blocks -- keeping every quoted region verbatim (a migration name lives in
+/// one). ONE left-to-right pass, earliest marker first:
+/// `sql/001_init_postgres.sql:1205` reads `-- Gates /v1/assets/* ...` and the
+/// file contains no `*/` at all, so stripping block comments in a pass of their
+/// own would swallow the file.
+///
+/// Knowing only the `'...'` spelling is what let a single apostrophe elsewhere
+/// -- in a `COPY` payload, in `$q$don't$q$`, in the identifier `"it's"` -- shift
+/// every later quote and drop ledger rows; `ferrogate-storage` was found doing
+/// exactly that, so this fourth reader learns the same lexing rather than
+/// inheriting the same blind spot.
 fn strip_sql_comments(sql: &str) -> String {
     let mut code = String::new();
     let mut rest = sql;
     while !rest.is_empty() {
-        let Some((at, marker)) = ["--", "/*", "'"]
+        let Some((at, marker)) = ["--", "/*", "'", "\"", "$"]
             .into_iter()
             .filter_map(|marker| rest.find(marker).map(|at| (at, marker)))
             .min()
@@ -229,12 +245,37 @@ fn strip_sql_comments(sql: &str) -> String {
                 assert_eq!(depth, 0, "a `/* ... */` comment is never closed");
                 rest = &rest[end..];
             }
+            "$" => match dollar_tag(rest) {
+                // `$1` is a positional parameter, not a quote.
+                None => {
+                    code.push('$');
+                    rest = &rest[1..];
+                }
+                Some(tag) => {
+                    let body = &rest[tag.len()..];
+                    let end = body
+                        .find(tag)
+                        .unwrap_or_else(|| panic!("a `{tag} ... {tag}` body is never closed"));
+                    // A `DO` body runs as the file loads and records real ledger
+                    // rows; any other body is text the server merely stores.
+                    if ends_with_do_introducer(&code) {
+                        code.push_str(&strip_sql_comments(&body[..end]));
+                    }
+                    rest = &body[end + tag.len()..];
+                }
+            },
             _ => {
+                let delimiter = marker.as_bytes()[0];
+                let escapes = delimiter == b'\'' && ends_with_e_prefix(&code);
                 let mut scan = 1usize;
                 let end = loop {
-                    assert!(scan < bytes.len(), "a `'...'` literal is never closed");
-                    if bytes[scan] == b'\'' {
-                        if bytes.get(scan + 1) == Some(&b'\'') {
+                    assert!(scan < bytes.len(), "a quoted region is never closed");
+                    if escapes && bytes[scan] == b'\\' {
+                        scan += 2;
+                        continue;
+                    }
+                    if bytes[scan] == delimiter {
+                        if bytes.get(scan + 1) == Some(&delimiter) {
                             scan += 2;
                             continue;
                         }
@@ -248,6 +289,59 @@ fn strip_sql_comments(sql: &str) -> String {
         }
     }
     code
+}
+
+/// `$$` or `$tag$` at the front of `text`, returned with both delimiters.
+fn dollar_tag(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.get(1).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut end = 1usize;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        end += 1;
+    }
+    (bytes.get(end) == Some(&b'$')).then(|| &text[..end + 1])
+}
+
+/// True when the code emitted so far ends with the `DO` of a `DO $$ ... $$`
+/// block (Postgres also allows `DO LANGUAGE plpgsql $$ ... $$`).
+fn ends_with_do_introducer(code: &str) -> bool {
+    let head = code.trim_end();
+    if strip_trailing_word(head, "DO").is_some() {
+        return true;
+    }
+    let named = head
+        .trim_end_matches(|char: char| char.is_ascii_alphanumeric() || char == '_')
+        .trim_end();
+    strip_trailing_word(named, "LANGUAGE")
+        .is_some_and(|before| strip_trailing_word(before.trim_end(), "DO").is_some())
+}
+
+/// `word` at the END of `text`, case-insensitively and as a whole word; returns
+/// what precedes it.
+fn strip_trailing_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let start = text.len().checked_sub(word.len())?;
+    if !text.get(start..)?.eq_ignore_ascii_case(word) {
+        return None;
+    }
+    let head = text.get(..start)?;
+    (!head.ends_with(|char: char| char.is_ascii_alphanumeric() || char == '_')).then_some(head)
+}
+
+/// True when the code emitted so far ends with the `E` of an `E'...'` literal,
+/// in which a backslash escapes the byte after it.
+fn ends_with_e_prefix(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    match bytes.last() {
+        Some(b'E' | b'e') => !bytes[..bytes.len() - 1]
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_'),
+        _ => false,
+    }
 }
 
 /// The `supabase-restart` migration assertion must expect the head of the SQL
@@ -272,21 +366,28 @@ fn the_supabase_restart_migration_expectation_is_the_head_of_the_applied_sql() {
     assert_eq!(expected_head_migration(), format!("{version}:{name}"));
 }
 
-/// The harness's own reader must read every shape `ferrogate-storage` certifies.
+/// The harness's own reader must read the ledger shapes listed here the way
+/// `ferrogate-storage` reads them.
 ///
-/// Pins `head_of_ledger` and `strip_sql_comments` against the four shapes the
-/// #511 rework legitimised on the storage side: a second tuple in one `VALUES`
-/// clause, a schema-qualified table, keywords in any case with `ONLY`, and a
-/// row parked inside a comment.
+/// It does not CALL the storage parser -- `head_migration` is private to that
+/// crate -- so each expectation below is written out, and the name says
+/// "listed here" rather than "every shape" for that reason.
 ///
-/// Catches: leaving this reader line-oriented, which is where review found it.
-/// Under the old whole-line anchor plus `body.split(')').next()`, the first
-/// ledger row written in any of these shapes made
+/// Pins `head_of_ledger` and `strip_sql_comments` against the shapes the #511
+/// rework settled on the storage side: a second tuple in one `VALUES` clause, a
+/// schema-qualified table, keywords in any case with `ONLY`, a row parked
+/// inside a comment, a case-sensitive double-quoted table name, and an
+/// apostrophe living outside a `'...'` literal.
+///
+/// Catches: leaving this reader line-oriented, which is where review found it;
+/// and folding a quoted identifier, which review found here after the last
+/// round. Under the old whole-line anchor plus `body.split(')').next()`, the
+/// first ledger row written in any of these shapes made
 /// `the_supabase_restart_migration_expectation_is_the_head_of_the_applied_sql`
 /// red FALSELY -- the scenario blocked on its own bookkeeping again -- and a
 /// parked row would have pushed the harness's expectation ABOVE the database.
 #[test]
-fn the_harness_ledger_reader_reads_every_shape_the_storage_parser_certifies() {
+fn the_harness_ledger_reader_reads_the_ledger_shapes_listed_here() {
     assert_eq!(
         head_of_ledger(
             "INSERT INTO storage_schema_migrations (version, name)\n\
@@ -316,6 +417,46 @@ fn the_harness_ledger_reader_reads_every_shape_the_storage_parser_certifies() {
         ),
         (59, "059_applied".to_string()),
         "a comment-blind reader would put the harness one migration ahead of the database"
+    );
+    // Postgres does not fold a quoted identifier, so `"Storage_Schema_Migrations"`
+    // is a different table -- the shape this reader used to fold and the storage
+    // parser never did.
+    assert_eq!(
+        head_of_ledger(
+            "INSERT INTO \"Storage_Schema_Migrations\" (version, name)\n\
+             VALUES (999, '999_a_different_table');\n\
+             INSERT INTO storage_schema_migrations (version, name)\n\
+             VALUES (60, '060_the_ledger');\n"
+        ),
+        (60, "060_the_ledger".to_string()),
+        "a reader that folds a quoted name reports 999 and reds the expectation falsely"
+    );
+    // An apostrophe outside a `'...'` literal must not re-pair the quotes that
+    // follow it: `$q$don't$q$` and `"it's"` are both legal, and under the
+    // previous stripper each swallowed the statement after it.
+    assert_eq!(
+        head_of_ledger(
+            "DO $$ BEGIN PERFORM $q$don't$q$; END $$;\n\
+             CREATE TABLE \"it's\" (a INT);\n\
+             INSERT INTO storage_schema_migrations (version, name)\n\
+             VALUES (60, '060_after_the_apostrophes');\n"
+        ),
+        (60, "060_after_the_apostrophes".to_string()),
+        "a reader that knows only `'...'` reads nothing after the first stray apostrophe"
+    );
+    // A `CREATE FUNCTION` body is stored, not run, so a ledger row written
+    // there is not applied and must not raise the harness's expectation.
+    assert_eq!(
+        head_of_ledger(
+            "CREATE FUNCTION seed() RETURNS void AS $b$\n\
+               INSERT INTO storage_schema_migrations (version, name)\n\
+               VALUES (99, '099_never_applied');\n\
+             $b$ LANGUAGE sql;\n\
+             INSERT INTO storage_schema_migrations (version, name)\n\
+             VALUES (60, '060_actually_applied');\n"
+        ),
+        (60, "060_actually_applied".to_string()),
+        "a body-blind reader reports 99 and puts the harness above every database"
     );
 }
 

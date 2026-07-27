@@ -38,8 +38,11 @@ fn schema_contract_includes_latest_asset_egress_migration() {
     // the obligation to hand-edit this file on every migration, which is what
     // let it rot. What stays below is the HISTORICAL record -- migrations that
     // already shipped and can therefore never legitimately disappear.
+    // The TUPLE, not `VALUES (<tuple>`: the head is allowed to be the second
+    // tuple of a multi-row clause (`VALUES (59, '059_a'), (60, '060_b')`), a
+    // shape `schema_migrations.rs` certifies and this line used to reject.
     assert!(POSTGRES_SCHEMA_SQL.contains(&format!(
-        "VALUES ({POSTGRES_SCHEMA_VERSION}, '{POSTGRES_SCHEMA_NAME}')"
+        "({POSTGRES_SCHEMA_VERSION}, '{POSTGRES_SCHEMA_NAME}')"
     )));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));

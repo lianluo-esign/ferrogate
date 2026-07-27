@@ -3,7 +3,8 @@
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-27
 // description: Properties that hold the derived Postgres schema head honest --
-// it must be the ACTUAL last migration in sql/001_init_postgres.sql (#511).
+// it must be the highest-numbered migration sql/001_init_postgres.sql actually
+// applies (#511).
 
 use super::{
     head_migration, POSTGRES_SCHEMA_LEDGER_ROWS, POSTGRES_SCHEMA_LEDGER_STATEMENTS,
@@ -18,22 +19,31 @@ use std::collections::BTreeSet;
 // `str` pattern methods and iterators at test time, so that agreement between
 // them is evidence rather than a tautology. Two of the three pieces --
 // `sql_code_only` and `insert_anchors` -- are shared by both readers, because
-// "which bytes are code" is not a matter of opinion; they get their own
-// fixtures below so that sharing them does not make the readers vacuous.
+// "which bytes are code" is not a matter of opinion; each gets its OWN fixtures
+// below (`the_test_side_stripper_*` and `the_test_side_anchor_scan_*`) so that
+// sharing them does not make the readers vacuous.
 // ---------------------------------------------------------------------------
 
-/// The SQL a Postgres parser would execute: `--` to end-of-line and nested
-/// `/* ... */` removed, `'...'` literals copied through verbatim (a migration
-/// name lives inside one).
+/// The SQL a Postgres server would EXECUTE while loading this file: `--` to
+/// end-of-line and nested `/* ... */` removed, dollar-quoted bodies it does not
+/// run removed, and every quoted region (`'...'`, `E'...'`, `"..."`) copied
+/// through verbatim -- a migration name lives inside one.
 ///
 /// The earliest marker wins at every step -- one left-to-right pass, for the
 /// same reason the const parser makes one: `sql/001_init_postgres.sql:1205`
 /// reads `-- Gates /v1/assets/* ...` and the file has no `*/` anywhere.
+///
+/// Knowing every quoted spelling is not optional for a reader either. Review
+/// found the const parser recognizing only `'...'`, so one apostrophe in a
+/// `COPY` payload silently shifted every later quote and dropped 42 of the 64
+/// ledger rows -- and this reader, knowing exactly as much, agreed with the
+/// wrong answer. Agreeing with the thing you are checking, for the reason it is
+/// wrong, is not a cross-check (#500).
 fn sql_code_only(sql: &str) -> String {
     let mut code = String::new();
     let mut rest = sql;
     while !rest.is_empty() {
-        let Some((at, marker)) = ["--", "/*", "'"]
+        let Some((at, marker)) = ["--", "/*", "'", "\"", "$"]
             .into_iter()
             .filter_map(|marker| rest.find(marker).map(|at| (at, marker)))
             .min()
@@ -65,16 +75,44 @@ fn sql_code_only(sql: &str) -> String {
                 assert_eq!(depth, 0, "a `/* ... */` comment is never closed: {rest}");
                 rest = &rest[end..];
             }
+            "$" => match dollar_tag(rest) {
+                // `$1` is a positional parameter and a lone `$` is punctuation.
+                None => {
+                    code.push('$');
+                    rest = &rest[1..];
+                }
+                Some(tag) => {
+                    let body = &rest[tag.len()..];
+                    let end = body
+                        .find(tag)
+                        .unwrap_or_else(|| panic!("a `{tag} ... {tag}` body is never closed"));
+                    // A `DO` body RUNS as this file loads, so its statements are
+                    // code; any other dollar-quoted body is a string the server
+                    // stores, and a ledger row written there is never applied.
+                    if ends_with_do_introducer(&code) {
+                        code.push_str(&sql_code_only(&body[..end]));
+                    }
+                    rest = &body[end + tag.len()..];
+                }
+            },
             _ => {
+                // `'...'`, `E'...'` and `"..."`: the contents are data, copied
+                // through so that no marker inside one opens anything.
+                let delimiter = marker.as_bytes()[0];
+                let escapes = delimiter == b'\'' && ends_with_e_prefix(&code);
                 let bytes = rest.as_bytes();
                 let mut scan = 1usize;
                 let end = loop {
                     assert!(
                         scan < bytes.len(),
-                        "a `'...'` literal is never closed: {rest}"
+                        "a quoted region is never closed: {rest}"
                     );
-                    if bytes[scan] == b'\'' {
-                        if bytes.get(scan + 1) == Some(&b'\'') {
+                    if escapes && bytes[scan] == b'\\' {
+                        scan += 2;
+                        continue;
+                    }
+                    if bytes[scan] == delimiter {
+                        if bytes.get(scan + 1) == Some(&delimiter) {
                             scan += 2;
                             continue;
                         }
@@ -88,6 +126,62 @@ fn sql_code_only(sql: &str) -> String {
         }
     }
     code
+}
+
+/// `$$` or `$tag$` at the front of `text`, returned with both delimiters.
+fn dollar_tag(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.get(1).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut end = 1usize;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        end += 1;
+    }
+    (bytes.get(end) == Some(&b'$')).then(|| &text[..end + 1])
+}
+
+/// True when the code emitted so far ends with the `DO` of a `DO $$ ... $$`
+/// block (Postgres also allows `DO LANGUAGE plpgsql $$ ... $$`).
+///
+/// Deliberately decided by looking BACKWARDS over what has already been
+/// emitted; the const parser decides it by parsing forwards from the keyword.
+fn ends_with_do_introducer(code: &str) -> bool {
+    let head = code.trim_end();
+    if strip_trailing_word(head, "DO").is_some() {
+        return true;
+    }
+    let named = head
+        .trim_end_matches(|char: char| char.is_ascii_alphanumeric() || char == '_')
+        .trim_end();
+    strip_trailing_word(named, "LANGUAGE")
+        .is_some_and(|before| strip_trailing_word(before.trim_end(), "DO").is_some())
+}
+
+/// `word` at the END of `text`, case-insensitively and as a whole word; returns
+/// what precedes it.
+fn strip_trailing_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let start = text.len().checked_sub(word.len())?;
+    if !text.get(start..)?.eq_ignore_ascii_case(word) {
+        return None;
+    }
+    let head = text.get(..start)?;
+    (!head.ends_with(|char: char| char.is_ascii_alphanumeric() || char == '_')).then_some(head)
+}
+
+/// True when the code emitted so far ends with the `E` of an `E'...'` literal,
+/// in which a backslash escapes the byte after it.
+fn ends_with_e_prefix(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    match bytes.last() {
+        Some(b'E' | b'e') => !bytes[..bytes.len() - 1]
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_'),
+        _ => false,
+    }
 }
 
 /// Byte offsets in `code` (already comment-free) at which the `INSERT` keyword
@@ -257,7 +351,7 @@ fn ledger_insert_statements(sql: &str) -> usize {
         .count()
 }
 
-/// The head constants must be the LAST migration the SQL actually contains.
+/// The head constants must be the HIGHEST-numbered migration the SQL contains.
 ///
 /// Pins `schema_migrations.rs`'s `POSTGRES_SCHEMA_VERSION`/`_NAME` against the
 /// statement scan's own maximum.
@@ -269,7 +363,7 @@ fn ledger_insert_statements(sql: &str) -> usize {
 /// maximum; `the_head_is_the_maximum_row_whatever_order_the_ledger_is_written_in`
 /// is the test that pins that.
 #[test]
-fn the_head_constants_are_the_last_migration_in_the_init_sql() {
+fn the_head_constants_are_the_highest_migration_in_the_init_sql() {
     let rows = ledger_rows_by_statement_scan(POSTGRES_SCHEMA_SQL);
     let (version, name) = rows
         .iter()
@@ -790,6 +884,321 @@ fn the_test_side_comment_stripper_drops_only_comments() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Quoting: one apostrophe outside `'...'` used to cost 42 ledger rows.
+//
+// Review drove the previous round's parser over the real file with one ordinary
+// block spliced in:
+//
+//     COPY notes (body) FROM stdin;
+//     don't
+//     \.
+//
+// The apostrophe in `don't` re-paired every quote after it, so `INSERT INTO
+// storage_schema_migrations` was read as string DATA. 64 rows became 38, no
+// panic, and the test-side readers -- which knew exactly as much about quoting
+// -- agreed. Two answers, both pinned below: every quoted spelling Postgres has
+// is lexed, and a quoted region that HIDES a ledger INSERT is a build failure
+// regardless of which construct desynced it.
+// ---------------------------------------------------------------------------
+
+/// An apostrophe outside a `'...'` literal cannot silently eat ledger rows.
+///
+/// Pins `schema_migrations.rs`'s `reject_hidden_ledger_insert`, called from
+/// `skip_quoted` just before a region is skipped.
+///
+/// Catches: the exact regression review demonstrated, and every future one of
+/// its shape. Delete that call and this fixture reports version 59 with ONE row
+/// -- migrations 60 and 61 gone, no panic, nothing red -- which is #511 itself,
+/// a head that lags the database, arrived at by the one route nothing else on
+/// this path watches. (Verified by const evaluation: with the call deleted the
+/// same text evaluates to `version 59, rows 1`.) The `COPY` payload is
+/// deliberately a construct the lexer does NOT model, and the trailing comment
+/// is deliberately apostrophe-bearing, so the desync closes cleanly at
+/// end-of-file and the unterminated-region arm never fires: the backstop is
+/// what is left to make an unmodelled construct loud instead of lossy.
+#[test]
+#[should_panic(expected = "hides a storage_schema_migrations INSERT")]
+fn a_stray_apostrophe_that_swallows_a_ledger_insert_is_a_hard_failure() {
+    let _ = head_migration(
+        "INSERT INTO storage_schema_migrations (version, name)\n\
+         VALUES (59, '059_applied');\n\
+         COPY notes (body) FROM stdin;\n\
+         don't\n\
+         \\.\n\
+         INSERT INTO storage_schema_migrations (version, name)\n\
+         VALUES (60, '060_would_be_lost');\n\
+         INSERT INTO storage_schema_migrations (version, name)\n\
+         VALUES (61, '061_would_also_be_lost');\n\
+         -- the ledger doesn't end here\n",
+    );
+}
+
+/// An apostrophe inside a `$tag$ ... $tag$` body is data, not a literal.
+///
+/// Pins `dollar_tag_at` / `dollar_body_end` and the `$` arm of `skip_noncode`.
+///
+/// Catches: dropping dollar-quote handling. `$q$don't$q$` then opens a literal
+/// that runs to the next apostrophe in the file -- the opening quote of the
+/// next migration name -- and every ledger statement after it is read as string
+/// data. The real file has 17 `DO $$` blocks, so this is not a hypothetical
+/// spelling.
+#[test]
+fn an_apostrophe_inside_a_dollar_quoted_body_does_not_open_a_literal() {
+    let sql = "DO $$\n\
+               BEGIN\n\
+                 PERFORM $q$don't$q$;\n\
+               END $$;\n\
+               INSERT INTO storage_schema_migrations (version, name)\n\
+               VALUES (60, '060_after_the_body');\n";
+    let head = head_migration(sql);
+    assert_eq!(head.version, 60, "a desynced scan reads no rows here");
+    assert_eq!(head.name, "060_after_the_body");
+    assert_eq!(head.rows, 1);
+    assert_eq!(ledger_insert_statements(sql), 1);
+    assert_eq!(ledger_rows_by_statement_scan(sql).len(), 1);
+}
+
+/// An apostrophe inside a `"..."` identifier is part of the name.
+///
+/// Pins the `b'"'` arm of `skip_noncode` (and its doubled-delimiter escape).
+///
+/// Catches: leaving quoted identifiers out of the lexer. `"it's"` is a legal
+/// Postgres table name; without this arm its apostrophe opens a literal and the
+/// ledger statement after it is swallowed, so the head drops to whatever came
+/// before.
+#[test]
+fn an_apostrophe_inside_a_double_quoted_identifier_does_not_open_a_literal() {
+    let sql = "CREATE TABLE \"it's\" (a INT);\n\
+               INSERT INTO storage_schema_migrations (version, name)\n\
+               VALUES (60, '060_after_the_identifier');\n";
+    let head = head_migration(sql);
+    assert_eq!(head.version, 60);
+    assert_eq!(head.name, "060_after_the_identifier");
+    assert_eq!(head.rows, 1);
+    assert_eq!(ledger_insert_statements(sql), 1);
+    assert_eq!(ledger_rows_by_statement_scan(sql).len(), 1);
+}
+
+/// `E'a\''` is one literal, not two.
+///
+/// Pins the `E'`/`e'` arm of `skip_noncode` and `skip_quoted`'s `backslash`
+/// branch.
+///
+/// Catches: treating `E'...'` as a plain literal. The `\'` is then read as the
+/// close and the following `'` opens a new one, so everything up to the next
+/// apostrophe -- the next migration name -- becomes string data.
+#[test]
+fn a_backslash_escaped_quote_in_an_e_string_does_not_end_it() {
+    let sql = "SELECT E'a\\'';\n\
+               INSERT INTO storage_schema_migrations (version, name)\n\
+               VALUES (60, '060_after_the_e_string');\n";
+    let head = head_migration(sql);
+    assert_eq!(head.version, 60);
+    assert_eq!(head.name, "060_after_the_e_string");
+    assert_eq!(head.rows, 1);
+}
+
+/// A ledger row written in a FUNCTION body was never applied.
+///
+/// Pins the `$` arm of `skip_noncode` skipping a body the outer loop did not
+/// claim as a `DO` block.
+///
+/// Catches: counting a `CREATE FUNCTION ... AS $b$ ... $b$` body as code, which
+/// is what the previous round did -- appended to the real file it read version
+/// 99 with 66 rows, i.e. a head ABOVE the database, and
+/// `validate_postgres_schema` compares for EXACT equality, so every correctly
+/// migrated deployment is rejected at startup. `DO` runs at load; a function
+/// body is text the server stores.
+#[test]
+fn a_ledger_insert_in_a_function_body_is_not_a_migration() {
+    let sql = "CREATE FUNCTION seed() RETURNS void AS $b$\n\
+                 INSERT INTO storage_schema_migrations (version, name)\n\
+                 VALUES (99, '099_never_applied');\n\
+               $b$ LANGUAGE sql;\n\
+               INSERT INTO storage_schema_migrations (version, name)\n\
+               VALUES (60, '060_actually_applied');\n";
+    let head = head_migration(sql);
+    assert_eq!(head.version, 60, "a body-blind scan reports 99 here");
+    assert_eq!(head.name, "060_actually_applied");
+    assert_eq!(head.rows, 1);
+    assert_eq!(head.statements, 1);
+    assert_eq!(ledger_insert_statements(sql), 1);
+    assert_eq!(ledger_rows_by_statement_scan(sql).len(), 1);
+}
+
+/// A ledger row written inside a `DO` block IS applied.
+///
+/// Pins `do_block_at` and the branch of `head_migration` that steps INTO the
+/// body instead of skipping it.
+///
+/// Catches: skipping every dollar-quoted body indiscriminately -- the tempting
+/// half of the fix above. Three of the real file's ledger statements
+/// (`sql/001_init_postgres.sql:1481`, `:1603`, `:1618`) sit inside `DO $$`
+/// blocks, so that mutation drops rows from the real file too; here it leaves
+/// no rows at all and the `rows == 0` arm fires.
+#[test]
+fn a_ledger_insert_inside_a_do_block_is_still_a_migration() {
+    let sql = "DO $$\n\
+               BEGIN\n\
+                 INSERT INTO storage_schema_migrations (version, name)\n\
+                 VALUES (60, '060_in_a_do') ON CONFLICT (version) DO NOTHING;\n\
+               END $$;\n";
+    let head = head_migration(sql);
+    assert_eq!(head.version, 60);
+    assert_eq!(head.name, "060_in_a_do");
+    assert_eq!(head.rows, 1);
+    assert_eq!(head.statements, 1);
+    assert_eq!(ledger_insert_statements(sql), 1);
+    assert_eq!(ledger_rows_by_statement_scan(sql).len(), 1);
+}
+
+/// A schema NAMED `only` is not the `ONLY` keyword.
+///
+/// Pins the reference-first `ONLY` handling in `ledger_insert_at` (consume the
+/// keyword only when no `.` follows it).
+///
+/// Catches: the previous shape, which matched `ONLY` and then demanded
+/// whitespace after it, so `INSERT INTO only.storage_schema_migrations` failed
+/// the separation check and was walked past in total silence -- a ledger
+/// statement contributing rows to the database and none to the head.
+#[test]
+fn a_schema_named_only_is_not_the_only_keyword() {
+    let sql = "INSERT INTO only.storage_schema_migrations (version, name)\n\
+               VALUES (60, '060_schema_named_only');\n";
+    let head = head_migration(sql);
+    assert_eq!(head.version, 60);
+    assert_eq!(head.name, "060_schema_named_only");
+    assert_eq!(head.statements, 1);
+    // ...and `ONLY` as the keyword still resolves to the same table.
+    let keyword = head_migration(
+        "INSERT INTO ONLY storage_schema_migrations (version, name)\n\
+         VALUES (60, '060_only_keyword');\n",
+    );
+    assert_eq!(keyword.version, 60);
+    assert_eq!(keyword.name, "060_only_keyword");
+    assert_eq!(ledger_insert_statements(sql), 1);
+    assert_eq!(ledger_rows_by_statement_scan(sql).len(), 1);
+}
+
+/// Pins the escaped-quote arm of the ledger NAME scan.
+///
+/// Catches: adopting the raw bytes of `'060_it''s'` as the head name. The live
+/// ledger row holds `060_it's` and the constant would hold `060_it''s`, so the
+/// exact-equality comparison in `validate_postgres_schema` could never succeed
+/// -- a head that is wrong in a way no amount of migrating fixes. Before this
+/// arm the same input panicked with `is not closed with ')'`, pointing at the
+/// wrong token.
+#[test]
+#[should_panic(expected = "contains an escaped quote")]
+fn a_ledger_name_with_an_escaped_quote_is_a_hard_failure() {
+    let _ = head_migration(
+        "INSERT INTO storage_schema_migrations (version, name)\n\
+         VALUES (60, '060_it''s');\n",
+    );
+}
+
+/// Pins the unterminated-identifier arm of `read_identifier`.
+///
+/// Catches: returning quietly at end-of-file, which reads the rest of the file
+/// as one table name -- the same fail-open class as an unterminated literal,
+/// and the one arm of it review found still silent.
+#[test]
+#[should_panic(expected = "identifier is never closed")]
+fn an_unterminated_double_quoted_identifier_is_a_hard_failure() {
+    let _ = head_migration(
+        "INSERT INTO \"storage_schema_migrations (version, name)\n\
+         VALUES (60, '060_x');\n",
+    );
+}
+
+/// Pins the unterminated-body arm of `dollar_body_end`.
+///
+/// Catches: skipping to end-of-file when a `$tag$` is never closed, which hides
+/// every migration after it behind a "no ledger rows" message on a file that
+/// plainly has 64.
+#[test]
+#[should_panic(expected = "body is never closed")]
+fn an_unclosed_dollar_quoted_body_is_a_hard_failure() {
+    let _ = head_migration(
+        "CREATE FUNCTION f() RETURNS void AS $b$\n\
+         INSERT INTO storage_schema_migrations (version, name) VALUES (60, '060_x');\n",
+    );
+}
+
+/// Pins the nesting arm of `head_migration`'s `DO` branch.
+///
+/// Catches: quietly mis-scoping a nested `DO` block -- the scan tracks one
+/// body, so the inner block's closing tag would end the outer one and the rest
+/// of the outer body would be read at the wrong nesting level. The file has no
+/// nested blocks; if one is ever added this stops the build rather than
+/// changing the head by an amount nobody predicted.
+#[test]
+#[should_panic(expected = "nested inside another `DO` block")]
+fn a_do_block_nested_in_a_do_block_is_a_hard_failure() {
+    let _ = head_migration(
+        "DO $$\n\
+         BEGIN\n\
+           DO $inner$ BEGIN NULL; END $inner$;\n\
+         END $$;\n\
+         INSERT INTO storage_schema_migrations (version, name) VALUES (60, '060_x');\n",
+    );
+}
+
+/// The test-side stripper reads the same quoted regions the const parser does.
+///
+/// Pins `sql_code_only`'s `$`, `"` and `E'` arms and `ends_with_do_introducer`,
+/// each of which the const parser has a counterpart for.
+///
+/// Catches: leaving this reader knowing only `'...'`, which is how it agreed
+/// with the const parser's wrong answer instead of contradicting it. Each
+/// assertion below reds on its own: drop the `$` arm and the function body's
+/// text survives into the code; drop the `DO` branch and a real ledger
+/// statement disappears from it; drop the `"` or `E'` arm and the apostrophe
+/// inside re-pairs everything after it.
+#[test]
+fn the_test_side_stripper_reads_the_same_quoted_regions_the_const_parser_does() {
+    // A function body is not code; a `DO` body is.
+    assert_eq!(
+        sql_code_only("CREATE FUNCTION f() AS $b$ SELECT 1; $b$;\nDO $$ SELECT 2; $$;\n"),
+        "CREATE FUNCTION f() AS ;\nDO  SELECT 2; ;\n"
+    );
+    // ...and comments inside a `DO` body are still comments.
+    assert_eq!(
+        sql_code_only("DO $$ -- parked\nSELECT 3; $$;"),
+        "DO  \nSELECT 3; ;"
+    );
+    // A quoted identifier and an E-string are copied through whole, so the
+    // apostrophes inside them pair with nothing.
+    assert_eq!(
+        sql_code_only("SELECT \"it's\", E'a\\'' -- gone\n, 'b';"),
+        "SELECT \"it's\", E'a\\'' \n, 'b';"
+    );
+    // `$1` is a parameter, not a dollar quote.
+    assert_eq!(sql_code_only("SELECT $1 -- gone\n;"), "SELECT $1 \n;");
+}
+
+/// The test-side anchor scan does not read an `INSERT` inside a literal.
+///
+/// Pins `insert_anchors`'s `if bytes[at] == b'\''` block, the other shared
+/// helper.
+///
+/// Catches: deleting that block. Both test-side readers would then count an
+/// `INSERT` written inside a string literal, and the statement cross-check
+/// would red on a file the const parser reads correctly -- a false red on the
+/// path whose whole point is to stop the harness failing on bookkeeping.
+#[test]
+fn the_test_side_anchor_scan_ignores_an_insert_inside_a_literal() {
+    let code = "SELECT 'INSERT INTO plans (id) VALUES (''x'')';\n\
+                INSERT INTO plans (id) VALUES ('y');\n";
+    assert_eq!(
+        insert_anchors(code).len(),
+        1,
+        "only the statement is an anchor; the quoted copy is data"
+    );
+    assert_eq!(insert_anchors("'no anchors in here: INSERT'").len(), 0);
+}
+
 // The panic arms. Each one is a COMPILE error when it fires during const
 // evaluation of the real file; driving `head_migration` at runtime is how they
 // can be asserted at all. "Fails closed" was previously claimed only in prose.
@@ -959,13 +1368,13 @@ fn an_unterminated_block_comment_is_a_hard_failure() {
     );
 }
 
-/// Pins the unterminated-literal arm of `skip_noncode`.
+/// Pins the unterminated-region arm of `skip_quoted`.
 ///
 /// Catches: skipping to end-of-file instead of failing, the same way -- a stray
-/// apostrophe in a `DO $$ ... $$` body would otherwise silently hide every
+/// apostrophe near the end of the file would otherwise silently hide every
 /// ledger row after it.
 #[test]
-#[should_panic(expected = "literal is never closed")]
+#[should_panic(expected = "quoted region is never closed")]
 fn an_unterminated_string_literal_is_a_hard_failure() {
     let _ = head_migration(
         "INSERT INTO storage_schema_migrations (version, name)\n\
