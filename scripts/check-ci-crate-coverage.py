@@ -4,15 +4,42 @@
 # Author: jamesduan (X: https://x.com/JamesDuanL)
 # Created: 2026-07-27
 # description: Fail when a workspace member's tests are executed by no CI slice
-# and no local module (issue #561).
-"""Reject workspace members that no `cargo test` invocation ever selects.
+# and no local module (issue #561), and when a `cargo test` name filter selects
+# no test at all (issue #553).
+"""Reject `cargo test` invocations that execute nothing.
 
-Issue #561: `ferrogate-gateway` -- 136k lines, 1,069 tests, the largest crate in
-the workspace -- was compiled by CI and executed by no job, for as long as it
-had existed. Nothing noticed, because nothing was looking. `ferrogate-secrets`,
-`ferrogate-payments` and `ferrogate-cloudflare` were in the same state, and
-`scripts/local-test-modules.sh` had drifted away from the workflow matrices on
-top of that, so a contributor could not reproduce CI even where CI was right.
+Two ways an invocation runs nothing, and this gate refuses both.
+
+**No slice names the crate (#561).** `ferrogate-gateway` -- 136,681 lines, 1,070
+test attributes, the largest crate in the workspace -- was compiled by CI and
+executed by no job, for as long as it had existed. Nothing noticed, because
+nothing was looking. `ferrogate-secrets`, `ferrogate-payments` and
+`ferrogate-cloudflare` were in the same state, and `scripts/local-test-modules.sh`
+had drifted away from the workflow matrices on top of that, so a contributor
+could not reproduce CI even where CI was right.
+
+**A slice names the crate, and its name filter matches nothing (#553).** This is
+the failure the first check cannot see, and it is the one #553 shipped.
+`governed-decision-conformance.yml` ran
+
+    cargo test -p ferrogate-cli --bin ferrogate governed_decision
+
+after #553 stage 3b moved `governed_decision_conformance_test.rs` into
+`ferrogate-gateway`. `ferrogate-cli` *is* named by that line, so the crate-level
+check above is satisfied and stays satisfied; libtest exits 0 when a filter
+matches no test, so Runner A of the #470 conformance suite -- the corpus-vs-
+authority gate `ci.yml` describes as failing CI on divergence -- passed having
+run zero tests, and `rust-ci` kept listing it in `needs:`. Two more filters in
+`rust-quality.yml` were in the same state for the same reason: `config::tests`
+and `config::validation_tests` against `ferrogate-cli`, whose `config` module
+had moved to `ferrogate-config` in stage 3a. Three instances of one mistake, all
+introduced by file moves, none visible to anything.
+
+So every literal `cargo test` invocation's positional name filters are resolved
+against the test paths its `-p` crates actually contain, and a filter that
+matches none of them is an error. `--test`/`--bin`/`--bench` selectors are NOT
+checked here: cargo already fails loudly on a target name that does not exist,
+which is why the same three moves did not break those.
 
 Carving out a new crate now fails here until someone points a slice at it. The
 gate checks two independent surfaces --
@@ -45,6 +72,18 @@ found both live in this tree:
     Deleting `platform-crates) run_platform_crates ;;` orphaned six crates'
     only local invocation and the gate did not notice, because it modelled
     workflow reachability via `uses:` and the script's reachability not at all.
+
+And one thing the filter check deliberately does not attempt, stated so its
+scope is not overread: a run line whose arguments come from a matrix
+(`cargo test -p "${{ matrix.package }}" ${{ matrix.args }}`) is skipped, because
+pairing an `args:` value with the `package:` in the same matrix ENTRY needs a
+real YAML parse and this gate has none. The count of skipped invocations is
+printed on success so the number cannot quietly grow. On this tree every
+positional name filter -- all six of them, three in the workflows and three in
+the local runner -- is on a literal line and is checked. Filters are matched as
+substrings of a reconstructed `module::path::fn_name`, the same way libtest
+matches them, and the reconstruction reads rustfmt indentation rather than
+counting braces, so a `{` inside a raw string cannot shift a module boundary.
 """
 
 from __future__ import annotations
@@ -52,6 +91,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import re
+import shlex
 import sys
 
 
@@ -84,6 +124,58 @@ JOB_KEY = re.compile(r"^(\s+)[A-Za-z0-9_.-]+:\s*$")
 # more rather than less.
 SHELL_FUNCTION = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*$")
 SHELL_FUNCTION_END = re.compile(r"^\}\s*$")
+
+# --- name-filter resolution (#553) -------------------------------------------
+#
+# Cargo flags that consume the NEXT token. Anything not listed is treated as a
+# boolean flag, so an unknown value-taking flag makes its value look like a name
+# filter -- which fails loudly rather than passing quietly, the direction this
+# gate wants to err in.
+CARGO_VALUE_FLAGS = frozenset(
+    {
+        "-p",
+        "--package",
+        "--exclude",
+        "--test",
+        "--bench",
+        "--example",
+        "--bin",
+        "--features",
+        "-F",
+        "--manifest-path",
+        "--target",
+        "--target-dir",
+        "--profile",
+        "--config",
+        "--color",
+        "--message-format",
+        "--out-dir",
+        "-j",
+        "--jobs",
+        "-Z",
+        # libtest's own value-taking flags, reachable after `--`.
+        "--skip",
+        "--test-threads",
+        "--logfile",
+        "--format",
+    }
+)
+# `#[test]`, `#[tokio::test]`, `#[tokio::test(flavor = "...")]`, `#[rstest]`.
+TEST_ATTRIBUTE = re.compile(r"^\s*#\[(?:[a-z_]+::)*(?:test|rstest)[\]\(]")
+# `mod name {` -- an inline module. A `mod name;` declaration adds no nesting to
+# the file it appears in; the declared file supplies its own prefix from its
+# path, so only the braced form is tracked.
+INLINE_MODULE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z0-9_]+)\s*\{")
+# `#[path = "signed_snapshot_test.rs"]` immediately above `mod tests;`: the file
+# on disk is not where its module path says it is, and `config::tests` is
+# exactly the kind of filter that depends on getting this right.
+PATH_ATTRIBUTE = re.compile(r"^\s*#\[path\s*=\s*\"([^\"]+)\"\s*\]")
+MODULE_DECLARATION = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z0-9_]+)\s*;"
+)
+FUNCTION_DECLARATION = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z0-9_]+)"
+)
 
 
 def matrix_key(key: str) -> re.Pattern[str]:
@@ -320,6 +412,226 @@ def selected_by_local_runner(text: str, label: str) -> set[str]:
     return selected_in_region(shell_reachable_text(strip_comments(text), label))
 
 
+def command_lines(text: str) -> list[str]:
+    """One shell/YAML command per string, `\\`-continuations folded in.
+
+    `scripts/local-test-modules.sh` writes its longest `cargo test` over two
+    lines with a trailing backslash. Reading it line-at-a-time would drop the
+    half carrying the filters, and a filter this gate cannot see is a filter it
+    silently exempts -- the gate's own version of the defect it checks for.
+    """
+    folded: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        if line.rstrip().endswith("\\"):
+            pending += line.rstrip()[:-1] + " "
+            continue
+        folded.append(pending + line)
+        pending = ""
+    if pending:
+        folded.append(pending)
+    return folded
+
+
+def cargo_test_name_filters(command: str) -> tuple[set[str], set[str]]:
+    """`(packages, positional name filters)` for one literal `cargo test`.
+
+    Tokenized with `shlex`, not `str.split`, because `-- --skip 'issue #563
+    fixture'` is ONE argument to libtest and splitting it on whitespace turns
+    three words into three name filters that must each match a test. The gate's
+    own test suite already contained that line.
+    """
+    index = command.find("cargo test")
+    remainder = command[index + len("cargo test") :]
+    try:
+        tokens = shlex.split(remainder, comments=False)
+    except ValueError:
+        # Unbalanced quoting: the arguments cannot be read, so neither can what
+        # this command runs. Reported as a filter that resolves to nothing
+        # rather than skipped, because "the gate could not parse it" and "the
+        # gate approved it" must not look the same.
+        return set(), {remainder.strip()}
+    packages: set[str] = set()
+    filters: set[str] = set()
+    skip_next = False
+    for position, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        flag, _, inline = token.partition("=")
+        if flag in CARGO_VALUE_FLAGS:
+            if inline:
+                if flag in ("-p", "--package"):
+                    packages.add(inline)
+                continue
+            skip_next = True
+            if flag in ("-p", "--package") and position + 1 < len(tokens):
+                packages.add(tokens[position + 1])
+            continue
+        if token.startswith("-"):
+            # `--` itself, and every boolean flag on either side of it.
+            continue
+        filters.add(token)
+    return packages, filters
+
+
+def module_prefix(relative: pathlib.PurePosixPath) -> list[str] | None:
+    """The module path a file contributes, or `None` if it is not a test root.
+
+    `src/lib.rs` and `src/main.rs` are crate roots and contribute nothing;
+    `src/a/b.rs` and `src/a/b/mod.rs` both contribute `a::b`. An integration
+    target `tests/foo.rs` is its own crate root, so it contributes nothing
+    either, while `tests/support/mod.rs` contributes `support` -- the name the
+    targets that `mod support;` it will see.
+    """
+    parts = list(relative.parts)
+    if not parts or parts[-1].endswith(".rs") is False:
+        return None
+    if parts[0] not in ("src", "tests"):
+        return None
+    inner = parts[1:]
+    if not inner:
+        return None
+    if inner[0] == "bin" and parts[0] == "src":
+        # A `src/bin/*.rs` binary is its own target with its own root.
+        inner = inner[1:]
+        if len(inner) == 1:
+            return []
+    stem = inner[-1][: -len(".rs")]
+    if stem == "mod":
+        return inner[:-1]
+    if parts[0] == "src" and len(inner) == 1 and stem in ("lib", "main"):
+        return []
+    if parts[0] == "tests" and len(inner) == 1:
+        return []
+    return inner[:-1] + [stem]
+
+
+def crate_test_paths(directory: pathlib.Path) -> set[str]:
+    """Every `module::path::test_name` libtest could print for this crate.
+
+    Nesting is read from rustfmt indentation, not from brace counting: `cargo
+    fmt --all -- --check` is a gate in this repo, so indentation is reliable,
+    while a `{` inside one of the JSON fixtures these tests are full of would
+    walk a brace counter straight off the end.
+    """
+    files = sorted(path for path in directory.rglob("*.rs") if path.is_file())
+    relatives = {path: pathlib.PurePosixPath(path.relative_to(directory).as_posix()) for path in files}
+    prefixes: dict[pathlib.Path, list[str]] = {}
+    for path in files:
+        prefix = module_prefix(relatives[path])
+        if prefix is not None:
+            prefixes[path] = prefix
+
+    # `#[path = "x_test.rs"] mod tests;` overrides what the file name implies.
+    # Applied to a fixpoint so a remapped file can itself remap another.
+    for _ in range(4):
+        changed = False
+        for path in files:
+            if path not in prefixes:
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            pending_path: str | None = None
+            for line in lines:
+                attribute = PATH_ATTRIBUTE.match(line)
+                if attribute is not None:
+                    pending_path = attribute.group(1)
+                    continue
+                declaration = MODULE_DECLARATION.match(line)
+                if declaration is not None and pending_path is not None:
+                    target = (path.parent / pending_path).resolve()
+                    resolved = prefixes[path] + [declaration.group(1)]
+                    if target in prefixes and prefixes[target] != resolved:
+                        prefixes[target] = resolved
+                        changed = True
+                if line.strip():
+                    pending_path = None
+        if not changed:
+            break
+
+    paths: set[str] = set()
+    for path, prefix in prefixes.items():
+        stack: list[tuple[int, str]] = []
+        is_test = False
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            indent = len(line) - len(line.lstrip())
+            while stack and indent <= stack[-1][0]:
+                stack.pop()
+            module = INLINE_MODULE.match(line)
+            if module is not None:
+                stack.append((len(module.group(1)), module.group(2)))
+                paths.add("::".join(prefix + [name for _, name in stack]))
+                continue
+            if TEST_ATTRIBUTE.match(line):
+                is_test = True
+                continue
+            function = FUNCTION_DECLARATION.match(line)
+            if function is not None:
+                if is_test:
+                    paths.add(
+                        "::".join(prefix + [name for _, name in stack] + [function.group(1)])
+                    )
+                is_test = False
+                continue
+            if not line.lstrip().startswith(("#", "//")):
+                is_test = False
+        if prefix:
+            paths.add("::".join(prefix))
+    return paths
+
+
+def unmatched_name_filters(
+    regions: list[tuple[str, str]],
+    packages: dict[str, str],
+    root: pathlib.Path,
+) -> tuple[list[str], int, int]:
+    """Filters selecting no test, filters checked, and templated lines skipped.
+
+    The middle number is reported because this half of the gate is invisible
+    when it finds nothing: a refactor that stopped recognizing `cargo test`
+    lines at all would print the same success line as a clean tree. The count
+    makes "checked nothing" and "checked everything" different outputs.
+    """
+    known: dict[str, set[str]] = {}
+    failures: list[str] = []
+    checked = 0
+    skipped = 0
+    for label, text in regions:
+        for command in command_lines(text):
+            if "cargo test" not in command:
+                continue
+            if "${{" in command:
+                skipped += 1
+                continue
+            selected, filters = cargo_test_name_filters(command)
+            if not filters:
+                continue
+            named = [name for name in selected if name in packages]
+            if not named:
+                failures.append(
+                    f"  {label}: `{command.strip()}` filters on "
+                    f"{', '.join(sorted(filters))} but names no workspace member, "
+                    "so what it runs cannot be resolved"
+                )
+                continue
+            reachable: set[str] = set()
+            for name in named:
+                if name not in known:
+                    known[name] = crate_test_paths(root / packages[name])
+                reachable |= known[name]
+            for name_filter in sorted(filters):
+                checked += 1
+                if not any(name_filter in candidate for candidate in reachable):
+                    failures.append(
+                        f"  {label}: `cargo test {' '.join('-p ' + n for n in sorted(named))} "
+                        f"{name_filter}` matches no test in "
+                        f"{', '.join(sorted(named))}"
+                    )
+    return failures, checked, skipped
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, default=ROOT)
@@ -343,8 +655,23 @@ def main(argv: list[str] | None = None) -> int:
         in_ci |= selected_by_workflow(workflow.read_text(encoding="utf-8"))
 
     runner = root / arguments.local_runner
-    in_local = selected_by_local_runner(
-        runner.read_text(encoding="utf-8"), arguments.local_runner
+    runner_text = runner.read_text(encoding="utf-8")
+    in_local = selected_by_local_runner(runner_text, arguments.local_runner)
+
+    # The same two surfaces, read a second time for the other failure: a slice
+    # that names its crate and then filters every test in it away (#553).
+    regions: list[tuple[str, str]] = [
+        (str(workflow.relative_to(root)), strip_comments(workflow.read_text(encoding="utf-8")))
+        for workflow in workflows
+    ]
+    regions.append(
+        (
+            arguments.local_runner,
+            shell_reachable_text(strip_comments(runner_text), arguments.local_runner),
+        )
+    )
+    empty_filters, checked_filters, templated = unmatched_name_filters(
+        regions, packages, root
     )
 
     missing_ci = sorted(name for name in packages if name not in in_ci)
@@ -374,9 +701,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if empty_filters:
+        print("`cargo test` name filters that select no test:", file=sys.stderr)
+        for failure in empty_filters:
+            print(failure, file=sys.stderr)
+        print(
+            "\nlibtest exits 0 when a filter matches nothing, so each of these is a "
+            "step that passes having run no test. Repoint the filter at the crate "
+            "the code now lives in, or delete it. This is #553's own regression: "
+            "moving a file out of a crate leaves every filter that named it green "
+            "and empty.",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         f"validated {len(packages)} workspace members against "
         f"{len(workflows)} CI workflows and {arguments.local_runner}"
+    )
+    print(
+        f"resolved {checked_filters} name filter(s) on literal `cargo test` lines; "
+        f"{templated} matrix-templated line(s) skipped"
     )
     return 0
 

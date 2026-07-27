@@ -166,8 +166,9 @@ run_cli_tooling() {
     --test control_cli_e2e --test control_cli_resource_e2e --test ctl_lifecycle_e2e
   # Mirrors the `control_plane_client` slice of `rust-cli-tooling-tests.yml`
   # (renamed from `cli_core` with the crate in #553). It was missing here, so
-  # the crate's ~17k lines of hermetic client tests had no local invocation at
-  # all.
+  # the crate's 20,961 lines of hermetic client tests -- measured at `4c2ba43`
+  # with `git ls-files 'crates/ferrogate-control-plane-client/*.rs' | xargs cat
+  # | wc -l` -- had no local invocation at all.
   cargo test -p ferrogate-control-plane-client --all-features
   cargo test -p ferrogate-test --all-features
   # Mirrors the `cli_all` slice. #561 measured the unfiltered run as red on

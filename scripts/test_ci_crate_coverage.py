@@ -3,7 +3,8 @@
 # Developed by the commercial cloud service company represented by https://token4ai.cloud.
 # Author: jamesduan (X: https://x.com/JamesDuanL)
 # Created: 2026-07-27
-# description: Tests for the workspace-member CI coverage gate (issue #561).
+# description: Tests for the workspace-member CI coverage gate (issue #561) and
+# its empty-name-filter half (issue #553).
 """Tests for `scripts/check-ci-crate-coverage.py`.
 
 The gate exists because nothing noticed that a 136k-line crate ran nowhere, so
@@ -11,6 +12,12 @@ the one thing these tests must rule out is the gate itself being the next thing
 that notices nothing. Every case below is built as a throwaway workspace on
 disk and run through the real script, and each negative case is paired with the
 positive that differs only in the fact under test.
+
+The second block of cases covers the filter half (#553): a slice that names its
+crate and then selects no test inside it. The crate-level cases above are all
+blind to it by construction -- every one of those invocations names its crate
+correctly -- which is why it survived four review rounds in
+`governed-decision-conformance.yml`.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ class CiCrateCoverageTests(unittest.TestCase):
         called_workflows: dict[str, str] | None = None,
         local_runner: str = "",
         member_lines: str | None = None,
+        sources: dict[str, dict[str, str]] | None = None,
     ) -> None:
         quoted = member_lines or "".join(
             f'    "crates/{member}",\n' for member in members
@@ -48,6 +56,10 @@ class CiCrateCoverageTests(unittest.TestCase):
             (directory / "Cargo.toml").write_text(
                 f'[package]\nname = "{member}"\nversion = "0.0.0"\n', encoding="utf-8"
             )
+            for relative, body in (sources or {}).get(member, {}).items():
+                target = directory / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(textwrap.dedent(body), encoding="utf-8")
         workflows = root / ".github" / "workflows"
         workflows.mkdir(parents=True)
         if ci_workflow is not None:
@@ -425,6 +437,187 @@ class CiCrateCoverageTests(unittest.TestCase):
         self.assertIn("ferrogate-gateway", result.stderr)
         self.assertNotIn("ferrogate-core", result.stderr)
 
+    # --- name filters that select nothing (#553) ----------------------------
+    #
+    # The crate-level half above is blind to all of these: every one of them
+    # names its crate correctly, which is what made the #470 conformance gate
+    # survive four rounds of review as a green no-op.
+
+    GATEWAY_SOURCES = {
+        "src/server/governed_decision_conformance_test.rs": """
+            #[test]
+            fn every_fixture_matches_its_golden() {}
+        """
+    }
+    CLI_SOURCES = {
+        "src/main.rs": """
+            #[test]
+            fn parses_the_root_command() {}
+        """
+    }
+
+    def test_rejects_a_name_filter_that_matches_no_test(self) -> None:
+        """The literal #553 shape, and the one this gate was added for.
+
+        Pins the `any(name_filter in candidate ...)` arm of
+        `unmatched_name_filters`. Mutating it to `if False` -- or dropping the
+        `empty_filters` branch from `main` -- turns this green, which is
+        precisely the state `governed-decision-conformance.yml` shipped in:
+        `-p ferrogate-cli ... governed_decision` after the test file moved to
+        `ferrogate-gateway`, exiting 0 having run nothing."""
+        result = self.run_checker(
+            members=["ferrogate-cli", "ferrogate-gateway"],
+            sources={
+                "ferrogate-gateway": self.GATEWAY_SOURCES,
+                "ferrogate-cli": self.CLI_SOURCES,
+            },
+            ci_workflow="jobs:\n  t:\n    run: |\n"
+            "        cargo test -p ferrogate-gateway\n"
+            "        cargo test -p ferrogate-cli --bin ferrogate governed_decision\n",
+            local_runner="cargo test -p ferrogate-cli\ncargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("governed_decision", result.stderr)
+        self.assertIn("matches no test in ferrogate-cli", result.stderr)
+
+    def test_accepts_the_same_filter_pointed_at_the_crate_that_holds_it(self) -> None:
+        """The positive twin: identical workspace, identical filter, only the
+
+        `-p` differs. Without it, a gate that rejected every filter outright
+        would pass the case above and prove nothing."""
+        result = self.run_checker(
+            members=["ferrogate-cli", "ferrogate-gateway"],
+            sources={
+                "ferrogate-gateway": self.GATEWAY_SOURCES,
+                "ferrogate-cli": self.CLI_SOURCES,
+            },
+            ci_workflow="jobs:\n  t:\n    run: |\n"
+            "        cargo test -p ferrogate-cli\n"
+            "        cargo test -p ferrogate-gateway --all-features governed_decision\n",
+            local_runner="cargo test -p ferrogate-cli\ncargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resolved 1 name filter(s)", result.stdout)
+
+    def test_a_module_path_filter_resolves_without_naming_a_test(self) -> None:
+        """`config::tests` names a MODULE, not a test, and is the second live
+
+        instance of this defect (`rust-quality.yml`, against a `ferrogate-cli`
+        whose `config` module had moved to `ferrogate-config`). Pins the
+        `paths.add("::".join(prefix))` line and the `INLINE_MODULE` branch in
+        `crate_test_paths`: delete either and a filter naming only a module
+        stops resolving, and the two `rust-quality.yml` lines red on a tree
+        where they are correct."""
+        sources = {
+            "src/config/mod.rs": """
+                mod tests;
+            """,
+            "src/config/tests.rs": """
+                #[test]
+                fn rejects_an_unknown_key() {}
+            """,
+        }
+        result = self.run_checker(
+            members=["ferrogate-config"],
+            sources={"ferrogate-config": sources},
+            ci_workflow="jobs:\n  t:\n    run: "
+            "cargo test -p ferrogate-config --all-features config::tests\n",
+            local_runner="cargo test -p ferrogate-config --all-features config::tests\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_path_attribute_moves_the_module_a_filter_must_match(self) -> None:
+        """`#[path = "x_test.rs"] mod tests;` is how half this workspace wires
+
+        its test files, and the module path libtest prints follows the
+        DECLARATION, not the file name. Pins the `PATH_ATTRIBUTE` fixpoint
+        loop: remove it and `signed_snapshot::tests` -- a real path in
+        `ferrogate-config` -- is reported as matching nothing."""
+        sources = {
+            "src/config/signed_snapshot.rs": """
+                #[cfg(test)]
+                #[path = "signed_snapshot_test.rs"]
+                mod tests;
+            """,
+            "src/config/signed_snapshot_test.rs": """
+                #[test]
+                fn verifies_a_snapshot_signature() {}
+            """,
+        }
+        result = self.run_checker(
+            members=["ferrogate-config"],
+            sources={"ferrogate-config": sources},
+            ci_workflow="jobs:\n  t:\n    run: "
+            "cargo test -p ferrogate-config signed_snapshot::tests\n",
+            local_runner="cargo test -p ferrogate-config signed_snapshot::tests\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_test_target_selector_is_not_a_name_filter(self) -> None:
+        """`--test agentic_lite` is a TARGET, and cargo already errors on a
+
+        target that does not exist. Pins `--test` in `CARGO_VALUE_FLAGS`: drop
+        it and every `--test <name>` in the workflows becomes a name filter
+        this gate demands a match for, reddening thirteen correct slices."""
+        result = self.run_checker(
+            members=["ferrogate-cli"],
+            sources={"ferrogate-cli": self.CLI_SOURCES},
+            ci_workflow="jobs:\n  t:\n    run: "
+            "cargo test -p ferrogate-cli --all-features --test agentic_lite\n",
+            local_runner="cargo test -p ferrogate-cli --test agentic_lite\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_harness_flags_after_the_double_dash_are_not_name_filters(self) -> None:
+        """`-- --nocapture` and `-- --skip foo` are libtest's own flags. Pins
+
+        the `token.startswith("-")` skip and `--skip` in `CARGO_VALUE_FLAGS`:
+        without the second, `foo` reads as a filter that must match, and
+        `--skip` exists precisely to name something you are NOT running."""
+        result = self.run_checker(
+            members=["ferrogate-cli"],
+            sources={"ferrogate-cli": self.CLI_SOURCES},
+            ci_workflow="jobs:\n  t:\n    run: "
+            "cargo test -p ferrogate-cli --test perf -- --nocapture --skip slow_case\n",
+            local_runner="cargo test -p ferrogate-cli\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_backslash_continued_command_is_read_as_one_command(self) -> None:
+        """`scripts/local-test-modules.sh` splits its longest invocation across
+
+        two lines. Pins `command_lines`: read line-at-a-time, the `-p` and the
+        filter land in different strings, the filter half names no member, and
+        the gate would report a false failure -- or, with the continuation
+        carrying the `-p`, silently exempt the filter."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={"ferrogate-gateway": self.GATEWAY_SOURCES},
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway\n",
+            local_runner="cargo test -p ferrogate-gateway --all-features \\\n"
+            "  governed_decision\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resolved 1 name filter(s)", result.stdout)
+
+    def test_a_filter_on_a_crate_outside_the_workspace_is_an_error(self) -> None:
+        """A filtered `cargo test` naming no member cannot be resolved at all,
+
+        and the honest answer is to fail rather than skip. Pins the `if not
+        named` branch: turning it into a `continue` is the shape that let the
+        whole class through -- an invocation the gate cannot model, exempted in
+        silence."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={"ferrogate-gateway": self.GATEWAY_SOURCES},
+            ci_workflow="jobs:\n  t:\n    run: |\n"
+            "        cargo test -p ferrogate-gateway\n"
+            "        cargo test -p ferrogate-retired governed_decision\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("names no workspace member", result.stderr)
+
     def test_the_real_repository_passes_its_own_gate(self) -> None:
         result = subprocess.run(
             ["python3", str(CHECKER)], text=True, capture_output=True, check=False
@@ -442,6 +635,43 @@ class CiCrateCoverageTests(unittest.TestCase):
         self.assertIn(
             f"validated {len(declared)} workspace members", result.stdout
         )
+
+    def test_the_real_repository_has_filters_for_the_filter_half_to_check(self) -> None:
+        """The filter half is silent when it finds nothing, and "found nothing"
+
+        is indistinguishable from "there is nothing" in the exit code. This
+        counts the literal name filters in the tree a second way -- straight
+        off the two files that carry them -- and requires the gate to report
+        the same number. Break `command_lines`, `cargo_test_name_filters` or
+        the `cargo test` scan and the reported count drops while the gate still
+        exits 0; that is the shape #553 shipped, one level up."""
+        takes_a_value = {"-p", "--test", "--bin", "--bench", "--example", "--features"}
+        expected = 0
+        for relative in (
+            ".github/workflows/governed-decision-conformance.yml",
+            ".github/workflows/rust-quality.yml",
+            "scripts/local-test-modules.sh",
+        ):
+            for line in (ROOT / relative).read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped.startswith("cargo test") or "${{" in stripped:
+                    continue
+                skip = False
+                for token in stripped.split()[2:]:
+                    if skip:
+                        skip = False
+                    elif token == "--":
+                        break  # everything after belongs to libtest
+                    elif token in takes_a_value:
+                        skip = True
+                    elif not token.startswith("-"):
+                        expected += 1
+        self.assertEqual(expected, 6, "the filters this repository actually carries")
+        result = subprocess.run(
+            ["python3", str(CHECKER)], text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"resolved {expected} name filter(s)", result.stdout)
 
 
 if __name__ == "__main__":

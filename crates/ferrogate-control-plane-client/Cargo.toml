@@ -6,9 +6,15 @@
 
 [package]
 # Renamed from `ferrogate-cli-core` (#553 rework). The old name asserted a
-# containment relation that was false in both directions: this crate is 17,060
-# lines against `ferrogate-cli`'s 5,629, so it was not the "core" of anything
-# it was named after, and "core" said nothing about what is inside. The new
+# containment relation that was false in both directions: at `4c2ba43`, the
+# parent of the commit that writes this line, the crate is 20,961 `.rs` lines
+# against `crates/ferrogate-cli/src`'s 6,200 -- 3.38x -- so it was not the
+# "core" of anything it was named after, and "core" said nothing about what is
+# inside. The measurement names a commit rather than saying "this tree": the
+# figures that stood here were three rounds of review stale, each time because
+# the tree moved under a claim written as if it could not. Reproduce with
+# `git ls-files 'crates/<dir>/*.rs' | xargs cat | wc -l` -- git's pathspec `*`
+# crosses `/`, so that one glob is the whole subtree. The new
 # name is an assertion that can be checked: every request this crate builds
 # targets the Control Plane API (`/admin/v1/...`), and `src/parity.rs` puts
 # the data plane -- inference, MCP/tool execution, agent invoke/messaging --

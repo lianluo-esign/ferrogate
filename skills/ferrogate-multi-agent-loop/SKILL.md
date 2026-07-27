@@ -58,9 +58,14 @@ it writes:**
   `/home/dev/ferrogate/target` is not safe under concurrency: on 2026-07-27 an
   agent got `cargo check` errors in a file it had never touched, whose source
   in its own worktree was correct, reproducing even with its changes stashed —
-  a stale `ferrogate-control-plane-client` artifact from a *concurrent* agent, which cargo
+  a stale `ferrogate-cli-core` artifact from a *concurrent* agent, which cargo
   reported as "fresh". `touch`ing the source forced a rebuild and it went
-  green.
+  green. (`ferrogate-cli-core` is the name that crate had on the day; #553
+  renamed it to `ferrogate-control-plane-client` later the same day. The old
+  name is kept because this is a dated account of something that happened, and
+  an incident record that quietly adopts a name the incident could not have
+  used is one a reader cannot check against the artifacts — the same reason
+  `docs/testing/coverage-baseline-2026-07-01.md` keeps its stale paths.)
 
   A phantom red costs an agent cycle. **A phantom green is the dangerous one**,
   because in a lane whose only gate is `cargo check`, it is the sole compile

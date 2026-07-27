@@ -70,9 +70,25 @@ pub use config::asset_endpoint::{
 /// they sit in is supposed to decide only what a config file means. Whoever
 /// takes #560's decomposition should move them out with the data plane rather
 /// than treat their presence here as settled by precedent.
+///
+/// The same is true of `build_target_uri` and `normalize_host` below -- see
+/// the note there. Both lists are one finding, and #560 inherits five names,
+/// not three.
 pub use config::network_access::{resolve_client_ip, IpCidr, UnauthenticatedIpRateLimiter};
 /// Upstream-endpoint parsing and route-rule path rewriting: the inherent impls
 /// on [`Config`]'s own `RouteRule`, so they cannot live anywhere else.
+///
+/// **`build_target_uri` and `normalize_host` are the other half of the
+/// data-plane leak noted above, and the clearer half.** `parse_upstream_endpoint`
+/// and `UpstreamEndpoint` genuinely belong here -- an `upstream` that will not
+/// parse is a config error and this crate is where config errors are decided.
+/// The other two are not consulted anywhere in the load or validate path: the
+/// only caller of `build_target_uri` inside this crate is `#[cfg(test)]`, and
+/// every production reader of both is in `ferrogate-gateway`'s
+/// `server::handlers` and `server::site_domains`, i.e. on the per-request path.
+/// They are here because `RouteRule` is here, which is a fact about where the
+/// *type* lives, not an argument that per-request URI construction belongs in
+/// the configuration crate. #560 should move them with the data plane.
 pub use config::routing::{
     build_target_uri, normalize_host, parse_upstream_endpoint, UpstreamEndpoint,
 };

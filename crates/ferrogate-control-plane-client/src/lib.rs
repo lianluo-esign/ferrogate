@@ -31,10 +31,14 @@
 //!   `reqwest`, `serde`, `serde_json`, `sha2`. Nothing here can serve the API
 //!   it talks to.
 //!
-//! The old name asserted neither. Worse, it asserted something false: on the
-//! tree that lands this rename, the crate is **19,638 `.rs` lines against
-//! `ferrogate-cli/src`'s 5,648 across 26 files — 3.48×** the crate it claimed
-//! to be the `-core` of, and "core" described none of the contents. #553's
+//! The old name asserted neither. Worse, it asserted something false: at
+//! `4c2ba43`, the parent of the commit that writes this line, the crate is
+//! **20,961 `.rs` lines across 53 files against `crates/ferrogate-cli/src`'s
+//! 6,200 across 28 — 3.38×** the crate it claimed to be the `-core` of, and
+//! "core" described none of the contents. The figure names a commit instead of
+//! saying "this tree" because every previous phrasing of it went stale inside
+//! one review round; `git ls-files 'crates/<dir>/*.rs' | xargs cat | wc -l`
+//! reproduces both halves. #553's
 //! objective is that a module's name and its code agree; the fold below is
 //! refused, so the rename is what carries that objective for this crate.
 //!

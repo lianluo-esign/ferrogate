@@ -78,6 +78,13 @@ jobs:
       # in scripts/local-test-modules.sh -- the second half matters because the
       # local mirror had drifted from the CI matrices, and that drift is how the
       # gap survived review.
+      #
+      # #553 rework 2 added the other half: a `cargo test` line that names its
+      # crate correctly and then filters every test in it away. That is what the
+      # two steps above and governed-decision-conformance.yml were doing after
+      # #553 moved files between crates, and the crate-level check could not see
+      # it, because the crate WAS named. libtest exits 0 on a filter that matches
+      # nothing, so three gates ran zero tests and reported success.
       - name: Validate CI crate coverage
         run: |
           python3 -m unittest scripts/test_ci_crate_coverage.py
