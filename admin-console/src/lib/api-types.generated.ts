@@ -3604,6 +3604,8 @@ export interface components {
             allowed_providers: components["schemas"]["StringList"];
             denied_providers: components["schemas"]["StringList"];
             organization_id?: string | null;
+            /** @description Whether this key holds unrestricted, cross-tenant platform-root access (issue #515). Declared via the request body, never inferred from a null organization_id. */
+            platform_operator?: boolean;
             team_id?: string | null;
             project_id?: string | null;
             workspace_id?: string | null;
@@ -3630,6 +3632,8 @@ export interface components {
             allowed_providers?: components["schemas"]["StringList"];
             denied_providers?: components["schemas"]["StringList"];
             organization_id?: string;
+            /** @description Explicit platform-root opt-in (issue #515). Mutually exclusive with organization_id; omitting it leaves the key on the deployment's [tenancy] implicit_platform_operator setting. */
+            platform_operator?: boolean;
             team_id?: string;
             project_id?: string;
             workspace_id?: string;

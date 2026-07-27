@@ -393,6 +393,29 @@ fn tenant_scoped_key_cannot_fetch_an_out_of_scope_role_by_id() {
     ));
     assert_eq!(operator["role"]["permission_keys"][0], "catalog.orphan");
 
+    // ...and still gets 404, NOT 403, for an id that genuinely does not exist.
+    // This is what pins the `&& !scope.is_full()` clause at rbac.rs:502: with it
+    // deleted the operator gets `tenant_scope_denied` here and the handler's own
+    // not-found branch becomes dead code, so the by-id endpoints stop
+    // distinguishing absent from forbidden even for the operator. The scope
+    // tests above all pass without that clause, which is why this assertion has
+    // to exist separately.
+    let missing = http_request(
+        &addr,
+        "GET",
+        "/admin/v1/roles/role-that-does-not-exist",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        status_line(&missing).contains("404"),
+        "operator must get 404 for an absent role, not a scope refusal: {missing}"
+    );
+    assert!(
+        missing.contains("role_not_found"),
+        "operator 404 must name role_not_found: {missing}"
+    );
+
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
@@ -446,6 +469,25 @@ fn tenant_scoped_key_cannot_fetch_an_out_of_scope_permission_by_id() {
         "",
     ));
     assert_eq!(operator["permission"]["key"], "catalog.orphan");
+
+    // Sibling of the role assertion: the operator still gets 404, NOT 403, for
+    // an absent id. This pins `&& !scope.is_full()` at rbac.rs:126; without it
+    // the handler's `permission_not_found` branch is unreachable.
+    let missing = http_request(
+        &addr,
+        "GET",
+        "/admin/v1/permissions/permission-that-does-not-exist",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        status_line(&missing).contains("404"),
+        "operator must get 404 for an absent permission, not a scope refusal: {missing}"
+    );
+    assert!(
+        missing.contains("permission_not_found"),
+        "operator 404 must name permission_not_found: {missing}"
+    );
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
