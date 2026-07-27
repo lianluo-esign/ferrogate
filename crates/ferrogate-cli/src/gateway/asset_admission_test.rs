@@ -312,10 +312,18 @@ async fn an_inlined_read_is_charged_for_the_copies_it_will_hold() {
 /// delivered the opposite. Every arriving small read barged past the queued
 /// large one, which then burned its whole wait and shed.
 ///
-/// The fixture is deterministic rather than statistical: half the budget is
-/// sitting free, so the small read WOULD be admitted instantly on the fast
-/// path. It must not be, because a larger read is already queued for that
-/// capacity -- it may only proceed once that read has left the queue.
+/// The fixture is deterministic rather than statistical: a larger read is
+/// already queued for the capacity, so the small read may only proceed once
+/// that read has left the queue.
+///
+/// WHAT THIS TEST DOES AND DOES NOT PROVE (#544). It proves the observable
+/// property -- a small read arriving behind a queued large one does not
+/// complete immediately. It does NOT prove that the `waiting` counter guard in
+/// `admit` is what delivers that, because tokio's partial reservation drains
+/// the semaphore to 0 as soon as the large read queues, so
+/// `try_acquire_many_owned` on the fast path would fail anyway. Whether that
+/// guard is load-bearing or redundant is an open question this fixture cannot
+/// answer; see the mutation note on #544.
 ///
 /// The assertion is on ELAPSED TIME rather than on a refusal, because tokio
 /// hands the freed capacity to the next waiter as soon as the large read gives
@@ -343,11 +351,31 @@ async fn a_queued_large_read_is_not_barged_by_a_later_small_one() {
     });
     // Let the large read reach the wait queue.
     tokio::time::sleep(Duration::from_millis(30)).await;
+    // #544: the original precondition here asserted that half the budget was
+    // still FREE while the large read waited. That can never be true, and the
+    // test therefore failed deterministically the moment it landed.
+    //
+    // tokio's batch semaphore reserves PARTIALLY. At `poll_acquire`, when the
+    // available permits are fewer than needed, it takes all of them and queues
+    // for the remainder (`batch_semaphore.rs`: `remaining = (needed -
+    // acquired) - curr; (0, ...)` -- the semaphore is set to 0), and
+    // `add_permits_locked` keeps assigning released permits to the waiter at
+    // the head of the queue. So the queued 8 MiB read DRAINS the free 4 MiB
+    // into its own reservation and `available_bytes()` is 0.
+    //
+    // That is the anti-barging property itself, provided by tokio rather than
+    // by us: capacity a queued read is waiting for stops being available to
+    // anyone else. The precondition that actually establishes the fixture is
+    // therefore "the large read is still queued", not "capacity is free".
+    assert!(
+        !queued.is_finished(),
+        "the large read must still be queued -- if it already completed, the small read below \
+         is racing nothing and the elapsed-time assertion proves nothing"
+    );
     assert_eq!(
         budget.available_bytes(),
-        4 * MIB,
-        "the queued read must still be waiting, with half the budget free -- otherwise this \
-         proves nothing about barging"
+        0,
+        "the queued read must have absorbed the free capacity into its reservation"
     );
 
     let started = Instant::now();
