@@ -144,14 +144,29 @@ stops assuming verbs that do not exist.
 following `status` still answers 404 — but it leaves the Durable Object's **alarm
 armed**: Cloudflare only made `deleteAll()` delete the alarm from compatibility
 date `2026-02-24`, and this Worker deploys `compatibility_date = "2025-06-01"`
-with no `delete_all_deletes_alarm` flag. It also leaves `cf_agents_schedules`
-standing, so the Agent constructor re-arms the alarm from the surviving row on
-the next wake. Either way a run destroyed while carrying a #426 schedule wakes
-back up after its own cleanup and bills compute, and in-flight work and
-WebSockets are never aborted (`ctx.abort()` is skipped).
-`workers/agent-gateway/test/destroy-alarm.test.ts` pins this: after a destroy the
-platform reports **no** pending alarm, while a sibling run that was not destroyed
-still has one.
+with no `delete_all_deletes_alarm` flag. Nothing later cleans that alarm up
+either: the SDK's `_scheduleNextAlarm()` only ever calls `setAlarm()`, and with
+zero schedule rows left it returns without calling `deleteAlarm()`. So a run
+destroyed while carrying a #426 schedule wakes back up after its own cleanup and
+bills compute — and in-flight work and WebSockets are never aborted
+(`ctx.abort()` is skipped).
+
+The **stranded alarm is the whole of it**; the schedule rows are not a second
+problem. `AgentGateway` is registered under `new_sqlite_classes` (see
+`wrangler.toml`), and on a SQLite-backed Durable Object `deleteAll()` removes the
+entire contents of the object's private SQLite database — SQL data *and*
+key-value data, atomically. `cf_agents_schedules` therefore does **not** survive
+`deleteAll()`, and the "surviving row re-arms the alarm on the next wake" story an
+earlier draft of this section told is **false** for this deployment. The table
+DROPs inside `destroy()` are redundant with its own `deleteAll()` here; what makes
+`destroy()` the required call is the `deleteAlarm()` and the `ctx.abort()` that
+`deleteAll()` alone does not do.
+
+`workers/agent-gateway/test/destroy-alarm.test.ts` pins exactly that one
+discriminator: after a destroy the platform reports **no** pending alarm, while a
+sibling run that was not destroyed still has one. Its schedule-list test is a
+post-condition, not a second discriminator — see the file's own header for why it
+does not red under the `deleteAll()` mutation.
 
 ### RPC vs. path routing (per verb)
 

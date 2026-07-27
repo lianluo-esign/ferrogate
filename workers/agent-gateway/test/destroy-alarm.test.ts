@@ -26,12 +26,23 @@
 //
 //   THE MUTATION THIS FILE EXISTS TO RED: replace `await this.destroy()` in
 //   `AgentGateway.destroyRun()` (src/index.ts) with `await this.ctx.storage.deleteAll()`.
-//   Two independent things then go wrong, and the alarm read below catches either one:
-//     1. the alarm armed by `_scheduleNextAlarm()` is still pending, and
-//     2. the `cf_agents_schedules` row is still there, so the Agent constructor's
-//        `blockConcurrencyWhile(... this.alarm() ...)` RE-ARMS the alarm on the next
-//        wake — which is exactly what the destroyed instance gets when anything
-//        re-addresses it.
+//   EXACTLY ONE observable then goes wrong, and it is the one the first test reads: the
+//   alarm `_scheduleNextAlarm()` armed is still pending, and nothing later clears it —
+//   `_scheduleNextAlarm()` (dist/chunk-3IQQY2UH.js:863-875) only ever calls `setAlarm()`,
+//   so with zero schedule rows it returns without calling `deleteAlarm()`. The stale alarm
+//   fires on a name marked `cleaned_up`, re-instantiates the Durable Object and bills
+//   compute.
+//
+//   WHAT IS *NOT* A SECOND DISCRIMINATOR — and was wrongly written here when this file
+//   first landed: a SURVIVING `cf_agents_schedules` ROW. `AgentGateway` is SQLite-backed
+//   (`wrangler.toml` `new_sqlite_classes`; `vitest.config.ts` `useSQLite: true`), and on a
+//   SQLite-backed Durable Object `deleteAll()` removes the entire contents of the object's
+//   private SQLite database — SQL data AND key-value data, atomically. The mutation
+//   therefore wipes the schedule rows too, and the Agent constructor's
+//   `CREATE TABLE IF NOT EXISTS cf_agents_schedules` (chunk-3IQQY2UH.js:158-168) rebuilds
+//   the table empty on the next wake. Nothing re-arms. The table DROPs inside `destroy()`
+//   are redundant with its own `deleteAll()` here; the `deleteAlarm()` and the
+//   `ctx.abort()` are what the mutation actually loses.
 //
 //   NON-VACUITY. The alarm is read through the SAME helper, in the SAME test, for a
 //   sibling run that was NOT destroyed; that read must be non-null. So "null" cannot be
@@ -106,9 +117,10 @@ async function scheduleFarFuture(instance: string, taskId: string): Promise<void
  *
  * `getAgentByName` addresses instances with a plain `idFromName(name)`, so this reads
  * the same Durable Object the routes drove. Entering the object also runs the Agents SDK
- * constructor's `blockConcurrencyWhile` block — including its `this.alarm()` /
- * `_scheduleNextAlarm()` re-arm — before the callback runs, so a surviving schedule row
- * shows up here as a re-armed alarm.
+ * constructor's `blockConcurrencyWhile(... this.alarm() ...)` block before the callback
+ * runs — i.e. this read happens AFTER the SDK's last chance to tidy up. That is the point:
+ * the SDK never takes it (`_scheduleNextAlarm()` can only `setAlarm()`), so a non-null read
+ * after a destroy is a genuinely stranded alarm and not a timing artefact of the harness.
  */
 function pendingAlarm(runRef: string): Promise<number | null> {
   const namespace = env.AGENT_GATEWAY as DurableObjectNamespace<AgentGateway>;
@@ -136,14 +148,17 @@ describe("#482 a destroyed run leaves no pending alarm", () => {
     expect(await res.json()).toMatchObject({ runRef: destroyed, status: "cleaned_up" });
 
     // Wake the destroyed name the way a caller (or a firing alarm) would: re-addressing
-    // re-instantiates the object, and the SDK constructor re-arms the alarm from any
-    // schedule row that outlived the teardown.
+    // re-instantiates the object and runs the SDK constructor's alarm path. That is the
+    // last opportunity anything has to notice a stale alarm and delete it, so reading
+    // AFTER it is what makes the assertion below about the platform rather than about
+    // when the test happened to look.
     const after = await SELF.fetch(`${BASE}/control/status?runRef=${destroyed}`, authedInit());
     expect(after.status).toBe(404);
 
     // THE ASSERTION: pinned to `await this.destroy()` in AgentGateway.destroyRun().
-    // Swap it for `ctx.storage.deleteAll()` and this reds — the alarm is preserved at
-    // this deployment's compatibility date, and the schedule row re-arms it besides.
+    // Swap it for `ctx.storage.deleteAll()` and this reds — at this deployment's
+    // compatibility date `deleteAll()` preserves the alarm, and nothing afterwards
+    // deletes it.
     expect(await pendingAlarm(destroyed)).toBeNull();
 
     // NON-VACUITY: same helper, same moment, the run that was NOT destroyed.
@@ -152,11 +167,20 @@ describe("#482 a destroyed run leaves no pending alarm", () => {
     expect(survivor as number).toBeGreaterThan(Date.now());
   });
 
-  it("the destroyed run's schedule rows are gone too, so a later wake can re-arm nothing", async () => {
-    // The second half of the property, on the SQL side: `deleteAll()` clears the
-    // key-value data, but `cf_agents_schedules` is a SQL table — only the DROPs inside
-    // `destroy()` remove it. A surviving row is a scheduled wake-up waiting for the
-    // next time anything touches this name.
+  it("the destroyed run reports no schedules afterwards (post-condition; it does NOT catch the deleteAll mutation)", async () => {
+    // READ THE TITLE LITERALLY. This is a true post-condition of destroy and worth
+    // holding, but it is NOT a second guard on `await this.destroy()`, and an earlier
+    // version of this comment claimed it was. Under the mutation
+    // (`this.destroy()` -> `this.ctx.storage.deleteAll()`) `deleteAll()` wipes the SQL
+    // data too, the Agent constructor's `CREATE TABLE IF NOT EXISTS` rebuilds an empty
+    // `cf_agents_schedules`, and `/schedule/list` still answers `count: 0` — this test
+    // GREENS on the broken implementation. The alarm read in the first test is the only
+    // thing separating the two.
+    //
+    // WHAT IT DOES CATCH: a `destroyRun` that stops tearing storage down at all — drop
+    // the teardown call, or let it return the `cleaned_up` envelope without reaching it,
+    // and the row is still listed (`count: 1`). It also holds the create -> list -> destroy
+    // -> list route pair itself, which is why it is worth its runtime.
     const name = "run-destroy-rows";
     await start(name);
     await scheduleFarFuture(name, "wake-me");
@@ -174,10 +198,10 @@ describe("#482 a destroyed run leaves no pending alarm", () => {
   it("the deployment still predates the compatibility date that would clear alarms for us", () => {
     // A tripwire, not a preference. The mutation argument above rests on `deleteAll()`
     // PRESERVING the alarm here. When this reds, someone moved the deployment past
-    // 2026-02-24 (or set the flag): `this.destroy()` is still the right call — the table
-    // DROPs and `ctx.abort()` are exclusive to it — but the alarm no longer discriminates
-    // it from `deleteAll()`, and the assertion above must be re-derived rather than
-    // trusted.
+    // 2026-02-24 (or set the flag): `this.destroy()` is still the right call, because
+    // `ctx.abort("destroyed")` remains exclusive to it and is what stops in-flight work
+    // and WebSockets — but the alarm stops discriminating the two, so THIS FILE loses its
+    // pinned assertion and needs a new one rather than a re-read of the old one.
     const compatibilityDate = /^compatibility_date\s*=\s*"([^"]+)"/m.exec(wranglerToml)?.[1];
     expect(compatibilityDate).toBeDefined();
     expect(wranglerToml).not.toContain("delete_all_deletes_alarm");
