@@ -208,6 +208,10 @@ export interface AppliedPosture {
   deniedHosts: string[] | undefined;
   interceptAll: boolean;
   interceptions: string[];
+  /**
+   * A SNAPSHOT of the props records published so far, in publication order.
+   * Copied, not aliased — see `appliedPosture`.
+   */
   props: CapturedProps[];
 }
 
@@ -239,7 +243,28 @@ export class ProbeSandbox extends AgentSandbox {
     this.recorder.failInterceptionWith = message;
   }
 
-  /** RPC: the posture actually applied to this instance. */
+  /**
+   * RPC: the posture actually applied to this instance.
+   *
+   * `props` IS A COPY, and has to be. `runInDurableObject` calls this method on the
+   * real instance IN THE SAME ISOLATE, so what it hands back is not a structured
+   * clone — returning `this.recorder.props` returns the recorder's LIVE array, and
+   * a caller holding a "before" posture watches it grow as later starts publish
+   * more records. Comparing a before to an after then compares an array to ITSELF:
+   * `before.props.length` and `after.props.length` read the same number no matter
+   * what happened in between, so the comparison can only ever pin `n === n`. That
+   * is what made `container-egress.test.ts`'s failed-sealed-reset test read 3 where
+   * it expected 3+1 (issue #471): the two-record tethered start and the one-record
+   * failed reset were both being counted through the same array.
+   * `interceptions` was already safe because `.map` allocates; `props` was not.
+   *
+   * A shallow copy is enough, and it is also why `allowedHosts` / `deniedHosts`
+   * need none: the SDK builds a fresh props literal per `applyOutboundInterception`
+   * call (`containers/dist/lib/container.js:1185-1194`) and never mutates a
+   * published one, and `setAllowedHosts` REPLACES `allowedHostsOverride` with
+   * `[...hosts]` (`container.js:487`) rather than editing the array a previous
+   * reader is holding. Only the recorder's own array grows in place.
+   */
   async appliedPosture(): Promise<AppliedPosture> {
     const state = this.egressState;
     return {
@@ -249,7 +274,7 @@ export class ProbeSandbox extends AgentSandbox {
       deniedHosts: state.effectiveDeniedHosts,
       interceptAll: state.shouldInterceptAllOutbound(),
       interceptions: this.recorder.interceptions.map((i) => `${i.kind}:${i.host}`),
-      props: this.recorder.props,
+      props: [...this.recorder.props],
     };
   }
 

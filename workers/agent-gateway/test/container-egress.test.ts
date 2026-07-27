@@ -766,11 +766,23 @@ describe("the start attestation matches the applied posture", () => {
     // `[GOVERNED_HOST]` and this reds. The tethered path's order is pinned at the
     // "deny is applied before allow" test; this is the sealed path's.
     expect(posture.allowedHosts).toEqual([]);
-    // The reset got as far as BUILDING a posture — one more props record than the
-    // tethered start left behind, with the emptied allowlist in it — which is what
-    // places the failure at the registration and not before it.
-    expect(posture.props.length).toBe(tethered.props.length + 1);
-    expect(posture.props.at(-1)?.allowedHosts).toEqual([]);
+    // WHAT THE FAILED RESET PUBLISHED, sliced off the chronological record the same
+    // way the reused-name test slices it. Exactly ONE props build, carrying the
+    // emptied allowlist. Both halves of that are load-bearing:
+    //   * "at least one" is what places the failure AT the registration rather than
+    //     before it — the SDK reached `ctx.exports.ContainerProxy` (`container.js:1194`)
+    //     and only then threw out of `interceptOutboundHttps` (`container.js:1208`).
+    //     Everything the comment above derives about a stale interceptor rests on
+    //     that ordering, so if a vendor bump moved the props build after the
+    //     registration this must red rather than keep asserting the old story.
+    //   * "exactly one" is what pins the sealed branch as fail-FAST. Wrap
+    //     `setAllowedHosts` in a try/catch that goes on to attempt
+    //     `setDeniedHosts` before rethrowing — a plausible "clear both lists
+    //     best-effort" rewrite — and a second record appears here while every other
+    //     assertion in this test stays green.
+    const resetProps = posture.props.slice(tethered.props.length);
+    expect(resetProps.length, "the failed sealed reset must publish exactly one posture").toBe(1);
+    expect(resetProps[0]?.allowedHosts).toEqual([]);
     // ...and registered NOTHING. No interception was added, so the fetcher the
     // container is actually running behind is still the tethered one.
     expect(posture.interceptions).toEqual(tethered.interceptions);
