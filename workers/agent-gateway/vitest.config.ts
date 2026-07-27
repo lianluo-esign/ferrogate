@@ -16,6 +16,9 @@
 //   without a container engine. See test/harness/worker.ts. Production still binds
 //   `AgentSandbox`; test/container-egress.test.ts asserts wrangler.toml says so.
 //
+//   CONSOLE (#559): `test.disableConsoleIntercept` is ON, and the suite cannot terminate
+//   without it. The reason is written out in full at the option itself, below.
+//
 //   COMPATIBILITY (#471): the runtime date and flags are READ FROM wrangler.toml rather
 //   than restated here. `setAllowedHosts`/`setDeniedHosts` resolve their interceptor
 //   through `ctx.exports`, which is off before compatibility date 2025-11-17 unless
@@ -95,5 +98,50 @@ export default defineConfig({
   ],
   test: {
     include: ["test/**/*.test.ts"],
+    // ISSUE #559 — WITHOUT THIS LINE THE WHOLE SUITE HANGS FOREVER. Do not remove it
+    // without reading the rest of this comment; the failure mode it prevents is a
+    // runner that never terminates, which reads to CI as "still running", not as red.
+    //
+    // WHAT VITEST DOES BY DEFAULT. `disableConsoleIntercept: false` replaces
+    // `globalThis.console` with a custom Console that buffers writes and then ships each
+    // line to the Vitest node process as an `onUserConsoleLog` RPC, so the reporter can
+    // attribute it to the test that produced it (vitest/dist/chunks/console.*.js).
+    //
+    // WHY THAT IS FATAL HERE. Inside vitest-pool-workers the node process is reached
+    // through a WebSocket owned by the runner Durable Object, so a log emitted from a
+    // DIFFERENT Durable Object cannot send it directly — the pool catches workerd's
+    // "Cannot perform I/O on behalf of a different Durable Object" and re-sends through
+    // `runInRunnerObject(...)`, an outbound RPC made from the logging object
+    // (@cloudflare/vitest-pool-workers/dist/worker/index.mjs, `init({ post })`).
+    // `POST /control/destroy` ends in the Agents SDK's `destroy()`, whose last step is
+    // `ctx.abort("destroyed")` (see SDK_DESTROY_ABORT_REASON in src/index.ts). Aborting
+    // the object breaks its output gate, so that pending outbound RPC can never
+    // complete. Vitest's run promise waits on the outstanding console RPC, the runner
+    // never sends `testfileFinished`, and the pool waits forever — `npm test` in this
+    // Worker never returns. workerd stays alive and ignores SIGTERM throughout; only
+    // SIGKILL ends it.
+    //
+    // WHAT THE DISCRIMINATOR IS, measured rather than reasoned about. Aborting a DO is
+    // NOT enough on its own: `deleteAll()` + `ctx.abort()` with no logging in the same
+    // request terminates in ~2s, and so does the SDK's `destroy()` called directly
+    // (its own observability emit runs AFTER the abort, so it never executes). Add ONE
+    // `console.log` before the abort — which is exactly what `destroyRun`'s
+    // `setState()` does, via the Agents SDK's default `genericObservability.emit`
+    // (agents@0.0.109 chunk-3IQQY2UH.js:1234) — and the runner hangs. That is the whole
+    // mechanism: console output emitted from an object that then aborts itself.
+    //
+    // WHY THIS SIDE AND NOT THE PRODUCTION SIDE. `ctx.abort("destroyed")` is the point
+    // of #482 — it is what deletes the alarm and stops in-flight work, and reverting
+    // `destroyRun` to `ctx.storage.deleteAll()` would re-open that issue. On real
+    // Cloudflare a log line before an abort is simply dropped; the round trip that
+    // cannot finish exists only because the test runner lives inside the same runtime.
+    // So the harness is what changes. Nothing about the Worker's behaviour is altered,
+    // and no assertion is weakened: `destroy-alarm.test.ts` still reads the platform
+    // alarm after a real `POST /control/destroy`.
+    //
+    // WHAT IT COSTS. Console output from tests and from the Worker is no longer
+    // attributed to the test that emitted it — it goes to workerd's own stdio and
+    // arrives interleaved, unlabelled. `vi.spyOn(console, ...)` is unaffected.
+    disableConsoleIntercept: true,
   },
 });

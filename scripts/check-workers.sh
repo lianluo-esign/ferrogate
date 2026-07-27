@@ -134,8 +134,38 @@ for worker in "${WORKERS[@]}"; do
   # by committing a vitest.config.ts, so mcp-server / d1-proxy stay typecheck-only.
   if [ -f vitest.config.ts ]; then
     echo "-- worker E2E (vitest run, workerd/miniflare — no docker)"
-    npm test \
-      || { echo "ERROR: workers/$worker: worker E2E failed" >&2; exit 1; }
+    # WALL CLOCK, because the failure this gate met in #559 was not a red suite but
+    # NO suite: a Durable Object aborted mid-request wedged vitest-pool-workers, and
+    # `npm test` sat there with workerd alive, ignoring SIGTERM, producing nothing.
+    # An unbounded call in a gate turns that into a job that never returns, which
+    # reads as "still running" rather than as a failure -- strictly worse than red,
+    # because nobody is paged for it. So bound it and report the bound explicitly.
+    # The cause is fixed (workers/agent-gateway/vitest.config.ts,
+    # `disableConsoleIntercept`); this is the class of failure being made visible,
+    # not that instance of it. Whole-suite wall time today is ~5s.
+    if command -v timeout >/dev/null 2>&1; then
+      # SIGKILL, not SIGTERM: in #559 workerd stayed alive through SIGTERM and only
+      # died on SIGKILL. coreutils `timeout` signals the whole process group it made
+      # for the command, so npm, node and workerd all go together and the gate box is
+      # not left with orphans.
+      test_status=0
+      timeout --signal=KILL "${WORKERS_TEST_TIMEOUT:-600}" npm test || test_status=$?
+      if [ "$test_status" -ne 0 ]; then
+        if [ "$test_status" -eq 137 ]; then
+          echo "ERROR: workers/$worker: worker E2E did not finish within ${WORKERS_TEST_TIMEOUT:-600}s and was killed." >&2
+          echo "ERROR: workers/$worker: a hanging runner is a FAILURE here, not a slow one -- see #559." >&2
+        else
+          echo "ERROR: workers/$worker: worker E2E failed" >&2
+        fi
+        exit 1
+      fi
+    else
+      # No coreutils `timeout` (e.g. a bare macOS shell). Run anyway rather than
+      # skip the E2E, but say out loud that the hang guard is not in place.
+      echo "WARNING: workers/$worker: no 'timeout' binary -- running the E2E UNBOUNDED (#559)." >&2
+      npm test \
+        || { echo "ERROR: workers/$worker: worker E2E failed" >&2; exit 1; }
+    fi
   fi
 
   echo "workers/$worker: OK"
