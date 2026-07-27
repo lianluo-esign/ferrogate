@@ -202,6 +202,37 @@ is reserved for control-plane resources and runtime evidence documents; billing
 facts use relational columns and joins so operators can query them directly in
 Supabase.
 
+### Known Data Caveat: Pre-#519 Managed-Worker Attribution
+
+Rows written by the managed-worker external-action and lifecycle paths *before*
+issue #519 carry the **workspace id in the project slot** of their packed
+tenant key (`org:<tenant>|project:<workspace>|workspace:<workspace>`). The
+affected tables are `agent_run_events` and the managed-worker session,
+lifecycle-event and isolation-evidence rows. Post-#519 rows carry the real
+project id, resolved off the workspace row, or no project at all when the
+control plane could not name one.
+
+These rows are **deliberately not backfilled**:
+
+- they are append-only audit evidence, and they record the attribution the
+  gateway actually used when it made each decision; rewriting them would make
+  the trail assert an attribution that was never in force at decision time;
+- nothing needs reconciling downstream. No wallet debit, usage rollup or
+  metering row is emitted on these paths, so no ledger row carries the wrong
+  value; the only live consumer is the exact-equality project filter on the
+  timeline/audit reads;
+- the affected rows are self-identifying — `project` equals `workspace` in the
+  packed key — so an analyst can select them exactly and join the real project
+  through the `workspaces` table, which is strictly more information than an
+  in-place rewrite of a packed key string across Postgres, MySQL, libSQL, D1 and
+  ClickHouse would leave behind.
+
+The practical consequence for a reader: an audit or timeline query filtered by
+`project_id=<real project>` returns only post-#519 rows for these paths, and
+`project_id=<workspace id>` returns only the pre-#519 ones. Query both, or
+filter by `workspace_id`, which is correct on both sides of the fix for the
+external-action rows.
+
 ## Evidence Boundary And Write Pressure
 
 Supabase is the synchronous system of record for the evidence that an operator

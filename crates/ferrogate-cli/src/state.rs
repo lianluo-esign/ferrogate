@@ -6900,6 +6900,15 @@ mod state_rbac;
 
 #[path = "state_tenancy.rs"]
 mod state_tenancy;
+// #519: the project a runtime record's workspace rolls up to, and whether the
+// control plane could say -- the gateway's external-action seam refuses on the
+// difference instead of silently deselecting project-scoped guardrail policies.
+pub(crate) use state_tenancy::WorkspaceAttribution;
+// Production code decides on `WorkspaceAttribution::project` through
+// `is_resolved()`; only the tests name the variants, which is the point --
+// "unknown workspace" and "read failed" are pinned apart from each other.
+#[cfg(test)]
+pub(crate) use state_tenancy::ProjectAttribution;
 
 #[path = "state_wallets.rs"]
 mod state_wallets;

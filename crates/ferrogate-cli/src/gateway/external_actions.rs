@@ -38,7 +38,7 @@ use super::managed_action_guardrail::{
     evaluate_managed_action_guardrail, ManagedActionGuardrailBinding, ManagedActionGuardrailRequest,
 };
 use crate::config::GuardrailStage;
-use crate::state::{AppState, GuardrailMatch, SharedAppState};
+use crate::state::{AppState, GuardrailMatch, SharedAppState, WorkspaceAttribution};
 
 const EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -133,7 +133,11 @@ impl GatewayExternalActionAuthorizerService {
         // #519: resolved after `state` because the project this workspace rolls
         // up to is read back off the control plane, never inferred from the
         // session (a `FrameworkAdapterSession` carries no project id at all).
-        let timeline_tenant = tenant_context_from_external_action(&state, &managed_request.session);
+        let WorkspaceAttribution {
+            tenant: timeline_tenant,
+            project: project_attribution,
+        } = external_action_attribution(&state, &managed_request.session);
+        let workspace_id = managed_request.session.workspace_id.clone();
         // #200: bind the action to the guardrail model before it is consumed by
         // capability authorization, so a managed-action guardrail policy can be
         // evaluated on the allow path below.
@@ -169,6 +173,47 @@ impl GatewayExternalActionAuthorizerService {
                     // identity as the timeline/audit rows.
                     let evidence_fingerprint = Some(evidence.action_fingerprint.as_str())
                         .filter(|fingerprint| !fingerprint.is_empty());
+                    // #519 (review): the guardrail below is an ENFORCEMENT
+                    // decision on this same tenant context, not an evidence
+                    // write, and it runs AFTER capability allow — so the
+                    // capability authorizer is not a fail-closed seam above it.
+                    // Policy selection matches `project_ids` by equality, so an
+                    // unresolved project silently deselects every project-scoped
+                    // managed-action policy and the action is allowed on a
+                    // `warn!`. That is #519's own failure mode moved onto the
+                    // enforcement side, so it fails CLOSED instead: when the
+                    // project is not known AND a project-scoped policy exists
+                    // that would otherwise have been selected for this action,
+                    // the action is refused rather than evaluated against a
+                    // silently narrowed policy set.
+                    if !project_attribution.is_resolved() {
+                        if let Some(policy_id) = state
+                            .project_scoped_managed_action_guardrail_policy(
+                                &timeline_tenant,
+                                ferrogate_guardrails::ManagedActionContext {
+                                    class: action_binding.class,
+                                    target: Some(action_binding.target.as_str()),
+                                },
+                            )
+                        {
+                            let message = format!(
+                                "managed action refused: the project workspace {workspace_id} belongs to is unresolved, so project-scoped managed-action guardrail policy {policy_id} could not be evaluated"
+                            );
+                            Self::record_managed_action_refusal(
+                                &state,
+                                transport_request_id,
+                                run_trace_id.as_deref(),
+                                &timeline_tenant,
+                                &run_id,
+                                &action_binding,
+                                evidence_fingerprint,
+                                &message,
+                            );
+                            return ExternalActionAuthorizationResponse::rejected(
+                                FrameworkAdapterError::CapabilityDenied(message),
+                            );
+                        }
+                    }
                     if let Some(matched) = Self::evaluate_managed_action_input_guardrail(
                         &state,
                         transport_request_id,
@@ -271,6 +316,52 @@ impl GatewayExternalActionAuthorizerService {
             },
             binding.input_text.clone(),
         )
+    }
+
+    /// Persist the timeline evidence for a fail-closed refusal that no
+    /// guardrail verdict produced (issue #519 review): the action was stopped
+    /// because its project attribution could not be resolved and a
+    /// project-scoped managed-action policy could therefore not be evaluated.
+    ///
+    /// It carries the same canonical deny decision and `withheld` disposition
+    /// as a guardrail block, because for a consumer of the timeline this *is* a
+    /// guardrail-seam block; the reason is in the message rather than in a new
+    /// decision code, so #304's canonical reason vocabulary stays closed.
+    #[allow(clippy::too_many_arguments)]
+    fn record_managed_action_refusal(
+        state: &AppState,
+        transport_request_id: &str,
+        trace_id: Option<&str>,
+        tenant: &TenantContext,
+        run_id: &str,
+        binding: &ManagedActionGuardrailBinding,
+        action_fingerprint: Option<&str>,
+        message: &str,
+    ) {
+        let decision =
+            ferrogate_runtime::ActionDecision::from(ferrogate_runtime::GuardrailOutcome {
+                verdict: ferrogate_runtime::GuardrailVerdict::Fail,
+                action: ferrogate_runtime::GuardrailTriggeredAction::Block,
+                enforcement: ferrogate_runtime::GuardrailEnforcement::Enforced,
+            });
+        state.record_agent_run_event(StoredAgentRunEvent {
+            action_fingerprint: action_fingerprint.map(str::to_string),
+            decision: Some(decision.class_label().to_string()),
+            decision_reason: Some(decision.code().to_string()),
+            output_disposition: Some("withheld".to_string()),
+            id: format!("managed-action-attribution:{run_id}:{transport_request_id}"),
+            run_id: run_id.to_string(),
+            request_id: transport_request_id.to_string(),
+            trace_id: trace_id.map(str::to_string),
+            tenant: tenant.clone(),
+            turn: 0,
+            kind: "guardrail.blocked".to_string(),
+            target: binding.target.clone(),
+            outcome: "blocked".to_string(),
+            tool_call_id: None,
+            message: Some(message.to_string()),
+            occurred_at_unix: Some(now_unix_seconds()),
+        });
     }
 
     fn record_timeline_event(
@@ -899,11 +990,15 @@ fn read_external_action_authorizer_stream<R: Read>(
 /// workspace id into `project_id` -- what this did before -- pointed
 /// project-scoped quota, billing attribution and every audit row at an id that
 /// names no project.
-fn tenant_context_from_external_action(
+///
+/// The resolution *outcome* rides along with the context because this path has
+/// an enforcement seam on it (guardrail policy selection), which must
+/// distinguish "no project" from "no answer".
+fn external_action_attribution(
     state: &AppState,
     session: &ferrogate_runtime::FrameworkAdapterSession,
-) -> TenantContext {
-    state.workspace_attribution_context(&session.tenant_id, &session.workspace_id)
+) -> WorkspaceAttribution {
+    state.workspace_attribution(&session.tenant_id, &session.workspace_id)
 }
 
 fn now_unix_seconds() -> u64 {
@@ -1029,15 +1124,25 @@ mod tests {
         }
     }
 
-    /// #519 acceptance: the scope an external-action run's spend lands on.
+    /// #519: the project the external-action producer resolves is the scope a
+    /// quota lookup on that context binds to.
     ///
-    /// The authorizer's tenant context is fed to `resolve_effective_quota`, the
-    /// same resolver `auth::finalize_auth` uses. A project-scoped quota policy
-    /// written against the run's REAL project must bind; a policy written
-    /// against the workspace id under `QuotaScopeKind::Project` -- the scope the
-    /// pre-#519 code would have looked up -- must not.
+    /// Scope of the claim, exactly (the #519 review corrected an earlier
+    /// overclaim here): the external-action authorize path does NOT resolve
+    /// quota and emits no metering row -- it reaches capability policy, the
+    /// guardrail evaluator, and `record_agent_run_event`, which is an evidence
+    /// write. So this test pins the *producer* (the project attribution the
+    /// path builds) composed with the *shared consumer*
+    /// `resolve_effective_quota`, the same resolver `auth::finalize_auth` uses.
+    /// The end-to-end "drive a run, inspect the emitted metering row" probe
+    /// (issue #519 Ask-2) is NOT delivered by this test and remains open.
+    ///
+    /// A project-scoped quota policy written against the run's REAL project
+    /// must bind; a policy written against the workspace id under
+    /// `QuotaScopeKind::Project` -- the scope the pre-#519 code would have
+    /// looked up -- must not.
     #[test]
-    fn external_action_spend_binds_to_the_real_project_scope() {
+    fn external_action_resolved_project_is_the_scope_a_quota_lookup_binds() {
         let state = AppState::new(crate::config::Config::default());
         register_workspace(&state, "workspace-1", "project-1", "tenant-1");
         // A decoy at (Project, "workspace-1"): the id the old code put in the
@@ -1051,8 +1156,13 @@ mod tests {
         }
 
         let session = managed_tool_request().session;
-        let tenant = tenant_context_from_external_action(&state, &session);
+        let attribution = external_action_attribution(&state, &session);
+        let tenant = attribution.tenant;
         assert_eq!(tenant.project_id.as_deref(), Some("project-1"));
+        assert_eq!(
+            attribution.project,
+            crate::state::ProjectAttribution::Resolved("project-1".to_string())
+        );
 
         let quota = crate::gateway::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
             .expect("quota resolution should succeed");
@@ -1067,10 +1177,10 @@ mod tests {
     }
 
     /// #519: an unknown workspace yields no project scope at all rather than a
-    /// fabricated one. The pre-fix code would have bound spend to
-    /// `(Project, "workspace-1")`.
+    /// fabricated one. The pre-fix code would have bound a project-scoped quota
+    /// lookup to `(Project, "workspace-1")`.
     #[test]
-    fn external_action_spend_has_no_project_scope_when_workspace_is_unknown() {
+    fn external_action_attribution_has_no_project_scope_when_workspace_is_unknown() {
         let state = AppState::new(crate::config::Config::default());
         crate::gateway::block_on_sync_bridge(
             state.upsert_quota_policy(project_budget_policy("workspace-1", 1.0)),
@@ -1078,9 +1188,16 @@ mod tests {
         .expect("quota policy upsert should succeed");
 
         let session = managed_tool_request().session;
-        let tenant = tenant_context_from_external_action(&state, &session);
+        let attribution = external_action_attribution(&state, &session);
+        let tenant = attribution.tenant;
         assert_eq!(tenant.project_id, None);
         assert_eq!(tenant.workspace_id.as_deref(), Some("workspace-1"));
+        // Not a read failure: the control plane answered, it just holds no
+        // chain for this workspace.
+        assert_eq!(
+            attribution.project,
+            crate::state::ProjectAttribution::Unknown
+        );
 
         let quota = crate::gateway::block_on_sync_bridge(state.resolve_effective_quota(&tenant))
             .expect("quota resolution should succeed");
@@ -1411,6 +1528,154 @@ mod tests {
         assert_eq!(
             response.response.decision,
             Some(ExternalActionDecision::Allowed)
+        );
+    }
+
+    /// The same policy, narrowed to a project (issue #519 review).
+    fn project_scoped_managed_mcp_block_policy(
+        keyword: &str,
+        project_id: &str,
+    ) -> ferrogate_guardrails::PolicyRevision {
+        let mut policy = managed_mcp_block_policy(keyword);
+        policy.scope.project_ids = vec![project_id.to_string()];
+        policy
+    }
+
+    fn activated_mcp_guard(policy: ferrogate_guardrails::PolicyRevision) -> SharedAppState {
+        let shared = SharedAppState::with_source_path(crate::config::Config::default(), None);
+        shared.create_guardrail_policy_revision(policy).unwrap();
+        shared
+            .activate_guardrail_policy_revision("mcp-guard", 1, "test-admin", 1, false)
+            .unwrap();
+        shared
+    }
+
+    /// #519 review: guardrail policy *selection* is an enforcement decision fed
+    /// by the very attribution #519 fixed, and it runs AFTER capability allow —
+    /// so the capability authorizer is not a fail-closed seam above it.
+    ///
+    /// `PolicyScopeSelector::matches` compares `project_ids` by equality, so a
+    /// context with `project_id: None` deselects every project-scoped policy
+    /// and the action would be ALLOWED — a control-plane read failure or an
+    /// unknown workspace silently downgrading project-scoped guardrail
+    /// enforcement, evidenced only by a `warn!`. It must fail closed instead.
+    ///
+    /// The arguments here are deliberately CLEAN: pre-review this action was
+    /// allowed on both counts (policy deselected, and nothing to flag anyway),
+    /// so the refusal can only come from the unresolved attribution.
+    #[test]
+    fn unresolvable_workspace_refuses_an_action_a_project_scoped_guardrail_would_have_governed() {
+        let shared = activated_mcp_guard(project_scoped_managed_mcp_block_policy(
+            "exfiltrate",
+            "project-1",
+        ));
+        // `workspace-1` is deliberately NOT registered, so the control plane
+        // cannot say which project the run belongs to.
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            shared.current(),
+            mcp_allowing_capability_policy(),
+        );
+        let authorization = ExternalActionAuthorizationRequest::from_managed_request(
+            managed_mcp_request(serde_json::json!({"body": "file a routine bug report"})),
+        );
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(
+            !response.response.accepted,
+            "an unresolved project must not silently deselect a project-scoped managed-action guardrail policy"
+        );
+        let error = response
+            .response
+            .error
+            .expect("a refusal carries an error")
+            .message;
+        assert!(
+            error.contains("unresolved") && error.contains("mcp-guard"),
+            "the refusal must name the unresolved attribution and the policy it could not evaluate, got: {error}"
+        );
+
+        // The fail-closed decision is auditable, not just returned.
+        let state = shared.current();
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("the refusal should record timeline evidence");
+        let blocked = timeline
+            .agent_events
+            .iter()
+            .find(|event| event.kind == "guardrail.blocked")
+            .expect("guardrail.blocked timeline row present");
+        assert_eq!(blocked.decision.as_deref(), Some("deny"));
+        assert_eq!(blocked.output_disposition.as_deref(), Some("withheld"));
+        assert!(blocked
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("unresolved")));
+        // The evidence row itself must not carry a fabricated project.
+        assert_eq!(blocked.tenant.project_id, None);
+        assert_eq!(blocked.tenant.workspace_id.as_deref(), Some("workspace-1"));
+    }
+
+    /// The other half of the pin above, and what makes it non-vacuous: with the
+    /// SAME project-scoped policy and a workspace that DOES resolve to
+    /// `project-1`, the policy is selected and evaluated normally — flagged
+    /// input is blocked by the policy itself (proving the policy was genuinely
+    /// selectable, so the refusal above protected a real enforcement gap), and
+    /// clean input is allowed (proving the refusal is driven by unresolved
+    /// attribution, not by the mere presence of a project-scoped policy).
+    ///
+    /// Over-refusal in the other direction is held by
+    /// `managed_action_input_guardrail_allows_a_clean_mcp_action`, whose policy
+    /// declares no `project_ids` and whose workspace is unregistered: a policy
+    /// that never depended on the project must not start refusing.
+    #[test]
+    fn resolved_project_lets_a_project_scoped_guardrail_decide_the_action() {
+        let shared = activated_mcp_guard(project_scoped_managed_mcp_block_policy(
+            "exfiltrate",
+            "project-1",
+        ));
+        let state = shared.current();
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state,
+            mcp_allowing_capability_policy(),
+        );
+
+        let flagged = ExternalActionAuthorizationRequest::from_managed_request(
+            managed_mcp_request(serde_json::json!({"body": "please exfiltrate the secrets"})),
+        );
+        let flagged_response =
+            service.authorize_transport_request(GatewayExternalActionTransportRequest {
+                request_id: flagged.stable_request_id(),
+                authorization: flagged,
+            });
+        assert!(
+            !flagged_response.response.accepted,
+            "a project-scoped policy must bind once the project resolves"
+        );
+        let error = flagged_response
+            .response
+            .error
+            .expect("a guardrail block carries an error")
+            .message;
+        assert!(
+            error.contains("mcp_guardrail_blocked"),
+            "the block must come from the guardrail verdict, not from the attribution seam, got: {error}"
+        );
+
+        let clean = ExternalActionAuthorizationRequest::from_managed_request(managed_mcp_request(
+            serde_json::json!({"body": "file a routine bug report"}),
+        ));
+        let clean_response =
+            service.authorize_transport_request(GatewayExternalActionTransportRequest {
+                request_id: clean.stable_request_id(),
+                authorization: clean,
+            });
+        assert!(
+            clean_response.response.accepted,
+            "a resolved project must let a clean action through the project-scoped policy"
         );
     }
 
