@@ -1664,74 +1664,116 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/skill-packages/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let data = state
-                            .config
-                            .skill_packages
-                            .iter()
-                            .map(admin_skill_package)
-                            .collect();
-                        write_json_response(
-                            session,
-                            StatusCode::OK,
-                            &AdminList::new(data),
-                            &ctx.request_id,
-                        )
-                        .await
-                    }
+                // Issue #535 re-sweep: `SkillPackage::api_key_ids` is the same
+                // cross-tenant selector `GatewayConfigProfile` carries, and
+                // this handler had the same discard-the-`AuthContext` shape.
+                // `skill_package_visible_to_auth` already existed for the
+                // agent-facing discovery path; the admin read never called it.
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
-                }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let data: Vec<_> = state
+                    .config
+                    .skill_packages
+                    .iter()
+                    .filter_map(|package| scope.visible_skill_package(package))
+                    .map(|package| admin_skill_package(&package))
+                    .collect();
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminList::new(data),
+                    &ctx.request_id,
+                )
+                .await
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let Some(package) = state
-                            .config
-                            .skill_packages
-                            .iter()
-                            .find(|package| package.id == id)
-                        else {
-                            return write_json_error(
-                                session,
-                                StatusCode::NOT_FOUND,
-                                "skill_package_not_found",
-                                format!("skill package {id} was not found"),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        };
-                        write_json_response(
-                            session,
-                            StatusCode::OK,
-                            &AdminSkillPackageMutationResponse {
-                                object: "skill_package",
-                                skill_package: admin_skill_package(package),
-                            },
-                            &ctx.request_id,
-                        )
-                        .await
-                    }
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                // Out-of-scope reads exactly like nonexistent for a
+                // tenant-scoped caller, so the ids the list no longer
+                // discloses cannot be walked back one probe at a time;
+                // `!scope.is_full()` keeps the operator's 404 for a genuinely
+                // absent id.
+                let visible = state
+                    .config
+                    .skill_packages
+                    .iter()
+                    .find(|package| package.id == id)
+                    .and_then(|package| scope.visible_skill_package(package));
+                if visible.is_none() && !scope.is_full() {
+                    return write_config_scope_denied(session, "skill package", &ctx.request_id)
+                        .await;
                 }
+                let Some(package) = visible else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "skill_package_not_found",
+                        format!("skill package {id} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminSkillPackageMutationResponse {
+                        object: "skill_package",
+                        skill_package: admin_skill_package(&package),
+                    },
+                    &ctx.request_id,
+                )
+                .await
             }
             (&Method::POST, None) => {
                 self.handle_admin_skill_package_upsert(session, ctx, headers, None)
@@ -8051,35 +8093,53 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-            Ok(_) => {
-                let search = query_value(query, "search");
-                let models = state
-                    .config
-                    .models
-                    .iter()
-                    .filter(|model| {
-                        matches_search(
-                            search.as_deref(),
-                            &[&model.name, &model.provider, &model.provider_model],
-                        )
-                    })
-                    .cloned()
-                    .collect();
-                let body = list_response(models, query, state.admin_pagination(query));
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-            }
+        // Issue #535 re-sweep: `.cloned()` returned the whole `Model`, which
+        // carries `visible_organization_ids`/`visible_project_ids` -- and
+        // those are in the response schema, so the leak was not theoretical.
+        // `GET /v1/models` has filtered on exactly this since #515 (via
+        // `can_tenant_use_model`); the admin listing did not, and it also
+        // rendered the two id lists themselves.
+        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
+            Ok(auth) => auth,
             Err(error) => {
-                write_json_error(
+                return write_json_error(
                     session,
                     error.status,
                     error.code,
                     error.message,
                     &ctx.request_id,
                 )
-                .await
+                .await;
             }
-        }
+        };
+        let scope = match config_catalog_scope(&state, &auth).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let search = query_value(query, "search");
+        let models: Vec<_> = state
+            .config
+            .models
+            .iter()
+            .filter(|model| {
+                matches_search(
+                    search.as_deref(),
+                    &[&model.name, &model.provider, &model.provider_model],
+                )
+            })
+            .filter_map(|model| scope.visible_model(model))
+            .collect();
+        let body = list_response(models, query, state.admin_pagination(query));
+        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
 
     pub(super) async fn handle_admin_api_keys(
@@ -9214,13 +9274,31 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-            Ok(_) => match (method, path.strip_prefix("/admin/v1/agent-upstreams/")) {
+            Ok(auth) => match (method, path.strip_prefix("/admin/v1/agent-upstreams/")) {
                 (&Method::GET, None) => {
-                    let data = state
+                    // Issue #535 re-sweep: `AgentUpstreamConfig::tenant_ids`
+                    // is a cross-tenant selector and was emitted verbatim.
+                    // `agent_upstream_visible_to_auth` already gates the
+                    // data-plane paths; the admin read never called it.
+                    let scope = match config_catalog_scope(&state, &auth).await {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    };
+                    let data: Vec<_> = state
                         .config
                         .agent_upstreams
                         .iter()
-                        .map(admin_agent_upstream)
+                        .filter_map(|upstream| scope.visible_agent_upstream(upstream))
+                        .map(|upstream| admin_agent_upstream(&upstream))
                         .collect();
                     write_json_response(
                         session,
@@ -9235,18 +9313,40 @@ impl FerroGateway {
                         .await
                 }
                 (&Method::GET, Some(id)) if !id.contains('/') => {
-                    if let Some(upstream) = state
+                    let scope = match config_catalog_scope(&state, &auth).await {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    };
+                    let visible = state
                         .config
                         .agent_upstreams
                         .iter()
                         .find(|upstream| upstream.id == id)
-                    {
+                        .and_then(|upstream| scope.visible_agent_upstream(upstream));
+                    if visible.is_none() && !scope.is_full() {
+                        return write_config_scope_denied(
+                            session,
+                            "agent upstream",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    if let Some(upstream) = visible {
                         return write_json_response(
                             session,
                             StatusCode::OK,
                             &AdminAgentUpstreamMutationResponse {
                                 object: "agent_upstream",
-                                agent_upstream: admin_agent_upstream(upstream),
+                                agent_upstream: admin_agent_upstream(&upstream),
                             },
                             &ctx.request_id,
                         )

@@ -21,7 +21,7 @@ use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
     auth::{authenticate, AuthContext, CallerScope},
-    config::{GatewayConfigProfile, PolicyRule},
+    config::{AgentUpstreamConfig, GatewayConfigProfile, Model, PolicyRule, SkillPackage},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, AdminDeleteResponse,
         AdminList, AdminPermission, AdminPermissionMutation, AdminPermissionMutationResponse,
@@ -1154,28 +1154,74 @@ async fn write_rbac_scope_denied(session: &mut Session, request_id: &str) -> Pin
 }
 
 /// How much of the *static config* catalog a caller is allowed to read
-/// (issue #535) -- the sibling of [`RbacCatalogScope`] for the two admin read
-/// surfaces #518 did not cover: `/admin/v1/policies[/{name}]` and
-/// `/admin/v1/gateway-configs[/{id}]`.
+/// (issue #535) -- the sibling of [`RbacCatalogScope`] for the admin read
+/// surfaces #518 did not cover.
 ///
-/// Both had the same `Ok(_) => ...` shape: authenticate, discard the
+/// # Which surfaces this covers, and how that set was derived
+///
+/// The defect class is: an `admin.read` handler serialising a **cross-tenant
+/// selector** -- a list of organization / project / api-key / tenant ids
+/// naming principals other than the caller -- out of *platform-global* static
+/// config (`state.config.*`), which every tenant-scoped key can read.
+///
+/// The set of affected surfaces is therefore derived from the **config types**,
+/// not from the handler list: a config struct with no selector field cannot
+/// leak one, whatever its handler does. The complete basis is
+///
+/// ```text
+/// git grep -nE 'pub\(crate\) [a-z_]*(id|ids)\s*:' crates/ferrogate-cli/src/config/types.rs
+/// ```
+///
+/// filtered to the ids that name a *tenant principal*. That yields eight
+/// structs, and every one of them is accounted for here:
+///
+/// | config struct | selector fields | admin read surface | disposition |
+/// |---|---|---|---|
+/// | `PolicyRule` | `organization_ids`, `project_ids`, `api_key_ids` | `/admin/v1/policies[/{name}]` | scoped, [`Self::visible_policy`] |
+/// | `GatewayConfigProfile` | `api_key_ids` | `/admin/v1/gateway-configs[/{id}]` | scoped, [`Self::visible_gateway_config`] |
+/// | `SkillPackage` | `api_key_ids` | `/admin/v1/skill-packages[/{id}]` | scoped, [`Self::visible_skill_package`] |
+/// | `AgentUpstreamConfig` | `tenant_ids` | `/admin/v1/agent-upstreams[/{id}]` | scoped, [`Self::visible_agent_upstream`] |
+/// | `Model` | `visible_organization_ids`, `visible_project_ids` | `/admin/v1/models` | scoped, [`Self::visible_model`] |
+/// | `AgentWorkflowPolicy` | `organization_ids`, `project_ids`, `api_key_ids` | `/admin/v1/agent-workflows[/{id}]` | split out as **#546** (its reads also join runtime counters, so the narrowing is not a one-line reuse) |
+/// | `ApiKey` | `organization_id`, `project_id`, `workspace_id`, `team_id`, `user_id` | `/admin/v1/api-keys[/{id}]` | **excluded**: both GET arms call `require_platform_operator` before reading, so no tenant-scoped caller reaches the serializer at all |
+/// | `GuardrailRule` | `organization_ids`, `project_ids`, `api_key_ids` | *(none)* | **excluded**: no read surface exists -- `git grep GuardrailRule` reaches only `compile_static_guardrail_policy`; the rule is compiled into a `PolicyRevision` and never serialised to a response |
+///
+/// Two further id-shaped config fields were examined and are *not* tenant
+/// selectors: `ClusterConfig::snapshot_tenant_id` (one deployment's own
+/// identity, consumed only by `config::signed_snapshot`, never serialised)
+/// and `ManagedWorkerCapabilityTargetGrantConfig::selector_id` (names a
+/// capability *target*, i.e. a host/tool, not a principal).
+///
+/// Storage-backed rows (virtual keys, projects, wallets, jobs) are a
+/// different class with a different primitive -- they carry a single owner id
+/// and are filtered row-wise by `auth.tenant_filter()` /
+/// `crate::auth::filter_by_tenant_scope` -- and are covered by #185/#186, not
+/// here.
+///
+/// All five had the same `Ok(_) => ...` shape: authenticate, discard the
 /// [`AuthContext`], serialize platform-global state. A `PolicyRule` carries
 /// `organization_ids`, `project_ids` and `api_key_ids` plus the
 /// effect/models/providers that act on them, so the unscoped list handed
 /// tenant A other tenants' ids *and* which models they are denied; a
-/// `GatewayConfigProfile` carries the `api_key_ids` allowed to use it. Writes
-/// are `require_platform_operator`-gated on both, so this was pure disclosure.
+/// `GatewayConfigProfile` carries the `api_key_ids` allowed to use it; a
+/// `SkillPackage` the same; an `AgentUpstreamConfig` its `tenant_ids`; a
+/// `Model` its `visible_organization_ids`/`visible_project_ids`. Writes are
+/// `require_platform_operator`-gated on all of them, so this was pure
+/// disclosure.
 ///
-/// Neither surface is public-to-tenants and neither is a blanket 403: a
-/// tenant-scoped console legitimately shows "which deny rules apply to me"
-/// and "which gateway profiles may my keys select". So a tenant-scoped
-/// caller gets the *reachable* slice, defined by the same selector semantics
-/// the runtime itself uses:
+/// None of these surfaces is public-to-tenants and none becomes a blanket
+/// 403: a tenant-scoped console legitimately shows "which deny rules apply to
+/// me", "which gateway profiles may my keys select" and "which models may I
+/// call". So a tenant-scoped caller gets the *reachable* slice, defined by
+/// the same selector semantics the runtime itself uses at request time:
 ///
 /// * an EMPTY selector list is a wildcard -- `build_policy_engine` expands it
-///   to `None` (matches every subject) and `gateway_config_use` treats an
-///   empty `api_key_ids` as "usable by any key". A rule/profile whose
-///   selectors are all empty is genuinely global and is shown verbatim.
+///   to `None` (matches every subject), `gateway_config_use` treats an empty
+///   `api_key_ids` as "usable by any key", `skill_package_visible_to_auth`
+///   and `agent_upstream_visible_to_auth` both `return true` on an empty
+///   list, and `allows_optional_scope` (behind `can_tenant_use_model`)
+///   returns `true` for an empty allow-list. An entry whose selectors are all
+///   empty is genuinely global and is shown verbatim.
 /// * a NON-EMPTY selector is an allow-list. It reaches the caller only if it
 ///   names something the caller owns; if it names only other tenants' ids the
 ///   entry is invisible, because it can never act on this caller.
@@ -1227,6 +1273,20 @@ impl ConfigCatalogScope {
         (!kept.is_empty()).then_some(kept)
     }
 
+    /// The organization arm of [`Self::narrow`]. An organization selector is
+    /// *rebuilt* from the caller's own tenant id rather than filtered, so no
+    /// value that was in the stored selector can survive into the response
+    /// even if the caller's id were to appear there in some other spelling.
+    fn narrow_organizations(selector: &[String], tenant_id: &str) -> Option<Vec<String>> {
+        if selector.is_empty() {
+            return Some(Vec::new());
+        }
+        selector
+            .iter()
+            .any(|id| id == tenant_id)
+            .then(|| vec![tenant_id.to_string()])
+    }
+
     /// The caller's view of one `[[policies]]` rule, or `None` if the rule
     /// cannot act on the caller. Visibility and redaction are decided
     /// together, in one place, so a call site cannot serialize the raw rule
@@ -1240,18 +1300,84 @@ impl ConfigCatalogScope {
         else {
             return Some(rule.clone());
         };
-        let organization_ids = if rule.organization_ids.is_empty() {
-            Vec::new()
-        } else if rule.organization_ids.iter().any(|id| id == tenant_id) {
-            vec![tenant_id.clone()]
-        } else {
-            return None;
-        };
         Some(PolicyRule {
-            organization_ids,
+            organization_ids: Self::narrow_organizations(&rule.organization_ids, tenant_id)?,
             project_ids: Self::narrow(&rule.project_ids, project_ids)?,
             api_key_ids: Self::narrow(&rule.api_key_ids, api_key_ids)?,
             ..rule.clone()
+        })
+    }
+
+    /// The caller's view of one `[[models]]` entry, or `None` if the model is
+    /// invisible to this tenant.
+    ///
+    /// `Model` carries `visible_organization_ids`/`visible_project_ids`, and
+    /// the runtime reads them through `ModelVisibility::allows` ->
+    /// `allows_optional_scope`: empty is a wildcard, non-empty is an
+    /// allow-list, and the two are ANDed -- the same shape as `PolicyRule`,
+    /// so the same two narrowings apply. `GET /v1/models` already filters on
+    /// exactly this via `can_tenant_use_model`; `GET /admin/v1/models` was
+    /// the surface that did not, and it additionally rendered the two id
+    /// lists themselves, which the data-plane listing never does.
+    pub(super) fn visible_model(&self, model: &Model) -> Option<Model> {
+        let Self::Tenant {
+            tenant_id,
+            project_ids,
+            ..
+        } = self
+        else {
+            return Some(model.clone());
+        };
+        Some(Model {
+            visible_organization_ids: Self::narrow_organizations(
+                &model.visible_organization_ids,
+                tenant_id,
+            )?,
+            visible_project_ids: Self::narrow(&model.visible_project_ids, project_ids)?,
+            ..model.clone()
+        })
+    }
+
+    /// The caller's view of one `[[skill_packages]]` entry, or `None` if none
+    /// of the caller's keys may load it -- the admin-read counterpart of
+    /// `skill_package_visible_to_auth`, which the data-plane discovery path
+    /// already applies and the admin read did not.
+    ///
+    /// The data-plane predicate also hides disabled packages; this one does
+    /// not, because `enabled` is an operator-authored flag on a package the
+    /// caller can already see and the admin console needs to render disabled
+    /// entries. Only the *selector* is a cross-tenant identifier.
+    pub(super) fn visible_skill_package(&self, package: &SkillPackage) -> Option<SkillPackage> {
+        let Self::Tenant { api_key_ids, .. } = self else {
+            return Some(package.clone());
+        };
+        Some(SkillPackage {
+            api_key_ids: Self::narrow(&package.api_key_ids, api_key_ids)?,
+            ..package.clone()
+        })
+    }
+
+    /// The caller's view of one `[[agent_upstreams]]` entry, or `None` if
+    /// none of the caller's keys may reach it.
+    ///
+    /// NOTE the field name is a misnomer: `AgentUpstreamConfig::tenant_ids`
+    /// is matched by `agent_upstream_visible_to_auth` against
+    /// `AuthContext::api_key_id`, i.e. it is an **api-key** allow-list, not
+    /// an organization one. Narrowing it against `api_key_ids` is therefore
+    /// what keeps this consistent with the runtime; narrowing it against the
+    /// tenant id -- which the name invites -- would hide every upstream from
+    /// every caller. The data-plane paths (`/v1/agents`, agent invoke) call
+    /// that predicate already; the admin read did not.
+    pub(super) fn visible_agent_upstream(
+        &self,
+        upstream: &AgentUpstreamConfig,
+    ) -> Option<AgentUpstreamConfig> {
+        let Self::Tenant { api_key_ids, .. } = self else {
+            return Some(upstream.clone());
+        };
+        Some(AgentUpstreamConfig {
+            tenant_ids: Self::narrow(&upstream.tenant_ids, api_key_ids)?,
+            ..upstream.clone()
         })
     }
 

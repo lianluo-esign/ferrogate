@@ -775,7 +775,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List configured logical models. */
+        /**
+         * List configured logical models.
+         * @description Lists the logical models visible to the caller. Scoped to the caller (issue #535): a platform-operator key receives every model verbatim; a tenant-scoped admin.read key receives only the models its tenant may actually call, matching the visibility gate GET /v1/models and the invocation path already apply (can_tenant_use_model). An empty visible_organization_ids/visible_project_ids is a wildcard, so an unrestricted model is returned unchanged; a non-empty list is an allow-list, so the model is hidden unless it names the caller's organization or one of its projects, and the two lists are then rendered with only the caller's own ids. The lists themselves are other tenants' identifiers, which is why they are narrowed rather than merely filtered on.
+         */
         get: operations["listAdminModels"];
         put?: never;
         post?: never;
@@ -1442,7 +1445,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List registered agent upstreams. */
+        /**
+         * List registered agent upstreams.
+         * @description Lists the agent upstreams visible to the caller. Scoped to the caller (issue #535): a platform-operator key receives every upstream verbatim; a tenant-scoped admin.read key receives only the upstreams one of its own api keys may reach, matching the gate the data-plane paths (GET /v1/agents and agent invoke) already apply. Note tenant_ids is matched against the caller's API KEY id, not its organization id: an empty list is a wildcard (any key may reach the upstream) and a non-empty list is an api-key allow-list, rendered with only the caller's own key ids.
+         */
         get: operations["listAdminAgentUpstreams"];
         put?: never;
         /** Register an agent upstream. */
@@ -1460,7 +1466,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get one registered agent upstream. */
+        /**
+         * Get one registered agent upstream.
+         * @description Returns one agent upstream, scoped exactly as GET /admin/v1/agent-upstreams is (issue #535), with tenant_ids rendered as only the caller's own api-key ids. A tenant-scoped admin.read key asking for an upstream none of its keys may reach receives 403 tenant_scope_denied -- the identical answer it receives for an id that does not exist, so this endpoint cannot be walked as an existence oracle to rebuild the list. A platform-operator key still receives 404 agent_upstream_not_found for a genuinely absent id.
+         */
         get: operations["getAdminAgentUpstream"];
         /** Replace an agent upstream. */
         put: operations["putAdminAgentUpstream"];
@@ -1497,7 +1506,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List registered skill packages. */
+        /**
+         * List registered skill packages.
+         * @description Lists the skill packages visible to the caller. Scoped to the caller (issue #535): a platform-operator key receives every package verbatim; a tenant-scoped admin.read key receives only the packages one of its own api keys may load -- those whose api_key_ids is empty (loadable by any key, exactly as agent-facing discovery treats it) or names a key the caller owns -- and api_key_ids is rendered with only the caller's own key ids. Unlike agent-facing discovery this listing still includes disabled packages, because enabled is an operator-authored flag rather than a cross-tenant identifier.
+         */
         get: operations["listAdminSkillPackages"];
         put?: never;
         /** Register a skill package. */
@@ -1515,7 +1527,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get one registered skill package. */
+        /**
+         * Get one registered skill package.
+         * @description Returns one skill package, scoped exactly as GET /admin/v1/skill-packages is (issue #535), with api_key_ids rendered as only the caller's own key ids. A tenant-scoped admin.read key asking for a package none of its keys may load receives 403 tenant_scope_denied -- the identical answer it receives for an id that does not exist. A platform-operator key still receives 404 skill_package_not_found for a genuinely absent id.
+         */
         get: operations["getAdminSkillPackage"];
         /** Replace a skill package. */
         put: operations["putAdminSkillPackage"];
