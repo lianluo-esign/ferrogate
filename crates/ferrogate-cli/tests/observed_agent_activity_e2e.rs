@@ -119,6 +119,19 @@ fn unattributed_virtual_key_activity_surfaces_as_tenant_scoped_unknown_running()
         "all three tenant-A requests coalesce into one row; the spoofed run id does not attribute the traffic away from Unknown: {row_a}"
     );
     assert_eq!(evidence["within_running_window"], true, "{row_a}");
+    // #494: on a healthy read the feed is explicitly `available` and the list
+    // says so too, so the operator never has to infer whether the answer was
+    // decidable.
+    assert_eq!(evidence["presence_feed_status"], "available", "{row_a}");
+    assert!(
+        evidence["presence_unavailable_reason"].is_null(),
+        "a healthy read names no condition: {row_a}"
+    );
+    assert_eq!(all["presence_feed"]["status"], "available", "{all}");
+    assert_eq!(
+        all["presence_feed"]["rows_may_be_incomplete"], false,
+        "a healthy read is complete: {all}"
+    );
 
     // --- Usage evidence folds when settled billing/metering is available;
     //     when present it must be real (never invented). Metering settlement is

@@ -3074,7 +3074,7 @@ export interface paths {
         };
         /**
          * List tenant-scoped Unknown (unattributed virtual-API-key) agent activity.
-         * @description Presents traffic authenticated by a durable virtual API key that carries no verified managed-worker session, self-hosted worker/run, or agent-run identity as a third presentation/source category (source=virtual_api_key, identity_status=unattributed, display_name=Unknown). It is NOT a WorkerType and NOT a persistent agent entity: the stable identity is the observed key activity, and it never claims how many real agents share the key. status=running is derived from a recent-activity window (running_ttl_seconds) over already-recorded evidence; expiry reports inactive without fabricating a stop event.
+         * @description Presents traffic authenticated by a durable virtual API key that carries no verified managed-worker session, self-hosted worker/run, or agent-run identity as a third presentation/source category (source=virtual_api_key, identity_status=unattributed, display_name=Unknown). It is NOT a WorkerType and NOT a persistent agent entity: the stable identity is the observed key activity, and it never claims how many real agents share the key. status=running is derived from a recent-activity window (running_ttl_seconds) over already-recorded evidence; expiry reports inactive without fabricating a stop event. When the durable presence read fails (#494) the affected rows report status=unknown with status_basis=presence_feed_unavailable and the list carries presence_feed.rows_may_be_incomplete=true; a read error is never rendered as a confident not-running.
          */
         get: operations["listAdminObservedAgentActivity"];
         put?: never;
@@ -6569,6 +6569,7 @@ export interface components {
             total: number;
             offset: number;
             limit: number;
+            presence_feed: components["schemas"]["AdminObservedAgentPresenceFeed"];
         };
         /** @description One tenant/key-scoped Unknown activity row observed through a durable virtual API key. */
         AdminObservedAgentActivity: {
@@ -6580,10 +6581,16 @@ export interface components {
             identity_status: "unattributed";
             /** @constant */
             display_name: "Unknown";
-            /** @enum {string} */
-            status: "running" | "inactive";
-            /** @constant */
-            status_basis: "recent_api_key_activity";
+            /**
+             * @description running | inactive | unknown. unknown (#494) is emitted when the durable presence feed did not answer and the request-log evidence alone cannot decide; it is NEVER collapsed into inactive, because an operator who reads inactive for a process that is in fact running may restart it.
+             * @enum {string}
+             */
+            status: "running" | "inactive" | "unknown";
+            /**
+             * @description Which question the status answers: recent_api_key_activity (the evidence decided it) or presence_feed_unavailable (the durable presence read failed, so it could not be decided).
+             * @enum {string}
+             */
+            status_basis: "recent_api_key_activity" | "presence_feed_unavailable";
             tenant_id: string;
             project_id?: string;
             workspace_id?: string;
@@ -6591,6 +6598,7 @@ export interface components {
             /** @description Redacted operator hint (the virtual key's name) the tenant may already view. Never the inferred agent name. */
             credential_name?: string;
             first_seen_at_unix: number;
+            /** @description Freshest recency actually observed. A LOWER BOUND when evidence.presence_feed_status is unavailable: the unread presence feed could only ever have reported something fresher. */
             last_seen_at_unix: number;
             running_ttl_seconds: number;
             evidence: components["schemas"]["AdminObservedAgentActivityEvidence"];
@@ -6600,11 +6608,20 @@ export interface components {
             /** @constant */
             evidence_source: "request_logs";
             request_count: number;
+            /** @description Age of last_seen_at_unix. An UPPER BOUND when presence_feed_status is unavailable. */
             seconds_since_last_seen: number;
             running_ttl_seconds: number;
-            within_running_window: boolean;
-            /** @description Whether the durable observed-agent presence store contributed the recency used for the running decision (its last-seen was at least as fresh as the request-log evidence). */
-            durable_presence_backed: boolean;
+            /** @description null (#494) when the presence feed did not answer and the request-log evidence alone is outside the window - the one case where the missing feed is exactly the signal that could have flipped the answer. */
+            within_running_window: boolean | null;
+            /** @description Whether the durable observed-agent presence store contributed the recency used for the running decision (its last-seen was at least as fresh as the request-log evidence). null (#494) when the presence read failed - false would claim the store was consulted and lost. */
+            durable_presence_backed: boolean | null;
+            /**
+             * @description Whether the durable presence read succeeded for this derivation pass.
+             * @enum {string}
+             */
+            presence_feed_status: "available" | "unavailable";
+            /** @description The named storage condition when the presence read failed; null when it succeeded. Always serialized, so an unknown status is never unexplained. */
+            presence_unavailable_reason: string | null;
             prompt_tokens?: number;
             completion_tokens?: number;
             total_tokens?: number;
@@ -7088,6 +7105,15 @@ export interface components {
             limit: number;
             /** @description Opaque cursor to pass back as ?cursor= for the next page. Null at the definitive end of the listing. */
             next_cursor?: string | null;
+        };
+        /** @description Availability of the durable observed-agent presence feed for this read (#494). An EMPTY data array is itself an answer, and a failed presence read makes that answer unsound; rows_may_be_incomplete says so instead of letting an empty list read as 'nothing is running'. */
+        AdminObservedAgentPresenceFeed: {
+            /** @enum {string} */
+            status: "available" | "unavailable";
+            /** @description The storage diagnostic when status is unavailable; null otherwise. Rendered as an explicit null so the field's presence is not itself a signal. */
+            unavailable_reason: string | null;
+            /** @description true when the feed did not answer, so absent or inactive rows are NOT evidence that nothing is running. */
+            rows_may_be_incomplete: boolean;
         };
     };
     responses: {

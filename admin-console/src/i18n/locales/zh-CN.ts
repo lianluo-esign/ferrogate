@@ -1219,6 +1219,12 @@ export const zhCN = {
   "page.agentRuns.unattributed.status.runningBasis": "依据最近 {ttl} 秒内的活动推导得出",
   "page.agentRuns.unattributed.status.noStopEvent":
     "最近活动时间窗已过期——未记录到停止事件，因此没有结束时间",
+  "page.agentRuns.unattributed.status.unknown": "未知",
+  "page.agentRuns.unattributed.status.unknownBasis":
+    "在场信号源不可用（{reason}）——该活动可能仍在运行；不会报告为非活跃",
+  "page.agentRuns.unattributed.status.unknownReasonFallback": "读取失败",
+  "page.agentRuns.unattributed.presenceFeedDegraded":
+    "无法读取持久化在场信号源（{reason}）。下方行可能不完整或无法判定——空结果或非活跃并不能证明没有任何智能体在运行。",
   "page.agentRuns.unattributed.usageUnavailable": "该活动没有可用的用量证据——未知，而非 0",
   "page.agentRuns.unattributed.evidence.show": "为什么？",
   "page.agentRuns.unattributed.evidence.hide": "收起",
@@ -1230,6 +1236,10 @@ export const zhCN = {
   "page.agentRuns.unattributed.evidence.runningTtl": "运行时间窗（秒）",
   "page.agentRuns.unattributed.evidence.withinWindow": "处于运行时间窗内",
   "page.agentRuns.unattributed.evidence.durablePresence": "由持久化在场记录支撑",
+  "page.agentRuns.unattributed.evidence.presenceFeed": "在场信号源",
+  "page.agentRuns.unattributed.evidence.presenceFeedUp": "可用",
+  "page.agentRuns.unattributed.evidence.presenceFeedDown": "不可用（{reason}）",
+  "page.agentRuns.unattributed.evidence.unknownValue": "未知",
   "page.agentRuns.unattributed.evidence.usageAvailable": "用量证据可用",
   "page.agentRuns.unattributed.evidence.reason": "原因",
 

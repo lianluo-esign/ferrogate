@@ -14,7 +14,7 @@ use ferrogate_storage::StoredRequestLog;
 
 use super::{
     derive_observed_agent_activity, resolve_observed_activity_running_ttl_seconds,
-    ObservedActivityInputs, UsageContribution,
+    ObservedActivityInputs, ObservedPresenceFeed, UsageContribution,
 };
 
 /// The default running-presence TTL (seconds) the issue's view contract
@@ -82,7 +82,7 @@ fn empty_inputs<'a>(
         attributed_run_ids: attributed,
         usage_by_request_id: usage,
         credential_names: names,
-        presence_last_seen: &EMPTY_PRESENCE,
+        presence: ObservedPresenceFeed::Available(&EMPTY_PRESENCE),
         tenant_scope: None,
         now_unix,
         running_ttl_seconds: RUNNING_TTL_SECONDS,
@@ -115,7 +115,7 @@ fn unattributed_key_with_recent_activity_surfaces_one_running_unknown_row() {
     // now is 40s after the last request -> within the 60s TTL.
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_070);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(
         rows.len(),
         1,
@@ -139,7 +139,7 @@ fn unattributed_key_with_recent_activity_surfaces_one_running_unknown_row() {
     // Evidence explains the decision and counts both requests.
     assert_eq!(row.evidence.request_count, 2);
     assert_eq!(row.evidence.seconds_since_last_seen, 40);
-    assert!(row.evidence.within_running_window);
+    assert_eq!(row.evidence.within_running_window, Some(true));
     assert!(!row.evidence.usage_evidence_available);
     assert!(row.evidence.total_tokens.is_none());
 }
@@ -160,10 +160,10 @@ fn key_without_recent_activity_is_reported_inactive_not_running() {
     // now is 61s after last request -> just past the 60s TTL boundary.
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_071);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "inactive");
-    assert!(!rows[0].evidence.within_running_window);
+    assert_eq!(rows[0].evidence.within_running_window, Some(false));
     assert_eq!(rows[0].evidence.seconds_since_last_seen, 61);
 }
 
@@ -182,7 +182,7 @@ fn running_ttl_boundary_is_inclusive() {
     let names = HashMap::new();
     // Exactly 60s since last seen -> still running (<= TTL).
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_070);
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows[0].status, "running");
     assert_eq!(rows[0].evidence.seconds_since_last_seen, 60);
 }
@@ -215,7 +215,7 @@ fn managed_or_self_hosted_verified_identity_is_not_reclassified_as_unknown() {
     let names = HashMap::new();
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_050);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows.len(), 1);
     // Only the direct request is counted; the verified-run request is excluded.
     assert_eq!(rows[0].evidence.request_count, 1);
@@ -238,7 +238,7 @@ fn fully_attributed_key_produces_no_unknown_row() {
     let names = HashMap::new();
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_050);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert!(rows.is_empty());
 }
 
@@ -258,7 +258,7 @@ fn spoofed_agent_run_id_that_matches_no_verified_run_stays_unknown() {
     let names = HashMap::new();
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_020);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "running");
     assert_eq!(rows[0].identity_status, "unattributed");
@@ -290,7 +290,7 @@ fn tenant_scope_isolates_other_tenants() {
     let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_020);
     inputs.tenant_scope = Some("tenant-a");
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].tenant_id, "tenant-a");
     assert_eq!(rows[0].api_key_id, "key-a");
@@ -309,7 +309,7 @@ fn requests_without_durable_key_or_tenant_are_out_of_scope() {
     let names = HashMap::new();
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_020);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert!(rows.is_empty());
 }
 
@@ -349,7 +349,7 @@ fn usage_and_credential_evidence_are_folded_when_available() {
     names.insert("key-1".to_string(), "prod-agent-key".to_string());
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_050);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     assert_eq!(row.credential_name.as_deref(), Some("prod-agent-key"));
@@ -375,7 +375,7 @@ fn missing_usage_evidence_is_unavailable_never_invented() {
     let names = HashMap::new();
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_020);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert!(!rows[0].evidence.usage_evidence_available);
     assert!(rows[0].evidence.total_tokens.is_none());
     assert!(rows[0].evidence.cost_usd.is_none());
@@ -396,7 +396,7 @@ fn serialized_row_carries_exact_contract_strings() {
     let names = HashMap::new();
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_020);
 
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     let json = serde_json::to_value(&rows[0]).unwrap();
     assert_eq!(json["id"], "observed:tenant-a:key-1");
     assert_eq!(json["source"], "virtual_api_key");
@@ -433,13 +433,13 @@ fn configured_ttl_flips_running_inactive_at_its_own_boundary() {
     let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_110);
 
     inputs.running_ttl_seconds = 120;
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows[0].status, "running", "100s <= 120s window -> running");
     assert_eq!(rows[0].running_ttl_seconds, 120);
     assert_eq!(rows[0].evidence.running_ttl_seconds, 120);
 
     inputs.running_ttl_seconds = 30;
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows[0].status, "inactive", "100s > 30s window -> inactive");
     assert_eq!(rows[0].running_ttl_seconds, 30);
 }
@@ -463,24 +463,149 @@ fn durable_presence_refines_recency_and_can_flip_a_key_to_running() {
 
     // Without presence: 190s since last seen, TTL 60 -> inactive.
     let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_200);
-    let rows = derive_observed_agent_activity(&inputs);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows[0].status, "inactive");
-    assert!(!rows[0].evidence.durable_presence_backed);
+    assert_eq!(rows[0].evidence.durable_presence_backed, Some(false));
 
     // With a durable presence touch at 1_180: 20s since last seen -> running,
     // and the row reports the durable last-seen + flags the presence backing.
     let mut presence = HashMap::new();
     presence.insert(("tenant-a".to_string(), "key-1".to_string()), 1_180u64);
     let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_200);
-    inputs.presence_last_seen = &presence;
-    let rows = derive_observed_agent_activity(&inputs);
+    inputs.presence = ObservedPresenceFeed::Available(&presence);
+    let rows = derive_observed_agent_activity(&inputs).rows;
     assert_eq!(rows[0].status, "running");
     assert_eq!(
         rows[0].last_seen_at_unix, 1_180,
         "durable last-seen presented"
     );
     assert_eq!(rows[0].evidence.seconds_since_last_seen, 20);
-    assert!(rows[0].evidence.durable_presence_backed);
+    assert_eq!(rows[0].evidence.durable_presence_backed, Some(true));
+}
+
+/// #494: the SAME stale-request-log input that reads `inactive` with a working
+/// presence feed must read `unknown` when the feed did not answer. The two
+/// halves share every other input, so the only thing that can move the status
+/// is the feed's availability.
+#[test]
+fn unreadable_presence_feed_reports_unknown_not_inactive() {
+    let logs = vec![log(
+        "r1",
+        Some("tenant-a"),
+        Some("key-1"),
+        None,
+        Some(1_000),
+        Some(1_010),
+    )];
+    let attributed = HashSet::new();
+    let usage = HashMap::new();
+    let names = HashMap::new();
+
+    // Feed answered and holds no row for the key: 190s stale is a CONFIDENT
+    // negative.
+    let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_200);
+    let rows = derive_observed_agent_activity(&inputs).rows;
+    assert_eq!(rows[0].status, "inactive");
+    assert_eq!(rows[0].status_basis, "recent_api_key_activity");
+    assert_eq!(rows[0].evidence.presence_feed_status, "available");
+    assert_eq!(rows[0].evidence.presence_unavailable_reason, None);
+
+    // Feed did NOT answer: the identical evidence is no longer decidable.
+    let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_200);
+    inputs.presence = ObservedPresenceFeed::Unavailable("d1 proxy: 503");
+    let report = derive_observed_agent_activity(&inputs);
+    let row = &report.rows[0];
+    assert_eq!(row.status, "unknown", "an unread feed is not a negative");
+    assert_eq!(row.status_basis, "presence_feed_unavailable");
+    assert_eq!(
+        row.evidence.within_running_window, None,
+        "the window question is not answerable without the feed"
+    );
+    assert_eq!(
+        row.evidence.durable_presence_backed, None,
+        "`false` would claim the store was consulted"
+    );
+    assert_eq!(row.evidence.presence_feed_status, "unavailable");
+    assert_eq!(
+        row.evidence.presence_unavailable_reason.as_deref(),
+        Some("d1 proxy: 503"),
+        "the condition is named, not collapsed into a generic negative"
+    );
+    assert!(row.evidence.reason.contains("d1 proxy: 503"));
+
+    // And the read as a whole is flagged, so an empty page cannot read as
+    // "nothing is running".
+    assert_eq!(report.presence_feed.status, "unavailable");
+    assert!(report.presence_feed.rows_may_be_incomplete);
+    assert_eq!(
+        report.presence_feed.unavailable_reason.as_deref(),
+        Some("d1 proxy: 503")
+    );
+}
+
+/// #494 asymmetry: an unread feed can only ever have moved recency FORWARD, so
+/// evidence already inside the window stays a sound `running` — the degradation
+/// is confined to the case the missing signal could actually have flipped.
+#[test]
+fn unreadable_presence_feed_keeps_a_fresh_row_running() {
+    let logs = vec![log(
+        "r1",
+        Some("tenant-a"),
+        Some("key-1"),
+        None,
+        Some(1_000),
+        Some(1_010),
+    )];
+    let attributed = HashSet::new();
+    let usage = HashMap::new();
+    let names = HashMap::new();
+
+    let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_040);
+    inputs.presence = ObservedPresenceFeed::Unavailable("d1 proxy: 503");
+    let report = derive_observed_agent_activity(&inputs);
+    let row = &report.rows[0];
+    assert_eq!(row.status, "running");
+    assert_eq!(row.status_basis, "recent_api_key_activity");
+    assert_eq!(row.evidence.within_running_window, Some(true));
+    // Still honest about WHY the presence column is blank.
+    assert_eq!(row.evidence.durable_presence_backed, None);
+    assert_eq!(row.evidence.presence_feed_status, "unavailable");
+    assert!(report.presence_feed.rows_may_be_incomplete);
+}
+
+/// #494: `null` is the rendering for "we could not tell" — the field must be
+/// present and null, never omitted, so a consumer cannot mistake absence for a
+/// value it failed to read.
+#[test]
+fn serialized_unknown_row_renders_nulls_not_omissions() {
+    let logs = vec![log(
+        "r1",
+        Some("tenant-a"),
+        Some("key-1"),
+        None,
+        Some(1_000),
+        Some(1_010),
+    )];
+    let attributed = HashSet::new();
+    let usage = HashMap::new();
+    let names = HashMap::new();
+    let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_200);
+    inputs.presence = ObservedPresenceFeed::Unavailable("d1 proxy: 503");
+
+    let rows = derive_observed_agent_activity(&inputs).rows;
+    let json = serde_json::to_value(&rows[0]).unwrap();
+    assert_eq!(json["status"], "unknown");
+    assert_eq!(json["status_basis"], "presence_feed_unavailable");
+    assert!(json["evidence"]["within_running_window"].is_null());
+    assert!(json["evidence"]["durable_presence_backed"].is_null());
+    assert_eq!(json["evidence"]["presence_feed_status"], "unavailable");
+    assert_eq!(
+        json["evidence"]["presence_unavailable_reason"],
+        "d1 proxy: 503"
+    );
+    // Present-and-null, not absent.
+    assert!(json["evidence"].get("within_running_window").is_some());
+    assert!(json["evidence"].get("durable_presence_backed").is_some());
 }
 
 #[test]

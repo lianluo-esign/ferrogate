@@ -16,17 +16,17 @@ use std::collections::{HashMap, HashSet};
 use super::*;
 use crate::gateway::observed_agent_activity::{
     derive_observed_agent_activity, resolve_observed_activity_running_ttl_seconds,
-    ObservedActivityInputs, ObservedAgentActivity, UsageContribution,
+    ObservedActivityInputs, ObservedActivityReport, ObservedPresenceFeed, UsageContribution,
     OBSERVED_ACTIVITY_RUNNING_TTL_ENV,
 };
 
 impl AppState {
-    /// Build the tenant-scoped observed-unattributed-activity rows. `None`
+    /// Build the tenant-scoped observed-unattributed-activity report. `None`
     /// tenant_scope is the platform-operator cross-tenant view.
     pub(crate) fn observed_agent_activity(
         &self,
         tenant_scope: Option<&str>,
-    ) -> Vec<ObservedAgentActivity> {
+    ) -> ObservedActivityReport {
         let now_unix = now_unix_seconds().unwrap_or(0);
 
         // Operator-configurable running-presence TTL (#357): typed config value
@@ -48,20 +48,41 @@ impl AppState {
         // ([now - ttl, now]); older rows can never flip a group to running.
         // Keyed by (tenant_id, api_key_id) -> MAX last-seen so the derivation
         // uses the fresher of this and the request-log evidence.
+        //
+        // #494: the read is FALLIBLE and its failure is NOT an empty result.
+        // Since #460 this is a real proxy-Worker round trip on D1, so a
+        // network blip / throttle / cold Worker is expected occasionally; the
+        // old `.unwrap_or_default()` turned that into "no presence rows",
+        // which the derivation then rendered as a confident "not running".
         let presence_window_start = now_unix.saturating_sub(running_ttl_seconds) as i64;
         let mut presence_last_seen: HashMap<(String, String), u64> = HashMap::new();
-        for presence in crate::gateway::block_on_sync_bridge(
+        let presence_error = match crate::gateway::block_on_sync_bridge(
             self.repositories
                 .list_observed_agent_presence_since(tenant_scope, presence_window_start),
-        )
-        .unwrap_or_default()
-        {
-            let last_seen = presence.last_seen_at_unix.max(0) as u64;
-            presence_last_seen
-                .entry((presence.tenant_id, presence.api_key_id))
-                .and_modify(|existing| *existing = (*existing).max(last_seen))
-                .or_insert(last_seen);
-        }
+        ) {
+            Ok(rows) => {
+                for presence in rows {
+                    let last_seen = presence.last_seen_at_unix.max(0) as u64;
+                    presence_last_seen
+                        .entry((presence.tenant_id, presence.api_key_id))
+                        .and_modify(|existing| *existing = (*existing).max(last_seen))
+                        .or_insert(last_seen);
+                }
+                None
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "observed-agent presence read failed; reporting affected rows as unknown \
+                     rather than inactive",
+                );
+                Some(error.to_string())
+            }
+        };
+        let presence = match presence_error.as_deref() {
+            Some(reason) => ObservedPresenceFeed::Unavailable(reason),
+            None => ObservedPresenceFeed::Available(&presence_last_seen),
+        };
 
         // Attribution exclusion set: run ids owned by a VERIFIED execution
         // identity. A request whose agent_run_id is here keeps that identity
@@ -133,7 +154,7 @@ impl AppState {
             attributed_run_ids: &attributed_run_ids,
             usage_by_request_id: &usage_by_request_id,
             credential_names: &credential_names,
-            presence_last_seen: &presence_last_seen,
+            presence,
             tenant_scope,
             now_unix,
             running_ttl_seconds,

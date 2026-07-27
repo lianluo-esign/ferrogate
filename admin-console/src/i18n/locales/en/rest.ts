@@ -1234,6 +1234,12 @@ export const enRest = {
     "Derived from activity within the last {ttl}s",
   "page.agentRuns.unattributed.status.noStopEvent":
     "Recency window expired — no stop event was recorded, so there is no end time",
+  "page.agentRuns.unattributed.status.unknown": "Unknown",
+  "page.agentRuns.unattributed.status.unknownBasis":
+    "Presence feed unavailable ({reason}) — this activity may still be running; it is NOT reported inactive",
+  "page.agentRuns.unattributed.status.unknownReasonFallback": "read failed",
+  "page.agentRuns.unattributed.presenceFeedDegraded":
+    "The durable presence feed could not be read ({reason}). Rows below may be incomplete or undecided — an empty or inactive result is not evidence that nothing is running.",
   "page.agentRuns.unattributed.usageUnavailable":
     "Usage evidence unavailable for this activity — unknown, not zero",
   "page.agentRuns.unattributed.evidence.show": "Why?",
@@ -1246,6 +1252,10 @@ export const enRest = {
   "page.agentRuns.unattributed.evidence.runningTtl": "Running window (seconds)",
   "page.agentRuns.unattributed.evidence.withinWindow": "Within running window",
   "page.agentRuns.unattributed.evidence.durablePresence": "Durable presence backed",
+  "page.agentRuns.unattributed.evidence.presenceFeed": "Presence feed",
+  "page.agentRuns.unattributed.evidence.presenceFeedUp": "Available",
+  "page.agentRuns.unattributed.evidence.presenceFeedDown": "Unavailable ({reason})",
+  "page.agentRuns.unattributed.evidence.unknownValue": "Unknown",
   "page.agentRuns.unattributed.evidence.usageAvailable": "Usage evidence available",
   "page.agentRuns.unattributed.evidence.reason": "Reason",
 

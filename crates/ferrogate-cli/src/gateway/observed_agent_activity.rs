@@ -71,8 +71,19 @@ const OBSERVED_SOURCE_VIRTUAL_API_KEY: &str = "virtual_api_key";
 const OBSERVED_IDENTITY_STATUS_UNATTRIBUTED: &str = "unattributed";
 const OBSERVED_DISPLAY_NAME_UNKNOWN: &str = "Unknown";
 const OBSERVED_STATUS_BASIS: &str = "recent_api_key_activity";
+/// `status_basis` for a row whose status could NOT be decided because the
+/// durable presence feed did not answer (#494). Distinct from
+/// [`OBSERVED_STATUS_BASIS`] so a consumer can tell "we looked and it is not
+/// recent" from "we could not look".
+const OBSERVED_STATUS_BASIS_PRESENCE_UNAVAILABLE: &str = "presence_feed_unavailable";
 const OBSERVED_STATUS_RUNNING: &str = "running";
 const OBSERVED_STATUS_INACTIVE: &str = "inactive";
+/// Third, honest status (#494): the recency evidence available is not enough to
+/// decide. NEVER collapse this into `inactive` -- an operator who reads
+/// "inactive" for a process that is in fact running may restart it.
+const OBSERVED_STATUS_UNKNOWN: &str = "unknown";
+const OBSERVED_PRESENCE_FEED_AVAILABLE: &str = "available";
+const OBSERVED_PRESENCE_FEED_UNAVAILABLE: &str = "unavailable";
 const OBSERVED_EVIDENCE_SOURCE: &str = "request_logs";
 
 /// One observed-unattributed-activity row. This is a presentation view, not a
@@ -85,6 +96,9 @@ pub(crate) struct ObservedAgentActivity {
     pub(crate) source: &'static str,
     pub(crate) identity_status: &'static str,
     pub(crate) display_name: &'static str,
+    /// `running` | `inactive` | `unknown`. `unknown` (#494) is a real answer,
+    /// not a fallback: it is emitted when the durable presence feed failed to
+    /// answer and the request-log evidence alone cannot decide.
     pub(crate) status: &'static str,
     pub(crate) status_basis: &'static str,
     pub(crate) tenant_id: String,
@@ -99,11 +113,107 @@ pub(crate) struct ObservedAgentActivity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) credential_name: Option<String>,
     pub(crate) first_seen_at_unix: u64,
+    /// Freshest recency actually observed. When
+    /// `evidence.presence_feed_status == "unavailable"` this is a LOWER BOUND:
+    /// the durable presence feed could only ever have reported something
+    /// fresher, so the true last-seen may be later than this value.
     pub(crate) last_seen_at_unix: u64,
     pub(crate) running_ttl_seconds: u64,
     /// Inspectable evidence for the operational decision (AGENTS.md: do not
     /// hide the "why is this Unknown running" answer).
     pub(crate) evidence: ObservedAgentActivityEvidence,
+}
+
+/// Availability of the durable observed-agent presence feed for one derivation
+/// pass (#494).
+///
+/// A failed presence read used to default to an empty map, which the derivation
+/// could not distinguish from "the store answered and nothing is present" -- so
+/// a transient D1/proxy-Worker failure rendered running agents as a confident
+/// `inactive`. Making the feed a two-state value forces every caller to say
+/// which of the two it has.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ObservedPresenceFeed<'a> {
+    /// The presence store answered. The map is authoritative for the window:
+    /// a key absent from it genuinely has no presence row in `[now - ttl, now]`.
+    Available(&'a HashMap<(String, String), u64>),
+    /// The presence read FAILED. Nothing about durable presence is known; the
+    /// storage diagnostic is carried so the surface can name the condition
+    /// rather than collapse it into a generic negative.
+    Unavailable(&'a str),
+}
+
+impl<'a> ObservedPresenceFeed<'a> {
+    /// The durable last-seen for one group. `None` means the feed did not
+    /// answer (unknown), `Some(0)` means the feed answered and has no row.
+    fn last_seen_for(&self, group: &(String, String)) -> Option<u64> {
+        match self {
+            Self::Available(map) => Some(map.get(group).copied().unwrap_or(0)),
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    pub(crate) fn feed_status(&self) -> &'static str {
+        match self {
+            Self::Available(_) => OBSERVED_PRESENCE_FEED_AVAILABLE,
+            Self::Unavailable(_) => OBSERVED_PRESENCE_FEED_UNAVAILABLE,
+        }
+    }
+
+    /// The named condition, or `None` when the feed answered.
+    pub(crate) fn unavailable_reason(&self) -> Option<&'a str> {
+        match self {
+            Self::Available(_) => None,
+            Self::Unavailable(reason) => Some(reason),
+        }
+    }
+}
+
+/// The observed-activity read as a whole (#494): the derived rows plus the
+/// availability of the presence feed they were derived from.
+///
+/// The feed status is reported at list level as well as per row because an
+/// EMPTY row set is itself an answer, and a failed presence read makes that
+/// answer unsound: `rows_may_be_incomplete` says so instead of letting an empty
+/// list read as "nothing is running".
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ObservedPresenceFeedStatus {
+    /// `available` | `unavailable`.
+    pub(crate) status: &'static str,
+    /// The storage diagnostic when `status == "unavailable"`; `null` otherwise.
+    /// Rendered as an explicit `null` (never omitted) so the field's presence
+    /// is not itself a signal.
+    pub(crate) unavailable_reason: Option<String>,
+    /// `true` when the feed did not answer, so absent/`inactive` rows are NOT
+    /// evidence that nothing is running.
+    pub(crate) rows_may_be_incomplete: bool,
+}
+
+impl ObservedPresenceFeedStatus {
+    fn from_feed(feed: ObservedPresenceFeed<'_>) -> Self {
+        Self {
+            status: feed.feed_status(),
+            unavailable_reason: feed.unavailable_reason().map(str::to_string),
+            rows_may_be_incomplete: feed.unavailable_reason().is_some(),
+        }
+    }
+}
+
+/// One observed-activity read: rows plus the presence-feed availability that
+/// qualifies them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ObservedActivityReport {
+    pub(crate) rows: Vec<ObservedAgentActivity>,
+    pub(crate) presence_feed: ObservedPresenceFeedStatus,
+}
+
+/// The `GET /admin/v1/observed-agent-activity` body: the standard paginated
+/// list, flattened, plus the `presence_feed` qualifier (#494).
+#[derive(Debug, Serialize)]
+struct ObservedAgentActivityListResponse {
+    #[serde(flatten)]
+    list: AdminList<ObservedAgentActivity>,
+    presence_feed: ObservedPresenceFeedStatus,
 }
 
 /// The evidence that justifies the row's `status`. Makes the recency decision
@@ -112,14 +222,28 @@ pub(crate) struct ObservedAgentActivity {
 pub(crate) struct ObservedAgentActivityEvidence {
     pub(crate) evidence_source: &'static str,
     pub(crate) request_count: u64,
+    /// Age of [`ObservedAgentActivity::last_seen_at_unix`]. An UPPER BOUND when
+    /// `presence_feed_status == "unavailable"` (the unread feed could only have
+    /// been fresher).
     pub(crate) seconds_since_last_seen: u64,
     pub(crate) running_ttl_seconds: u64,
-    pub(crate) within_running_window: bool,
+    /// `Some(true)`/`Some(false)` when the window question is decidable;
+    /// `null` (#494) when the presence feed did not answer and the request-log
+    /// evidence alone is outside the window -- the one case where the missing
+    /// feed is exactly the signal that could have flipped the answer.
+    pub(crate) within_running_window: Option<bool>,
     /// #357: whether the durable presence store contributed the recency used
     /// for the `running` decision (its last-seen was at least as fresh as the
     /// request-log evidence). Makes the "which signal decided running" answer
-    /// inspectable rather than an opaque merge.
-    pub(crate) durable_presence_backed: bool,
+    /// inspectable rather than an opaque merge. `null` (#494) when the presence
+    /// read failed -- `false` would claim the store was consulted and lost.
+    pub(crate) durable_presence_backed: Option<bool>,
+    /// `available` | `unavailable` (#494): whether the durable presence read
+    /// succeeded for this derivation pass.
+    pub(crate) presence_feed_status: &'static str,
+    /// The named storage condition when the presence read failed; `null` when
+    /// it succeeded. Always serialized so `unknown` is never unexplained.
+    pub(crate) presence_unavailable_reason: Option<String>,
     /// Token/cost activity for the SAME key+requests, folded from settled
     /// billing/metering evidence. `None`/`false` when no such evidence exists
     /// for the observed requests -- shown as unavailable, never invented.
@@ -167,7 +291,11 @@ pub(crate) struct ObservedActivityInputs<'a> {
     /// from `request_logs`/`usage_by_request_id`; presence only refines
     /// recency. A group with no presence row falls back to its request-log
     /// last-seen.
-    pub(crate) presence_last_seen: &'a HashMap<(String, String), u64>,
+    ///
+    /// #494: this is a two-state feed, not a map. An unreadable presence store
+    /// is [`ObservedPresenceFeed::Unavailable`], which the derivation reports
+    /// as `unknown` rather than silently behaving like an empty map.
+    pub(crate) presence: ObservedPresenceFeed<'a>,
     /// When `Some`, only this tenant's activity is considered (tenant-scoped
     /// caller). `None` is the platform operator's cross-tenant view.
     pub(crate) tenant_scope: Option<&'a str>,
@@ -193,9 +321,13 @@ struct ObservedActivityAccumulator {
 /// Derive the observed unattributed-activity rows from already-recorded
 /// evidence. Pure and deterministic: `now_unix` is injected so recency/TTL
 /// behavior is testable without sleeps.
+///
+/// Returns an [`ObservedActivityReport`] rather than a bare `Vec` (#494): the
+/// availability of the presence feed qualifies the row set as a whole, and an
+/// empty `Vec` alone cannot carry "we could not tell".
 pub(crate) fn derive_observed_agent_activity(
     inputs: &ObservedActivityInputs<'_>,
-) -> Vec<ObservedAgentActivity> {
+) -> ObservedActivityReport {
     // Keyed (tenant_id, api_key_id); BTreeMap gives a stable base order before
     // the final recency sort.
     let mut groups: BTreeMap<(String, String), ObservedActivityAccumulator> = BTreeMap::new();
@@ -279,33 +411,60 @@ pub(crate) fn derive_observed_agent_activity(
             // durable presence last-seen. Presence survives request-log
             // retention pruning and is a single-row upsert, so it is the
             // authoritative recency source when it is at least as fresh.
-            let presence_last_seen = inputs
-                .presence_last_seen
-                .get(&(tenant_id.clone(), api_key_id.clone()))
-                .copied()
-                .unwrap_or(0);
-            let durable_presence_backed = presence_last_seen >= acc.last_seen;
-            let effective_last_seen = acc.last_seen.max(presence_last_seen);
+            // #494: `None` here means the presence read FAILED, which is not
+            // the same as the store reporting no row (`Some(0)`).
+            let presence_last_seen =
+                inputs.presence.last_seen_for(&(tenant_id.clone(), api_key_id.clone()));
+            let durable_presence_backed = presence_last_seen.map(|seen| seen >= acc.last_seen);
+            let effective_last_seen = acc.last_seen.max(presence_last_seen.unwrap_or(0));
             let seconds_since_last_seen = inputs.now_unix.saturating_sub(effective_last_seen);
-            let within_running_window = seconds_since_last_seen <= inputs.running_ttl_seconds;
-            let status = if within_running_window {
-                OBSERVED_STATUS_RUNNING
-            } else {
-                OBSERVED_STATUS_INACTIVE
-            };
-            let reason = if within_running_window {
-                format!(
+            let observed_within_window = seconds_since_last_seen <= inputs.running_ttl_seconds;
+            // Asymmetry that makes an unreadable feed safe: presence can only
+            // ever move recency FORWARD, so evidence already inside the window
+            // stays a sound `running` even with the feed down. The negative is
+            // NOT sound -- the unread feed is exactly the signal that could
+            // have flipped it -- so it degrades to `unknown`, never `inactive`.
+            let (status, status_basis, within_running_window) =
+                match (observed_within_window, presence_last_seen.is_some()) {
+                    (true, _) => (
+                        OBSERVED_STATUS_RUNNING,
+                        OBSERVED_STATUS_BASIS,
+                        Some(true),
+                    ),
+                    (false, true) => (
+                        OBSERVED_STATUS_INACTIVE,
+                        OBSERVED_STATUS_BASIS,
+                        Some(false),
+                    ),
+                    (false, false) => (
+                        OBSERVED_STATUS_UNKNOWN,
+                        OBSERVED_STATUS_BASIS_PRESENCE_UNAVAILABLE,
+                        None,
+                    ),
+                };
+            let reason = match status {
+                OBSERVED_STATUS_RUNNING => format!(
                     "observed {} request(s) authenticated by this virtual API key with no verified \
                      managed/self-hosted/agent-run identity; last seen {}s ago is within the {}s \
                      running window",
                     acc.request_count, seconds_since_last_seen, inputs.running_ttl_seconds
-                )
-            } else {
-                format!(
+                ),
+                OBSERVED_STATUS_INACTIVE => format!(
                     "last observed {}s ago, beyond the {}s running window; reported inactive (no \
                      stop event is fabricated)",
                     seconds_since_last_seen, inputs.running_ttl_seconds
-                )
+                ),
+                _ => format!(
+                    "durable presence feed unavailable ({}); request-log evidence alone is {}s old, \
+                     beyond the {}s running window, and the unread feed could only have been \
+                     fresher -- reported unknown, NOT inactive",
+                    inputs
+                        .presence
+                        .unavailable_reason()
+                        .unwrap_or("read failed"),
+                    seconds_since_last_seen,
+                    inputs.running_ttl_seconds
+                ),
             };
             let credential_name = inputs.credential_names.get(&api_key_id).cloned();
             let evidence = ObservedAgentActivityEvidence {
@@ -315,6 +474,11 @@ pub(crate) fn derive_observed_agent_activity(
                 running_ttl_seconds: inputs.running_ttl_seconds,
                 within_running_window,
                 durable_presence_backed,
+                presence_feed_status: inputs.presence.feed_status(),
+                presence_unavailable_reason: inputs
+                    .presence
+                    .unavailable_reason()
+                    .map(str::to_string),
                 prompt_tokens: acc.usage_evidence.then_some(acc.prompt_tokens),
                 completion_tokens: acc.usage_evidence.then_some(acc.completion_tokens),
                 total_tokens: acc.usage_evidence.then_some(acc.total_tokens),
@@ -328,7 +492,7 @@ pub(crate) fn derive_observed_agent_activity(
                 identity_status: OBSERVED_IDENTITY_STATUS_UNATTRIBUTED,
                 display_name: OBSERVED_DISPLAY_NAME_UNKNOWN,
                 status,
-                status_basis: OBSERVED_STATUS_BASIS,
+                status_basis,
                 tenant_id,
                 project_id: acc.project_id,
                 workspace_id: acc.workspace_id,
@@ -349,7 +513,10 @@ pub(crate) fn derive_observed_agent_activity(
             .cmp(&left.last_seen_at_unix)
             .then_with(|| left.id.cmp(&right.id))
     });
-    rows
+    ObservedActivityReport {
+        rows,
+        presence_feed: ObservedPresenceFeedStatus::from_feed(inputs.presence),
+    }
 }
 
 impl FerroGateway {
@@ -383,15 +550,22 @@ impl FerroGateway {
                 // `tenant_filter()` is the classification, so a credential that
                 // merely omitted `organization_id` no longer lands in the
                 // unfiltered branch.
-                let rows = state.observed_agent_activity(auth.tenant_filter());
+                let report = state.observed_agent_activity(auth.tenant_filter());
                 let pagination = state.admin_pagination(query);
-                let total = rows.len();
-                let data = rows
+                let total = report.rows.len();
+                let data = report
+                    .rows
                     .into_iter()
                     .skip(pagination.offset)
                     .take(pagination.limit)
                     .collect();
-                let body = AdminList::paginated(data, total, pagination.offset, pagination.limit);
+                // #494: the list carries the presence-feed status alongside the
+                // rows, so an EMPTY page is never mistaken for "nothing is
+                // running" when the feed simply did not answer.
+                let body = ObservedAgentActivityListResponse {
+                    list: AdminList::paginated(data, total, pagination.offset, pagination.limit),
+                    presence_feed: report.presence_feed,
+                };
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {

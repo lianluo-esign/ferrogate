@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import AgentRunsPage, {
   type AgentRunSummary,
   type ObservedAgentActivity,
+  type ObservedPresenceFeed as PresenceFeed,
 } from "@/pages/agent-runs";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
@@ -70,6 +71,8 @@ function activity(
       running_ttl_seconds: 300,
       within_running_window: true,
       durable_presence_backed: true,
+      presence_feed_status: "available",
+      presence_unavailable_reason: null,
       usage_evidence_available: true,
       prompt_tokens: 1_000,
       completion_tokens: 3_321,
@@ -81,7 +84,14 @@ function activity(
   };
 }
 
-function mockObservedActivity(rows: ObservedAgentActivity[]): void {
+function mockObservedActivity(
+  rows: ObservedAgentActivity[],
+  presenceFeed: PresenceFeed = {
+    status: "available",
+    unavailable_reason: null,
+    rows_may_be_incomplete: false,
+  },
+): void {
   server.use(
     http.get(gatewayUrl("/admin/v1/observed-agent-activity"), () =>
       HttpResponse.json({
@@ -90,6 +100,7 @@ function mockObservedActivity(rows: ObservedAgentActivity[]): void {
         total: rows.length,
         offset: 0,
         limit: 50,
+        presence_feed: presenceFeed,
       }),
     ),
   );
@@ -299,6 +310,49 @@ describe("AgentRunsPage — unattributed activity", () => {
     // no "ended at" column and the last-seen value is never relabelled as one.
     expect(screen.queryByText(/ended/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/stopped at/i)).not.toBeInTheDocument();
+  });
+
+  // #494: a presence READ FAILURE must not reach the operator as "Inactive" —
+  // that is the rendering that gets a live agent restarted.
+  it("renders an undecidable row as unknown, never as inactive", async () => {
+    const user = userEvent.setup();
+    mockObservedActivity(
+      [
+        activity(
+          { status: "unknown", status_basis: "presence_feed_unavailable" },
+          {
+            within_running_window: null,
+            durable_presence_backed: null,
+            presence_feed_status: "unavailable",
+            presence_unavailable_reason: "d1 proxy: 503",
+            seconds_since_last_seen: 4_000,
+            reason: "durable presence feed unavailable (d1 proxy: 503)",
+          },
+        ),
+      ],
+      {
+        status: "unavailable",
+        unavailable_reason: "d1 proxy: 503",
+        rows_may_be_incomplete: true,
+      },
+    );
+
+    await openUnattributedTab(user);
+    await screen.findByText("observed:tenant-acme:key-1");
+
+    expect(screen.getByText("Unknown", { selector: "div" })).toBeInTheDocument();
+    expect(screen.queryByText("Inactive")).not.toBeInTheDocument();
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Presence feed unavailable (d1 proxy: 503) — this activity may still be running; it is NOT reported inactive",
+      ),
+    ).toBeInTheDocument();
+    // The list itself says the answer may be incomplete, so an empty page can
+    // never read as "nothing is running".
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The durable presence feed could not be read (d1 proxy: 503).",
+    );
   });
 
   it("makes the evidence behind the derived status reachable", async () => {

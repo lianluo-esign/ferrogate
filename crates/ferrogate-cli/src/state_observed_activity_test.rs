@@ -78,13 +78,14 @@ fn recording_a_request_log_backs_observed_activity_with_durable_presence() {
 
     // And the observed-activity surface reports the key as a running Unknown
     // row whose recency is backed by the durable presence signal.
-    let rows = state.observed_agent_activity(Some("tenant-a"));
+    let rows = state.observed_agent_activity(Some("tenant-a")).rows;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "observed:tenant-a:key-1");
     assert_eq!(rows[0].display_name, "Unknown");
     assert_eq!(rows[0].status, "running");
-    assert!(
+    assert_eq!(
         rows[0].evidence.durable_presence_backed,
+        Some(true),
         "the running decision must be backed by the durable presence store"
     );
     assert_eq!(rows[0].running_ttl_seconds, 60, "config default TTL");

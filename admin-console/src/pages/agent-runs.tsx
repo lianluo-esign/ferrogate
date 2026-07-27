@@ -60,6 +60,8 @@ import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 export type AgentRunSummary = AdminSchema<"AgentRunSummary">;
 export type ObservedAgentActivity = AdminSchema<"AdminObservedAgentActivity">;
+/** #494: the list-level "could we even read presence?" qualifier. */
+export type ObservedPresenceFeed = AdminSchema<"AdminObservedAgentPresenceFeed">;
 
 const PAGE_SIZE = 50;
 
@@ -323,6 +325,11 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
   const rows = data?.data ?? [];
   const total = data?.total ?? 0;
   const hasNext = offset + PAGE_SIZE < total;
+  // #494: an empty table is itself an answer, and a failed presence read makes
+  // that answer unsound. Say so above the table instead of letting "no rows"
+  // read as "nothing is running".
+  const presenceFeed = data?.presence_feed;
+  const presenceDegraded = presenceFeed?.rows_may_be_incomplete === true;
 
   return (
     <>
@@ -333,6 +340,19 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {t("page.agentRuns.unattributed.loadError", { message: error.message })}
+        </p>
+      )}
+
+      {presenceDegraded && (
+        <p
+          role="status"
+          className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm"
+        >
+          {t("page.agentRuns.unattributed.presenceFeedDegraded", {
+            reason:
+              presenceFeed?.unavailable_reason ??
+              t("page.agentRuns.unattributed.status.unknownReasonFallback"),
+          })}
         </p>
       )}
 
@@ -377,7 +397,12 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
                 // The row is only "running" while the recency window holds; the
                 // window is the ONLY basis, so an expired row is inactive and
                 // there is nothing to render as an end time.
-                const active = row.status === "running" && evidence.within_running_window;
+                const active = row.status === "running" && evidence.within_running_window === true;
+                // #494: a failed presence read is NOT a negative. The badge has
+                // three states, and `unknown` must never render as "Inactive" —
+                // an operator who reads "Inactive" for a live process may
+                // restart it.
+                const unknown = row.status === "unknown";
                 const usage = evidence.usage_evidence_available;
                 const isExpanded = expanded === row.id;
                 return (
@@ -398,19 +423,30 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
                       <TableCell className="font-mono text-xs">{row.api_key_id}</TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
-                          <Badge variant={active ? "default" : "outline"}>
-                            {active
-                              ? t("page.agentRuns.unattributed.status.running")
-                              : t("page.agentRuns.unattributed.status.inactive")}
+                          <Badge variant={active ? "default" : unknown ? "secondary" : "outline"}>
+                            {unknown
+                              ? t("page.agentRuns.unattributed.status.unknown")
+                              : active
+                                ? t("page.agentRuns.unattributed.status.running")
+                                : t("page.agentRuns.unattributed.status.inactive")}
                           </Badge>
                           {/* The sub-label reads off the window itself, so the
-                              badge and the justification can never disagree. */}
+                              badge and the justification can never disagree.
+                              `within_running_window === null` is the undecided
+                              case and gets its own sentence, not the
+                              "no stop event" negative. */}
                           <span className="text-xs text-muted-foreground">
-                            {evidence.within_running_window
-                              ? t("page.agentRuns.unattributed.status.runningBasis", {
-                                  ttl: evidence.running_ttl_seconds,
+                            {evidence.within_running_window === null
+                              ? t("page.agentRuns.unattributed.status.unknownBasis", {
+                                  reason:
+                                    evidence.presence_unavailable_reason ??
+                                    t("page.agentRuns.unattributed.status.unknownReasonFallback"),
                                 })
-                              : t("page.agentRuns.unattributed.status.noStopEvent")}
+                              : evidence.within_running_window
+                                ? t("page.agentRuns.unattributed.status.runningBasis", {
+                                    ttl: evidence.running_ttl_seconds,
+                                  })
+                                : t("page.agentRuns.unattributed.status.noStopEvent")}
                           </span>
                         </div>
                       </TableCell>
@@ -477,14 +513,29 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
                               label={t("page.agentRuns.unattributed.evidence.runningTtl")}
                               value={format.number(evidence.running_ttl_seconds)}
                             />
+                            {/* #494: `null` is "we could not tell". Rendering it
+                                as "No" would be the same confident-negative
+                                defect one layer down. */}
                             <EvidenceItem
                               label={t("page.agentRuns.unattributed.evidence.withinWindow")}
-                              value={evidence.within_running_window ? t("common.yes") : t("common.no")}
+                              value={triState(t, evidence.within_running_window)}
                             />
                             <EvidenceItem
                               label={t("page.agentRuns.unattributed.evidence.durablePresence")}
+                              value={triState(t, evidence.durable_presence_backed)}
+                            />
+                            <EvidenceItem
+                              label={t("page.agentRuns.unattributed.evidence.presenceFeed")}
                               value={
-                                evidence.durable_presence_backed ? t("common.yes") : t("common.no")
+                                evidence.presence_feed_status === "unavailable"
+                                  ? t("page.agentRuns.unattributed.evidence.presenceFeedDown", {
+                                      reason:
+                                        evidence.presence_unavailable_reason ??
+                                        t(
+                                          "page.agentRuns.unattributed.status.unknownReasonFallback",
+                                        ),
+                                    })
+                                  : t("page.agentRuns.unattributed.evidence.presenceFeedUp")
                               }
                             />
                             <EvidenceItem
@@ -539,6 +590,23 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
       </div>
     </>
   );
+}
+
+/**
+ * Render a nullable boolean as Yes / No / Unknown (#494).
+ *
+ * `null` on these evidence fields means the gateway could not tell, so it must
+ * NOT collapse into "No" — that is exactly the confident-negative defect the
+ * backend change removed.
+ */
+function triState(
+  t: (key: TranslationKey) => string,
+  value: boolean | null | undefined,
+): string {
+  if (value === null || value === undefined) {
+    return t("page.agentRuns.unattributed.evidence.unknownValue");
+  }
+  return value ? t("common.yes") : t("common.no");
 }
 
 /** One `<dt>/<dd>` pair inside the per-row evidence expander. */
