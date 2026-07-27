@@ -2545,7 +2545,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get a permission action. */
+        /**
+         * Get a permission action.
+         * @description Scoped per caller (#518): a platform operator sees the whole RBAC catalog; a tenant-scoped credential sees only the entries reachable for its own tenant, resolved through its tenant_role_bindings. An entry outside the caller's scope is refused identically to one that does not exist -- 403 `tenant_scope_denied`, deliberately conflating absent with forbidden -- so this endpoint cannot be walked as an existence oracle to rebuild the catalog the list operations no longer disclose. A platform operator still gets 404 for a genuinely absent id.
+         */
         get: operations["getPermission"];
         put?: never;
         post?: never;
@@ -2584,7 +2587,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get a DB-backed role. */
+        /**
+         * Get a DB-backed role.
+         * @description Scoped per caller (#518): a platform operator sees the whole RBAC catalog; a tenant-scoped credential sees only the entries reachable for its own tenant, resolved through its tenant_role_bindings. An entry outside the caller's scope is refused identically to one that does not exist -- 403 `tenant_scope_denied`, deliberately conflating absent with forbidden -- so this endpoint cannot be walked as an existence oracle to rebuild the catalog the list operations no longer disclose. A platform operator still gets 404 for a genuinely absent id.
+         */
         get: operations["getRole"];
         put?: never;
         post?: never;
@@ -12946,6 +12952,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     deletePermission: {
@@ -13049,6 +13056,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     deleteRole: {

@@ -34,6 +34,10 @@ jobs:
     name: workers
     uses: ./.github/workflows/workers.yml
 
+  api-contract-drift:
+    name: api-contract-drift
+    uses: ./.github/workflows/api-contract-drift.yml
+
   core-policy-tests:
     name: rust-core-policy-tests
     uses: ./.github/workflows/rust-core-policy-tests.yml

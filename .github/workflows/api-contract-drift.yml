@@ -1,0 +1,72 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-27
+# description: OpenAPI -> generated-client drift gate, on the commits that can cause it.
+
+name: API contract drift
+
+# The Rust side of the contract has been gated in CI since #392
+# (`scripts/check-openapi.py` in rust-quality). Its client-side mirror,
+# `admin-console/scripts/check-api-types-drift.mjs`, ran only inside
+# `scripts/check-admin-console.sh` -- which no workflow invokes, and which
+# until #508 could not even find Node on the dev box. That asymmetry is not
+# theoretical: it bounced #488 and #518 in review, and both bounces were the
+# same commit shape -- a Rust slice edited the spec and never regenerated the
+# TypeScript client.
+#
+# A stale client still type-checks, so nothing downstream notices; the drift
+# surfaces later as a reviewer reproducing it by hand. Gating it here catches
+# it on the commit that causes it, which is the only cheap moment.
+#
+# Path-filtered to the two files that can drift, so a commit touching neither
+# cannot trigger it.
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    paths:
+      - "docs/openapi/admin-api.openapi.json"
+      - "admin-console/src/lib/api-types.generated.ts"
+      - "admin-console/scripts/check-api-types-drift.mjs"
+      - ".github/workflows/api-contract-drift.yml"
+  pull_request:
+    paths:
+      - "docs/openapi/admin-api.openapi.json"
+      - "admin-console/src/lib/api-types.generated.ts"
+      - "admin-console/scripts/check-api-types-drift.mjs"
+      - ".github/workflows/api-contract-drift.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-contract-drift-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: api-contract-drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: admin-console/package-lock.json
+
+      # The guard replays `generate:api` (openapi-typescript + the stamp
+      # banner) into a temp file and diffs it against the committed client, so
+      # it needs the generator itself installed. It never writes to the
+      # committed file.
+      - name: Install admin-console dependencies
+        working-directory: admin-console
+        run: npm ci --no-audit --no-fund
+
+      - name: Check OpenAPI -> generated client drift
+        working-directory: admin-console
+        run: npm run check:api-types
