@@ -308,22 +308,27 @@ async fn an_inlined_read_is_charged_for_the_copies_it_will_hold() {
 
 /// Review finding 4 on the first round: the module doc promised a large read at
 /// the head of the queue could not be starved by a stream of small ones, and
-/// `try_acquire_many_owned` -- which never consults tokio's wait queue --
-/// delivered the opposite. Every arriving small read barged past the queued
-/// large one, which then burned its whole wait and shed.
+/// nothing tested it. The finding also supposed that `try_acquire_many_owned`
+/// -- which never consults tokio's wait queue -- delivered the OPPOSITE, with
+/// every arriving small read barging past the queued large one. #544 found
+/// that supposition false: the fast path cannot barge, because a queued waiter
+/// has already drained the counter it reads. The promise was untested, not
+/// inverted.
 ///
 /// The fixture is deterministic rather than statistical: a larger read is
 /// already queued for the capacity, so the small read may only proceed once
 /// that read has left the queue.
 ///
-/// WHAT THIS TEST DOES AND DOES NOT PROVE (#544). It proves the observable
-/// property -- a small read arriving behind a queued large one does not
-/// complete immediately. It does NOT prove that the `waiting` counter guard in
-/// `admit` is what delivers that, because tokio's partial reservation drains
-/// the semaphore to 0 as soon as the large read queues, so
-/// `try_acquire_many_owned` on the fast path would fail anyway. Whether that
-/// guard is load-bearing or redundant is an open question this fixture cannot
-/// answer; see the mutation note on #544.
+/// WHAT THIS TEST PROVES, AND WHOSE CODE IT PINS (#544). It pins the
+/// observable property -- a small read arriving behind a queued large one does
+/// not complete immediately -- and that property is delivered by TOKIO's
+/// partial reservation, not by anything in `admit`. #544 settled the question
+/// this doc previously left open: the `waiting` counter guard #529 added was
+/// redundant (free permits and a queued waiter cannot coexist; see the module
+/// doc for the `batch_semaphore.rs` line numbers) and has been deleted, so
+/// there is no longer a guard here for a mutation to break. `admit`'s own
+/// contribution -- the bounded wait and the typed shed -- is pinned by the
+/// elapsed-time and shed assertions below and by the refusal tests above.
 ///
 /// The assertion is on ELAPSED TIME rather than on a refusal, because tokio
 /// hands the freed capacity to the next waiter as soon as the large read gives
@@ -357,11 +362,12 @@ async fn a_queued_large_read_is_not_barged_by_a_later_small_one() {
     //
     // tokio's batch semaphore reserves PARTIALLY. At `poll_acquire`, when the
     // available permits are fewer than needed, it takes all of them and queues
-    // for the remainder (`batch_semaphore.rs`: `remaining = (needed -
-    // acquired) - curr; (0, ...)` -- the semaphore is set to 0), and
-    // `add_permits_locked` keeps assigning released permits to the waiter at
-    // the head of the queue. So the queued 8 MiB read DRAINS the free 4 MiB
-    // into its own reservation and `available_bytes()` is 0.
+    // for the remainder (tokio 1.52.1 -- the LOCKED version --
+    // `src/sync/batch_semaphore.rs:426-432`: `remaining = (needed - acquired)
+    // - curr; (0, ...)`, the counter CAS'd to 0), and `add_permits_locked`
+    // (`:310-333`) keeps assigning released permits to the waiter at the head
+    // of the queue. So the queued 8 MiB read DRAINS the free 4 MiB into its
+    // own reservation and `available_bytes()` is 0.
     //
     // That is the anti-barging property itself, provided by tokio rather than
     // by us: capacity a queued read is waiting for stops being available to

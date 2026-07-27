@@ -36,13 +36,36 @@
 //! never served truncated and never left waiting silently.
 //!
 //! The queue is FIFO, so a large read at the head cannot be starved by a stream
-//! of small ones -- but that takes more than tokio's semaphore being FIFO among
-//! its *waiters*. `try_acquire_many_owned` does not consult the wait queue at
-//! all, so the no-wait fast path would let every newly arriving 4 KiB read
-//! barge past a 10 MiB read already queued, which under sustained small-read
-//! load burns the large read's whole wait and sheds it. [`Self::waiting`]
-//! counts queued readers and the fast path is skipped while it is non-zero, so
-//! the documented property is the enforced one.
+//! of small ones. That property is **tokio's**, not ours, and issue #544
+//! retracted the claim that this module enforced it.
+//!
+//! The mechanism, read out of the locked tokio (1.52.1,
+//! `src/sync/batch_semaphore.rs`) rather than out of its docs, is PARTIAL
+//! RESERVATION. In `poll_acquire` (`:426-432`), when the available permits are
+//! fewer than needed, the waiter takes ALL of them and queues for the
+//! remainder -- the counter is CAS'd to `0`. Releases then never reach that
+//! counter while anyone is queued: `add_permits_locked` (`:310-333`) assigns
+//! `rem` to the head waiter first, `assign_permits` (`:551-572`) takes
+//! `min(curr, *n)` so a still-hungry head waiter consumes the whole release,
+//! and the `permits.fetch_add` at `:342` runs only inside `if rem > 0 &&
+//! is_empty` -- i.e. only after the queue was observed EMPTY under the waitlist
+//! lock. Both transitions hold that same lock (`poll_acquire` takes it at
+//! `:434-443`, *before* the CAS, and holds it through the `queue.push_front` at
+//! `:517`), so no observer sees free capacity and a queued waiter at once.
+//!
+//! Consequence: free permits and a queued waiter are MUTUALLY EXCLUSIVE. A
+//! `try_acquire_many_owned` that succeeds therefore proves the queue was empty
+//! at that instant, so the no-wait fast path cannot barge anyone -- it does not
+//! consult the wait queue and does not need to. The `waiting` counter #529
+//! added to skip the fast path was redundant against this and is gone; it also
+//! never delivered ordering in the one sub-poll window it could observe (see
+//! [`Self::admit`]).
+//!
+//! One shape that looks like barging and is not: after `add_permits_locked`
+//! fully satisfies the head waiter it POPS it and returns the surplus to the
+//! counter, so a small read can take that surplus before the popped waiter is
+//! polled. That waiter already owns its permits and is no longer waiting for
+//! capacity, so it cannot be starved.
 //!
 //! # The permit outlives the RESPONSE, not the transport read
 //!
@@ -79,7 +102,6 @@
 //! `max_total_gateway_buffer_bytes` a number the gateway exceeded by ~3.7x on
 //! its own documented surfaces.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -123,11 +145,6 @@ pub(crate) struct GatewayBufferBudget {
     /// single read can never be permanently inadmissible.
     budget_units: u32,
     wait: Duration,
-    /// Readers currently queued on the semaphore. The no-wait fast path is
-    /// skipped while this is non-zero; see the FIFO paragraph in the module
-    /// doc. It is an ordering hint, not accounting -- a stale read only costs
-    /// one arrival a trip through the (still bounded) wait.
-    waiting: AtomicUsize,
 }
 
 /// How much memory a read of `n` object bytes actually leaves resident, which
@@ -335,7 +352,6 @@ impl GatewayBufferBudget {
                 budget_bytes: 0,
                 budget_units: 0,
                 wait,
-                waiting: AtomicUsize::new(0),
             };
         }
         let effective = budget_bytes.max(per_read_ceiling_bytes);
@@ -346,7 +362,6 @@ impl GatewayBufferBudget {
             budget_bytes: effective,
             budget_units,
             wait,
-            waiting: AtomicUsize::new(0),
         }
     }
 
@@ -399,6 +414,19 @@ impl GatewayBufferBudget {
     /// by construction: `timeout` cannot become an unbounded queue, and a
     /// closed semaphore (unreachable -- nothing closes it) fails **open**
     /// rather than turning a bookkeeping bug into a total read outage.
+    ///
+    /// The no-wait fast path is UNCONDITIONAL, and #544 deleted the `waiting`
+    /// counter that #529 used to gate it. It cannot barge a queued read:
+    /// tokio's partial reservation means a success here proves the wait queue
+    /// was empty at that instant (module doc, with the `batch_semaphore.rs`
+    /// line numbers). The counter was not merely redundant -- the only state it
+    /// could ever discriminate was the window between its own `fetch_add` and
+    /// the acquire future's first poll, and in that window the arriving read is
+    /// not yet in tokio's queue either, so skipping the fast path only moved
+    /// the race from `try_acquire` into two un-ordered `acquire_many_owned`
+    /// calls. It bought no ordering, and no black-box test of this function
+    /// could red a mutation of it. Keeping it would have left the repo carrying
+    /// a guard nobody can break and notice (issue #500).
     pub(crate) async fn admit(
         &self,
         residency: ReadResidency,
@@ -408,21 +436,13 @@ impl GatewayBufferBudget {
             return Ok(BufferPermit::unbudgeted());
         };
         let charge = self.charge_units(residency.residency_bytes(bytes));
-        // The fast path is skipped while anyone is queued. `try_acquire_many_owned`
-        // never consults tokio's wait queue, so taking it unconditionally lets
-        // an arriving small read barge past a large read already waiting --
-        // which is the documented FIFO property inverted, not merely unproven.
-        if self.waiting.load(Ordering::Acquire) == 0 {
-            match Arc::clone(&permits).try_acquire_many_owned(charge) {
-                Ok(permit) => return Ok(BufferPermit(Some(permit))),
-                Err(TryAcquireError::NoPermits) => {}
-                Err(TryAcquireError::Closed) => return Ok(BufferPermit::unbudgeted()),
-            }
+        match Arc::clone(&permits).try_acquire_many_owned(charge) {
+            Ok(permit) => return Ok(BufferPermit(Some(permit))),
+            Err(TryAcquireError::NoPermits) => {}
+            Err(TryAcquireError::Closed) => return Ok(BufferPermit::unbudgeted()),
         }
         let started = Instant::now();
-        self.waiting.fetch_add(1, Ordering::AcqRel);
         let outcome = tokio::time::timeout(self.wait, permits.acquire_many_owned(charge)).await;
-        self.waiting.fetch_sub(1, Ordering::AcqRel);
         match outcome {
             Ok(Ok(permit)) => Ok(BufferPermit(Some(permit))),
             Ok(Err(_closed)) => Ok(BufferPermit::unbudgeted()),
