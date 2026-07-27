@@ -2524,7 +2524,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List DB-backed permission actions. */
+        /**
+         * List DB-backed permission actions.
+         * @description Lists the DB-backed permission actions visible to the caller. Scoped to the caller (issue #518): a platform-operator key (no organization_id) receives the entire global catalog; a tenant-scoped admin.read key receives only the slice its own tenant can actually reach -- the roles bound to it via /admin/v1/tenant-roles/{tenant_id}, and only the permission keys those roles compose. The RBAC catalog is deliberately not public-to-tenants: it is the platform's authority model.
+         */
         get: operations["listPermissions"];
         put?: never;
         /** Create a DB-backed permission action. */
@@ -2560,7 +2563,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List DB-backed roles. */
+        /**
+         * List DB-backed roles.
+         * @description Lists the DB-backed roles visible to the caller. Scoped to the caller (issue #518): a platform-operator key (no organization_id) receives the entire global catalog; a tenant-scoped admin.read key receives only the slice its own tenant can actually reach -- the roles bound to it via /admin/v1/tenant-roles/{tenant_id}, and only the permission keys those roles compose. The RBAC catalog is deliberately not public-to-tenants: it is the platform's authority model.
+         */
         get: operations["listRoles"];
         put?: never;
         /** Create a role from permission action keys. */
@@ -13426,7 +13432,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Existing binding for the hostname updated (re-bound within the same tenant). */
+            /** @description Existing proven binding for the hostname updated (re-bound within the same tenant). Still serving; the ACME order set is unchanged. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -13435,8 +13441,17 @@ export interface operations {
                     "application/json": components["schemas"]["AdminSiteDomainResponse"];
                 };
             };
-            /** @description Site domain bound. */
+            /** @description Site domain bound and serving: a newly created binding whose ownership was already proven, so the hostname is in the ACME order set and serves immediately. */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSiteDomainResponse"];
+                };
+            };
+            /** @description Binding recorded but NOT serving. Ownership is unproven, so the gateway deliberately keeps the hostname out of the ACME order set (no certificate is ordered) and it will not answer traffic until POST /admin/v1/site-domains/{hostname}/verify succeeds. Clients must branch on this: it is a 2xx that does not mean the domain is live. Read `site_domain.serving` / `verification.state` rather than inferring from the status code. */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13525,6 +13540,7 @@ export interface operations {
                     "application/json": components["schemas"]["AdminSiteDomainResponse"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
