@@ -106,15 +106,6 @@ What that leaves this session, and it is the larger half:
   commit time** — #493 shipped with two. Grep the diff for edits that look like
   a deliberately broken assertion.
 
-The standard behind all of this now lives in
-`docs/testing/testing-architecture.md`, section **"Assertions must be able to
-fail"** (added by #500, and named as binding from `AGENTS.md`). It carries the
-one-minute check — name the line, name a one-token edit to it, then find the
-assertion that reds *and read it* — plus an eight-row anti-pattern table and a
-subsection on the two failures mutation reasoning alone cannot find. Read it
-once; it is the written form of the method below, with the concrete cases
-attached.
-
 Four failure modes produced most of the bounces. Hunt them by name:
 
 1. **The code asserts a primitive it never calls.** #414's `cancel()` claimed a
@@ -150,32 +141,14 @@ mutations survived on #460 alone, 7 of 7 on #471's Worker half.
 "Tests that assert nothing" was too vague to catch these. **Apply the operational
 form instead: if you can break the thing the test names and the test would still
 pass, the test does not cover it.** It is cheap by hand and it is what caught all
-six. The specific shapes, all of which *read* as thorough:
+six.
 
-1. **Asserting the SQL string instead of the behaviour.** A mocked transport
-   replays canned rows regardless of the SQL sent, so `enabled = 1`, `IS NOT NULL`
-   and `<=` get pinned as *substrings* and never as *filters*. Every due-filter
-   boundary on #460 was unpinned this way.
-2. **Asserting on the sending side, never the applying side.** #471's Rust client
-   proved it *asked* for a sealed container; nothing proved Cloudflare was ever
-   *told*. This is the #188/#397 write-succeeds/runtime-ignores shape moved one
-   layer up — and it is the one to watch on every Worker/edge slice.
-3. **Asserting an expression's text while the value feeding it is unpinned.**
-   `request_count = stored + excluded.request_count` passes happily when the
-   `VALUES` seed is mutated from `1` to `0`.
-4. **A comment documenting an invariant no assertion enforces.** The test says
-   "VALUES seeds … the literal 1" and then asserts only `params` — but the literal
-   is inline SQL, not a param.
-5. **Fixtures that make a transform vacuous.** A re-sort asserted over rows that
-   are already sorted; a truncate asserted over 2 rows with `limit = 10`.
-6. **Pinning a conclusion whose premise is unguarded.** #460 asserted
-   `!sql.contains("CAST")` justified by "these columns are INTEGER-affinity" —
-   with nothing pinning the columns as INTEGER. Flip them to TEXT and the
-   portability test, which compares column *names* only, stays green.
-
-Note shape 6 against the affinity check in "What it inspects": verifying that a
-`CAST` is *present* is not enough if nothing pins the column type the reasoning
-rests on.
+The shapes it catches — all of which *read* as thorough — are maintained in one
+place, `docs/testing/testing-architecture.md`, section **"Assertions must be
+able to fail"** (#500, binding from `AGENTS.md`): the one-minute check, an
+eight-row anti-pattern table with the case each row is drawn from, and the two
+failures mutation reasoning alone cannot find. Read it once. A second copy here
+would be the same two-hand-maintained-claim defect the table's own row 7 names.
 
 Two second-order lessons worth carrying:
 

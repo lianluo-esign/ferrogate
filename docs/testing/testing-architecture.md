@@ -258,10 +258,10 @@ Each of these reads as thorough. Each survived the mutation named beside it.
 | **Text, not behaviour.** The SQL string is pinned as a substring while a mocked transport replays canned rows regardless of what was sent, so `enabled = 1`, `IS NOT NULL` and `<=` are never *filters*. | `#460` due scan; every boundary — exactly-due, disabled, null-next-fire, not-yet-due — was unpinned | The rows that come back across the boundary, one case per boundary. |
 | **Sending side, never applying side.** The client proves it *asked* for the sealed container; nothing proves the peer was ever told. | `#471` (the `#188`/`#397` write-succeeds/runtime-ignores shape, one layer up) | The request the dependency actually receives, or the state it actually reaches. |
 | **A conclusion pinned on an unguarded premise.** `!sql.contains("CAST")` is justified by "the columns are already INTEGER" — and nothing pins the columns as INTEGER. | `#460`; the portability test compares column *names* only, so flipping them to TEXT stays green | The premise, at the layer that owns it. |
-| **A comment carrying the invariant.** The comment says "VALUES seeds `request_count` literal 1"; the assertion covers `params`, and the literal is inline SQL. The mirror case: a regex window that matches the pin anywhere in the method, comments included. | `#460`; `#480` `search_path` | The value at the point it takes effect. A comment is not an assertion, and an assertion a comment can satisfy is not one either. |
+| **A comment carrying the invariant.** The comment says "VALUES seeds `request_count` literal 1"; the assertion covers `params`, and the literal is inline SQL. The mirror case: a substring match over the whole method window, which a comment inside that window satisfies. | `#460`; `#480` `search_path` | The value at the point it takes effect. A comment is not an assertion, and an assertion a comment can satisfy is not one either. |
 | **A vacuous fixture.** A re-sort asserted over rows that were already sorted; a truncate asserted over 2 rows with `limit = 10`. | `#460` fire-list | Input that is wrong in the direction the transform fixes. |
 | **A guard coarser than the rule it enforces.** One audit walked a single directory by filename prefix while its convention spanned three crates; another signed off on `(file, fn)`, so a *new* capture inside an already-blessed function was pre-approved. | `#495`; `#526`, fixed by keying on `(file, fn, idiom, exact count)` | Key the guard on the exact thing that must not change, and prove its reach covers the whole class it claims. |
-| **A count asserted as fact with no mechanism.** "236 transactions across 41 files", in a comment. It was 42 by the next slice. | `#480` | Either compute the count in the test, or delete the claim. |
+| **A count asserted as fact with no mechanism.** "236 transactions across 41 files", in a comment. It was 42 by the next slice. | `#480` | Compute it in the test, or assert a floor and label the bare number as a dated measurement — `async_postgres_test.rs:66-71` took the second option deliberately, because a count that had to be edited on every new query gets edited without thought. What fails is a number no assertion reads. |
 | **Red for an unrelated reason.** The schedule-count test does fail on the broken implementation — on `status === 200`, because the route 400s with `no such table`. `count` is never reached, so the assertion the test is named for is still unproven, and the entry that used to sit here predicted the opposite outcome from the same reasoning. | `#482`, corrected once the suite could actually run (`#559`) | Run the mutation and read which line reds. A test that fails for the wrong reason passes for the wrong reason too. |
 
 ### Where mutation reasoning is not enough
@@ -273,7 +273,11 @@ because they are properties of the *unmutated* run:
   asserted `allowedHosts == [GOVERNED_HOST]` after a failed reset; the SDK
   assigns the field *before* the call that throws, so it is `[]`. Nobody
   noticed, because nothing ran it. Only reading the dependency's source finds
-  this. An un-run test is an unverified claim — write it, then say so.
+  this. An un-run test is an unverified claim — write it, then say so. A whole
+  suite can be in that state: `ferrogate-gateway` compiled its tests in every CI
+  run and executed none of them until `#561`, which is why
+  `scripts/check-ci-crate-coverage.py` now fails when a workspace member is
+  selected by no `cargo test` that CI reaches.
 - **A cross-check that shares the blind spot.** `#511`'s second reader was
   line-oriented, so it agreed with the const parser's inability to see a
   multi-row `VALUES`. Two readers only cross-check if they fail differently.
@@ -313,10 +317,12 @@ suite this slow, whether each mutant should run the whole workspace suite or
 only the owning crate's, and therefore whether a `.cargo/mutants.toml` is worth
 having at all. No config is committed, because a filter config nobody has run
 `--list` against can silently examine nothing — which is the exact defect class
-this section exists to prevent. Adding a CI job is also premature: repo
-workflows are `release: published` gates (see `AGENTS.md` → CI Workflow
-Structure), and a mutation run of unknown duration does not belong in one until
-its cost is measured.
+this section exists to prevent. Adding a CI job is also premature, though not
+because push/PR triggers are barred: `AGENTS.md` → CI Workflow Structure keeps
+`ci.yml` on `release: published` and the modules `workflow_call`-only, and the
+two path-filtered `push`/`pull_request` exceptions (`workers.yml`,
+`api-contract-drift.yml`) each argue their own cost asymmetry in the file
+header. That is the bar, and a run of unknown duration cannot meet it yet.
 
 ---
 

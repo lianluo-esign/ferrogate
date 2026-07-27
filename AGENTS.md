@@ -386,13 +386,14 @@ Rules that make the layers binding:
 - An assertion must be able to fail. If you can break the thing a test names
   and the test stays green, the test does not cover it. Assert the behaviour —
   the rows the filter returns, the request the peer actually receives, the
-  decision the runtime makes — never the text that produces it. SQL substrings,
-  expression source, constant lists, log lines, and comments are all satisfied
-  by code that does nothing. At review time this is a one-minute check: name the
-  line the change exists for, name a one-token edit to it, then find the
-  assertion that goes red and read it. No red assertion means no coverage,
-  whatever the suite says. Under speed mode the dev lane does not run the
-  mutation, so writing the assertion so that a mutation *would* red it is the
+  decision the runtime makes — never the text that produces it, unless the text
+  *is* the subject, as in a convention guard like #480's transaction-pin scan.
+  SQL substrings, expression source, constant lists, log lines, and comments are
+  all satisfied by code that does nothing. At review time this is a one-minute
+  check: name the line the change exists for, name a one-token edit to it, then
+  find the assertion that goes red and read it. No red assertion means no
+  coverage, whatever the suite says. Under speed mode the dev lane does not run
+  the mutation, so writing the assertion so a mutation *would* red it is the
   author's design obligation and confirming it is the review and gate
   obligation — not a dev-lane proof step. The named anti-patterns, the review
   check, and the limits of mutation reasoning are in
