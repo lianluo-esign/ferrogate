@@ -51,8 +51,22 @@ it writes:**
 
 - **Run `cargo check --all-targets` — that is the whole gate.** `--all-targets`
   matters: it type-checks the tests too, so a written-but-unrun test still
-  cannot be malformed. Use `CARGO_TARGET_DIR=/home/dev/ferrogate/target
-  cargo check -j4` (shared target dir; `-j8` freezes the machine).
+  cannot be malformed. `-j4`; `-j8` freezes the machine.
+- **Every parallel agent needs its OWN `CARGO_TARGET_DIR`** —
+  `CARGO_TARGET_DIR=/tmp/target-$$`, removed when the slice lands. Worktrees
+  isolate *source*, not *build artifacts*, and the shared
+  `/home/dev/ferrogate/target` is not safe under concurrency: on 2026-07-27 an
+  agent got `cargo check` errors in a file it had never touched, whose source
+  in its own worktree was correct, reproducing even with its changes stashed —
+  a stale `ferrogate-cli-core` artifact from a *concurrent* agent, which cargo
+  reported as "fresh". `touch`ing the source forced a rebuild and it went
+  green.
+
+  A phantom red costs an agent cycle. **A phantom green is the dangerous one**,
+  because in a lane whose only gate is `cargo check`, it is the sole compile
+  barrier before the test lane. The shared dir is still right for the *serial*
+  integration step (one build, warm cache); it is wrong the moment two agents
+  build at once.
 - **Do NOT run `cargo build`.** Superseded — `check` catches the
   non-compiling-`main` hazard that `build` was kept for, at a fraction of the
   time.
