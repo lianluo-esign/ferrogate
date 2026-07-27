@@ -179,39 +179,99 @@ fn agent_job_reads_do_not_leak_another_tenants_run() {
 }
 
 #[test]
-fn cancel_dispatches_a_runtime_cancel_and_terminalizes_the_run() {
+fn cancel_stops_the_work_in_the_runtime_and_terminalizes_the_run() {
+    // Was `cancel_dispatches_a_runtime_cancel_and_terminalizes_the_run`, which
+    // asserted that EVERY cancel enqueues a `cancel_run`. #502 falsified that
+    // assertion, and the invariant under it genuinely MOVED rather than merely
+    // going stale: minting a `cancel_run` for a job no worker holds told nobody
+    // anything (there is no holder to lease it), left the start dispatch in the
+    // lease queue where a worker could still pick it up and START the cancelled
+    // work, and left two permanent rows behind in a table nothing deleted. The
+    // property the old assertion was standing in for -- "a cancel actually
+    // stops the work in the runtime" -- is what is asserted here, on BOTH arms,
+    // because it is the property and not the mechanism that must hold.
     let state = AppState::new(Config::default());
-    let run_id = agent_job_run_id("tenant-a", "cancel-me");
-    state
-        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&run_id, "tenant-a"))
-        .expect("submit enqueues the start dispatch");
-    let run = queued_run(&run_id, "tenant-a");
-    state.record_agent_run(run.clone());
+    let (_worker_id, identity) = register_job_worker(&state, "tenant-a");
 
-    let dispatched =
-        cancel_agent_job_in_runtime(&state, &run, "fg-cancel", 200).expect("cancel enqueues");
-    assert!(dispatched, "a live job's cancel must reach the runtime");
+    // Arm 1 -- nobody holds it. Withdrawal is the remedy, and it is complete:
+    // out of the lease queue AND out of the durable table, with no `cancel_run`
+    // addressed at a worker that does not exist.
+    let idle_id = agent_job_run_id("tenant-a", "cancel-me");
+    state
+        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&idle_id, "tenant-a"))
+        .expect("submit enqueues the start dispatch");
+    let idle = queued_run(&idle_id, "tenant-a");
+    state.record_agent_run(idle.clone());
+    assert_eq!(
+        cancel_agent_job_in_runtime(&state, &idle, "fg-cancel", 200),
+        Ok(false),
+        "an unleased job has no holder to tell, so it is withdrawn, not dispatched at"
+    );
+    assert!(
+        state
+            .self_hosted_dispatch_for_run(&idle_id, SelfHostedRunAction::CancelRun)
+            .is_none(),
+        "no cancel_run may be minted for work no worker ever held"
+    );
+    assert!(
+        !state.self_hosted_dispatch_unacked(&agent_job_start_dispatch_id(&idle_id)),
+        "the withdrawn start dispatch is gone from the lease queue"
+    );
+    assert!(
+        !durable_dispatch_ids(&state).contains(&agent_job_start_dispatch_id(&idle_id)),
+        "...and from the durable table, so a submit/cancel loop leaves no permanent row"
+    );
+
+    // Arm 2 -- a worker holds it. Now there IS somebody to tell, and the
+    // `cancel_run` has to address the same worker shape the start dispatch did
+    // or the holder cannot lease it.
+    let held_id = agent_job_run_id("tenant-a", "cancel-me-while-held");
+    state
+        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&held_id, "tenant-a"))
+        .expect("submit enqueues the start dispatch");
+    let run = queued_run(&held_id, "tenant-a");
+    state.record_agent_run(run.clone());
+    let lease = poll_for_lease(&state, &identity, 1_000).expect("the worker leases the job");
+    assert_eq!(
+        lease.dispatch_id,
+        agent_job_start_dispatch_id(&held_id),
+        "the worker must have leased the submitted job, not the registration seed"
+    );
+
+    let dispatched = cancel_agent_job_in_runtime(&state, &run, "fg-cancel", 1_050)
+        .expect("cancel reaches the transport");
+    assert!(
+        dispatched,
+        "a job a worker HOLDS must have its cancel reach the runtime"
+    );
 
     let cancel = state
-        .self_hosted_dispatch_for_run(&run_id, SelfHostedRunAction::CancelRun)
+        .self_hosted_dispatch_for_run(&held_id, SelfHostedRunAction::CancelRun)
         .expect("a cancel_run dispatch is queued for the runtime to lease");
-    assert_eq!(cancel.dispatch_id, agent_job_cancel_dispatch_id(&run_id));
+    assert_eq!(cancel.dispatch_id, agent_job_cancel_dispatch_id(&held_id));
     assert_eq!(cancel.action, SelfHostedRunAction::CancelRun);
-    assert_eq!(cancel.run_id, run_id);
+    assert_eq!(cancel.run_id, held_id);
     // The cancel addresses the SAME worker shape the start dispatch targeted,
     // so the worker that owns the run can lease it.
     assert_eq!(cancel.framework_adapter, "claude-code");
-    assert_eq!(cancel.session_id, format!("agent-job-session-{run_id}"));
+    assert_eq!(cancel.session_id, format!("agent-job-session-{held_id}"));
     assert_eq!(cancel.tenant_id, "tenant-a");
+    // The holder's start dispatch is NOT withdrawn -- its ack still has to
+    // resolve. It is superseded instead (asserted through the real poll seam by
+    // `cancelling_an_already_leased_job_supersedes_its_start_dispatch`).
+    assert!(
+        durable_dispatch_ids(&state).contains(&agent_job_start_dispatch_id(&held_id)),
+        "the holder's start dispatch survives the cancel so its ack can resolve"
+    );
 
     // The handler then terminalizes the run itself.
     let mut cancelled = run;
     cancelled.status = "cancelled".to_string();
-    cancelled.completed_at_unix = Some(200);
+    cancelled.completed_at_unix = Some(1_050);
     state.record_agent_run(cancelled);
-    let stored = state.agent_run_record(&run_id).expect("run record");
+    let stored = state.agent_run_record(&held_id).expect("run record");
     assert_eq!(stored.status, "cancelled");
-    assert_eq!(stored.completed_at_unix, Some(200));
+    assert_eq!(stored.completed_at_unix, Some(1_050));
     assert!(agent_job_status_is_terminal(&stored.status));
 
     // Cancelling a job the runtime never accepted is not an error; there is
@@ -790,6 +850,16 @@ fn a_cancel_on_a_replica_that_never_served_the_submit_still_reaches_the_runtime(
     // cancel found no start dispatch, enqueued no `cancel_run`, and still
     // answered 200 while the worker kept running. The durable fallback closes
     // that: the peer's row IS the dispatch.
+    //
+    // #502's first cut regressed exactly this and this test caught it. Keying
+    // the withdraw/dispatch choice on the LEASE OWNER alone made the peer-served
+    // cancel take the withdraw arm (the durable row shows no assigned worker),
+    // which deletes the durable row while the SUBMITTING replica's in-memory
+    // copy stays queued and unacked -- and with no `cancel_run` anywhere, that
+    // replica's superseded set is empty, so a worker polling it leases and
+    // STARTS the cancelled job. Withdrawal is only a remedy for the node that
+    // owns the runnable copy; every other node must leave durable `cancel_run`
+    // evidence instead. That is what `Ok(true)` below is pinning.
     let state = AppState::new(Config::default());
     let run_id = agent_job_run_id("tenant-a", "cancel-across-nodes");
     let dispatch = start_dispatch(&run_id, "tenant-a");
@@ -829,6 +899,58 @@ fn a_cancel_on_a_replica_that_never_served_the_submit_still_reaches_the_runtime(
         Ok(true),
         "the cancel must actually reach the runtime transport from any replica"
     );
+
+    // `Ok(true)` is only worth something if the evidence is really there, so
+    // read it back the way the peer will: out of the DURABLE table, addressed
+    // at the same worker shape the start dispatch targeted.
+    let cancel_dispatch_id = agent_job_cancel_dispatch_id(&run_id);
+    assert!(
+        durable_dispatch_ids(&replica).contains(&cancel_dispatch_id),
+        "the cancel_run must be persisted, not merely enqueued in this replica's memory: {:?}",
+        durable_dispatch_ids(&replica)
+    );
+    let cancel = replica
+        .self_hosted_dispatch_for_run(&run_id, SelfHostedRunAction::CancelRun)
+        .expect("the replica queued a cancel_run for the runtime to lease");
+    assert_eq!(cancel.dispatch_id, cancel_dispatch_id);
+    assert_eq!(cancel.framework_adapter, dispatch.framework_adapter);
+    assert_eq!(cancel.session_id, dispatch.session_id);
+    assert_eq!(cancel.tenant_id, dispatch.tenant_id);
+
+    // ...and the peer's start dispatch is NOT yanked out from under it. This
+    // replica cannot remove the peer's in-memory copy, so deleting the durable
+    // row would only destroy the evidence that a rebuild uses to supersede it.
+    assert!(
+        durable_dispatch_ids(&replica).contains(&dispatch.dispatch_id),
+        "a peer-served cancel must not delete the durable row the holder still needs"
+    );
+
+    // The property the whole arm exists for: once the peer rebuilds its lease
+    // queue from those durable rows, the cancelled job is no longer leasable.
+    let rebuilt = AppState::new(Config::default());
+    let (_worker_id, identity) = register_job_worker(&rebuilt, "tenant-a");
+    for record in crate::gateway::block_on_sync_bridge(
+        replica.repositories_arc().self_hosted_run_dispatches(),
+    ) {
+        crate::gateway::block_on_sync_bridge(
+            rebuilt
+                .repositories_arc()
+                .upsert_self_hosted_run_dispatch(record),
+        )
+        .expect("the peer reads the same durable table");
+    }
+    rebuilt
+        .rebuild_self_hosted_worker_dispatch_runtime()
+        .expect("the peer rebuilds its lease queue from durable rows");
+    for attempt in 0..4 {
+        let Some(lease) = poll_for_lease(&rebuilt, &identity, 9_000 + attempt) else {
+            break;
+        };
+        assert_ne!(
+            lease.dispatch_id, dispatch.dispatch_id,
+            "the cancel_run this replica wrote must stop the peer re-leasing the start dispatch"
+        );
+    }
 }
 
 #[test]
@@ -1324,6 +1446,52 @@ fn a_job_settled_on_a_peer_replica_stops_counting_here() {
 }
 
 #[test]
+fn a_settled_runs_rows_are_reclaimed_by_a_node_that_never_held_them_in_memory() {
+    // The DURABLE FALLBACK inside `reclaim_settled_run_dispatches`, which is
+    // the entire basis for "the durable delete is issued even when this node
+    // did not hold the row in memory" -- and which every other reclaim test
+    // leaves unexecuted, because they all still hold the dispatch in the local
+    // queue and so never reach it. Replacing that fallback's body with
+    // `Vec::new()` has to redden something, and this is it.
+    let submitter = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "reclaim-across-nodes");
+    let start_dispatch_id = agent_job_start_dispatch_id(&run_id);
+    submitter
+        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&run_id, "tenant-a"))
+        .expect("the submitting node enqueues + persists the start dispatch");
+
+    // The node that serves the settlement: same durable table, empty queue.
+    let settling = AppState::new(Config::default());
+    for record in crate::gateway::block_on_sync_bridge(
+        submitter.repositories_arc().self_hosted_run_dispatches(),
+    ) {
+        crate::gateway::block_on_sync_bridge(
+            settling
+                .repositories_arc()
+                .upsert_self_hosted_run_dispatch(record),
+        )
+        .expect("the settling node reads the same durable table");
+    }
+    assert!(
+        settling
+            .self_hosted_dispatch_ids_for_run(&run_id)
+            .is_empty(),
+        "this node's in-process lease queue genuinely holds nothing for the run"
+    );
+    assert!(durable_dispatch_ids(&settling).contains(&start_dispatch_id));
+
+    assert_eq!(
+        settling.reclaim_settled_run_dispatches(&run_id),
+        1,
+        "the reclaim must find the peer's row through the durable table"
+    );
+    assert!(
+        !durable_dispatch_ids(&settling).contains(&start_dispatch_id),
+        "...and actually delete it, which is the retention bound the cap used to stand in for"
+    );
+}
+
+#[test]
 fn a_cancelled_job_can_no_longer_be_leased_and_started() {
     // Cancel returned the caller's budget while leaving the work leasable, so a
     // worker would still poll, lease and START a job the caller had cancelled
@@ -1378,7 +1546,7 @@ fn cancelling_an_already_leased_job_supersedes_its_start_dispatch() {
 
     // Long after the original lease expired: nothing may hand the start
     // dispatch out again. The `cancel_run` may (and must) still be leasable.
-    let mut saw_cancel = false;
+    let mut cancel_lease = None;
     for attempt in 0..4 {
         let Some(lease) = poll_for_lease(&state, &identity, 9_000 + attempt) else {
             break;
@@ -1388,12 +1556,40 @@ fn cancelling_an_already_leased_job_supersedes_its_start_dispatch() {
             "a cancelled job's start dispatch must never be re-leased"
         );
         if lease.action == SelfHostedRunAction::CancelRun && lease.run_id == run_id {
-            saw_cancel = true;
+            cancel_lease = Some(lease);
         }
     }
+    let cancel_lease =
+        cancel_lease.expect("the holder must still be able to lease the cancel_run that stops it");
+
+    // Acking the cancel is the point at which BOTH rows lose their last reader,
+    // and it is the only reclaim trigger the ack seam owns. Driven through the
+    // real ack seam so deleting that trigger reddens this test rather than
+    // passing silently.
     assert!(
-        saw_cancel,
-        "the holder must still be able to lease the cancel_run that stops it"
+        durable_dispatch_ids(&state).contains(&start_dispatch_id),
+        "the superseded start row is still there while the cancel is unacked"
+    );
+    state
+        .ack_self_hosted_worker_run(ferrogate_runtime::SelfHostedRunAckRequest {
+            protocol_version: 1,
+            identity,
+            dispatch_id: cancel_lease.dispatch_id.clone(),
+            action: cancel_lease.action,
+            lease_id: cancel_lease.lease_id.clone(),
+            run_id: cancel_lease.run_id.clone(),
+            status: ferrogate_runtime::SelfHostedRunAckStatus::Cancelled,
+            reported_at_unix: cancel_lease.lease_expires_at_unix,
+        })
+        .expect("the holder's cancel ack is accepted");
+    let remaining = durable_dispatch_ids(&state);
+    assert!(
+        !remaining.contains(&start_dispatch_id),
+        "an acknowledged cancel reclaims the start dispatch it superseded: {remaining:?}"
+    );
+    assert!(
+        !remaining.contains(&cancel_lease.dispatch_id),
+        "...and the cancel_run row itself, which now has no reader at all: {remaining:?}"
     );
 }
 

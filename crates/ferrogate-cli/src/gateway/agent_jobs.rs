@@ -373,11 +373,12 @@ struct AgentJobCancelResponse {
     /// `true` when this call terminalized the run; `false` when it was already
     /// terminal (cancel is idempotent).
     cancelled: bool,
-    /// `true` when a `cancel_run` dispatch was handed to the runtime transport,
-    /// which happens only when a worker had already LEASED the job. Queued work
-    /// nobody has picked up is withdrawn from the lease queue instead, so
-    /// `false` here means "nothing was executing it", not "the cancel did not
-    /// take effect" (#502).
+    /// `true` when a `cancel_run` dispatch was handed to the runtime transport.
+    /// That happens whenever this node could not simply WITHDRAW the queued
+    /// work itself: a worker had already leased it, or the job was submitted
+    /// through a peer replica that still holds the runnable copy in its own
+    /// lease queue. `false` therefore means "this node held the only copy and
+    /// took it back", not "the cancel did not take effect" (#502).
     runtime_cancel_dispatched: bool,
     cancelled_at_unix: Option<u64>,
     request_id: String,
@@ -995,27 +996,45 @@ impl FerroGateway {
 
 /// Stop `run` in the runtime, and reclaim what it leaves behind.
 ///
-/// Two shapes, chosen by whether any worker has EVER leased the start dispatch
-/// (#502 rework):
+/// Two shapes, chosen by whether WITHDRAWING the start dispatch on this node
+/// is by itself enough to stop the work (#502 rework):
 ///
-/// * NOT leased -- nothing is executing the job, so there is nobody to tell.
-///   The start dispatch is WITHDRAWN: removed from the lease queue and deleted
-///   from `self_hosted_run_dispatches`. A submit/cancel loop therefore leaves
-///   no permanent row behind, where before #502 it left two per iteration in a
-///   table nothing ever deleted.
-/// * LEASED -- a worker holds it and may be running it, so a `cancel_run`
-///   (#414) is enqueued addressing the SAME worker/session/adapter the start
-///   dispatch targeted. The start dispatch is left in place so the holder's ack
-///   still resolves, but it is now SUPERSEDED: the lease queue refuses to hand
-///   out a `start_run` whose run carries a `cancel_run`, so the expiry of that
-///   lease can no longer let a second worker pick up and START work the caller
-///   cancelled. Both rows are reclaimed when the worker acknowledges the
-///   cancel.
+/// * WITHDRAWABLE -- this process's own lease queue holds the start dispatch
+///   and no worker has leased it, so nothing is executing the job and this node
+///   owns the only runnable copy. The dispatch is removed from the lease queue
+///   and deleted from `self_hosted_run_dispatches`. A submit/cancel loop
+///   therefore leaves no permanent row behind, where before #502 it left two
+///   per iteration in a table nothing ever deleted.
+/// * NOT WITHDRAWABLE -- either a worker holds the lease, or the dispatch
+///   resolved only out of the durable table because a PEER replica is the one
+///   holding it in memory. Both get a `cancel_run` (#414) enqueued, addressing
+///   the SAME worker/session/adapter the start dispatch targeted. The start
+///   dispatch is left in place so the holder's ack still resolves, but it is
+///   now SUPERSEDED: the lease queue refuses to hand out a `start_run` whose
+///   run carries a `cancel_run`, so the expiry of that lease can no longer let
+///   a second worker pick up and START work the caller cancelled. Both rows are
+///   reclaimed when the worker acknowledges the cancel.
 ///
-/// Lease ownership is read through
-/// [`AppState::self_hosted_dispatch_lease_owner`], which falls back to the
-/// durable row, so a cancel served by a replica that never held the dispatch
-/// still distinguishes the two cases.
+/// The lease queue is PER PROCESS, which is why the lease owner alone cannot
+/// pick the shape. Deleting the durable row from a replica that never held the
+/// dispatch does not touch the peer's in-memory entry: that entry stays
+/// unacked, and with no `cancel_run` anywhere the peer's `poll_run` has an
+/// empty superseded set, so a worker polling the peer leases and STARTS the
+/// cancelled job. That is #474's original defect verbatim -- "the cancel found
+/// no start dispatch, enqueued no `cancel_run`, and still answered 200 while
+/// the worker kept running" -- so a cancel that cannot withdraw locally always
+/// leaves durable `cancel_run` evidence instead.
+///
+/// Residue, stated rather than left implied (the same discipline the budget's
+/// over-permissive N x cap gets): the `cancel_run` this path enqueues is
+/// durable immediately, but a node's superseded set is built from its OWN
+/// in-process queue, so a peer only starts refusing to re-lease the start
+/// dispatch once it next rebuilds that queue from `self_hosted_run_dispatches`
+/// (startup, worker registration, rotation). Until then the peer can still
+/// hand the start dispatch to a worker. That is strictly better than the
+/// alternative -- deleting the durable row leaves the peer's copy leasable AND
+/// destroys the evidence that would ever supersede it -- but it is not a
+/// closed window, and the cross-replica cancel is not instantaneous.
 ///
 /// Returns whether a `cancel_run` was enqueued. `false` covers both "there was
 /// nothing to cancel" and "the queued work was withdrawn without needing to
@@ -1032,10 +1051,17 @@ fn cancel_agent_job_in_runtime(
         return Ok(false);
     };
     let start_dispatch_id = start.dispatch_id.clone();
-    if state
+    // Node-local on purpose: `self_hosted_dispatch_for_run` above may have
+    // resolved `start` out of the durable table, and a durable row is evidence
+    // that SOME node holds the dispatch, not that this one does.
+    let held_in_this_process = state
+        .self_hosted_dispatch_ids_for_run(&run.id)
+        .iter()
+        .any(|dispatch_id| dispatch_id == &start_dispatch_id);
+    let leased = state
         .self_hosted_dispatch_lease_owner(&run.id, SelfHostedRunAction::StartRun)
-        .is_none()
-    {
+        .is_some();
+    if held_in_this_process && !leased {
         state.discard_self_hosted_dispatch(&start_dispatch_id);
         return Ok(false);
     }

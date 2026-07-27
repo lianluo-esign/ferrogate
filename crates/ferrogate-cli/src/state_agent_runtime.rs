@@ -1639,6 +1639,22 @@ impl AppState {
         }
     }
 
+    /// Dispatch ids THIS PROCESS's lease queue holds for `run_id`, whatever
+    /// their action or ack state.
+    ///
+    /// Deliberately node-local, with no durable fallback: its callers are
+    /// deciding what only this node can act on. The cancel path (#502 rework)
+    /// uses it to tell "the runnable copy is mine, so withdrawing it is the
+    /// whole remedy" apart from "a peer holds the runnable copy, so the remedy
+    /// has to be durable evidence that peer will read" -- a distinction the
+    /// durable row cannot make, because a durable row exists in both cases.
+    pub(crate) fn self_hosted_dispatch_ids_for_run(&self, run_id: &str) -> Vec<String> {
+        match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime.queue.dispatch_ids_for_run(run_id),
+            Err(poisoned) => poisoned.into_inner().queue.dispatch_ids_for_run(run_id),
+        }
+    }
+
     /// Reclaim every dispatch row a SETTLED run still holds.
     ///
     /// A run that has reached a terminal state has no remaining reader for its
@@ -1651,10 +1667,7 @@ impl AppState {
     /// Falls back to the durable table only when this node holds nothing for
     /// the run, so the common (same-node) settle costs no extra query.
     pub(crate) fn reclaim_settled_run_dispatches(&self, run_id: &str) -> usize {
-        let mut dispatch_ids = match self.self_hosted_dispatch.lock() {
-            Ok(runtime) => runtime.queue.dispatch_ids_for_run(run_id),
-            Err(poisoned) => poisoned.into_inner().queue.dispatch_ids_for_run(run_id),
-        };
+        let mut dispatch_ids = self.self_hosted_dispatch_ids_for_run(run_id);
         if dispatch_ids.is_empty() {
             dispatch_ids = crate::gateway::block_on_sync_bridge(
                 self.repositories.self_hosted_run_dispatches(),
@@ -1856,6 +1869,19 @@ impl AppState {
         // the caller's submit slot stayed consumed by every job its own healthy
         // worker had finished, and the dispatch row stayed in the table for the
         // lifetime of the deployment. Settlement returns both.
+        //
+        // KNOWN GAP (#549), stated rather than hidden: the reporting worker is
+        // by construction the holder of this run's `start_run` lease (the check
+        // above proved it), and it may not have acked that lease yet. Deleting
+        // the row here means a worker that reports `{"state":"completed"}` and
+        // THEN acks with `SelfHostedRunAckStatus::Completed` gets
+        // `InvalidTransport("unknown dispatch")` where it previously got 200,
+        // and any later telemetry for the run trips #503's ownership check and
+        // logs the security-shaped "does not hold the lease for" warning
+        // instead of the benign already-terminal skip. Deferring the delete
+        // past the ack window is the fix; it is not taken here because the
+        // majority worker never acks at all, which is the retention leak this
+        // reclaim exists to close.
         if terminal {
             self.reclaim_settled_run_dispatches(run_id);
         }
