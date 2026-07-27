@@ -27,13 +27,37 @@ fn maps_429_status_to_rate_limited() {
 }
 
 #[test]
-fn maps_rate_limit_error_code_to_rate_limited() {
-    // Code 10013 is a rate-limit code even on a non-429 status.
-    let mapped = CloudflareError::from_response(403, None, vec![err(10013, "rate limited")]);
+fn r2_incomplete_body_code_10013_is_not_misclassified_as_rate_limited() {
+    // Issue #493: R2's `IncompleteBody` (code 10013, HTTP 400 — "request
+    // body terminated before expected Content-Length") must NOT be treated
+    // as a rate limit. It is a genuine client-side truncation that fails
+    // identically on every retry, so it must also be classified as a
+    // non-retryable `Api` error rather than something the backoff loop will
+    // burn its whole retry budget on.
+    let mapped = CloudflareError::from_response(400, None, vec![err(10013, "IncompleteBody")]);
+    match mapped {
+        CloudflareError::Api { status, ref errors } => {
+            assert_eq!(status, 400);
+            assert_eq!(errors[0].code, 10013);
+        }
+        other => panic!("expected Api, got {other:?}"),
+    }
+    assert!(
+        !mapped.is_retryable(),
+        "R2 IncompleteBody (10013/400) must not be retried, got {mapped:?}"
+    );
+}
+
+#[test]
+fn r2_too_many_requests_code_10058_maps_to_rate_limited() {
+    // Issue #493: R2's actual rate-limit code is 10058 / `TooManyRequests`,
+    // which always arrives with HTTP 429.
+    let mapped = CloudflareError::from_response(429, None, vec![err(10058, "TooManyRequests")]);
     assert!(
         matches!(mapped, CloudflareError::RateLimited { .. }),
         "got {mapped:?}"
     );
+    assert!(mapped.is_retryable(), "rate limits must be retryable");
 }
 
 #[test]

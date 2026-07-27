@@ -45,10 +45,29 @@ impl fmt::Display for CloudflareApiError {
 /// `9109` = "Unauthorized to access requested resource"; `9103` /
 /// `9107` are the sibling authorization-denied codes Cloudflare returns
 /// when a token authenticates but is not scoped for the resource.
+///
+/// Cross-namespace audit (issue #493): all three codes live in the
+/// account/token-auth namespace (`9xxx`), which every product shares — they
+/// are not re-used with a different meaning by R2 (whose codes are the
+/// disjoint S3-flavoured `1000x`-`10007x` range documented at
+/// <https://developers.cloudflare.com/r2/api/error-codes/>, e.g. `10002`
+/// Unauthorized/401, `10003` AccessDenied/403, `10035`
+/// SignatureDoesNotMatch/403, `10042` NotEntitled/403) or by any other
+/// Cloudflare product researched for that issue. No collision found, so the
+/// bare numeric match is kept as-is.
 pub const MISSING_SCOPE_CODES: &[i64] = &[9103, 9107, 9109];
 
 /// Cloudflare error codes that mean the credential itself is bad
 /// (unknown/expired/malformed token), as opposed to merely under-scoped.
+///
+/// Cross-namespace audit (issue #493): same conclusion as
+/// [`MISSING_SCOPE_CODES`] — `1000`, `9106` and `10000` are general
+/// `client/v4` account-auth codes and none of them appear in R2's disjoint
+/// error-code range (R2 has no code `10000`; its own auth codes are
+/// `10002`/`10003`/`10035`/`10042`, none of which are listed here because
+/// `status == 401`/`403` in [`CloudflareError::from_response`] already
+/// classifies them as [`CloudflareError::Unauthorized`] without needing a
+/// numeric-code match). No collision found.
 pub const AUTHENTICATION_CODES: &[i64] = &[1000, 9106, 10000];
 
 /// Every failure mode of the shared Cloudflare client.
@@ -102,12 +121,32 @@ impl CloudflareError {
     ///
     /// Precedence: rate-limit (429) → missing-scope codes → auth codes →
     /// generic API error.
+    ///
+    /// Rate-limit detection is `status == 429` alone (issue #493). An earlier
+    /// version additionally treated any envelope carrying `errors[].code ==
+    /// 10013` as a rate limit regardless of namespace. That numeral is not a
+    /// rate-limit code in *any* Cloudflare product: in R2 it is
+    /// `IncompleteBody` (HTTP 400 — "request body terminated before expected
+    /// Content-Length", a non-retryable client-side truncation that can
+    /// never succeed by retrying), and in the general `client/v4` namespace
+    /// it surfaces as `workers.api.error.unknown` (HTTP 500), also unrelated
+    /// to rate limiting. Because R2 now routes through this mapper (`r2.rs`),
+    /// the collision was live: a truncated R2 upload body was reported as
+    /// `RateLimited` and retried until the backoff budget was burned on a
+    /// request that could never succeed. R2's real rate-limit code, `10058`
+    /// / `TooManyRequests`, always arrives with HTTP 429 per
+    /// <https://developers.cloudflare.com/r2/api/error-codes/>, so
+    /// `status == 429` alone already classifies it correctly — no
+    /// additional numeric-code branch is added, since a bare `code == 10058`
+    /// match would reintroduce the same collision class: in Cloudflare's
+    /// Lists/Bulk-Redirect `10xxx` namespace, `10058` means "list items
+    /// incompatible with list type" (HTTP 400), not a rate limit.
     pub(crate) fn from_response(
         status: u16,
         retry_after: Option<Duration>,
         errors: Vec<CloudflareApiError>,
     ) -> Self {
-        if status == 429 || errors.iter().any(|e| e.code == 10013) {
+        if status == 429 {
             return CloudflareError::RateLimited {
                 retry_after,
                 attempts: 0,
