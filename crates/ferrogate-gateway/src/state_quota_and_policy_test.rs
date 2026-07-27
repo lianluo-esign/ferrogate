@@ -2304,12 +2304,36 @@ fn activating_guardrail_policy_bumps_shared_control_plane_revision_for_peers() {
     );
 }
 
+/// The api-key payload the signed-snapshot tests below publish, verify and
+/// replay. `organization_id` is load-bearing for the fixture to exist at all:
+/// since #540 a static key that declares neither `organization_id` nor
+/// `platform_operator` is refused by `Config::validate`, which every test here
+/// calls before building a node.
+///
+/// It is a *tenant* rather than `platform_operator = true` because that is what
+/// this key models. Its only scope is `chat.completions`, i.e. a data-plane
+/// traffic key, and the shipped hybrid-deployment templates draw exactly that
+/// line: in `docs/deploy/customer-vpc/control-plane.toml` the `chat.completions`
+/// client key names `organization_id`, while `platform_operator = true` is
+/// reserved for the `admin.read`/`admin.write` bootstrap operator key (there and
+/// in `data-plane.toml`). Giving a traffic key platform root would restore, in
+/// the fixture, precisely the "root by omission" posture #540 abolished.
+///
+/// The value coincides with `cluster.snapshot_tenant_id` in the tests that set
+/// one, but the two are not coupled: `server::rbac`'s scoped-config table
+/// records `ClusterConfig::snapshot_tenant_id` as "one deployment's own
+/// identity", explicitly *not* a tenant selector, and it is consumed only by
+/// `ferrogate-config`'s `signed_snapshot`. Nothing on the publish, sign, verify
+/// or replay-floor path reads a key's tenancy, so the choice does not weaken
+/// what these tests assert -- it only decides which real key shape the payload
+/// stands for.
 fn signed_snapshot_test_api_key(id: &str) -> ferrogate_config::ApiKey {
     serde_json::from_value(serde_json::json!({
         "id": id,
         "name": id,
         "key": format!("{id}-secret"),
         "scopes": ["chat.completions"],
+        "organization_id": "tenant-a",
     }))
     .expect("valid test api key")
 }

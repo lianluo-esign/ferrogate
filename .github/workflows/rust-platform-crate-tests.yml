@@ -35,23 +35,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 1,063 passed / 4 skipped / 0 ignored, 2.4s of test time after the
-          # crate builds. The four skips are issue #563: their shared fixture
-          # `signed_snapshot_test_api_key` mints an API key declaring neither
-          # organization_id nor platform_operator, which #540 turned into a hard
-          # `Config::validate()` refusal. Choosing which field it should declare
-          # is a #540 judgement, not a CI-wiring one, so the slice names them and
-          # runs the other 1,063 rather than waiting or pretending. Delete these
-          # four lines when #563 lands; they are substring filters and will go
-          # quietly no-op if the tests are renamed, which is what #563 tracks.
+          # 1,067 passed / 0 failed / 0 ignored / 0 filtered out, 1.3s of test
+          # time after the crate builds. The four `--skip` filters this slice
+          # carried are gone with #563: their shared fixture
+          # `signed_snapshot_test_api_key` now declares `organization_id`, so the
+          # `Config::validate()` refusal #540 added no longer fires on it and the
+          # whole crate runs unfiltered.
           - slice: gateway
             package: ferrogate-gateway
-            args: >-
-              --all-features --
-              --skip signed_shared_snapshot_verifies_activates_and_rejects_forgery
-              --skip signed_snapshot_replay_floor_advances_on_local_publish
-              --skip signed_snapshot_replay_floor_persists_across_restart
-              --skip unsigned_shared_snapshots_are_unaffected_by_the_persisted_replay_floor
+            args: --all-features
           # 342 passed / 0 failed / 0 ignored, 2.6s. Its only previous mention
           # anywhere was `--test firecracker_boot_validation` inside
           # firecracker-boot-validation.yml, which is workflow_dispatch-only and
