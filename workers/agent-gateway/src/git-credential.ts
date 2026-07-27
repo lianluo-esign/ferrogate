@@ -138,17 +138,41 @@ export interface GitCredentialHost {
   brokerRecordDelete(): Promise<void>;
 }
 
-/** The credential-helper callback body. Note: no password field, ever. */
-interface CredentialCallback {
+/**
+ * The `key=value` block git hands its credential helper, as the helper
+ * forwards it. Note: no password field, ever.
+ *
+ * This is the VALIDATED form. The wire form is `unknown` until
+ * {@link invalidCallback} has proven every field's type — see the note on
+ * {@link CredentialCallback}.
+ */
+export interface CredentialQuery {
+  protocol: string;
+  host: string;
+  path?: string;
+  username?: string;
+}
+
+/**
+ * One credential-helper callback, **after** validation. Twin of the Rust
+ * `GitCredentialCallback`.
+ *
+ * The type distinction this interface carries is load-bearing, and #501 is what
+ * happens without it. On the Rust side the equivalent type is `Deserialize`, so
+ * `{"query":{"protocol":123}}` never becomes a `GitCredentialCallback` at all —
+ * serde rejects it at the boundary. TypeScript has no such boundary: a `as
+ * CredentialCallback` cast is a promise to the compiler and nothing to the
+ * runtime, so `query.protocol.toLowerCase()` on a number threw a `TypeError`
+ * out of the Durable Object, past the budget charge and past the audit write.
+ *
+ * So the rule for this module: a value of this type has been through
+ * {@link invalidCallback}. Anything that has not is typed `unknown`.
+ */
+export interface CredentialCallback {
   runId: string;
   grantId: string;
   operation: "fetch" | "push";
-  query: {
-    protocol: string;
-    host: string;
-    path?: string;
-    username?: string;
-  };
+  query: CredentialQuery;
 }
 
 /** Stable denial codes; mirror `broker_deny_codes` in the Rust module. */
@@ -195,6 +219,10 @@ export async function capabilityFingerprint(
  * testable without a GitHub round trip; it is the TypeScript twin of
  * `GitCredentialBroker::decide` and MUST stay in step with it — the same ten
  * codes in the same order, and the caller charges the budget on denials too.
+ *
+ * `callback` is a VALIDATED {@link CredentialCallback}: every field access below
+ * is total over that type, which is why there is no defensive `?.` left in this
+ * function. Handing it an unvalidated body is the #501 defect.
  */
 export function authorizeCallback(
   grant: BrokerGrantRecord,
@@ -217,10 +245,10 @@ export function authorizeCallback(
   if (grant.delivery !== BROKERED_DELIVERY) {
     return deny(DENY.DELIVERY_NOT_BROKERED, "grant is not a brokered grant");
   }
-  if (callback.query?.protocol?.toLowerCase() !== "https") {
+  if (callback.query.protocol.toLowerCase() !== "https") {
     return deny(DENY.PROTOCOL_NOT_HTTPS, "credentials are brokered over TLS only");
   }
-  const host = (callback.query.host ?? "").toLowerCase().split(":")[0];
+  const host = callback.query.host.toLowerCase().split(":")[0];
   if (host !== grant.host.toLowerCase()) {
     return deny(DENY.HOST_NOT_GRANTED, `host ${host} is not the granted host`);
   }
@@ -286,6 +314,67 @@ function invalidRegistration(candidate: unknown): string | null {
     return "capabilityFingerprint must be lowercase hex sha256 (64 chars)";
   }
   return null;
+}
+
+/**
+ * Reject a callback whose fields are the wrong TYPE, field by field, exactly as
+ * {@link invalidRegistration} does for the control-plane half (#501).
+ *
+ * Optional chaining is NOT a type check: `(123)?.toLowerCase` is `undefined`,
+ * and calling it throws. This function is the only thing standing between a
+ * JSON body and the string operations in {@link authorizeCallback}, so it must
+ * stay exhaustive over every field that function touches.
+ *
+ * `operation` is required and must be one of the two literals — the Rust twin
+ * deserializes it into a `GitOperation` enum, which has no default either. It
+ * is checked here rather than coerced because a coerced operation would land in
+ * the audit row as fact.
+ *
+ * Empty strings in `protocol`/`host` are deliberately NOT rejected: they are
+ * well-typed and the authorization denies them with `protocol_not_https` /
+ * `host_not_granted`, which is a charged, audited denial rather than a
+ * discarded body.
+ */
+function invalidCallback(candidate: unknown): string | null {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return "callback must be an object";
+  }
+  const callback = candidate as Partial<CredentialCallback>;
+  for (const field of ["runId", "grantId"] as const) {
+    const value = callback[field];
+    if (typeof value !== "string" || value.trim() === "") return `${field} is required`;
+  }
+  if (callback.operation !== "fetch" && callback.operation !== "push") {
+    return 'operation must be "fetch" or "push"';
+  }
+  const query = callback.query as Partial<CredentialQuery> | undefined;
+  if (!query || typeof query !== "object" || Array.isArray(query)) return "query is required";
+  for (const field of ["protocol", "host"] as const) {
+    if (typeof query[field] !== "string") return `query.${field} must be a string`;
+  }
+  for (const field of ["path", "username"] as const) {
+    const value = query[field];
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      return `query.${field} must be a string`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The operation the body actually PRESENTED, or `undefined` when it presented
+ * neither literal.
+ *
+ * Deliberately not a coercion. A malformed callback still gets an audit row
+ * when the operation is knowable, and gets none when it is not: an audit row
+ * asserting `fetch` for a body that never said `fetch` is a wrong value, and a
+ * wrong value in the audit trail is worse than an absent row.
+ */
+function presentedOperation(candidate: unknown): "fetch" | "push" | undefined {
+  const operation = (candidate as { operation?: unknown } | null | undefined)?.operation;
+  if (operation === "push") return "push";
+  if (operation === "fetch") return "fetch";
+  return undefined;
 }
 
 /**
@@ -370,24 +459,45 @@ export async function brokerAuthorize(
     return { ok: false, code: "unauthorized", detail: "no run capability" };
   }
 
-  const callback = callbackCandidate as CredentialCallback;
-  const operation = callback?.operation === "push" ? "push" : "fetch";
-  const sequence = record.operationsUsed + 1;
-  record.operationsUsed = sequence;
-
-  const decision = authorizeCallback(record.grant, { ...callback, operation }, sequence, nowUnix);
   const grant = record.grant;
-  const audit: GitCredentialAuditRow = {
+  const sequence = record.operationsUsed + 1;
+  // Charged BEFORE the body is looked at. A capability holder posting a
+  // malformed callback is probing, and #501 is precisely the case where the
+  // probe cost nothing: the throw landed between this line and the
+  // `brokerRecordPut` below, so neither the charge nor the row was persisted.
+  record.operationsUsed = sequence;
+  const row = (operation: "fetch" | "push", decisionCode: string): GitCredentialAuditRow => ({
     tenantId: grant.tenantId,
     runId: grant.runId,
     grantId: grant.grantId,
     repoId: grant.repoId,
     operation,
-    decisionCode: decision.ok ? "approved" : decision.code,
+    decisionCode,
     credentialFingerprint: grant.credentialFingerprint,
     sequence,
     occurredAtUnix: nowUnix,
+  });
+  const append = (audit: GitCredentialAuditRow) => {
+    record.audit = [...record.audit, audit].slice(-AUDIT_RING_CAPACITY);
   };
+
+  // The type boundary. Past this point `callbackCandidate` is a
+  // `CredentialCallback` for real, not by assertion.
+  const problem = invalidCallback(callbackCandidate);
+  if (problem !== null) {
+    const presentedOp = presentedOperation(callbackCandidate);
+    if (presentedOp) append(row(presentedOp, "invalid_callback"));
+    // `outstanding` is untouched: a body this broken must not supersede — and
+    // therefore must not cause the revocation of — a token a live operation is
+    // still using. It is still revoked at run close.
+    await host.brokerRecordPut(record);
+    return { ok: false, code: "invalid_callback", detail: problem };
+  }
+  const callback = callbackCandidate as CredentialCallback;
+  const operation = callback.operation;
+
+  const decision = authorizeCallback(grant, callback, sequence, nowUnix);
+  const audit = row(operation, decision.ok ? "approved" : decision.code);
 
   let mint: BrokerAuthorization["mint"];
   if (decision.ok) {
@@ -407,7 +517,7 @@ export async function brokerAuthorize(
   // The audit row is written on BOTH paths — a denied callback is the
   // interesting one — and it is written BEFORE the mint, so there is no
   // ordering in which a token is issued without a row already recorded.
-  record.audit = [...record.audit, audit].slice(-AUDIT_RING_CAPACITY);
+  append(audit);
   const supersededToken = record.outstanding?.token ?? null;
   if (supersededToken) delete record.outstanding;
   await host.brokerRecordPut(record);
@@ -706,12 +816,28 @@ export async function handleGitCredential(
       }
 
       const stub = await runStub(env, runId);
-      const authorized = await stub.gitCredentialAuthorize(
-        callback,
-        capability,
-        Math.floor(Date.now() / 1000),
-      );
-      if (!authorized.ok) return json({ error: authorized.code, detail: authorized.detail }, 403);
+      let authorized: Awaited<ReturnType<typeof stub.gitCredentialAuthorize>>;
+      try {
+        authorized = await stub.gitCredentialAuthorize(
+          callback,
+          capability,
+          Math.floor(Date.now() / 1000),
+        );
+      } catch {
+        // Belt and braces behind `invalidCallback`: an unexpected throw inside
+        // the Durable Object becomes a typed 502, never an uncaught Worker
+        // exception (1101) that leaks a stack and skips the budget. The
+        // exception text is not echoed — it can quote the callback body.
+        return json({ error: "authorize_failed", detail: "callback could not be authorized" }, 502);
+      }
+      if (!authorized.ok) {
+        // A body the broker could not even read is the caller's mistake (400);
+        // anything else here is `unauthorized`, which stays 403 so this route
+        // is not an oracle. `invalid_callback` reaches this line only AFTER the
+        // capability verified, and the budget was charged for it in the DO.
+        const status = authorized.code === "invalid_callback" ? 400 : 403;
+        return json({ error: authorized.code, detail: authorized.detail }, status);
+      }
       if (authorized.supersededToken) {
         // The previous operation's token dies the moment a new one is asked for.
         ctx.waitUntil(revokeInstallationToken(env, authorized.supersededToken));

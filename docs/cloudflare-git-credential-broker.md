@@ -207,8 +207,18 @@ Refused (403): `{ "error": "<deny code>", "detail": "…" }`. The helper renders
 refusal as an **empty credential block** on stdout, so `git` fails the
 operation rather than prompting or retrying. An unregistered run and a wrong
 capability both answer `unauthorized` — the route must not be an oracle for
-which run ids exist. A malformed body is a 400 (`invalid_json`), never an
+which run ids exist. A malformed body is a 400 — `invalid_json` when it is not
+JSON at all, `invalid_callback` when a field is the wrong *type* — never an
 uncaught Worker exception.
+
+`invalid_callback` is a **charged** rejection (#501). Rust gets this boundary
+for free: `GitCredentialCallback` is `Deserialize`, so `"protocol": 123` never
+becomes a callback. TypeScript has no such boundary — a cast is a promise to
+the compiler and nothing to the runtime — so the Worker validates every field
+by type before the authorization touches it, and the run's budget is charged
+whether or not the body parsed. An audit row is written too whenever the body
+named a real `operation`; when it did not, the charge is recorded without a row
+rather than with a fabricated one.
 
 `expiresAtUnix` is what the helper is told; it is **not** what bounds the
 token's life. GitHub fixes that at one hour and does not accept a shorter
@@ -219,6 +229,11 @@ in step): `run_mismatch`, `grant_mismatch`, `grant_expired`,
 `delivery_not_brokered`, `protocol_not_https`, `host_not_granted`,
 `path_missing`, `repo_not_granted`, `write_not_granted`,
 `operation_budget_exhausted`.
+
+`invalid_callback` is deliberately **not** in that list. Deny codes are
+authorization outcomes, and Rust cannot produce this one at all — serde stops
+the body a step earlier. It sits with `invalid_registration` and `unauthorized`
+as a rejection of the request itself, so the ten-code parity is unchanged.
 
 ### `POST /git-credential/revoke`
 
@@ -301,7 +316,10 @@ same DO method that authorizes, so concurrent callbacks cannot race past it.
 Denials consume budget too; otherwise probing the broker is free. Both halves
 behave the same way — the TypeScript side used to accept `operationsUsed` from
 the request body and never write it back, which meant the budget was not
-enforced at all.
+enforced at all. A body that fails the type check is charged on the same
+grounds (#501): the throw it used to cause landed after the counter was
+incremented in memory and before the record was persisted, so a capability
+holder could drive unbounded callbacks that cost no budget and left no row.
 
 **Deny-code parity** — ten codes, one list, both languages
 (`broker_deny_codes` in Rust, `DENY` in TypeScript). The TypeScript side was
