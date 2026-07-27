@@ -145,12 +145,24 @@ export interface GitCredentialHost {
  * This is the VALIDATED form. The wire form is `unknown` until
  * {@link invalidCallback} has proven every field's type — see the note on
  * {@link CredentialCallback}.
+ *
+ * `path`/`username` are `string | null | undefined` rather than `string |
+ * undefined`, and the `| null` is the load-bearing half. The Rust twin
+ * `GitCredentialQuery` declares them `Option<String>` with `#[serde(default)]`
+ * and NO `skip_serializing_if`, so a serialized pathless query is `"path":
+ * null` on the wire, not an absent key. Declaring the null makes `?? ""` in
+ * {@link authorizeCallback} legitimate instead of defensive, and — the point —
+ * makes a future `callback.query.path.trim()` a COMPILE error rather than a
+ * second #501. Rejecting the null in the validator would have bought the same
+ * safety at the price of answering `invalid_callback` for the single most
+ * likely real misconfiguration, where the charged, audited, documented
+ * `path_missing` deny code is what an operator needs to see.
  */
 export interface CredentialQuery {
   protocol: string;
   host: string;
-  path?: string;
-  username?: string;
+  path?: string | null;
+  username?: string | null;
 }
 
 /**
@@ -334,6 +346,17 @@ function invalidRegistration(candidate: unknown): string | null {
  * well-typed and the authorization denies them with `protocol_not_https` /
  * `host_not_granted`, which is a charged, audited denial rather than a
  * discarded body.
+ *
+ * `null` in `path`/`username` is ACCEPTED, and that is deliberate rather than
+ * an oversight: the Rust twin serializes `Option<String>` without
+ * `skip_serializing_if`, so `"path": null` is what a pathless query looks like
+ * on the wire. A pathless callback must reach `authorizeCallback` and come back
+ * `path_missing` — charged, audited, and naming the fix
+ * (`credential.useHttpPath=true`) — not `invalid_callback`, which names
+ * nothing. The safety that rejecting it would have bought is bought instead by
+ * the `| null` in {@link CredentialQuery}: the validated form is exactly the
+ * declared form, so this validator stays total, and a later
+ * `callback.query.path.trim()` fails to compile.
  */
 function invalidCallback(candidate: unknown): string | null {
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
@@ -485,13 +508,21 @@ export async function brokerAuthorize(
   // `CredentialCallback` for real, not by assertion.
   const problem = invalidCallback(callbackCandidate);
   if (problem !== null) {
+    // The cap is enforced AHEAD of the validator (#501 review item 7). Without
+    // this line the budget check lives only inside `authorizeCallback`, which
+    // this branch returns before, so a malformed probe was charged forever and
+    // never refused: `operation_budget_exhausted` was unreachable on the one
+    // path that does not even have to be well-typed to reach it.
+    const exhausted = sequence > OPERATION_BUDGET;
+    const code = exhausted ? DENY.OPERATION_BUDGET_EXHAUSTED : "invalid_callback";
+    const detail = exhausted ? `run used its ${OPERATION_BUDGET} operations` : problem;
     const presentedOp = presentedOperation(callbackCandidate);
-    if (presentedOp) append(row(presentedOp, "invalid_callback"));
+    if (presentedOp) append(row(presentedOp, code));
     // `outstanding` is untouched: a body this broken must not supersede — and
     // therefore must not cause the revocation of — a token a live operation is
     // still using. It is still revoked at run close.
     await host.brokerRecordPut(record);
-    return { ok: false, code: "invalid_callback", detail: problem };
+    return { ok: false, code, detail };
   }
   const callback = callbackCandidate as CredentialCallback;
   const operation = callback.operation;
@@ -514,9 +545,15 @@ export async function brokerAuthorize(
     };
   }
 
-  // The audit row is written on BOTH paths — a denied callback is the
-  // interesting one — and it is written BEFORE the mint, so there is no
-  // ordering in which a token is issued without a row already recorded.
+  // The audit row is written on both AUTHORIZED paths — approve and deny, and
+  // the denied one is the interesting one — and it is written BEFORE the mint,
+  // so there is no ordering in which a token is issued without a row already
+  // recorded. There is a THIRD path since #501: a body too broken to name an
+  // `operation` is charged and returns above WITHOUT a row, because an audit
+  // row asserting `fetch` for a body that never said `fetch` is a wrong value.
+  // So `operationsUsed` may exceed the row count, and the gap it leaves in
+  // `sequence` is the only trace of such a body. The doc states this as the
+  // reconciliation rule.
   append(audit);
   const supersededToken = record.outstanding?.token ?? null;
   if (supersededToken) delete record.outstanding;
@@ -731,10 +768,50 @@ function presentedBearer(request: Request): string {
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
 }
 
-/** JSON body or a 400 — never an uncaught Worker exception (1101). */
-async function parseJsonBody(request: Request): Promise<{ body?: unknown; error?: Response }> {
+/**
+ * Ceiling on a callback body, in characters of decoded JSON text.
+ *
+ * A credential-helper callback is four short strings; 16 KiB is three orders of
+ * magnitude of headroom. The cap exists because the body is passed as a Durable
+ * Object RPC ARGUMENT, and DO RPC arguments are size-limited: an oversize body
+ * throws at the RPC boundary, i.e. outside `brokerAuthorize`, where no budget
+ * can be charged and no row written (#501 review item 3). Refusing it here is
+ * the only place that class can be removed rather than merely re-labelled.
+ *
+ * Counted in UTF-16 code units rather than UTF-8 bytes deliberately: a code
+ * unit is at most 3 UTF-8 bytes, so this is a hard bound either way, and it
+ * costs no second pass over the body.
+ */
+const MAX_CALLBACK_BODY_CHARS = 16 * 1024;
+
+/**
+ * JSON body or a 400 — never an uncaught Worker exception (1101).
+ *
+ * `maxChars` also buys a 413. It is applied on the untrusted callback path and
+ * not on the control-plane verbs, which are already gated on
+ * `GATEWAY_CONTROL_TOKEN`.
+ */
+async function parseJsonBody(
+  request: Request,
+  maxChars?: number,
+): Promise<{ body?: unknown; error?: Response }> {
+  const tooLarge = () =>
+    json({ error: "body_too_large", detail: `callback body exceeds ${maxChars} characters` }, 413);
+  if (maxChars !== undefined) {
+    // Cheapest refusal first, when the caller declared a length at all.
+    const declared = Number(request.headers.get("content-length") ?? "");
+    if (Number.isFinite(declared) && declared > maxChars * 3) return { error: tooLarge() };
+  }
+  let text: string;
   try {
-    return { body: await request.json() };
+    text = await request.text();
+  } catch {
+    // The read error's text is deliberately not echoed: it can quote the body.
+    return { error: json({ error: "invalid_json", detail: "body must be JSON" }, 400) };
+  }
+  if (maxChars !== undefined && text.length > maxChars) return { error: tooLarge() };
+  try {
+    return { body: JSON.parse(text) };
   } catch {
     // The parse error's text is deliberately not echoed: it can quote the body.
     return { error: json({ error: "invalid_json", detail: "body must be JSON" }, 400) };
@@ -803,16 +880,30 @@ export async function handleGitCredential(
 
     case "get": {
       if (!appBound) return json({ error: "github_app_unbound" }, 501);
-      const parsed = await parseJsonBody(request);
+      const capability = presentedBearer(request);
+      if (!capability) {
+        return json({ error: "unauthorized", detail: "no run capability" }, 401);
+      }
+      const parsed = await parseJsonBody(request, MAX_CALLBACK_BODY_CHARS);
       if (parsed.error) return parsed.error;
       const callback = parsed.body as Partial<CredentialCallback> | null;
       const runId = callback?.runId;
       if (typeof runId !== "string" || runId.trim() === "") {
-        return json({ error: "run_mismatch", detail: "callback names no run" }, 403);
-      }
-      const capability = presentedBearer(request);
-      if (!capability) {
-        return json({ error: "unauthorized", detail: "no run capability" }, 401);
+        // A FREE REFUSAL, documented as such rather than claimed away (#501).
+        // A body that names no run cannot address a Durable Object, so there is
+        // no record to charge and no audit ring to write to: a charge is
+        // structurally impossible here, not merely skipped.
+        //
+        // The code is `invalid_request`, which is what `revoke` and `audit`
+        // already answer for a missing runId, and deliberately neither of the
+        // two codes it sits between. Not `run_mismatch`: that is a DENY CODE,
+        // which the Durable Object emits charged and audited, and spending it
+        // on a request that never reached an authorization would give one code
+        // two accountings. Not `invalid_callback` either: that code is the
+        // Durable Object's, and it is worth keeping it to mean exactly one
+        // thing — the capability verified, the body did not, and the budget was
+        // charged for the attempt.
+        return json({ error: "invalid_request", detail: "callback names no run" }, 400);
       }
 
       const stub = await runStub(env, runId);
@@ -827,14 +918,26 @@ export async function handleGitCredential(
         // Belt and braces behind `invalidCallback`: an unexpected throw inside
         // the Durable Object becomes a typed 502, never an uncaught Worker
         // exception (1101) that leaks a stack and skips the budget. The
-        // exception text is not echoed — it can quote the callback body.
+        // exception text is not echoed — it can quote the callback body — but
+        // the event IS logged, because a 502 written to no row and no log is
+        // less visible than the 1101 it replaced: that was at least a stack in
+        // Workers error analytics. The run id is a non-secret identifier and is
+        // the only thing that makes such a report actionable.
+        console.error("gitCredentialAuthorize threw", { runId });
         return json({ error: "authorize_failed", detail: "callback could not be authorized" }, 502);
       }
       if (!authorized.ok) {
         // A body the broker could not even read is the caller's mistake (400);
-        // anything else here is `unauthorized`, which stays 403 so this route
-        // is not an oracle. `invalid_callback` reaches this line only AFTER the
-        // capability verified, and the budget was charged for it in the DO.
+        // anything else here is `unauthorized`, which stays 403.
+        //
+        // Be plain about what the split leaks (#501): the SAME malformed body
+        // answers `invalid_callback` with a valid capability and `unauthorized`
+        // with an invalid one, because this code is only reachable after
+        // `timingSafeEqual` accepted the capability. `invalid_callback`
+        // therefore IMPLIES a verified capability and a charged budget unit.
+        // That is accepted, not denied: the capability is high-entropy and
+        // run-scoped, and a valid one already yields a 200 carrying a token,
+        // which is a far louder signal than a status code.
         const status = authorized.code === "invalid_callback" ? 400 : 403;
         return json({ error: authorized.code, detail: authorized.detail }, status);
       }

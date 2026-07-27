@@ -193,6 +193,16 @@ anything the broker does not authorize on. The Rust `GitCredentialQuery` has
 **no `password` field**, so a credential cannot ride back into the control
 plane on the request path even if a helper forwards the whole block.
 
+`protocol` and `host` must be strings. `path` and `username` may be a string,
+absent, or **explicitly `null`** — the null is accepted on purpose, because the
+Rust `GitCredentialQuery` declares them `Option<String>` with no
+`skip_serializing_if`, so a serialized pathless query is `"path": null` on the
+wire rather than an absent key. That callback is denied `path_missing`, the
+deny code that names its own fix (`credential.useHttpPath=true`), and it is
+charged and audited like any other denial. Refusing it as `invalid_callback`
+instead would spend the same budget unit and tell the operator nothing.
+Anything else — a number, an object, an array — is `invalid_callback`.
+
 There is no `grant` field. If a caller sends one it is ignored: the grant is
 loaded from the run's Durable Object.
 
@@ -207,9 +217,12 @@ Refused (403): `{ "error": "<deny code>", "detail": "…" }`. The helper renders
 refusal as an **empty credential block** on stdout, so `git` fails the
 operation rather than prompting or retrying. An unregistered run and a wrong
 capability both answer `unauthorized` — the route must not be an oracle for
-which run ids exist. A malformed body is a 400 — `invalid_json` when it is not
-JSON at all, `invalid_callback` when a field is the wrong *type* — never an
-uncaught Worker exception.
+which run ids exist. A malformed body is never an uncaught Worker exception; it
+is one of four typed refusals — `invalid_json` (400) when it is not JSON at
+all, `invalid_request` (400) when it names no `runId` for the route to address,
+`invalid_callback` (400) when a field is the wrong *type*, and `body_too_large`
+(413) over the 16 KiB cap. A throw the route did not anticipate is
+`authorize_failed` (502), not a 1101.
 
 `invalid_callback` is a **charged** rejection (#501). Rust gets this boundary
 for free: `GitCredentialCallback` is `Deserialize`, so `"protocol": 123` never
@@ -219,6 +232,54 @@ by type before the authorization touches it, and the run's budget is charged
 whether or not the body parsed. An audit row is written too whenever the body
 named a real `operation`; when it did not, the charge is recorded without a row
 rather than with a fabricated one.
+
+**Reconciliation rule for `audit` vs `operationsUsed`.** They are not required
+to agree, and a mismatch is not corruption. There are three paths through the
+authorization, not two:
+
+| path | `operationsUsed` | audit row |
+|---|---|---|
+| approved, or denied by a deny code | +1 | one row, `approved` or the code |
+| malformed body that still named `fetch`/`push` | +1 | one row, `invalid_callback` — or `operation_budget_exhausted` past the cap |
+| malformed body naming no operation at all | +1 | **none** |
+
+So `operationsUsed >= rows.length` always, and the **gap in `sequence`** is the
+only trace a body of the third kind leaves. That is deliberate: `operation` is
+never coerced, because a row asserting `fetch` for a body that never said
+`fetch` is a wrong value in an audit trail, which is worse than an absent row.
+Anything reconciling the two must read a gap as "a body too broken to name an
+operation was charged here", not as a lost row.
+
+**Three carve-outs where a probe is free**, stated rather than claimed away.
+"Denials consume budget" is a claim about *authorizations*, and each of these
+is a request that never reached one:
+
+- **No capability, or the wrong one.** `unauthorized` is returned before the
+  budget is touched, and it has to be: charging it would let any anonymous
+  caller who guessed a run id burn that run's 32 operations and strand a real
+  agent. This is the widest of the three — it is unauthenticated and
+  unbounded — and it is accepted because it is also the emptiest: the answer is
+  byte-identical for a run that exists and one that does not, so a prober
+  learns nothing it did not already know.
+- **A body that names no `runId`** (or a non-string one) cannot address a
+  Durable Object, so there is no record to charge and no audit ring to write
+  to — a charge is structurally *impossible*, not merely skipped. It answers
+  `invalid_request` (400) at the route, deliberately neither `run_mismatch`
+  (a deny code, which the Durable Object emits charged and audited — spending
+  it here would give one code two accountings) nor `invalid_callback` (which is
+  worth keeping to mean exactly one thing; see below).
+- **A body over `MAX_CALLBACK_BODY_CHARS`** (16 KiB) is refused with 413
+  `body_too_large` before the RPC, for the same structural reason: the body is
+  an RPC *argument*, and an oversize argument throws at the boundary, outside
+  the method that does the charging.
+
+**`invalid_callback` implies a verified capability and a charged budget unit.**
+It is emitted only by the Durable Object, and only *after* `timingSafeEqual`
+accepted the capability, so the same malformed body answers `invalid_callback`
+with a valid capability and `unauthorized` with an invalid one. That split is
+accepted, not denied: the capability is high-entropy and run-scoped, and a
+valid one already yields a 200 carrying a token, which is a far louder signal
+than a status code.
 
 `expiresAtUnix` is what the helper is told; it is **not** what bounds the
 token's life. GitHub fixes that at one hour and does not accept a shorter
@@ -320,6 +381,20 @@ enforced at all. A body that fails the type check is charged on the same
 grounds (#501): the throw it used to cause landed after the counter was
 incremented in memory and before the record was persisted, so a capability
 holder could drive unbounded callbacks that cost no budget and left no row.
+
+The cap is enforced **ahead of** the type check, not only inside the
+authorization: past 32 operations a malformed body is refused with
+`operation_budget_exhausted` rather than charged again as `invalid_callback`,
+so "the budget bounds probing" holds for probes that never had to be
+well-typed.
+
+Read "otherwise probing the broker is free" with its scope, which is *an
+authenticated caller's authorizations*. Three refusals are still free, and they
+are listed under [the callback route](#post-git-credentialget) rather than
+argued away here: no capability or the wrong one, a body naming no run, and a
+body over the 16 KiB cap. The first is the widest and is deliberate — charging
+an unauthenticated caller would let anyone who guessed a run id exhaust that
+run's budget.
 
 **Deny-code parity** — ten codes, one list, both languages
 (`broker_deny_codes` in Rust, `DENY` in TypeScript). The TypeScript side was
