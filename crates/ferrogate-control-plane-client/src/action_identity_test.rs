@@ -29,9 +29,13 @@
 //!   wire-side twin of the field-set tripwire. Every other assertion here looks
 //!   a header up by name, so nothing else reds when a header is *added*.
 //! * [`a_non_ascii_context_name_or_label_still_produces_a_sendable_header`] —
-//!   asserted against `http::HeaderValue::try_from`, the predicate the real
-//!   transport applies, because a value this client cannot send is a value that
-//!   fails every request rather than one that logs badly.
+//!   asserted on the **output byte range** and on a hand-computed literal, not
+//!   on `http::HeaderValue::try_from`. `try_from` reads like the real predicate
+//!   and is not one: `http` 1.4.0 accepts 0x80–0xFF, so the version of this test
+//!   that rested on it stayed green under the mutation it was written to catch.
+//!   The predicate that really refuses is `ferrogate-cli`'s
+//!   `render_header_block`, one crate to the right, and its range is what is
+//!   asserted here.
 //! * [`a_time_token_outside_its_window_is_refused_at_both_ends`] — its fixtures
 //!   deliberately do **not** tie the server's `issued_at` to the client's frozen
 //!   reading. Tying them together is what hid a check that dropped every token
@@ -454,27 +458,73 @@ fn an_operator_supplied_label_cannot_forge_a_header_or_a_field() {
 
 /// A context name or host label outside ASCII must not brick the CLI.
 ///
-/// Pins: [`encode_header_value`] restricting its output to `32..=126`.
+/// Pins: `action_identity.rs`'s `if byte.is_ascii() && is_header_value_safe(ch)`
+/// — specifically the `byte.is_ascii()` half, which is what keeps the output
+/// inside `0x20..=0x7E`.
 ///
-/// Catches: the filter this replaced, which removed only CR, LF, `;` and
-/// `char::is_control` and let every other byte through. `http::HeaderValue`'s
-/// `TryFrom<&str>` rejects any byte outside `32..=126`, so a context named `生产`
-/// or `prod-café` — and this project's own issues are written in Chinese —
-/// failed **every** request the CLI issued, at the chokepoint, as an opaque
-/// `reqwest` builder error. Nothing in `context.rs` validates a context name,
-/// and #548 is what first put it on the wire.
+/// Catches: `if !byte.is_ascii() || is_header_value_safe(ch)`, i.e. non-ASCII
+/// passing through raw. That is a one-token mutation and it re-arms the defect
+/// this test is named for: `ferrogate-cli`'s `render_header_block` refuses any
+/// character outside `0x20..=0x7E`, so a context named `生产` — and this
+/// project's own issues are written in Chinese — makes all seven `assets`/
+/// `plans` verbs bail before a byte is written. Nothing in `context.rs`
+/// validates a context name, and #548 is what first put it on the wire.
 ///
-/// The assertion is on `http::HeaderValue::try_from`, i.e. on the same
-/// predicate the real transport applies, rather than on a hand-rolled ASCII
-/// check that could drift from it.
+/// # Why the assertion is not `HeaderValue::try_from(..).is_ok()`
+///
+/// It used to be, with a doc claiming `TryFrom<&str>` "rejects every byte
+/// outside `32..=126`". Both are withdrawn. The pinned `http` is 1.4.0 and its
+/// validator is `b >= 32 && b != 127 || b == b'\t'`, which **accepts**
+/// 0x80–0xFF; `is_visible_ascii` is reached only from `from_static`, `to_str`
+/// and `Debug`, and `transport.rs` passes a `&String`, selecting `from_bytes`,
+/// which is more permissive still. So `try_from(..).is_ok()` survives the
+/// mutation above — as do a `== encode_header_value(..)` comparison, which is a
+/// tautology through the mutated function, and a length floor, because raw UTF-8
+/// is *longer* than the character count it is compared against.
+///
+/// What replaces it discriminates by construction: the byte range is asserted
+/// directly (the idiom `assets_cli_test.rs` already uses at the other
+/// chokepoint), the escaped spelling of `生产` is asserted as a **literal** that
+/// no mutated encoder can restate, and `HeaderValue::to_str()` — the one `http`
+/// API that really applies `is_visible_ascii` — is exercised on top.
 #[test]
 fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
-    for (label, context_name, host_label) in [
-        ("chinese context", "生产", None),
-        ("accented context", "prod-café", None),
-        ("emoji host label", "prod-eu", Some("🚀-runner")),
-        ("cyrillic host label", "prod-eu", Some("сервер-1")),
-        ("del and high-ascii", "prod-eu", Some("a\u{7f}b\u{80}c")),
+    // A literal, computed by hand from UTF-8, so it cannot be restated by
+    // whatever `encode_header_value` currently does. `生` is E7 94 9F and `产`
+    // is E4 BA A7.
+    assert_eq!(
+        encode_header_value("生产"),
+        "%E7%94%9F%E4%BA%A7",
+        "the escaped spelling of a Chinese context name is fixed, byte for byte"
+    );
+    assert_eq!(
+        encode_header_value("prod-café"),
+        "prod-caf%C3%A9",
+        "one non-ASCII scalar inside an otherwise safe label escapes to its two UTF-8 bytes"
+    );
+
+    for (label, context_name, host_label, reported_ip) in [
+        ("chinese context", "生产", None, None),
+        ("accented context", "prod-café", None, None),
+        ("emoji host label", "prod-eu", Some("🚀-runner"), None),
+        ("cyrillic host label", "prod-eu", Some("сервер-1"), None),
+        (
+            "del and high-ascii",
+            "prod-eu",
+            Some("a\u{7f}b\u{80}c"),
+            None,
+        ),
+        // The reported IP rides its own header and goes through the same
+        // encoder. Every other test in this file passes `10.4.2.9`, which is a
+        // fixed point of the encoder and therefore holds nothing (#548 review,
+        // minor 12).
+        (
+            "hostile reported ip",
+            "prod-eu",
+            None,
+            Some("203.0.113.9\r\nx-ferrogate-action-id: fgact_evil"),
+        ),
+        ("non-ascii reported ip", "prod-eu", None, Some("сервер")),
     ] {
         let mut context = context_with_auth(AuthSource::None);
         context.context_name = Some(context_name.to_string());
@@ -482,7 +532,7 @@ fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
             &context,
             &FingerprintEnv {
                 host_label: host_label.map(str::to_string),
-                reported_ip: None,
+                reported_ip: reported_ip.map(str::to_string),
             },
         );
         let rendered = fingerprint.render();
@@ -493,14 +543,31 @@ fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
             server_time: Arc::new(Mutex::new(None)),
         };
         for (name, value) in identity.headers() {
+            // The discriminating assertion. `render_header_block` on the
+            // raw-TCP path applies exactly this range and *refuses* — so a byte
+            // outside it is not a cosmetic problem, it is seven verbs that stop
+            // working.
+            if let Some(offending) = value.bytes().find(|byte| !(0x20..=0x7E).contains(byte)) {
+                panic!(
+                    "[{label}] '{name}: {value}' carries byte {offending:#04X}, outside \
+                     0x20..=0x7E. ferrogate-cli's render_header_block refuses this and every \
+                     `assets`/`plans` request bails; on the reqwest path it leaves as RFC 9110 \
+                     obs-text, which an intermediary may drop or reinterpret"
+                );
+            }
+            // And it round-trips through the one `http` API that applies
+            // `is_visible_ascii`. `try_from` alone does not: http 1.4.0 accepts
+            // 0x80..=0xFF.
+            let header = http::HeaderValue::try_from(value.as_str())
+                .unwrap_or_else(|error| panic!("[{label}] '{name}: {value}': {error}"));
             assert!(
-                http::HeaderValue::try_from(value.as_str()).is_ok(),
-                "[{label}] '{name}: {value}' is not a header value reqwest can build; every \
-                 request this CLI issues would fail with an unattributable transport error"
+                header.to_str().is_ok(),
+                "[{label}] '{name}: {value}' is not readable back as a &str; an audit consumer \
+                 calling HeaderValue::to_str gets an error instead of the attribution"
             );
         }
         // And it is escaped, not discarded: an encoder that dropped every
-        // non-ASCII byte would satisfy the assertion above while silently
+        // non-ASCII byte would satisfy the assertions above while silently
         // erasing which context an action was taken in.
         let context_segment = segments_named(&rendered, "context");
         assert_eq!(
@@ -514,6 +581,52 @@ fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
              {rendered}"
         );
     }
+}
+
+/// Percent-decoding a fingerprint value returns the operator's own text.
+///
+/// Pins: `'%'` being **absent** from `is_header_value_safe`'s allow-list, which
+/// is what makes [`encode_header_value`] injective.
+///
+/// Catches: adding `'%'` to that set. Nothing else in this file contains a `%`
+/// in an *input*, so today every `%` in an output is one the encoder wrote and
+/// the escape is unpinned. With `'%'` safe, an operator label of `%3B` is
+/// carried through unchanged and every audit consumer that percent-decodes the
+/// blob — which the module docs promise it may — reads back a `;`, the
+/// fingerprint's own delimiter. That is the forgery
+/// `an_operator_supplied_label_cannot_forge_a_header_or_a_field` prevents,
+/// reintroduced one layer down where that test cannot see it.
+#[test]
+fn an_operator_label_that_already_looks_escaped_is_escaped_again() {
+    assert_eq!(
+        encode_header_value("%3B"),
+        "%253B",
+        "a literal percent must become %25 or the encoding is not injective"
+    );
+    assert_eq!(
+        encode_header_value("100%"),
+        "100%25",
+        "a trailing percent is escaped too"
+    );
+
+    let fingerprint = ClientFingerprint::detect(
+        &context_with_auth(AuthSource::None),
+        &FingerprintEnv {
+            host_label: Some("%3Bcred%3Devil".to_string()),
+            reported_ip: None,
+        },
+    );
+    let rendered = fingerprint.render();
+    assert_eq!(
+        segments_named(&rendered, "host"),
+        vec!["%253Bcred%253Devil"],
+        "an already-escaped-looking label decodes back to itself, not to a delimiter: {rendered}"
+    );
+    assert_eq!(
+        segments_named(&rendered, "cred"),
+        vec!["none"],
+        "and it cannot become a second cred field after one decode pass: {rendered}"
+    );
 }
 
 /// Pins: the action-id binding check at the top of
@@ -967,14 +1080,28 @@ fn the_headers_sent_are_exactly_the_reviewed_set_in_every_shape() {
     );
 }
 
-/// Pins: `ClientClockReading::read_local_clock` being the sole `SystemTime::now()`
+/// Pins: `ClientClockReading::read_local_clock` being the sole wall-clock read
 /// in the audit path.
 ///
-/// Catches: the acceptance criterion's named defect — `SystemTime::now()`
-/// reaching `client_sent_at`. Any of these mutations reds it: filling
-/// `client_sent_at` from the clock in `receipt.rs`; stamping a request in
-/// `prepare_request`; adding a `ServerIssuedTime::now()` constructor. No value
-/// assertion can catch those, because each produces a plausible number.
+/// Catches: a *new* clock read in this crate's audit path — stamping a request
+/// in `prepare_request`, adding a `ServerIssuedTime::now()` constructor, timing
+/// a call and folding the reading into a receipt. No value assertion can catch
+/// those, because each produces a plausible number.
+///
+/// **What it does not catch, stated because an earlier revision of this doc
+/// claimed it:** "filling `client_sent_at` from the clock in `receipt.rs`" is
+/// only caught when the fill *takes a new reading*. The cheaper mutation
+/// launders a reading that was already taken — `client_clock_unverified_unix`
+/// is right there on the receipt — and adds no clock read at all. `receipt.rs`
+/// says so at the `(true, None)` arm, and that statement is the correct one.
+/// The guard for the laundering mutation is
+/// `the_only_way_to_mint_a_client_sent_at_is_from_a_parsed_server_token` here,
+/// and `no_ferrogate_cli_module_mints_a_client_sent_at` in `ferrogate-cli`.
+///
+/// The needle list is not one string. `UNIX_EPOCH.elapsed()` yields the
+/// identical `u64` with no new dependency and never spells `now()`, and
+/// `chrono::Utc::now()` is a zero-`Cargo.toml` bypass wherever chrono is already
+/// a dependency; both are matched.
 ///
 /// Comment lines are stripped before the scan: this crate documents the rule in
 /// prose that quotes the call, and a guard that could be defeated (or falsely
@@ -985,6 +1112,13 @@ fn the_only_local_clock_read_in_the_audit_path_is_the_one_named_for_it() {
         ("action_identity.rs", include_str!("action_identity.rs")),
         ("transport.rs", include_str!("transport.rs")),
         ("receipt.rs", include_str!("receipt.rs")),
+    ];
+    const CLOCK_READS: [&str; 5] = [
+        "SystemTime::now()",
+        "Instant::now()",
+        "Utc::now()",
+        "Local::now()",
+        "UNIX_EPOCH.elapsed()",
     ];
     let mut reads: Vec<(&str, String)> = Vec::new();
     for (name, source) in AUDIT_PATH {
@@ -1005,7 +1139,7 @@ fn the_only_local_clock_read_in_the_audit_path_is_the_one_named_for_it() {
                     .unwrap_or("<unnamed>")
                     .to_string();
             }
-            if line.contains("SystemTime::now()") || line.contains("Instant::now()") {
+            if CLOCK_READS.iter().any(|needle| line.contains(needle)) {
                 reads.push((name, enclosing.clone()));
             }
         }
@@ -1073,4 +1207,90 @@ fn the_opt_in_variables_are_documented_where_an_operator_will_find_them() {
         PAGE.contains("off by default"),
         "the page must say both variables are off by default"
     );
+    // The header-stripping case. It is in this crate's module docs, which
+    // satisfies the issue's literal wording and reaches nobody: the operator who
+    // needs it is behind a corporate proxy and reads the `.md`.
+    assert!(
+        PAGE.contains("strip") || PAGE.contains("forward list"),
+        "the page must tell an operator that an intermediary can drop these headers silently; \
+         there is no fallback and no error, so an unattributed audit trail looks identical to a \
+         CLI that never sent them"
+    );
+
+    // `include_str!` makes deleting this page a compile error. Nothing made
+    // deleting the *links* to it fail anything, and a page nothing points at is
+    // a page nobody finds.
+    for (name, source) in [
+        ("security-controls.md", SECURITY_CONTROLS),
+        ("cli-migration.md", CLI_MIGRATION),
+    ] {
+        assert!(
+            source.contains("cli-audit-attribution.md"),
+            "{name} no longer links docs/cli-audit-attribution.md. That page documents two \
+             operator-facing variables which are not clap flags, so nothing generated will ever \
+             mention them; the inbound links are the only way an operator arrives"
+        );
+    }
+}
+
+/// The two inbound links pinned by
+/// [`the_opt_in_variables_are_documented_where_an_operator_will_find_them`].
+const SECURITY_CONTROLS: &str = include_str!("../../../docs/security-controls.md");
+const CLI_MIGRATION: &str = include_str!("../../../docs/cli-migration.md");
+
+/// The production reader of the two opt-in variables works.
+///
+/// Pins: [`FingerprintEnv::from_process`] reading [`HOST_LABEL_ENV`] and
+/// [`REPORTED_IP_ENV`], trimming, and treating an empty value as unset.
+///
+/// Catches: `from_process` reading the wrong variable names, or dropping the
+/// trim/empty filter so an exported-but-blank `FERROGATE_CLIENT_HOST_LABEL`
+/// sends `host=` on every request. It had **zero** test callers before this:
+/// every other test in this file injects a [`FingerprintEnv`] by hand, so the
+/// one function the three real `mint` call sites actually use was unexercised,
+/// and `the_pii_bearing_fields_are_absent_until_the_operator_opts_in` could not
+/// have caught a `from_process` that auto-detected a hostname.
+///
+/// The variable names are deliberately unique to this test, and the process
+/// environment is restored, because the whole crate's tests share one process.
+#[test]
+fn from_process_reads_the_two_opt_in_variables_and_nothing_else() {
+    // Distinct from any other test's, so a parallel test cannot observe these.
+    const HOST_VALUE: &str = "  ci-runner-548  ";
+    let previous_host = std::env::var(HOST_LABEL_ENV).ok();
+    let previous_ip = std::env::var(REPORTED_IP_ENV).ok();
+
+    std::env::remove_var(HOST_LABEL_ENV);
+    std::env::remove_var(REPORTED_IP_ENV);
+    let unset = FingerprintEnv::from_process();
+    assert_eq!(
+        unset,
+        FingerprintEnv::default(),
+        "with neither variable set, from_process must disclose nothing — not a detected hostname \
+         and not an empty string"
+    );
+
+    std::env::set_var(HOST_LABEL_ENV, HOST_VALUE);
+    std::env::set_var(REPORTED_IP_ENV, "   ");
+    let partial = FingerprintEnv::from_process();
+    assert_eq!(
+        partial.host_label.as_deref(),
+        Some("ci-runner-548"),
+        "the label is read from {HOST_LABEL_ENV} and trimmed"
+    );
+    assert_eq!(
+        partial.reported_ip, None,
+        "a whitespace-only value is unset, not a blank disclosure; `host=` or an empty reported \
+         IP on every request would be a field the operator never chose to send"
+    );
+
+    // Restore, so nothing after this observes the fixture.
+    match previous_host {
+        Some(value) => std::env::set_var(HOST_LABEL_ENV, value),
+        None => std::env::remove_var(HOST_LABEL_ENV),
+    }
+    match previous_ip {
+        Some(value) => std::env::set_var(REPORTED_IP_ENV, value),
+        None => std::env::remove_var(REPORTED_IP_ENV),
+    }
 }

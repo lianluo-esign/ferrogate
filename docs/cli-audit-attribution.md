@@ -35,6 +35,24 @@ introduce a delimiter or split the request. **`cred` names the credential
 _source_** — `env:FERROGATE_TOKEN`, `stdin`, `inline` or `none` — and never the
 credential itself; no token, and no digest of a token, is ever sent.
 
+Percent-encoding is reversible, not a digest: a value like `生产` arrives as
+`%E7%94%9F%E4%BA%A7` and decodes back to what you wrote. A literal `%` in your
+own label is escaped to `%25`, so one decode pass always returns your text and
+never a delimiter.
+
+### If something between you and the control plane strips headers
+
+These are ordinary request headers with no fallback. A corporate proxy, an API
+gateway or a service mesh configured to forward only a header allow-list will
+drop `x-ferrogate-*` **silently** — the request still succeeds, and the action
+is simply recorded without attribution. There is no error, no warning and
+nothing on the receipt to distinguish it from a CLI that never sent them.
+
+If your audit trail shows actions with no `action_id`, the intermediary is the
+first place to look: add `x-ferrogate-action-id`,
+`x-ferrogate-client-fingerprint` and `x-ferrogate-client-clock-unverified` to
+its forward list (plus `x-ferrogate-client-reported-ip` if you opted in).
+
 ## The two opt-in variables
 
 Neither is a command-line flag, so neither appears in the generated
@@ -110,6 +128,18 @@ action, so a receipt's `client_sent_at` will stay `null` until something makes a
 mutation the second request of an action; the saving lands on multi-request
 reads, which produce no receipt.
 
+> **Known limitation, when that day comes.** The client also refuses a token
+> that falls outside its declared TTL by more than five minutes, judged against
+> the client's own clock — the one this whole design calls untrusted. The
+> reading is taken once, when the command starts, so a machine whose clock is
+> further out than five minutes, or an invocation that runs longer than that,
+> will refuse **every** token and report `client_sent_at: null` with the same
+> absence code as "none was issued". The refusal is printed on stderr and is not
+> distinguished on the receipt. That is precisely the skewed-host case this page
+> says the two instants exist to expose, so it is a real gap and not a
+> theoretical one; removing the client-side window check in favour of the
+> server's own TTL is deferred work.
+
 `ferrogate ctl <group> <verb> --output json` renders all of this under
 `client_identity`; `--output table` renders it as `client.*` rows, each labelled
 with its authority.
@@ -131,10 +161,16 @@ compile-time argument:
 
 `ferrogate admin-api` is deliberately **not** on this list: it is a reverse
 proxy relaying a request the admin console made, and minting an `action_id`
-there would attribute the console's action to the proxy process.
+there would attribute the console's action to the proxy process. The proxy does
+relay the caller's own `x-ferrogate-*` headers untouched — they are not
+hop-by-hop and the forward loop passes them through — **but the admin console
+does not send any today**. So a mutation an operator makes in the console is
+recorded without an `action_id`, exactly as it was before this issue. Attributing
+console actions means minting an identity in the console and is separate work;
+it is not covered by anything on this page.
 
-Two originating requests are still **outside** both, and are named here rather
-than left to be discovered:
+Two originating requests from the CLI itself are still **outside** both
+chokepoints, and are named here rather than left to be discovered:
 
 * `ferrogate reload --admin-url …` mutates a running gateway's live config
   through a third raw-TCP client that lives in the `ferrogate-gateway` crate. It
@@ -144,8 +180,23 @@ than left to be discovered:
 
 Inside `ferrogate-cli` the set is closed and checked: a test
 (`every_outbound_http_call_goes_through_an_attributed_chokepoint`) holds an
-allow-list of every socket that crate opens, so a fourth hand-rolled client
-there fails the suite.
+allow-list of every raw socket **and every `reqwest` client** that crate
+constructs, so a fourth hand-rolled client there fails the suite. `reqwest` is
+scanned because it is already a declared dependency of `ferrogate-cli`, which
+made it a bypass needing no manifest change; a client from some other crate would
+require a `Cargo.toml` edit, which is a review event.
+
+## Where this is held by a test, and where it is only written down
+
+| claim | held by |
+|---|---|
+| every `ctl`/`ops` request carries the identity | a compile error — `prepare_request` takes a `&ClientActionIdentity` |
+| the raw-TCP client writes the identity onto the socket | `send_request_writes_the_identity_onto_the_socket`, against a loopback listener |
+| no fourth HTTP client appears in `ferrogate-cli` | `every_outbound_http_call_goes_through_an_attributed_chokepoint` |
+| no local clock reaches the audit instant | two source guards, one per crate |
+| the fingerprint field set | `the_fingerprint_declares_exactly_the_reviewed_field_set` |
+| nothing issues a time token yet | `no_operation_yet_issues_a_server_time_token`, over the contract |
+| `ferrogate reload` and the admin console | **nothing** — stated above, not tested |
 
 ## Privacy summary
 

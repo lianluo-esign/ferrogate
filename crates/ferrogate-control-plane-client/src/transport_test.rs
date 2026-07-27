@@ -1643,6 +1643,17 @@ fn every_operation_declares_the_client_identity_headers() {
 /// `components.headers.ClientTimeTokenResponseHeader` so the shape is in the
 /// contract and a server implementing it has something to reference; the
 /// assertion is that nothing references it *yet*.
+///
+/// # Both places a response can declare a header
+///
+/// An earlier cut walked only the inline `responses` objects under each
+/// operation. **883 of this contract's 1106 response entries are `$ref`s into
+/// `components.responses`**, so a server-side issuer that declared the header on
+/// a shared response component — the natural place to put it, since it would
+/// ride every operation at once — left this test green. Both are walked now: the
+/// operation's own entries, and every component the contract defines, whether or
+/// not anything references it. A component nothing references yet is still the
+/// declaration a server implements against.
 #[test]
 fn no_operation_yet_issues_a_server_time_token() {
     let spec: serde_json::Value =
@@ -1658,6 +1669,16 @@ fn no_operation_yet_issues_a_server_time_token() {
     );
 
     let mut issuing: Vec<String> = Vec::new();
+    let mut response_entries = 0usize;
+    let mut declares_token = |response: &serde_json::Value, whose: String| {
+        if let Some(headers) = response.get("headers").and_then(|h| h.as_object()) {
+            for name in headers.keys() {
+                if name.eq_ignore_ascii_case(TIME_TOKEN_HEADER) {
+                    issuing.push(whose.clone());
+                }
+            }
+        }
+    };
     for (path, item) in spec["paths"].as_object().expect("paths") {
         let Some(operations) = item.as_object() else {
             continue;
@@ -1667,22 +1688,129 @@ fn no_operation_yet_issues_a_server_time_token() {
                 continue;
             };
             for (status, response) in responses {
-                let Some(headers) = response.get("headers").and_then(|h| h.as_object()) else {
-                    continue;
-                };
-                for name in headers.keys() {
-                    if name.eq_ignore_ascii_case(TIME_TOKEN_HEADER) {
-                        issuing.push(format!("{method} {path} {status}"));
-                    }
-                }
+                response_entries += 1;
+                declares_token(response, format!("{method} {path} {status}"));
             }
         }
     }
+    // The shared components, which most of those entries `$ref` into. Walking
+    // them by definition rather than by reference is deliberate: a component is
+    // a declaration a server implements against whether or not a path item
+    // points at it yet.
+    let shared = spec["components"]["responses"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (name, response) in &shared {
+        declares_token(response, format!("components.responses.{name}"));
+    }
+    // Floors on both walks, so neither can be vacuous through a renamed key.
+    assert!(
+        response_entries > 500,
+        "expected the whole contract's operation responses, saw only {response_entries}"
+    );
+    assert!(
+        !shared.is_empty(),
+        "components.responses is empty or renamed; most of this contract's responses are $refs \
+         into it, and a walk that misses it is the hole this floor exists to prevent"
+    );
     assert!(
         issuing.is_empty(),
         "the API now issues a '{TIME_TOKEN_HEADER}' on {issuing:?} — correct the \
          'no deployment issues one today' statement in docs/cli-audit-attribution.md, in \
          action_identity's module docs and in receipt's, and revisit whether the receipt's \
          NO_SERVER_TIME_TOKEN wording still reads honestly"
+    );
+}
+
+/// The contract's own prose about the fingerprint is derived from the code,
+/// not retyped beside it.
+///
+/// Pins: `components.parameters.ClientFingerprintHeader.description` naming
+/// every field the blob actually renders, and
+/// `ClientReportedIpHeader.description` naming the one field that is
+/// deliberately **not** in the blob.
+///
+/// Catches: adding a field to [`crate::action_identity::ClientFingerprint`] and
+/// leaving the contract describing the old set — which is exactly the drift the
+/// last round of this issue fixed by hand, in prose, with nothing holding it, so
+/// the same drift would recur on the next field. The expected field list here is
+/// *rendered* from a fully populated fingerprint rather than restated, so there
+/// is no second list to forget.
+///
+/// It is a weaker guarantee than the field-set tripwire in
+/// `action_identity_test` and does not replace it: this one says the contract
+/// mentions each field, not that the description is accurate about it. Naming a
+/// new field is the cheapest thing a contract can be made to do, and it is the
+/// step that was skipped.
+#[test]
+fn the_contract_describes_the_fingerprint_field_set_the_code_renders() {
+    use crate::action_identity::{ClientFingerprint, FingerprintEnv};
+
+    // Fully populated, so the two opt-in fields are present and cannot be
+    // silently dropped from the expected list.
+    let context = crate::context::EffectiveContext {
+        context_name: Some("prod-eu".to_string()),
+        endpoint: "https://control.example.com".to_string(),
+        tenant: None,
+        project: None,
+        workspace: None,
+        ca_bundle_path: None,
+        tls_insecure_skip_verify: false,
+        timeout_millis: crate::context::DEFAULT_TIMEOUT_MILLIS,
+        auth: crate::auth::AuthSource::None,
+        output: crate::output::OutputFormat::Json,
+        non_interactive: true,
+    };
+    let fingerprint = ClientFingerprint::detect(
+        &context,
+        &FingerprintEnv {
+            host_label: Some("ci-runner-7".to_string()),
+            reported_ip: Some("203.0.113.9".to_string()),
+        },
+    );
+    let rendered = fingerprint.render();
+    let blob_fields: Vec<&str> = rendered
+        .split(';')
+        .filter_map(|segment| segment.split_once('='))
+        .map(|(key, _)| key)
+        .collect();
+    assert!(
+        blob_fields.len() >= 5,
+        "the rendered blob yielded only {blob_fields:?}; the expected list below would then be \
+         a formality"
+    );
+
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+            .expect("the OpenAPI contract parses");
+    let description = |component: &str| -> String {
+        spec["components"]["parameters"][component]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("components.parameters.{component}.description"))
+            .to_string()
+    };
+
+    let fingerprint_doc = description("ClientFingerprintHeader");
+    for field in &blob_fields {
+        assert!(
+            fingerprint_doc.contains(*field),
+            "the contract's ClientFingerprintHeader description does not name the '{field}' \
+             field the client renders into the blob. A consumer typing against this contract \
+             reads the field list from here"
+        );
+    }
+    // The field that is declared but deliberately kept OUT of the blob has to be
+    // described somewhere too, or a consumer concludes it does not exist.
+    let reported_ip_doc = description("ClientReportedIpHeader");
+    assert!(
+        !fingerprint_doc.contains("client_reported_ip"),
+        "the fingerprint blob does not carry client_reported_ip and the contract must not say \
+         it does: {fingerprint_doc}"
+    );
+    assert!(
+        reported_ip_doc.contains("client-reported") || reported_ip_doc.contains("Client-asserted"),
+        "the client-reported address must be described as client-asserted where it actually \
+         rides: {reported_ip_doc}"
     );
 }

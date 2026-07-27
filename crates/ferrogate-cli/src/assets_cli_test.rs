@@ -16,7 +16,9 @@
 //! which this issue asks for too.
 //!
 //! These tests hold the two halves of closing that: that `send_request` really
-//! writes the identity into the request it builds, and that no *third*
+//! writes the identity into the bytes it puts on a socket — asserted against a
+//! loopback listener, because a test on the rendered block alone cannot see the
+//! one line that moves the block into the request — and that no *third*
 //! hand-rolled client appears without a test going red.
 
 use super::*;
@@ -27,18 +29,19 @@ use ferrogate_control_plane_client::action_identity::{
 /// Pins: `render_header_block` emitting every header
 /// `ClientActionIdentity::headers` returns, in `Name: value\r\n` form.
 ///
-/// Catches: dropping the `request.push_str(&identity_headers)` line in
-/// `send_request` (the header block would be empty and every assertion here
-/// reds); and emitting a subset — the action id is what the whole correlation
-/// rests on, and the fingerprint and clock are what make the record readable.
+/// Catches: emitting a subset — the action id is what the whole correlation
+/// rests on, and the fingerprint and clock are what make the record readable —
+/// and a leak of the credential into the block.
 ///
-/// This is deliberately a test on the *rendered block* rather than on a live
-/// socket: what `send_request` writes is `format!(...)` text, and asserting on
-/// the text is what an assertion can do here without a listening server.
-/// [`every_raw_tcp_command_mints_exactly_one_action_identity`] below covers the
-/// other half — that a real command hands one in, exactly once per invocation.
+/// **It does not catch dropping `request.push_str(&identity_headers)`.** An
+/// earlier revision of this doc said it did, and that was written from intent
+/// rather than from tracing it: this test never calls `send_request`, so
+/// deleting that line and rebinding the render call to `let _ = ...` leaves it
+/// green while all seven requests go out unattributed. The test that holds that
+/// line is [`send_request_writes_the_identity_onto_the_socket`], which drives a
+/// loopback listener and reads the head off the wire.
 #[test]
-fn the_raw_tcp_client_writes_the_action_identity_into_its_request() {
+fn the_raw_tcp_client_renders_the_action_identity_into_a_header_block() {
     let identity = mint_action_identity("http://127.0.0.1:8080", "fgk_live_secret_value")
         .expect("the OS random source is available in the test env");
     let block = render_header_block(identity.headers()).expect("the identity renders");
@@ -79,10 +82,147 @@ fn the_raw_tcp_client_writes_the_action_identity_into_its_request() {
     );
 }
 
-/// Every socket this binary opens is accounted for, by name.
+/// The bytes `send_request` actually writes to a socket carry the identity.
 ///
-/// Pins: the complete set of `TcpStream::connect*` sites in
-/// `crates/ferrogate-cli/src`.
+/// Pins: `assets_cli.rs`'s `request.push_str(&identity_headers);` — the single
+/// line that moves the rendered block into the request.
+///
+/// Catches: deleting that line and rebinding the render call above it to
+/// `let _ = render_header_block(identity.headers())?;`. That compiles clean and
+/// warns about nothing, and it is invisible to every other test in this file:
+/// [`the_raw_tcp_client_renders_the_action_identity_into_a_header_block`]
+/// exercises the renderer, the socket census still finds `TcpStream::connect`,
+/// and the mint census still counts lines. Under it all seven `assets`/`plans`
+/// requests revert to unattributed with the suite green — which is the whole
+/// hole issue #548 exists to close.
+///
+/// A loopback `TcpListener` is what makes this assertable, and it needs neither
+/// Docker nor a database: `admin_api.rs` already binds one in this crate. The
+/// server thread reads the head, answers a minimal response and half-closes,
+/// because `send_request` reads to EOF.
+///
+/// It also asserts the *placement*, not just the presence: the identity must be
+/// inside the head, before the blank line. A header written after `\r\n\r\n`
+/// would be body bytes, and the `Content-Length: 0` on this request means no
+/// server would ever read them.
+#[test]
+fn send_request_writes_the_identity_onto_the_socket() {
+    const API_KEY: &str = "fgk_live_secret_value";
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port is free");
+    let port = listener
+        .local_addr()
+        .expect("the listener reports its address")
+        .port();
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("the client connects");
+        let mut head: Vec<u8> = Vec::new();
+        let mut byte = [0u8; 1];
+        // Byte at a time: the head is a few hundred bytes and this needs no
+        // buffering logic to know where it ends.
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => head.push(byte[0]),
+                Err(error) => panic!("failed to read the request head: {error}"),
+            }
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .expect("the loopback response is written");
+        drop(stream);
+        String::from_utf8(head).expect("the request head is UTF-8")
+    });
+
+    let gateway_url = format!("http://127.0.0.1:{port}");
+    let endpoint = GatewayEndpoint::parse(&gateway_url).expect("a loopback URL parses");
+    let identity = mint_action_identity(&gateway_url, API_KEY)
+        .expect("the OS random source is available in the test env");
+    let expected_action_id = identity.action_id().to_string();
+
+    let response = send_request(
+        &endpoint,
+        "GET",
+        "/v1/assets",
+        API_KEY,
+        None,
+        &[],
+        &identity,
+    )
+    .expect("the loopback server answers");
+    assert_eq!(
+        response.status, 200,
+        "the fixture server answered 200; a different status means this test read the wrong thing"
+    );
+
+    let head = server.join().expect("the server thread did not panic");
+
+    // The head really is a head — without this the assertions below could be
+    // satisfied by a truncated read.
+    assert!(
+        head.starts_with("GET /v1/assets HTTP/1.1\r\n"),
+        "the request line is not what send_request claims to build: {head:?}"
+    );
+    assert!(
+        head.ends_with("\r\n\r\n"),
+        "the head was not read to its terminator: {head:?}"
+    );
+
+    let (head_only, _) = head
+        .split_once("\r\n\r\n")
+        .expect("the head terminator was just asserted");
+    for header in [
+        ACTION_ID_HEADER,
+        CLIENT_FINGERPRINT_HEADER,
+        CLIENT_CLOCK_HEADER,
+    ] {
+        assert!(
+            head_only.contains(&format!("\r\n{header}: ")),
+            "'{header}' never reached the socket: {head:?}"
+        );
+    }
+    assert!(
+        head_only.contains(&format!("\r\n{ACTION_ID_HEADER}: {expected_action_id}\r\n")),
+        "the socket carries an action id, but not THIS invocation's ({expected_action_id}): \
+         {head:?}"
+    );
+    // The same leak check as the renderer test, at the place it would actually
+    // matter: these are the bytes that left the process. The positive control is
+    // the count — the key IS on the wire, exactly once, in the one header that
+    // is supposed to carry it, so "not in the identity headers" is a real
+    // restriction rather than a statement about an absent string.
+    assert!(
+        head_only.contains(&format!("Authorization: Bearer {API_KEY}\r\n")),
+        "the request must still authenticate, or the leak check below is vacuous: {head:?}"
+    );
+    assert_eq!(
+        head_only.matches(API_KEY).count(),
+        1,
+        "the credential appears more than once in the head; Authorization is the only header \
+         that may carry it: {head:?}"
+    );
+    let identity_lines: Vec<&str> = head_only
+        .lines()
+        .filter(|line| line.starts_with("x-ferrogate-"))
+        .collect();
+    assert!(
+        identity_lines.iter().all(|line| !line.contains("fgk_")),
+        "an identity header on the wire carries a prefix of the API key: {identity_lines:?}"
+    );
+    assert!(
+        identity_lines
+            .iter()
+            .any(|line| line.contains("cred=inline")),
+        "the credential SOURCE must be on the wire, or the assertion above is vacuous: \
+         {identity_lines:?}"
+    );
+}
+
+/// Every HTTP client this crate constructs is accounted for, by name.
+///
+/// Pins: the complete set of `TcpStream::connect*` **and** `reqwest` client
+/// sites in `crates/ferrogate-cli/src`.
 ///
 /// Catches: a fourth command group copying the raw client into a new file —
 /// which is precisely how this hole was made. `send_request` is `pub(crate)`
@@ -90,12 +230,29 @@ fn the_raw_tcp_client_writes_the_action_identity_into_its_request() {
 /// the `plans` author did, and a copy would carry no identity and red nothing.
 /// A source scan is the only assertion that can speak for code not yet written.
 ///
-/// It scans for the connect call rather than for a header name, because the
-/// defect is "bytes left the process through a path with no identity on it",
-/// and a new client would not mention any of #548's constants at all.
+/// It scans for the client-construction call rather than for a header name,
+/// because the defect is "bytes left the process through a path with no identity
+/// on it", and a new client would not mention any of #548's constants at all.
 ///
-/// Two sites are expected, and the list is an **allow-list with a reason**
-/// rather than a count, so a new one is a decision someone has to write down:
+/// # Why `reqwest` is on the needle list
+///
+/// An earlier cut scanned only `TcpStream::connect` while calling itself "every
+/// outbound HTTP call". It was not: `reqwest` is a **declared, currently unused
+/// direct dependency** of `ferrogate-cli`, so a `reqwest::Client` in a new
+/// command file was a bypass that needed no `Cargo.toml` edit and reded nothing.
+/// Both are scanned now, which is what makes the name honest.
+///
+/// `reqwest::Url` is deliberately *not* a needle — it is a URL parser, not a
+/// client, and `ctl/fingerprint_parity_test.rs` uses it to build an expected
+/// string. The residual is stated rather than implied: a client from some
+/// *third* crate would still slip through, but adding one requires a
+/// `Cargo.toml` edit, which is a review event; `reqwest` was the only HTTP
+/// client already sitting in the manifest.
+///
+/// # The allow-list
+///
+/// Two entries, each with a reason, so a new one is a decision someone has to
+/// write down rather than a count someone has to bump:
 ///
 /// * `assets_cli.rs::send_request` — the attributed raw client. Takes a
 ///   `&ClientActionIdentity` and writes its headers into the request.
@@ -104,10 +261,30 @@ fn the_raw_tcp_client_writes_the_action_identity_into_its_request() {
 ///   console made, and minting an `action_id` there would attribute the
 ///   console's action to the proxy process and put a false actor in the audit
 ///   trail. It forwards the caller's own headers, `x-forwarded-for` included.
+///   See the boundary note in `docs/cli-audit-attribution.md`: the console
+///   itself sends no identity header today, so a console mutation through this
+///   proxy is unattributed. That is server-and-console work, not a hole in this
+///   crate, and it is written down in both places rather than presented as
+///   solved.
 ///
-/// Both spellings are matched. `connect_timeout` is a different method name and
-/// scanning only for `TcpStream::connect` would have passed here by accident
-/// while a new `connect_timeout` client slipped through.
+/// [`send_request_writes_the_identity_onto_the_socket`] binds a loopback
+/// `TcpListener` and is deliberately **not** on the list: a listener is not an
+/// outbound client, and the connect it provokes is `send_request`'s own, already
+/// accounted for above. It is named here so a reader does not go looking for it.
+///
+/// `connect_timeout` is matched by the same needle because it shares the prefix;
+/// scanning for the exact string `TcpStream::connect(` would have passed here by
+/// accident while a new `connect_timeout` client slipped through.
+///
+/// # No file-path self-exemption
+///
+/// This scan used to skip `*_test.rs`, recorded as "one of them
+/// (`admin_api_test.rs`) drives a loopback listener on purpose". That was false
+/// at the time it was written — `admin_api_test.rs` contains no `TcpStream` at
+/// all — and a file-path exemption is the #561 shape: it exempts exactly the
+/// code most likely to normalise a bypass. The needles are assembled at runtime
+/// instead, so this file's own scan lines are not hits and every file in the
+/// tree is subject to the rule.
 ///
 /// **Scope, stated rather than implied:** this scans `crates/ferrogate-cli/src`
 /// and nothing else. `ferrogate reload --admin-url …` mutates a running
@@ -118,10 +295,20 @@ fn the_raw_tcp_client_writes_the_action_identity_into_its_request() {
 /// `action_identity`'s module docs rather than left for a reader to discover.
 #[test]
 fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
-    /// Every sanctioned socket, and why each one is allowed.
+    /// Every sanctioned client site, and why each one is allowed.
     const SANCTIONED: [&str; 2] = [
         "admin_api.rs::connect_upstream",
         "assets_cli.rs::send_request",
+    ];
+
+    // Assembled at runtime so the lines below are not hits on themselves. The
+    // alternative — skipping `*_test.rs` — exempts the code most likely to
+    // normalise a bypass, and its recorded reason was false besides.
+    let needles = [
+        format!("{}{}", "TcpStream", "::connect"),
+        format!("{}{}", "reqwest", "::Client"),
+        format!("{}{}", "reqwest", "::blocking"),
+        format!("{}{}", "reqwest", "::get("),
     ];
 
     let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -143,11 +330,6 @@ fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
                 .and_then(|name| name.to_str())
                 .unwrap_or("<unnamed>")
                 .to_string();
-            // Test files are not the shipped command surface, and one of them
-            // (`admin_api_test.rs`) drives a loopback listener on purpose.
-            if name.ends_with("_test.rs") {
-                continue;
-            }
             files_scanned += 1;
             let source = std::fs::read_to_string(&path).expect("source file is UTF-8");
             let mut enclosing = String::from("<file scope>");
@@ -169,7 +351,7 @@ fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
                         .unwrap_or("<unnamed>")
                         .to_string();
                 }
-                if trimmed.contains("TcpStream::connect") {
+                if needles.iter().any(|needle| trimmed.contains(needle)) {
                     connects.push(format!("{name}::{enclosing}"));
                 }
             }
@@ -179,11 +361,20 @@ fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
         files_scanned > 5,
         "expected the whole crate's src/ tree, scanned only {files_scanned} files"
     );
+    // A positive control on the matcher itself: a floor on the file count proves
+    // the walk, not the detector. `TcpStream::connect` is real code in this
+    // crate and the scan must be finding it, or `connects` could be empty for a
+    // reason that has nothing to do with the rule.
+    assert!(
+        connects.contains(&"assets_cli.rs::send_request".to_string()),
+        "the scan did not find the raw client it is written around; the needles no longer match \
+         anything and this guard is green over a tree it cannot see: {connects:?}"
+    );
     connects.sort();
     assert_eq!(
         connects,
         SANCTIONED.map(str::to_string).to_vec(),
-        "an unaccounted socket in the CLI. Every request that ORIGINATES here carries a \
+        "an unaccounted HTTP client in the CLI. Every request that ORIGINATES here carries a \
          ClientActionIdentity, because a new command group copying the raw client is how \
          `plans` came to POST /admin/v1/plans unattributed. If the new site is a relay rather \
          than an operator action, say so here — do not mint an identity for someone else's \

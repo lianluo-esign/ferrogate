@@ -441,6 +441,25 @@ fn a_verb_the_prober_cannot_construct_fails_by_name() {
 /// `PreparedRequest`'s fields are `pub(crate)`, so a consumer crate cannot build
 /// a request at all without one. This test covers the residual runtime question:
 /// that the chokepoint is really on the path every registered verb takes.
+///
+/// # What this test is currently worth, stated plainly
+///
+/// **It has never run.** `ferrogate-control-plane-client` was selected by no CI
+/// workflow until #561 landed the coverage gate, and the first run showed this
+/// sweep red on `main`: [`probe_spec`] guesses id-segment arities downward from
+/// three, and `asset-channels set` — registered 2026-07-23 by #363 — needs four.
+/// The sweep panics at its `expect("probe request")` before it asserts anything
+/// about a header. That is **#569**, it is a defect in the probe helper and not
+/// in the chokepoint, and it is being fixed separately; nothing here should be
+/// read as evidence until it is.
+///
+/// So the acceptance box "every registered verb carries the action identity" is
+/// **discharged by the structural argument above, not by this test**: no
+/// expression outside this crate yields a `PreparedRequest` at all, and the one
+/// function inside it that does takes the identity as a required argument. A
+/// reviewer should weigh the compile error, and treat this sweep as a backstop
+/// that has not yet fired — worth having for the day a verb finds some other
+/// route to the wire, but not a green this issue may lean on today.
 #[test]
 fn every_registered_verb_carries_the_action_identity_on_the_wire() {
     let registry = full_registry();

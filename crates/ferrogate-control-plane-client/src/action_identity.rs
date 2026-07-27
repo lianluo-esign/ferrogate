@@ -51,15 +51,23 @@
 //! the audit log of a multi-tenant control plane, so the field set is chosen by
 //! subtraction rather than by collection:
 //!
-//! | field | value | verbatim / hashed | default |
+//! The third column used to read "verbatim" for every row. Since #548 that is
+//! no longer true of the spelling: every field goes through
+//! [`encode_header_value`] first, so the two operator-supplied fields — the only
+//! ones that can contain anything outside `[A-Za-z0-9._~:/-]` — arrive
+//! percent-escaped. It is a reversible spelling and **not** a digest, so a
+//! privacy review should still read every row as "disclosed in full"; the column
+//! now says so without claiming a byte-for-byte copy it does not make.
+//!
+//! | field | value | on the wire | default |
 //! |---|---|---|---|
-//! | `cli` | [`crate::version::CLI_VERSION`] | verbatim | always |
-//! | `os` | `std::env::consts::OS` | verbatim | always |
-//! | `arch` | `std::env::consts::ARCH` | verbatim | always |
-//! | `context` | the resolved context/profile name | verbatim | always, when one was selected |
-//! | `cred` | [`AuthSource::audit_source`] (`env:VAR`, `stdin`, `inline`, `none`) | verbatim | always |
-//! | `host` | an operator-supplied label, [`HOST_LABEL_ENV`] | verbatim | **opt-in, off** |
-//! | client-reported IP | an operator-supplied address, [`REPORTED_IP_ENV`] | verbatim | **opt-in, off** |
+//! | `cli` | [`crate::version::CLI_VERSION`] | not hashed; percent-encoded (a fixed point today) | always |
+//! | `os` | `std::env::consts::OS` | not hashed; percent-encoded (a fixed point today) | always |
+//! | `arch` | `std::env::consts::ARCH` | not hashed; percent-encoded (a fixed point today) | always |
+//! | `context` | the resolved context/profile name | not hashed; **percent-encoded**, operator-supplied | always, when one was selected |
+//! | `cred` | [`AuthSource::audit_source`] (`env:VAR`, `stdin`, `inline`, `none`) | not hashed; percent-encoded (`:` is in the safe set, so `env:VAR` is unchanged) | always |
+//! | `host` | an operator-supplied label, [`HOST_LABEL_ENV`] | not hashed; **percent-encoded**, operator-supplied | **opt-in, off** |
+//! | client-reported IP | an operator-supplied address, [`REPORTED_IP_ENV`] | not hashed; **percent-encoded** (a dotted-quad or an IPv6 literal is a fixed point) | **opt-in, off** |
 //!
 //! **Nothing is hashed, because nothing collected needs to be.** A hash is the
 //! right answer when a value must be *joinable but not readable*; every value
@@ -287,14 +295,22 @@
 //! `ferrogate admin-api`'s upstream socket is deliberately *not* on that list:
 //! it is a reverse proxy relaying the admin console's request, and minting an
 //! `action_id` there would record the console's action against the proxy
-//! process.
+//! process. The proxy relays the caller's own `x-ferrogate-*` headers untouched
+//! (they are not hop-by-hop, and the forward loop passes them through) — **but
+//! the admin console sends none today**, so a console mutation reaching the
+//! control plane through it is unattributed. That is console-side work, outside
+//! this slice, and it is written down here and on the operator page rather than
+//! presented as solved by the relay.
 //!
 //! Within `ferrogate-cli` the set is closed and checked: a source guard
 //! (`every_outbound_http_call_goes_through_an_attributed_chokepoint`) holds an
-//! allow-list of every `TcpStream::connect*` in that crate, so a fourth
-//! hand-rolled client there is a red test rather than a silent hole. The guard
-//! scans `crates/ferrogate-cli/src` and says so; it does not and cannot speak
-//! for `ferrogate-gateway`.
+//! allow-list of every `TcpStream::connect*` **and every `reqwest` client** in
+//! that crate, so a fourth hand-rolled client there is a red test rather than a
+//! silent hole. `reqwest` is on the needle list because it is already a declared
+//! direct dependency of `ferrogate-cli` and was therefore a bypass requiring no
+//! manifest change. The guard scans `crates/ferrogate-cli/src` and says so; it
+//! does not and cannot speak for `ferrogate-gateway`, and a client from a crate
+//! not yet in the manifest would need a `Cargo.toml` edit to exist at all.
 
 use std::sync::{Arc, Mutex};
 
@@ -383,6 +399,23 @@ pub const SERVER_TIME_AUTHORITY: &str = "server_issued_time_token";
 /// It is deliberately loose. **The authoritative TTL decision is the server's**,
 /// against its own clock; this bound exists to catch the absurd (a token a day
 /// stale) locally instead of on the wire, and nothing rests on it.
+///
+/// # The residual, stated rather than implied
+///
+/// This widens the symptom; it does not remove the cause. The comparison is
+/// still made against a reading frozen at [`ClientActionIdentity::mint`], so
+/// skew — or an invocation duration — beyond five minutes still refuses **every**
+/// token, on exactly the hosts the design names as its target: "a host running
+/// hours behind, a suspended VM, a backdated workstation". A machine an hour out
+/// gets no `client_sent_at` at all, and the refusal is an `eprintln!` on stderr
+/// rather than anything the receipt distinguishes from "no token was issued".
+///
+/// The honest fix is to stop judging a server-issued token against a client
+/// clock the design already declares untrusted — the server's `ttl` is the
+/// authority, and this check earns its place only by catching the absurd. That
+/// is a change to what `accept_for` refuses, not to this number, and it is
+/// deferred rather than done. `docs/cli-audit-attribution.md` says so where an
+/// operator will read it.
 pub const CLIENT_CLOCK_SKEW_ALLOWANCE_SECONDS: u64 = 300;
 
 // ---------------------------------------------------------------------------
@@ -909,16 +942,40 @@ fn is_header_value_safe(ch: char) -> bool {
 ///    `;` in front of it. Anything grepping the blob sees a field that was never
 ///    declared. Encoding cannot weld: `%3B` is one segment's worth of text and
 ///    reads back as one.
-/// 2. **Nothing restricted the output to ASCII.** `http::HeaderValue`'s
-///    `TryFrom<&str>` rejects every byte outside `32..=126`, and `reqwest`
-///    surfaces that at `.send()` as an opaque builder error. Two operator-reachable
-///    inputs reach this function — [`HOST_LABEL_ENV`] and, since #548, the
-///    resolved **context name**, which nothing in [`crate::context`] validates —
-///    so a context named `生产` or `prod-café` failed *every* request the CLI
-///    issued, at the chokepoint, with an unattributable error. This project's
-///    own issues are written in Chinese; that is not a hypothetical profile
-///    name. The encoding makes the output visible-ASCII by construction, so the
-///    name survives as `%E7%94%9F%E4%BA%A7` instead of bricking the client.
+/// 2. **Nothing restricted the output to ASCII.** Two operator-reachable inputs
+///    reach this function — [`HOST_LABEL_ENV`] and, since #548, the resolved
+///    **context name**, which nothing in [`crate::context`] validates — so a
+///    context named `生产` or `prod-café` put raw UTF-8 into a header value.
+///    This project's own issues are written in Chinese; that is not a
+///    hypothetical profile name.
+///
+///    An earlier revision of this doc said that broke the `reqwest` path,
+///    because `http::HeaderValue`'s `TryFrom<&str>` "rejects every byte outside
+///    `32..=126`". **That is wrong and is withdrawn.** The pinned `http` is
+///    1.4.0 (one version in `Cargo.lock`) and its validator is
+///    `b >= 32 && b != 127 || b == b'\t'`, which *accepts* 0x80–0xFF;
+///    `is_visible_ascii` exists but is reached only from `from_static`,
+///    `to_str` and `Debug`. `crate::transport` calls
+///    `builder.header(name, &String)`, which selects `TryFrom<&String>` →
+///    `from_bytes`, documented as permitting 128–255. So `reqwest` builds and
+///    sends it.
+///
+///    What it actually breaks is worse for being quieter:
+///
+///    * **The raw-TCP chokepoint refuses outright.** `ferrogate-cli`'s
+///      `assets_cli::render_header_block` bails on any character outside
+///      `0x20..=0x7E`, because there is no `http::HeaderValue` between that
+///      string and the socket. A `生产` context therefore fails all seven
+///      `assets`/`plans` verbs before a byte is written — the brick, and it is
+///      real, just one crate to the right of where the old doc put it.
+///    * **On the `reqwest` path the bytes leave as obs-text**, which RFC 9110
+///      §5.5 deprecates and leaves to the recipient to reject or reinterpret,
+///      and which `HeaderValue::to_str` — the one `http` API that does apply
+///      `is_visible_ascii` — refuses to read back. An intermediary or an audit
+///      consumer may drop or mangle exactly the attribution this issue adds.
+///
+///    The encoding makes the output visible-ASCII by construction, so the name
+///    survives as `%E7%94%9F%E4%BA%A7` on both paths.
 ///
 /// Lossless, so an audit consumer can percent-decode back to what the operator
 /// wrote. `%` itself is escaped to `%25`, or the encoding would be ambiguous.

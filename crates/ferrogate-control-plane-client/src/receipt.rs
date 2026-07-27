@@ -702,11 +702,39 @@ pub struct ReceiptCorrelation {
 ///    has no constructor taking an instant — only
 ///    [`crate::action_identity::ServerIssuedTime::parse`], over bytes a server
 ///    sent.
+/// 3. `ferrogate-cli` — the crate that actually *renders* a receipt, and so the
+///    obvious place to "helpfully" fill a null — constructs the struct nowhere
+///    either, pinned from that side by
+///    `ferrogate_cli::ctl::clock_guard_test::no_ferrogate_cli_module_mints_a_client_sent_at`.
 ///
-/// So a local clock cannot reach this struct along any path the CLI takes, and
-/// adding one is a red test rather than a review finding. Deserializing a
-/// receipt someone else wrote is *reading a record*, not minting an instant, and
-/// [`MutationReceipt::validate`] is what judges a record read back in.
+/// # What the premises above do and do not conclude
+///
+/// An earlier revision of this doc concluded from premises 1 and 2 that "a local
+/// clock cannot reach this struct along any path the CLI takes". Premises
+/// scoped to *this crate* do not reach that, and the gap was live: every field
+/// is `pub`, `Attested::present` is `pub`, and `ferrogate-cli`'s receipt
+/// renderer already holds `client_clock_unverified_unix` — so
+///
+/// ```text
+/// receipt.client_identity.client_sent_at = Attested::present(ServerIssuedClientSentAt {
+///     issued_at_unix: receipt.client_identity.client_clock_unverified_unix, ..
+/// })
+/// ```
+///
+/// reads **no clock at all** (the number is already on the receipt), passes
+/// `validate()` (a forger sets `bound_action_id` and `authority` too), and is
+/// invisible to both `SystemTime::now()` guards. Premise 3 is what closes it,
+/// and it is a source guard in the other crate rather than a property of this
+/// type.
+///
+/// So: no expression in either crate constructs this struct except
+/// `from_server_time`, and adding one is a red test rather than a review
+/// finding. That is a statement about two source trees, not a type-level
+/// impossibility — anyone holding this type can still write any number they like
+/// into `issued_at_unix`, and a *third* crate depending on this one is outside
+/// both guards. Deserializing a receipt someone else wrote is *reading a
+/// record*, not minting an instant, and [`MutationReceipt::validate`] is what
+/// judges a record read back in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerIssuedClientSentAt {
     /// Seconds since the Unix epoch, as the server stated them.
@@ -1919,10 +1947,19 @@ impl<'a> MutationPlan<'a> {
             }
             (true, None) => Attested::absent(
                 absence_codes::NO_SERVER_TIME_TOKEN,
-                "no server-issued time token was held when this request was prepared (the \
-                 control plane issues none today, and the first request of an invocation has \
-                 nothing to echo yet); the client clock is deliberately NOT used to fill this \
-                 field, and the server's own receive time still bounds the action",
+                // The detail states what was observed and stops there. It used
+                // to add "the control plane issues none today", which is a
+                // *cause* this code never checked: the same absence is produced
+                // by a response that carried no header, by a first request with
+                // nothing to echo yet, and by a token this client refused as
+                // outside its window (reported on stderr, and not distinguished
+                // here). Naming one of three as the reason is a guess printed
+                // as a finding.
+                "no server-issued time token was held when this request was prepared; this is \
+                 the observed state and not a diagnosis — no response had carried one yet, or \
+                 the responses that did were refused (see stderr). The client clock is \
+                 deliberately NOT used to fill this field, and the server's own receive time \
+                 still bounds the action",
             ),
             (false, _) => Attested::absent(
                 absence_codes::REQUEST_NOT_SENT,
