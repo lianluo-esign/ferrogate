@@ -117,6 +117,25 @@
 //! then a truncated prefix stops being recognizable and the ordering becomes
 //! load-bearing for real. Restore the claim WITH a fixture that fails under the
 //! swap; do not restore it on its own.
+//!
+//! # Where the audit lives, and what it still does not cover
+//!
+//! #526's per-site audit is not prose in an issue: it is
+//! `RAW_CAPTURE_AUDIT` in `recorded_evidence_scan_test.rs`, a table the suite
+//! reads. Every place in this crate that turns raw observed bytes into a string
+//! must appear there with a verdict, including the ones found clean — so a new
+//! excerpt path that never calls a helper here fails a test instead of shipping.
+//! That guard is DETECTION, not impossibility, and says so in its own docs.
+//!
+//! Two things are recorded as accepted rather than fixed, so the next reader
+//! does not go looking:
+//!
+//! * `url` and `external_target` (`external_actions.rs`) are recorded verbatim,
+//!   so a query-string token or a presigned URL still reaches event metadata.
+//!   That is a different shape of leak — a secret in a path, with no header name
+//!   to anchor on — and belongs to its own issue, not to this deny-list.
+//! * Nothing rewrites events recorded BEFORE this module existed. The redaction
+//!   is on the write path only; historical rows keep whatever they captured.
 
 use std::collections::BTreeMap;
 
@@ -191,6 +210,12 @@ pub(crate) enum RecordedSurface {
     /// A microVM guest workload's stdout/stderr
     /// (`firecracker_guest_exec.rs`). Recorded into the guest `run.completed`
     /// frame AND into the guest RPC response, which no metadata sweep covers.
+    ///
+    /// Also the surface for every guest-authored free-text field the HOST
+    /// ingests — event metadata, event `message`, the response `message`,
+    /// `output_excerpt` and `denial_reason` — because the capture and the
+    /// redaction that used to protect it both ran inside the microVM, on the
+    /// far side of the boundary this crate exists to distrust.
     GuestWorkloadOutput,
     /// A microVM serial console / Firecracker log (`backends.rs`), recorded as
     /// `FirecrackerBootEvidence` and serialized straight to worker stdout —
@@ -559,3 +584,14 @@ fn truncate_on_char_boundary(mut text: String, byte_limit: usize) -> String {
 #[cfg(test)]
 #[path = "recorded_evidence_test.rs"]
 mod recorded_evidence_test;
+
+/// The pure half of the source audit: `(file_name, source_text)` in, verdicts
+/// out, so the guard can be aimed at sources that MUST be rejected and not only
+/// at a clean tree (#480's rule, applied to #526).
+#[cfg(test)]
+#[path = "recorded_evidence_scan_test_support.rs"]
+mod recorded_evidence_scan_test_support;
+
+#[cfg(test)]
+#[path = "recorded_evidence_scan_test.rs"]
+mod recorded_evidence_scan_test;

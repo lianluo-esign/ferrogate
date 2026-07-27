@@ -1824,7 +1824,32 @@ impl FirecrackerGuestRpcStartResponse {
             );
         }
         response.elapsed_millis = elapsed_millis;
+        // The host is about to record this response; the guest wrote its free
+        // text (#526).
+        response.sweep_recorded_guest_text();
         Ok(response)
+    }
+
+    /// Sweep the free-text fields a GUEST filled in, on the host side, before
+    /// the host records any of them (#526).
+    ///
+    /// `message` and the workload result's `output_excerpt` / `denial_reason`
+    /// are the only fields on this type a guest writes prose into; everything
+    /// else is an identifier the host already binds against the request it
+    /// sent. The guest redacts its own capture where it takes it, but that runs
+    /// inside the microVM — and this response is printed straight to worker
+    /// stdout by the Firecracker exec smoke and handed to the control plane by
+    /// `lifecycle.rs`, neither of which passes it through a metadata sweep.
+    pub(crate) fn sweep_recorded_guest_text(&mut self) {
+        if let Some(message) = self.message.as_mut() {
+            *message = crate::recorded_evidence::recorded_value(
+                crate::recorded_evidence::RecordedSurface::GuestWorkloadOutput,
+                message,
+            );
+        }
+        if let Some(workload_result) = self.workload_result.as_mut() {
+            workload_result.sweep_recorded_guest_text();
+        }
     }
 
     /// Require the response to echo the exact identity, adapter, capability,

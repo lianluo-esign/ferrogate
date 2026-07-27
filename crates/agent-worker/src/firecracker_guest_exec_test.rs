@@ -702,3 +702,136 @@ fn configured_guest_vsock_port_requires_a_positive_integer() {
     assert_eq!(configured_guest_vsock_port(), Some(5252));
     std::env::remove_var(GUEST_VSOCK_PORT_ENV);
 }
+
+// ---------------------------------------------------------------------------
+// Host-side ingestion of guest-supplied evidence (#526)
+// ---------------------------------------------------------------------------
+
+/// Obviously-fake credential material for the ingestion tests. Long enough that
+/// a surviving prefix would still be a leak worth failing on.
+const FAKE_GUEST_SECRET: &str = "FAKEGUESTCREDENTIALDONOTLOG0123456789abcdefghijklmnop";
+
+/// The host does not trust a guest to have redacted its own evidence.
+///
+/// The emit-side sweep in `write_guest_event` runs INSIDE the microVM. The host
+/// is the side that hands `HandlerEvents` to the control plane (`lifecycle.rs`)
+/// and prints the workload result to worker stdout (`backends.rs`), and it was
+/// doing both on whatever the guest sent. This frame is built the way a guest
+/// that never swept would send it — serialized by hand, never through
+/// `write_guest_event` — so the assertion can only be satisfied by the
+/// host-side sweep.
+///
+/// Pins `firecracker_guest_exec.rs`'s `ingest_guest_frame` and
+/// `FirecrackerGuestRpcStartResponse::sweep_recorded_guest_text`. Deleting
+/// either — including reverting the read loop to a bare
+/// `serde_json::from_str::<GuestStreamFrame>` — reds this.
+#[test]
+fn the_host_sweeps_guest_supplied_frames_it_ingests() {
+    let envelope = test_envelope("guest-ingest-session", "guest-ingest-run");
+    let request = firecracker_guest_vsock_start_request(
+        &envelope,
+        "guest-ingest-instance",
+        shell_workload("true"),
+        FirecrackerGuestCapabilityEnvelope::enforced(
+            "cap:test:ingest".to_string(),
+            vec!["cli".to_string()],
+        ),
+    );
+    let response = FirecrackerGuestRpcStartResponse::for_guest_request(
+        &request,
+        "completed",
+        format!(
+            "guest workload completed, upstream said\nauthorization: Bearer {FAKE_GUEST_SECRET}"
+        ),
+        Some(FirecrackerGuestWorkloadResult {
+            executed: true,
+            exit_code: Some(0),
+            output_excerpt: format!(
+                "HTTP/1.1 200 OK\nset-cookie: session={FAKE_GUEST_SECRET}\nupstream body\n"
+            ),
+            capability_denial_enforced: false,
+            denial_reason: Some(format!("cookie: sid={FAKE_GUEST_SECRET}")),
+        }),
+        true,
+    );
+    let line = serde_json::to_string(&GuestStreamFrame::Response {
+        response: Box::new(response),
+    })
+    .unwrap();
+    // Non-vacuity, stated before the act: the wire really does carry the
+    // credential, so a passing assertion below is the sweep and not the fixture.
+    assert!(line.contains(&FAKE_GUEST_SECRET[..12]));
+
+    let ingested = ingest_guest_frame(&line).unwrap();
+
+    let recorded = serde_json::to_string(&ingested).unwrap();
+    assert!(
+        !recorded.contains(&FAKE_GUEST_SECRET[..12]),
+        "the host recorded guest-supplied bearer material: {recorded}"
+    );
+    // The capture reached the host and was rewritten there, not dropped.
+    assert!(recorded.contains("upstream body"), "{recorded}");
+    assert!(
+        recorded.contains(crate::recorded_evidence::REDACTED_HEADER_VALUE),
+        "{recorded}"
+    );
+    // Names survive on all three guest-authored free-text fields.
+    assert!(recorded.contains("set-cookie"), "{recorded}");
+    assert!(recorded.contains("authorization"), "{recorded}");
+    assert!(recorded.contains("cookie"), "{recorded}");
+}
+
+/// The same obligation for an EVENT frame, and for a metadata key nobody
+/// classified — the shape a guest event added tomorrow would have.
+///
+/// The frame is assembled as raw JSON rather than through `write_guest_event`,
+/// so the in-guest sweep cannot be what satisfies it. Pins
+/// `ingest_guest_frame`'s event arm and `sweep_recorded_event_text`, including
+/// the `message` field the emit-side sweep did not cover before #526.
+#[test]
+fn the_host_sweeps_an_event_frame_a_guest_never_swept() {
+    let mut event = AgentWorkerFrameworkEventResult {
+        session_id: "guest-ingest-session".to_string(),
+        run_id: "guest-ingest-run".to_string(),
+        adapter_name: "native-harness".to_string(),
+        adapter_version: "test".to_string(),
+        framework: "firecracker".to_string(),
+        mode: "managed".to_string(),
+        kind: "run.completed".to_string(),
+        message: Some(format!(
+            "guest workload completed, tail was\nset-cookie: sid={FAKE_GUEST_SECRET}"
+        )),
+        metadata: std::collections::HashMap::new(),
+    };
+    event.metadata.insert(
+        "a_key_nobody_classified".to_string(),
+        format!("authorization: Bearer {FAKE_GUEST_SECRET}\nupstream body\n"),
+    );
+    let line = serde_json::json!({
+        "frame": "event",
+        "event": serde_json::to_value(&event).unwrap(),
+    })
+    .to_string();
+    assert!(line.contains(&FAKE_GUEST_SECRET[..12]));
+
+    let ingested = ingest_guest_frame(&line).unwrap();
+
+    let recorded = serde_json::to_string(&ingested).unwrap();
+    assert!(
+        !recorded.contains(&FAKE_GUEST_SECRET[..12]),
+        "the host recorded a guest event verbatim: {recorded}"
+    );
+    assert!(recorded.contains("upstream body"), "{recorded}");
+    assert!(recorded.contains("authorization"), "{recorded}");
+    assert!(
+        recorded.contains("guest workload completed"),
+        "the diagnostic must survive: {recorded}"
+    );
+    assert_eq!(
+        recorded
+            .matches(crate::recorded_evidence::REDACTED_HEADER_VALUE)
+            .count(),
+        2,
+        "both the metadata value and the message must be swept: {recorded}"
+    );
+}

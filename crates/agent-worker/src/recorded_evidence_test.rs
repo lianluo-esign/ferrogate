@@ -145,6 +145,73 @@ fn nothing_outside_the_scan_window_can_be_recorded() {
     assert!(wide.contains("head line"), "{wide}");
 }
 
+/// The scan window is a WORK bound, and the invariant that makes it safe is
+/// that it is never smaller than the record — which is what this pins.
+///
+/// Stated plainly, because the test above is named as if the window were a
+/// protection boundary and the review found its 4 KiB fixture never reached the
+/// 64 KiB boundary at all: no edit to the window expression can leak. The
+/// record is built FROM the window, so a smaller window can only produce a
+/// shorter record, never an unscanned one. That is the same kind of comforting
+/// claim as the withdrawn redaction-before-truncation one, and it gets the same
+/// treatment — the property is named for what it is rather than dressed up.
+///
+/// What the window CAN get wrong is usefulness, and that is observable.
+/// Redaction shortens a credential line from hundreds of bytes to
+/// `<redacted>`, so content that sat far beyond `byte_limit` in the RAW buffer
+/// is pulled up into the record. It must therefore have been scanned. Pins
+/// `recorded_excerpt`'s `byte_limit.max(EVIDENCE_SCAN_BYTES)`: replacing that
+/// `max` with `min` — the one edit that makes the scan smaller than what the
+/// caller asked to record — drops the second credential's line out of the
+/// record entirely and reds this test.
+#[test]
+fn the_scan_window_is_never_smaller_than_what_it_records() {
+    assert_eq!(
+        EVIDENCE_SCAN_BYTES,
+        64 * 1024,
+        "this fixture is sized against the window; resize it deliberately"
+    );
+
+    // A very long credential line, then a second credential line far beyond any
+    // sane excerpt limit.
+    let long_value = "a".repeat(4_096);
+    let raw =
+        format!("set-cookie: session={long_value}\nauthorization: Bearer {FAKE_PROOF}\nend\n");
+    // The second credential starts well past the limit we are about to ask for.
+    assert!(raw.find("authorization").expect("fixture") > 4_000);
+
+    let excerpt = recorded_excerpt(RecordedSurface::CliOutput, raw.as_bytes(), 128);
+
+    assert!(excerpt.len() <= 128, "limit not honored: {excerpt:?}");
+    assert!(!excerpt.contains(&FAKE_PROOF[..8]), "{excerpt:?}");
+    assert!(!excerpt.contains(&long_value[..64]), "{excerpt:?}");
+    // Both lines are IN the 128-byte record, because redaction shortened the
+    // first one. The scan therefore had to reach the second.
+    assert!(excerpt.starts_with("set-cookie: "), "{excerpt:?}");
+    assert!(
+        excerpt.contains("authorization"),
+        "content beyond byte_limit is pulled into the record by redaction, so the window must \
+         have scanned it: {excerpt:?}"
+    );
+    assert_eq!(
+        excerpt.matches(REDACTED_HEADER_VALUE).count(),
+        2,
+        "{excerpt:?}"
+    );
+
+    // And the other half of the bound: content beyond the WINDOW is dropped,
+    // never recorded, so a buffer larger than the window is safe to excerpt.
+    let filler = "f".repeat(EVIDENCE_SCAN_BYTES);
+    let huge = format!("head\n{filler}\nset-cookie: tail={FAKE_PROOF}\n");
+    assert!(
+        huge.len() > EVIDENCE_SCAN_BYTES,
+        "fixture must exceed window"
+    );
+    let capped = recorded_excerpt(RecordedSurface::CliOutput, huge.as_bytes(), 256);
+    assert!(!capped.contains(&FAKE_PROOF[..8]), "{}", &capped[..64]);
+    assert!(capped.starts_with("head\n"), "{}", &capped[..16]);
+}
+
 // ---------------------------------------------------------------------------
 // Scope is a property of the SURFACE, not of the call site
 // ---------------------------------------------------------------------------

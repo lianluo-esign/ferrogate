@@ -180,11 +180,35 @@ pub(crate) struct FirecrackerGuestWorkloadResult {
     pub(crate) denial_reason: Option<String>,
 }
 
+impl FirecrackerGuestWorkloadResult {
+    /// Sweep the two free-text fields the GUEST filled in, on the host side,
+    /// before the host records either of them (#526).
+    ///
+    /// The guest already redacts `output_excerpt` where it captures it, and
+    /// that is the right place for it — but that code runs INSIDE the microVM,
+    /// on the far side of the boundary this crate exists to distrust.
+    /// `validate_vsock_response_status` is the crate's own statement of that
+    /// stance: a guest's claims about its own execution are checked, not
+    /// believed. Its free text gets the same treatment.
+    pub(crate) fn sweep_recorded_guest_text(&mut self) {
+        self.output_excerpt = crate::recorded_evidence::recorded_value(
+            crate::recorded_evidence::RecordedSurface::GuestWorkloadOutput,
+            &self.output_excerpt,
+        );
+        if let Some(denial_reason) = self.denial_reason.as_mut() {
+            *denial_reason = crate::recorded_evidence::recorded_value(
+                crate::recorded_evidence::RecordedSurface::GuestWorkloadOutput,
+                denial_reason,
+            );
+        }
+    }
+}
+
 /// One framed line on the guest stream after the request: zero or more
 /// events, then exactly one response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "frame", rename_all = "snake_case")]
-enum GuestStreamFrame {
+pub(crate) enum GuestStreamFrame {
     Event {
         event: Box<AgentWorkerFrameworkEventResult>,
     },
@@ -774,9 +798,10 @@ pub(crate) fn firecracker_guest_vsock_exec(
                 error.reason()
             ))
         })?;
-        let frame: GuestStreamFrame = serde_json::from_str(line.trim()).map_err(|error| {
-            transport_error(format!("invalid guest stream frame JSON: {error}"))
-        })?;
+        // Deserialize and sweep in one step: the host records what comes back
+        // from inside the microVM, and the guest is not a trusted author of it
+        // (#526).
+        let frame = ingest_guest_frame(&line).map_err(transport_error)?;
         match frame {
             GuestStreamFrame::Event { event } => events.push(*event),
             GuestStreamFrame::Response { response } => break *response,
@@ -870,13 +895,52 @@ pub(crate) fn write_guest_event<S: Write>(
     stream: &mut S,
     mut event: AgentWorkerFrameworkEventResult,
 ) -> Result<(), String> {
-    crate::recorded_evidence::redact_recorded_values(event.metadata.values_mut());
+    sweep_recorded_event_text(&mut event);
     write_json_line(
         stream,
         &GuestStreamFrame::Event {
             event: Box::new(event),
         },
     )
+}
+
+/// The ONE place a guest-supplied frame becomes evidence the HOST holds (#526).
+///
+/// Parsing and redacting are the same step here on purpose. The emit-side sweep
+/// in [`write_guest_event`] runs inside the microVM; this one runs on the host,
+/// which is the side that actually hands
+/// `AgentWorkerManagementResult::HandlerEvents` to the control plane
+/// (`lifecycle.rs`) and prints the workload result to worker stdout
+/// (`backends.rs`). Trusting the in-guest sweep would make a workload's own
+/// process boundary the only thing standing between an upstream credential and
+/// the operator's terminal, which is the assumption
+/// [`validate_vsock_response_status`] already refuses to make about everything
+/// else a guest says.
+///
+/// A caller cannot obtain a `GuestStreamFrame` from the wire without going
+/// through this function: [`read_bounded_line`] hands back a `String`, and this
+/// is the only place in the crate that deserializes one.
+pub(crate) fn ingest_guest_frame(line: &str) -> Result<GuestStreamFrame, String> {
+    let mut frame: GuestStreamFrame = serde_json::from_str(line.trim())
+        .map_err(|error| format!("invalid guest stream frame JSON: {error}"))?;
+    match &mut frame {
+        GuestStreamFrame::Event { event } => sweep_recorded_event_text(event),
+        GuestStreamFrame::Response { response } => response.sweep_recorded_guest_text(),
+    }
+    Ok(frame)
+}
+
+/// Sweep every free-text field of a guest-authored event: the metadata values
+/// and the human-facing message, which the guest builds over its own workload's
+/// denial reason and output.
+fn sweep_recorded_event_text(event: &mut AgentWorkerFrameworkEventResult) {
+    crate::recorded_evidence::redact_recorded_values(event.metadata.values_mut());
+    if let Some(message) = event.message.as_mut() {
+        *message = crate::recorded_evidence::recorded_value(
+            crate::recorded_evidence::RecordedSurface::GuestWorkloadOutput,
+            message,
+        );
+    }
 }
 
 fn write_json_line<S: Write, T: Serialize>(stream: &mut S, value: &T) -> Result<(), String> {
