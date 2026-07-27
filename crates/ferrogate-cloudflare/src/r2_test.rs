@@ -16,10 +16,43 @@ use crate::client::{
 use crate::config::CloudflareConfig;
 use crate::error::CloudflareError;
 use crate::r2::{
-    r2_bucket_name_for_tenant, r2_legacy_bucket_name_for_tenant, R2BucketCreation,
-    R2CreateBucketRequest, R2_BUCKET_NAME_MAX_LEN, R2_BUCKET_NAME_MIN_LEN,
+    r2_bucket_name_for_tenant, R2BucketCreation, R2CreateBucketRequest, R2_BUCKET_NAME_MAX_LEN,
+    R2_BUCKET_NAME_MIN_LEN,
 };
 use crate::resolver::EnvTokenResolver;
+
+/// The **pre-#490** tenant bucket-name derivation, reproduced here as a test
+/// fixture. This is a historical record, not production code.
+///
+/// It used to live in `r2.rs` as a `pub fn r2_legacy_bucket_name_for_tenant`
+/// "for migration lookups only". Issue #496 removed it from the crate's public
+/// surface: it had no non-test caller, no migration tool ever consumed it, and
+/// a `pub` helper with no caller advertises a capability the project does not
+/// have. Nothing in this tree has ever provisioned a bucket under a
+/// tenant-derived name (`ensure_tenant_r2_bucket` reaches only
+/// `ensure_tenant_r2_credentials`, which has no non-test caller; the live
+/// probes create ad-hoc `ferrogate-gate-probe-…` buckets and delete them), so
+/// there is no legacy bucket to look up. See the `r2` module docs for what a
+/// migration would owe if one is ever found.
+///
+/// The algorithm is copied verbatim from the deleted function: prefix, then
+/// lowercase every ASCII alphanumeric and fold everything else to `-`,
+/// truncate at 63, trim trailing `-`. The constants are **hardcoded on
+/// purpose** — this reproduces what the code did in the past, so it must not
+/// drift when `R2_BUCKET_NAME_MAX_LEN` or the prefix change.
+fn legacy_bucket_name_pre_490(tenant: &str) -> String {
+    let mut name = String::from("ferrogate-");
+    for c in tenant.chars() {
+        name.push(if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            '-'
+        });
+    }
+    // All pushed bytes are ASCII, so truncating at a byte index is char-safe.
+    name.truncate(63);
+    name.trim_end_matches('-').to_string()
+}
 
 /// Clock that never sleeps (retries would otherwise stall the test).
 struct InstantClock;
@@ -629,6 +662,125 @@ fn tenant_bucket_name_convention_is_deterministic_and_r2_valid() {
     );
 }
 
+/// Issue #496: guard the fixture the collision demonstration now rests on.
+///
+/// When `r2_legacy_bucket_name_for_tenant` was a real function in `r2.rs`, the
+/// collision tests below were checking production code. Now they check
+/// [`legacy_bucket_name_pre_490`], so the fixture itself must be pinned — a
+/// fixture that quietly became `|_| "ferrogate-x".to_string()` would make every
+/// "these tenants collide" assertion pass while demonstrating nothing, which is
+/// exactly the vacuous-green failure mode this repo keeps hitting (#500).
+///
+/// So: exact outputs across the shapes that matter, AND non-constancy.
+#[test]
+fn legacy_fixture_still_reproduces_the_pre_490_derivation() {
+    // Lowercasing + non-alphanumeric folding, the whole reason the old
+    // derivation lost injectivity.
+    assert_eq!(
+        legacy_bucket_name_pre_490("Acme_Corp"),
+        "ferrogate-acme-corp"
+    );
+    assert_eq!(
+        legacy_bucket_name_pre_490("ACME.CORP"),
+        "ferrogate-acme-corp"
+    );
+    // Unlike the #490 slug, the old fold did NOT collapse runs of separators,
+    // so `a__b` kept both hyphens. Pinning this distinguishes the fixture from
+    // an accidental copy of `tenant_bucket_slug`.
+    assert_eq!(legacy_bucket_name_pre_490("a__b"), "ferrogate-a--b");
+    // Trailing separators were trimmed, leading ones were not.
+    assert_eq!(legacy_bucket_name_pre_490("acme..."), "ferrogate-acme");
+    assert_eq!(legacy_bucket_name_pre_490("_acme"), "ferrogate--acme");
+    // An empty / all-separator id degenerated to the bare prefix, trimmed —
+    // note this is 9 chars and does NOT end in `-`.
+    assert_eq!(legacy_bucket_name_pre_490(""), "ferrogate");
+    assert_eq!(legacy_bucket_name_pre_490("___"), "ferrogate");
+    // Truncation at exactly 63, before the trailing-hyphen trim.
+    assert_eq!(legacy_bucket_name_pre_490(&"a".repeat(200)).len(), 63);
+    assert_eq!(
+        legacy_bucket_name_pre_490(&"a".repeat(200)),
+        format!("ferrogate-{}", "a".repeat(53))
+    );
+    // The fixture must NOT be constant: it agreed with itself only on the
+    // families the old rule genuinely folded together.
+    assert_ne!(
+        legacy_bucket_name_pre_490("alpha"),
+        legacy_bucket_name_pre_490("beta")
+    );
+    assert_ne!(
+        legacy_bucket_name_pre_490("tenant-1"),
+        legacy_bucket_name_pre_490("tenant-2")
+    );
+    // And it must not be the CURRENT derivation: no digest, so the ids that
+    // #490 separates are still folded together here. If someone "fixes" the
+    // fixture by delegating to `r2_bucket_name_for_tenant`, this fails.
+    assert_ne!(
+        legacy_bucket_name_pre_490("Acme_Corp"),
+        r2_bucket_name_for_tenant("Acme_Corp")
+    );
+    assert_eq!(
+        legacy_bucket_name_pre_490("Acme_Corp"),
+        legacy_bucket_name_pre_490("acme corp"),
+        "the fixture must still FOLD what #490 separates — otherwise the \
+         collision tests below prove nothing"
+    );
+}
+
+/// Issue #496: the pre-#490 derivation is no longer part of this crate's public
+/// surface. It was `pub` in `r2.rs` and re-exported from `lib.rs` "for
+/// migration lookups only", with no non-test caller and no migration tool —
+/// API that advertised a capability the project does not have.
+///
+/// Re-add it and this test fails: the source of both files is checked for the
+/// symbol. That is the only mechanism available, since a test inside the crate
+/// cannot observe the absence of an export by naming it.
+///
+/// If a migration is ever actually built, it belongs behind a real entry point
+/// (see the `r2` module docs for what it would owe, including refusing an
+/// ambiguous legacy name) — not behind a bare name-derivation helper, so this
+/// test is not in the way of that work.
+#[test]
+fn legacy_bucket_name_derivation_is_not_public_api() {
+    const LEGACY_SYMBOL: &str = "r2_legacy_bucket_name_for_tenant";
+    for (file, source) in [
+        ("r2.rs", include_str!("r2.rs")),
+        ("lib.rs", include_str!("lib.rs")),
+    ] {
+        // Doc prose is allowed to name the removed function (the module docs
+        // explain why it went); a definition or re-export of it is not.
+        for forbidden in [
+            format!("pub fn {LEGACY_SYMBOL}"),
+            format!("fn {LEGACY_SYMBOL}"),
+            format!("{LEGACY_SYMBOL},"),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "{file} reintroduces the pre-#490 derivation as crate API ({forbidden:?}); \
+                 issue #496 removed it — keep it a private fixture in r2_test.rs"
+            );
+        }
+    }
+    // The deletion is only defensible because the knowledge survived: `r2.rs`
+    // must still carry the note saying what a migration would owe, so whoever
+    // finds a legacy bucket is not left reconstructing it from git history.
+    // Delete that section and this fails.
+    let r2_source = include_str!("r2.rs");
+    for required in [
+        "No legacy-name compatibility surface",
+        // The ambiguity refusal — the acceptance criterion of the migration
+        // this crate did NOT build.
+        "refuse to run when that name is ambiguous",
+        // The reason the control-plane surface here cannot be the migration.
+        "S3-compatible data plane",
+    ] {
+        assert!(
+            r2_source.contains(required),
+            "r2.rs no longer records {required:?}; issue #496 removed the legacy helper on the \
+             condition that this note stays"
+        );
+    }
+}
+
 /// Issue #490: the pre-#490 derivation folded case + every non-alphanumeric to
 /// `-` and truncated at 63, so distinct tenants shared one bucket — and with
 /// #462 layered on, each got a read+write credential for that *shared* bucket.
@@ -640,7 +792,7 @@ fn tenant_bucket_names_are_injective_for_the_490_colliding_ids() {
     let folding = ["Acme_Corp", "acme-corp", "acme corp", "ACME.CORP"];
     for tenant in folding {
         assert_eq!(
-            r2_legacy_bucket_name_for_tenant(tenant),
+            legacy_bucket_name_pre_490(tenant),
             "ferrogate-acme-corp",
             "the legacy derivation is expected to collide on {tenant:?}"
         );
@@ -657,13 +809,18 @@ fn tenant_bucket_names_are_injective_for_the_490_colliding_ids() {
     ];
     let legacy: Vec<String> = truncating
         .iter()
-        .map(|t| r2_legacy_bucket_name_for_tenant(t))
+        .map(|t| legacy_bucket_name_pre_490(t))
         .collect();
     assert_eq!(
         legacy[0], legacy[1],
         "the legacy derivation is expected to collide after truncation"
     );
     assert_eq!(legacy[0], legacy[2]);
+    // Pin the collided value, not just the equality: a fixture that returned a
+    // constant would satisfy every `assert_eq!` above while demonstrating
+    // nothing. 10 (`ferrogate-`) + 53 leading `t` = the 63-char cap exactly.
+    assert_eq!(legacy[0], format!("ferrogate-{head}"));
+    assert_eq!(legacy[0].len(), 63);
     let truncating: Vec<&str> = truncating.iter().map(String::as_str).collect();
     assert_distinct(&truncating);
 
@@ -745,18 +902,18 @@ fn gate_490_all_issue_colliding_tenant_ids_are_pairwise_distinct_and_r2_valid() 
     // Sanity: the pre-#490 derivation really did collide on these, so this test
     // is not vacuous about what it is guarding.
     assert_eq!(
-        r2_legacy_bucket_name_for_tenant(&tenants[0]),
-        r2_legacy_bucket_name_for_tenant(&tenants[3]),
+        legacy_bucket_name_pre_490(&tenants[0]),
+        legacy_bucket_name_pre_490(&tenants[3]),
         "the legacy derivation must collide on the issue's folding family"
     );
     assert_eq!(
-        r2_legacy_bucket_name_for_tenant(&tenants[4]),
-        r2_legacy_bucket_name_for_tenant(&tenants[5]),
+        legacy_bucket_name_pre_490(&tenants[4]),
+        legacy_bucket_name_pre_490(&tenants[5]),
         "the legacy derivation must collide after 63-char truncation"
     );
     assert_eq!(
-        r2_legacy_bucket_name_for_tenant(&tenants[6]),
-        r2_legacy_bucket_name_for_tenant(&tenants[7]),
+        legacy_bucket_name_pre_490(&tenants[6]),
+        legacy_bucket_name_pre_490(&tenants[7]),
     );
 
     // The property under test: pairwise distinct across the WHOLE pool.

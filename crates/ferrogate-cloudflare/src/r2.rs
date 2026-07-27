@@ -39,9 +39,52 @@
 //! per-tenant asset boundary, so two tenants sharing a name share their
 //! objects. R2 names cannot carry a raw tenant id (`[a-z0-9-]`, 3–63 chars), so
 //! the name is `ferrogate-{cosmetic-slug}-{sha256-of-length-prefixed-tenant}`
-//! and *all* of the collision resistance lives in the digest. The pre-#490
-//! slug-only derivation is retained as
-//! [`r2_legacy_bucket_name_for_tenant`] for migration lookups only.
+//! and *all* of the collision resistance lives in the digest.
+//!
+//! ## No legacy-name compatibility surface (issue #496)
+//!
+//! #490 changed every derived name, and this module deliberately offers **no**
+//! way to compute the pre-#490 name and **no** dual-read fallback. A fallback
+//! would resolve two tenants that folded to one legacy name back onto that one
+//! shared bucket — reintroducing exactly the cross-tenant read/write #490
+//! fixed.
+//!
+//! The reason no migration is needed is not "nobody kept the old function": it
+//! is that **no bucket has ever been provisioned under a tenant-derived name
+//! by this tree, under either derivation**.
+//! [`CloudflareClient::ensure_tenant_r2_bucket`] — the only code path that
+//! turns a tenant id into a bucket — has, across the whole repository history,
+//! exactly one caller ([`CloudflareClient::ensure_tenant_r2_credentials`]),
+//! which itself has no non-test caller; the onboarding auto-provision trigger
+//! is still deferred (see "Deferred" below). The two live probes create only
+//! ad-hoc, timestamp-named buckets (`ferrogate-gate-probe-…`) and delete them
+//! unconditionally in the same run. So there is nothing under a legacy name to
+//! migrate, and #496 removed the legacy derivation from this crate's public
+//! surface rather than shipping a migration entry point with no caller. The
+//! pre-#490 algorithm and its collision families survive as a private fixture
+//! in `r2_test.rs` — that is the record of *why* the derivation changed.
+//!
+//! **If a legacy bucket is ever found** (a `ferrogate-*` bucket in a live
+//! account whose name is not `ferrogate-[{slug}-]{32 hex}`), the migration this
+//! module does not implement would have to:
+//!
+//! 1. reconstruct the source name with the pre-#490 rule — lowercase the
+//!    tenant id, fold every non-ASCII-alphanumeric character to `-`, truncate
+//!    to [`R2_BUCKET_NAME_MAX_LEN`], trim trailing `-`, all after the
+//!    `ferrogate-` prefix (the fixture in `r2_test.rs` is the executable copy);
+//! 2. **refuse to run when that name is ambiguous** — if more than one known
+//!    tenant id folds to it, the objects cannot be attributed to a tenant and
+//!    merging them is the collision, not the cure;
+//! 3. copy every object to [`r2_bucket_name_for_tenant`]'s name over the R2
+//!    **S3-compatible data plane**. The REST surface in this module is control
+//!    plane only — it creates, lists and deletes buckets and cannot move a
+//!    single object. This crate has no S3 client and no SigV4 signer, so that
+//!    is new work, not a wiring change;
+//! 4. verify the copy (object count + per-object size/etag) *before* deleting
+//!    the source with [`CloudflareClient::delete_r2_bucket`], never after;
+//! 5. skip probe leftovers — an aborted probe run can leave a
+//!    `ferrogate-gate-probe-{unix-secs}` bucket, which is also not #490-shaped
+//!    and must not be treated as a tenant's assets.
 //!
 //! ## Credential / scope
 //!
@@ -89,8 +132,9 @@ const R2_TENANT_BUCKET_PREFIX: &str = "ferrogate-";
 
 /// Domain-separation tag mixed into the hashed tenant identity, so the digest
 /// for a tenant can never coincide with a digest this repo mints for some other
-/// purpose over the same bytes. Bump the `v1` suffix only with a migration
-/// (see [`r2_legacy_bucket_name_for_tenant`]).
+/// purpose over the same bytes. Bumping the `v1` suffix renames every tenant's
+/// bucket, so it is a migration (see the module docs' "No legacy-name
+/// compatibility surface"), never a refactor.
 const R2_TENANT_BUCKET_DIGEST_DOMAIN: &str = "ferrogate.r2.bucket.v1";
 
 /// Hex characters of SHA-256 kept in the bucket name: 32 hex chars = **128
@@ -400,7 +444,8 @@ fn validate_tenant_id(tenant: &str) -> Result<(), CloudflareError> {
 /// carry a raw tenant id — they are limited to `[a-z0-9-]` and 63 characters —
 /// so any direct embedding must fold characters and truncate, and folding plus
 /// truncation are exactly the two ways to lose injectivity. The pre-#490
-/// derivation lost it both ways (see [`r2_legacy_bucket_name_for_tenant`]).
+/// derivation lost it both ways; the families it collapsed are pinned in
+/// `r2_test.rs`.
 ///
 /// Collision-safety therefore comes **only** from `{digest}`:
 ///
@@ -425,8 +470,10 @@ fn validate_tenant_id(tenant: &str) -> Result<(), CloudflareError> {
 /// `f` and ends with a hex digit, and length between
 /// `10 + 32 = 42` and `10 + 20 + 1 + 32 =` [`R2_BUCKET_NAME_MAX_LEN`].
 ///
-/// **Migration:** this is NOT the pre-#490 name. See
-/// [`r2_legacy_bucket_name_for_tenant`].
+/// **Migration:** this is NOT the pre-#490 name, and no helper computes that
+/// name any more — see the module docs' "No legacy-name compatibility surface"
+/// (issue #496) for why, and for what a migration would owe if one is ever
+/// needed.
 pub fn r2_bucket_name_for_tenant(tenant: &str) -> String {
     let slug = tenant_bucket_slug(tenant);
     let digest = tenant_bucket_digest(tenant);
@@ -435,48 +482,6 @@ pub fn r2_bucket_name_for_tenant(tenant: &str) -> String {
     } else {
         format!("{R2_TENANT_BUCKET_PREFIX}{slug}-{digest}")
     }
-}
-
-/// The **pre-#490** bucket-name derivation, kept ONLY as a migration/lookup
-/// helper — never call it to provision.
-///
-/// It lowercased the tenant id, folded every non-alphanumeric character to `-`,
-/// truncated at 63 characters, and trimmed trailing hyphens, which is not
-/// injective:
-///
-/// ```text
-/// legacy("Acme_Corp") == legacy("acme-corp") == legacy("acme corp")
-///                     == legacy("ACME.CORP") == "ferrogate-acme-corp"
-/// ```
-///
-/// plus any two ids agreeing on their first 53 post-fold characters. Two such
-/// tenants shared one bucket — a cross-tenant asset read/write.
-///
-/// Nothing in the tree provisioned through it (onboarding wiring is still
-/// deferred; only tests and the live probe touched the R2 surface), so there is
-/// no known live bucket under a legacy name. If a deployment *did* provision
-/// one out-of-band, its objects live under this name and must be copied to
-/// [`r2_bucket_name_for_tenant`]'s name before the old bucket is deleted — this
-/// function is how a migration tool computes the source name.
-///
-/// **There is no such tool yet, and no non-test caller.** Issue #496 carries the
-/// decision: either build the copy-then-delete path (rejecting an ambiguous
-/// legacy name, since a colliding one cannot be attributed to a tenant) or drop
-/// this from the public API. There is deliberately no dual-read fallback — a
-/// fallback would resolve two colliding tenants back to one shared bucket,
-/// reintroducing exactly what #490 fixed.
-pub fn r2_legacy_bucket_name_for_tenant(tenant: &str) -> String {
-    let mut name = String::from(R2_TENANT_BUCKET_PREFIX);
-    for c in tenant.chars() {
-        name.push(if c.is_ascii_alphanumeric() {
-            c.to_ascii_lowercase()
-        } else {
-            '-'
-        });
-    }
-    // All pushed bytes are ASCII, so truncating at a byte index is char-safe.
-    name.truncate(R2_BUCKET_NAME_MAX_LEN);
-    name.trim_end_matches('-').to_string()
 }
 
 /// Lowercase-hex SHA-256 of the length-prefixed, domain-separated tenant

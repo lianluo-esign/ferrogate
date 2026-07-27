@@ -54,9 +54,9 @@ pub use d1_proxy::{D1ProxyClient, D1ProxyStatement};
 pub use envelope::{CloudflareEnvelope, CloudflareMessage, CloudflareResultInfo};
 pub use error::{CloudflareApiError, CloudflareError, AUTHENTICATION_CODES, MISSING_SCOPE_CODES};
 pub use r2::{
-    r2_bucket_name_for_tenant, r2_legacy_bucket_name_for_tenant, R2Bucket, R2BucketCreation,
-    R2BucketProvision, R2CreateBucketRequest, R2_BUCKET_ALREADY_EXISTS_CODES,
-    R2_BUCKET_NAME_MAX_LEN, R2_BUCKET_NAME_MIN_LEN,
+    r2_bucket_name_for_tenant, R2Bucket, R2BucketCreation, R2BucketProvision,
+    R2CreateBucketRequest, R2_BUCKET_ALREADY_EXISTS_CODES, R2_BUCKET_NAME_MAX_LEN,
+    R2_BUCKET_NAME_MIN_LEN,
 };
 pub use r2_token::{
     R2CredentialProvision, R2ScopedToken, R2ScopedTokenRequest, R2TokenAccess,
