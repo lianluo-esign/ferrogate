@@ -29,6 +29,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "asset-client"
@@ -42,6 +43,7 @@ id = "unscoped-asset-client"
 name = "Unscoped asset client"
 key = "unscoped-asset-secret"
 scopes = ["assets.read"]
+platform_operator = true
 "#
         ),
     )

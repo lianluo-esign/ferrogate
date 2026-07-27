@@ -50,6 +50,7 @@ name = "Chat"
 key = "chat-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 {extra_toml}
 "#

@@ -45,10 +45,10 @@ id = "control-plane-operator"
 name = "Control-plane operator"
 key_env = "FERROGATE_ADMIN_SECRET"
 scopes = ["admin.read", "admin.write"]
-# Issue #515: this key administers every tenant, so it says so. Before #515 the
-# same access came from merely omitting `organization_id`; declaring it here is
-# accepted both under the legacy `[tenancy] implicit_platform_operator = true`
-# default and after that default is turned off.
+# Issues #515/#540: this key administers every tenant, so it says so. Before
+# #515 the same access came from merely omitting `organization_id`; since #540
+# a key that says neither this nor `organization_id` is refused when the config
+# loads.
 platform_operator = true
 
 # Client keys and [[policies]] defined here (or created via the Admin API)
@@ -61,8 +61,8 @@ id = "acme-app-1"
 name = "Acme app key"
 key_env = "FERROGATE_CLIENT_SECRET"
 scopes = ["models.read", "chat.completions"]
-# Issue #515: a client key must name the tenant it bills and isolates to.
-# Until it does, it is still classified as a platform operator by the
-# deprecated `[tenancy] implicit_platform_operator` default (and the gateway
-# says so at startup); add `organization_id = "<tenants.id>"` before turning
-# that default off.
+# Issues #515/#540: a client key names the tenant it bills and isolates to --
+# `tenants.id`, as registered through /admin/v1/tenant-accounts. This is the
+# line that keeps it a tenant rather than platform root: omitting it used to
+# mean root, and now means the gateway refuses to start until you say which.
+organization_id = "acme-corp"

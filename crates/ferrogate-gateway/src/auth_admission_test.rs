@@ -41,7 +41,28 @@ fn authenticate(
     ))
 }
 
+/// The ordinary static key most tests here need: it exists to make
+/// `auth_required()` true and to be authenticated as the root/bootstrap key the
+/// rest of this suite assumes.
+///
+/// It declares `platform_operator = true` since #540. Before the flip, "the
+/// field is absent" and "this key is root" were the same fixture, so a helper
+/// could be both at once; now they are different keys and the undeclared one is
+/// [`undeclared_yaml_key`]. Anything that wants the undeclared shape must ask
+/// for it by name -- otherwise the flip could be reverted and this file, which
+/// is where it is pinned, would still be green.
 fn decoy_yaml_key() -> ApiKey {
+    ApiKey {
+        platform_operator: Some(true),
+        ..undeclared_yaml_key()
+    }
+}
+
+/// The pre-#515 shape: a key that names no tenant and never says
+/// `platform_operator`. What it is worth is now entirely `[tenancy]
+/// implicit_platform_operator`'s answer -- refused by default, root only where
+/// a deployment explicitly asks for the legacy behaviour.
+fn undeclared_yaml_key() -> ApiKey {
     ApiKey {
         region_allowlist: Vec::new(),
         id: "decoy".into(),
@@ -950,48 +971,128 @@ fn tenant_scoped_monthly_budget_is_shared_across_two_keys_under_the_tenant() {
     );
 }
 
-/// The config default is legacy-compatible on purpose (existing deployments'
-/// bootstrap keys are root today), and the compatibility answer is reachable
-/// only through this one field.
+/// #540, the flip itself. This test exists to be the thing that reds if the
+/// default goes back, and it is deliberately written so that no amount of
+/// fixture annotation can satisfy it: it constructs `Config::default()` and
+/// reads the field, so the only way to make it pass is for the default to
+/// actually be `false`. (It replaces #515's
+/// `tenancy_config_defaults_are_legacy_compatible_and_explicit`, which pinned
+/// the opposite value for the opposite reason -- that guard existed so stage 2
+/// could not happen by accident, and this is stage 2.)
+///
+/// Its sibling assertion pins the OTHER half of "the default cannot grant
+/// root": the config must be `false` AND the resolver must read that `false` as
+/// "not an operator". Pinning only the field would leave
+/// `resolve_platform_operator`'s `(None, None) => implicit_platform_operator`
+/// arm free to be rewritten to `=> true` with every test still green.
 #[test]
-fn tenancy_config_defaults_are_legacy_compatible_and_explicit() {
+fn undeclared_platform_root_is_off_by_default_and_the_resolver_agrees() {
     let config = Config::default();
 
     assert!(
-        config.tenancy.implicit_platform_operator,
-        "flipping this default is a breaking change for every deployment whose bootstrap key \
-         declares no tenancy; it must be a deliberate release decision, not a silent one"
+        !config.tenancy.implicit_platform_operator,
+        "#515's non-negotiable: an omitted config field must not grant platform root. Flipping \
+         this back is the whole regression -- every annotated fixture in the tree would keep \
+         passing while it was broken"
     );
     assert!(
+        !crate::auth::resolve_platform_operator(
+            config.tenancy.implicit_platform_operator,
+            None,
+            None
+        ),
+        "the single classification chokepoint must resolve an undeclared credential to NOT an \
+         operator under the default; the field being false is worth nothing if the resolver \
+         ignores it"
+    );
+
+    assert!(
         !config.tenancy.require_registered_tenant,
-        "the api-key write path must stay no stricter than the storage-free config path until a \
-         deployment opts in"
+        "#540 deliberately did not flip this one: a misspelled organization_id already fails \
+         closed (the key is scoped to an island it can read nothing from), and whether a tenant \
+         row exists is a fact about the control-plane store that no load-time check can warn \
+         about first -- so turning it on by default would surface only as a 400 from a console \
+         that could mint keys the day before"
     );
 }
 
 /// A config that omits `platform_operator` on a tenant-less key is told so, by
-/// id, at load time -- the migration window for the flip above.
+/// id -- the list the refusal and the legacy warning both read.
 #[test]
 fn config_load_names_every_key_that_relies_on_implicit_platform_root() {
-    let mut operator = decoy_yaml_key();
+    let mut operator = undeclared_yaml_key();
     operator.id = "bootstrap".into();
-    let mut declared = decoy_yaml_key();
+    let mut declared = undeclared_yaml_key();
     declared.id = "declared-root".into();
     declared.platform_operator = Some(true);
-    let mut scoped = decoy_yaml_key();
+    let mut scoped = undeclared_yaml_key();
     scoped.id = "tenant-key".into();
     scoped.organization_id = Some("tenant-a".into());
 
     let config = Config {
         api_keys: vec![operator, declared, scoped],
+        tenancy: ferrogate_config::TenancyConfig {
+            implicit_platform_operator: true,
+            ..Default::default()
+        },
         ..Config::default()
     };
 
     assert_eq!(
+        config.api_keys_without_tenant_identity(),
+        vec!["bootstrap"],
+        "only the key that declared neither identity has an undeclared tenant identity"
+    );
+    assert_eq!(
         config.warn_implicit_platform_operators(),
         vec!["bootstrap"],
-        "only the key that declared neither identity is relying on the deprecated default"
+        "and it is the one the legacy opt-in is silently promoting to root"
     );
+}
+
+/// #540, the upgrade path. A config whose keys still rely on the pre-#515 rule
+/// does not boot and then 403 its own traffic -- it is refused where the
+/// operator is already looking, by id, with both fixes and the escape hatch
+/// spelled out. Same shape as #542's `ensure_auth_posture_is_declared`.
+#[test]
+fn config_validate_refuses_a_key_with_no_declared_tenant_identity() {
+    let mut bootstrap = undeclared_yaml_key();
+    bootstrap.id = "bootstrap".into();
+    let mut scoped = undeclared_yaml_key();
+    scoped.id = "tenant-key".into();
+    scoped.key = Some("tenant-secret".into());
+    scoped.organization_id = Some("tenant-a".into());
+
+    let error = Config {
+        api_keys: vec![bootstrap, scoped.clone()],
+        ..Config::default()
+    }
+    .validate()
+    .expect_err("#540: a key that declares no tenant identity must not load");
+    let message = error.to_string();
+    assert!(
+        message.contains("bootstrap"),
+        "the refusal must name the key that has to change: {message}"
+    );
+    assert!(
+        !message.contains("tenant-key"),
+        "a key that named its tenant is not part of the problem: {message}"
+    );
+    assert!(
+        message.contains("platform_operator = true") && message.contains("organization_id"),
+        "the refusal must print both fixes, not just the diagnosis: {message}"
+    );
+    assert!(
+        message.contains("implicit_platform_operator = true"),
+        "and the one-line way to get an existing deployment back up while annotating: {message}"
+    );
+
+    Config {
+        api_keys: vec![scoped],
+        ..Config::default()
+    }
+    .validate()
+    .expect("a config whose every key declares an identity loads under the new default");
 }
 
 /// Captures everything written by `tracing` while `run` executes, on this
@@ -1039,35 +1140,34 @@ fn capture_tracing_output(run: impl FnOnce()) -> String {
 /// deployment while every test stays green.
 ///
 /// So drive the caller and assert on what it PRODUCED -- and on the guard
-/// inside it, by validating the same key list with the deprecated default
-/// turned off, where the key is refused at authentication instead and the
-/// warning must NOT fire.
+/// inside it, by validating the same key list under the #540 default, where the
+/// same key is refused outright and the warning must NOT fire.
 #[test]
 fn config_validate_is_what_emits_the_implicit_platform_root_warning() {
-    let mut bootstrap = decoy_yaml_key();
+    let mut bootstrap = undeclared_yaml_key();
     bootstrap.id = "bootstrap".into();
-    let mut declared = decoy_yaml_key();
+    let mut declared = undeclared_yaml_key();
     declared.id = "declared-root".into();
     declared.key = Some("declared-secret".into());
     declared.platform_operator = Some(true);
-    let mut scoped = decoy_yaml_key();
+    let mut scoped = undeclared_yaml_key();
     scoped.id = "tenant-key".into();
     scoped.key = Some("tenant-secret".into());
     scoped.organization_id = Some("tenant-a".into());
     let api_keys = vec![bootstrap, declared, scoped];
 
-    let legacy_default = Config {
+    let legacy_opt_in = Config {
         api_keys: api_keys.clone(),
+        tenancy: ferrogate_config::TenancyConfig {
+            implicit_platform_operator: true,
+            ..Default::default()
+        },
         ..Config::default()
     };
-    assert!(
-        legacy_default.tenancy.implicit_platform_operator,
-        "this test's premise is the deprecated default being on"
-    );
     let warned = capture_tracing_output(|| {
-        legacy_default
+        legacy_opt_in
             .validate()
-            .expect("this config is otherwise valid");
+            .expect("the legacy opt-in keeps this config loading");
     });
     assert!(
         warned.contains("bootstrap"),
@@ -1075,28 +1175,36 @@ fn config_validate_is_what_emits_the_implicit_platform_root_warning() {
     );
     assert!(
         warned.contains("implicit_platform_operator"),
-        "the warning must point at the setting an operator has to flip: {warned}"
+        "the warning must point at the setting an operator has to remove: {warned}"
     );
     assert!(
         !warned.contains("declared-root") && !warned.contains("tenant-key"),
-        "a key that declared either identity is not relying on the default: {warned}"
+        "a key that declared either identity is not relying on the switch: {warned}"
     );
 
-    let opted_in = Config {
-        api_keys,
-        tenancy: ferrogate_config::TenancyConfig {
-            implicit_platform_operator: false,
-            ..Default::default()
-        },
-        ..Config::default()
-    };
+    // #540: under the default the same list does not get a warning and a
+    // running gateway -- it gets no gateway. Asserting the log is empty would
+    // pass on a build that simply deleted the warning, so assert what replaced
+    // it as well.
+    let mut error = None;
     let silent = capture_tracing_output(|| {
-        opted_in.validate().expect("this config is otherwise valid");
+        error = Config {
+            api_keys,
+            ..Config::default()
+        }
+        .validate()
+        .err();
     });
     assert!(
-        !silent.contains("bootstrap"),
-        "with the deprecated default off there is no implicit root left to warn about; the key \
-         is refused at authentication instead: {silent}"
+        error
+            .as_ref()
+            .is_some_and(|error| error.to_string().contains("bootstrap")),
+        "under the default the undeclared key is refused, not warned about: {error:?}"
+    );
+    assert!(
+        !silent.contains("implicit_platform_operator = true is set")
+            && !silent.contains("are granted UNRESTRICTED"),
+        "and nothing was promoted to root on the way out: {silent}"
     );
 }
 
@@ -1104,7 +1212,7 @@ fn config_validate_is_what_emits_the_implicit_platform_root_warning() {
 /// rather than an identity -- both refused before the gateway ever starts.
 #[test]
 fn config_validation_rejects_contradictory_and_blank_tenant_identities() {
-    let mut both = decoy_yaml_key();
+    let mut both = undeclared_yaml_key();
     both.platform_operator = Some(true);
     both.organization_id = Some("tenant-a".into());
     let error = Config {
@@ -1118,7 +1226,7 @@ fn config_validation_rejects_contradictory_and_blank_tenant_identities() {
         "unexpected error: {error}"
     );
 
-    let mut blank = decoy_yaml_key();
+    let mut blank = undeclared_yaml_key();
     blank.organization_id = Some("   ".into());
     let error = Config {
         api_keys: vec![blank],
@@ -1132,42 +1240,48 @@ fn config_validation_rejects_contradictory_and_blank_tenant_identities() {
     );
 }
 
-/// End to end over the static-config path: the same key is platform root under
-/// the legacy default, and is refused outright once the deployment says its
-/// operators must declare themselves.
+/// End to end over the static-config path: an undeclared key is refused by
+/// DEFAULT since #540, and is root only where a deployment explicitly asked for
+/// the pre-#515 rule.
+///
+/// The `AppState` is built straight from a `Config` literal rather than through
+/// `Config::validate`, on purpose: this pins the request-time half in
+/// isolation, so it stays a real assertion even if the load-time refusal is
+/// ever moved or relaxed.
 #[test]
 fn static_config_key_without_any_declared_identity_is_governed_by_the_switch() {
-    let legacy = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
+    let strict = AppState::new(Config {
+        api_keys: vec![undeclared_yaml_key()],
         ..Config::default()
     });
-    let auth = authenticate(
-        &legacy,
-        &bearer_headers("decoy-secret"),
-        "admin.read",
-        "req-1",
-    )
-    .expect("the legacy default must keep existing bootstrap keys working");
-    assert!(
-        auth.is_platform_operator(),
-        "legacy compatibility: an undeclared key is still root, but now says so in a field"
-    );
-
-    let mut strict_config = Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    };
-    strict_config.tenancy.implicit_platform_operator = false;
-    let strict = AppState::new(strict_config);
     let error = authenticate(
         &strict,
         &bearer_headers("decoy-secret"),
         "chat.completions",
-        "req-2",
+        "req-1",
     )
-    .expect_err("a credential with no tenant identity must fail closed, not become root");
+    .expect_err("#540: by default a credential with no tenant identity fails closed");
     assert_eq!(error.code, "tenant_identity_required");
     assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    let mut legacy_config = Config {
+        api_keys: vec![undeclared_yaml_key()],
+        ..Config::default()
+    };
+    legacy_config.tenancy.implicit_platform_operator = true;
+    let legacy = AppState::new(legacy_config);
+    let auth = authenticate(
+        &legacy,
+        &bearer_headers("decoy-secret"),
+        "admin.read",
+        "req-2",
+    )
+    .expect("the legacy opt-in must keep an un-annotated bootstrap key working");
+    assert!(
+        auth.is_platform_operator(),
+        "the escape hatch has to actually restore the old behaviour, or nobody can use it to buy \
+         time"
+    );
 }
 
 /// The migration path an operator is told to take: annotate the key, and it
@@ -1175,7 +1289,7 @@ fn static_config_key_without_any_declared_identity_is_governed_by_the_switch() {
 #[test]
 fn declared_platform_operator_authenticates_under_both_settings() {
     for implicit in [true, false] {
-        let mut key = decoy_yaml_key();
+        let mut key = undeclared_yaml_key();
         key.platform_operator = Some(true);
         let mut config = Config {
             api_keys: vec![key],
@@ -1200,7 +1314,7 @@ fn declared_platform_operator_authenticates_under_both_settings() {
 #[test]
 fn tenant_scoped_static_key_is_never_platform_root() {
     for implicit in [true, false] {
-        let mut key = decoy_yaml_key();
+        let mut key = undeclared_yaml_key();
         key.organization_id = Some("tenant-a".into());
         let mut config = Config {
             api_keys: vec![key],

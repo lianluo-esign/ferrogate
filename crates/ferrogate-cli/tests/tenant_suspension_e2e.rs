@@ -45,18 +45,27 @@ provider_model = "gpt-4o-mini"
 id = "admin"
 name = "Platform operator"
 key = "admin-secret"
+platform_operator = true
 
 # A credential that names ONLY a project -- the shape the first #514 landing
 # could not see. `organization_id` is optional on a native api-key, so this key
 # never names `tenant-susp` at all; the gate has to WALK from the project row to
 # its tenant to find the suspension. Before the chain walk this key kept serving
 # `/v1/models` with its tenant fully suspended.
+#
+# #540: it declares `platform_operator` rather than an `organization_id`,
+# because naming the tenant here would hand the gate the answer it is supposed
+# to have to walk for. That is exactly what this key was before #540 (root by
+# omission), only now written down -- and `platform_operator` does not shorten
+# the chain: the walk reads the ids the key DECLARES, and this one still
+# declares only `project_id`.
 [[api_keys]]
 id = "project-only"
 name = "Project-scoped key"
 key = "project-only-secret"
 project_id = "proj-susp"
 scopes = ["models.read"]
+platform_operator = true
 "#
         ),
     )

@@ -67,9 +67,10 @@ fn auth_section_is_the_named_switch_for_the_open_posture() {
 fn credential_sources_are_static_keys_external_auth_or_a_durable_backend() {
     assert!(!Config::default().has_credential_source());
 
-    let with_static_key =
-        Config::from_toml_str("[[api_keys]]\nid = \"k1\"\nname = \"k1\"\nkey = \"secret\"\n")
-            .unwrap();
+    let with_static_key = Config::from_toml_str(
+        "[[api_keys]]\nid = \"k1\"\nname = \"k1\"\nkey = \"secret\"\nplatform_operator = true\n",
+    )
+    .unwrap();
     assert!(with_static_key.has_credential_source());
 
     let mut with_auth_service = Config::default();
@@ -985,6 +986,7 @@ fn parses_caddyfile_ai_gateway_into_valid_runtime_config() {
             denied_providers openai
             monthly_token_budget 1000000
             request_limit_per_minute 60
+            platform_operator on
         }
     }
 }
@@ -1050,11 +1052,11 @@ fn write_self_signed_test_certificate(cert: &std::path::Path, key: &std::path::P
     status.success()
 }
 
-/// #515: the two tenant-identity semantics are declarable in the config file
-/// and round-trip through serde, and a config that says nothing lands on the
-/// documented legacy-compatible answers.
+/// #515/#540: the two tenant-identity semantics are declarable in the config
+/// file and round-trip through serde, and a config that says nothing lands on
+/// the fail-closed answer.
 #[test]
-fn tenancy_section_parses_and_defaults_to_the_legacy_answers() {
+fn tenancy_section_parses_and_defaults_to_declared_identity() {
     let declared = Config::from_toml_str(
         r#"
 listen = "127.0.0.1:8080"
@@ -1088,7 +1090,39 @@ organization_id = "tenant-a"
         Some("tenant-a")
     );
 
+    // #540: omitting `[tenancy]` is the fail-closed answer, not the legacy one.
+    // Deserialising an ABSENT section (rather than reading
+    // `TenancyConfig::default()` in Rust) is the point -- `#[serde(default =
+    // "default_true")]` was how the old answer got in, and putting it back would
+    // red exactly here.
     let silent = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[[api_keys]]
+id = "bootstrap"
+name = "Bootstrap"
+key = "bootstrap-secret"
+platform_operator = true
+"#,
+    )
+    .expect("a config whose every key declares an identity loads with no [tenancy] section");
+
+    assert!(
+        !silent.tenancy.implicit_platform_operator,
+        "an omitted [tenancy] section must not re-grant root by omission"
+    );
+    assert!(!silent.tenancy.require_registered_tenant);
+    assert_eq!(
+        silent.warn_implicit_platform_operators(),
+        Vec::<&str>::new(),
+        "nothing is relying on the legacy answer here, and the warning must not fire for a key \
+         that declared itself"
+    );
+
+    // The same file with the declaration removed is refused -- so the pass
+    // above is the annotation doing work, not the check being absent.
+    let undeclared = Config::from_toml_str(
         r#"
 listen = "127.0.0.1:8080"
 
@@ -1098,16 +1132,30 @@ name = "Bootstrap"
 key = "bootstrap-secret"
 "#,
     )
-    .expect("a pre-#515 config must still load unchanged");
-
+    .expect_err("#540: a key that declares no tenant identity must not load");
     assert!(
-        silent.tenancy.implicit_platform_operator,
-        "omitting [tenancy] must keep pre-#515 deployments working"
+        undeclared.to_string().contains("bootstrap"),
+        "unexpected error: {undeclared}"
     );
-    assert!(!silent.tenancy.require_registered_tenant);
-    assert_eq!(silent.api_keys[0].platform_operator, None);
+
+    // ...and the legacy opt-in restores it, naming the key it promotes.
+    let opted_in = Config::from_toml_str(
+        r#"
+listen = "127.0.0.1:8080"
+
+[tenancy]
+implicit_platform_operator = true
+
+[[api_keys]]
+id = "bootstrap"
+name = "Bootstrap"
+key = "bootstrap-secret"
+"#,
+    )
+    .expect("the documented escape hatch must actually load an un-annotated config");
+    assert_eq!(opted_in.api_keys[0].platform_operator, None);
     assert_eq!(
-        silent.warn_implicit_platform_operators(),
+        opted_in.warn_implicit_platform_operators(),
         vec!["bootstrap"],
         "...and must say out loud which key that leaves holding platform root"
     );

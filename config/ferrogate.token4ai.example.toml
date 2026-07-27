@@ -123,3 +123,6 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+# Issue #540: administers every tenant, so it declares it. The client key above
+# names its tenant instead; a key that does neither no longer loads.
+platform_operator = true

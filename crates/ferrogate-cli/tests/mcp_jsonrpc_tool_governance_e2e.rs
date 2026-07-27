@@ -247,12 +247,14 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+platform_operator = true
 "#
     )
 }
@@ -407,12 +409,14 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+platform_operator = true
 
 [[mcp_servers]]
 name = "local"

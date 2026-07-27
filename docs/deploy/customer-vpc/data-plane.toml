@@ -62,6 +62,10 @@ id = "vpc-bootstrap-admin"
 name = "VPC bootstrap admin"
 key_env = "FERROGATE_ADMIN_SECRET"
 scopes = ["admin.read"]
+# Issue #540: reads the whole node's admin surface, not one tenant's, so it
+# declares platform root. A key that declares neither this nor an
+# `organization_id` no longer starts the gateway.
+platform_operator = true
 
 # Model providers are reached DIRECTLY from inside the VPC; their credentials
 # exist only here and never appear in any snapshot.

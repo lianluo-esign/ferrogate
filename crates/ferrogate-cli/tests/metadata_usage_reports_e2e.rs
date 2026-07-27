@@ -45,6 +45,7 @@ organization_id = "tenant-meta-iso"
 id = "admin"
 name = "Admin bootstrap key"
 key = "admin-secret"
+platform_operator = true
 
 [[api_keys]]
 id = "tenant-console"

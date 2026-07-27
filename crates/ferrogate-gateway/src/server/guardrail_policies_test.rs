@@ -63,7 +63,7 @@ fn tenant_guardrail_scope_requires_explicit_single_tenant_boundary() {
 
 /// A DECLARED platform operator (#515): `platform_operator = true`, which is
 /// what `resolve_platform_operator` produces for a key that opted in or that
-/// inherited the deprecated `[tenancy] implicit_platform_operator` default.
+/// inherited the `[tenancy] implicit_platform_operator` legacy opt-in.
 fn operator_auth() -> AuthContext {
     let mut auth = tenant_auth("ignored");
     auth.organization_id = None;

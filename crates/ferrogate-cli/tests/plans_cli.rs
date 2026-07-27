@@ -26,6 +26,7 @@ id = "admin"
 name = "Admin bootstrap key"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )

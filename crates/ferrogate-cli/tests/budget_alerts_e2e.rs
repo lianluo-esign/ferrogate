@@ -49,6 +49,7 @@ output_price_per_1m = 0.0
 id = "admin"
 name = "Admin bootstrap key"
 key = "admin-secret"
+platform_operator = true
 "#
         ),
     )

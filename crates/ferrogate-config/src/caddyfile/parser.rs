@@ -570,6 +570,8 @@ impl<'a> Parser<'a> {
             denied_providers: Vec::new(),
             monthly_token_budget: None,
             request_limit_per_minute: None,
+            organization_id: None,
+            platform_operator: None,
         };
 
         if !self.consume_lbrace() {
@@ -621,11 +623,33 @@ impl<'a> Parser<'a> {
                     api_key.request_limit_per_minute =
                         args.first().and_then(|value| value.parse().ok());
                 }
+                // #540: the tenancy vocabulary, spelled the Caddy way, for the
+                // same reason `auth off` exists (#542). Once an undeclared key
+                // is refused at load, a bridged config needs SOME way to
+                // declare one -- and the refusal cannot honestly point a
+                // Caddyfile at a `[[api_keys]]` TOML field its format has no
+                // grammar for. Omitting both directives still means "this key
+                // said nothing", which is exactly what gets refused.
+                "organization_id" => api_key.organization_id = args.first().cloned(),
+                "platform_operator" => match args.first().map(String::as_str) {
+                    Some("on" | "true") => api_key.platform_operator = Some(true),
+                    Some("off" | "false") => api_key.platform_operator = Some(false),
+                    _ => {
+                        return Err(self.unsupported(
+                            &token,
+                            directive,
+                            "expected `platform_operator on` (this key administers EVERY tenant) \
+                             or `platform_operator off` (it does not); to scope a key to one \
+                             tenant use `organization_id <tenants.id>` instead"
+                                .to_string(),
+                        ));
+                    }
+                },
                 _ => {
                     return Err(self.unsupported(
                         &token,
                         directive,
-                        "inside api_key blocks, FerroGate supports name, key, key_env, key_hash, scopes, allowed_models, denied_models, allowed_providers, denied_providers, monthly_token_budget and request_limit_per_minute".to_string(),
+                        "inside api_key blocks, FerroGate supports name, key, key_env, key_hash, scopes, allowed_models, denied_models, allowed_providers, denied_providers, monthly_token_budget, request_limit_per_minute, organization_id and platform_operator".to_string(),
                     ));
                 }
             }

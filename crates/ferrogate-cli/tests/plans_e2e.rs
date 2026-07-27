@@ -24,6 +24,7 @@ listen = "{gateway_addr}"
 id = "admin"
 name = "Admin bootstrap key"
 key = "admin-secret"
+platform_operator = true
 "#
         ),
     )

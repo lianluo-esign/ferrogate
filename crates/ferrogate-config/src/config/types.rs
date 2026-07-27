@@ -295,38 +295,65 @@ impl Config {
 ///    the native/static-config write path -- so a typo silently created a new
 ///    tenancy island rather than being refused.
 ///
-/// Both flags start in the *legacy* (pre-#515) position so this change is not a
-/// silent break for deployments whose env-derived/bootstrap keys are root today
-/// (see the migration note on each field); both are logged at load time when a
-/// key actually depends on the legacy answer, and both are intended to flip in
-/// a subsequent release once operators have written the intent down.
+/// Semantic 1 was #515's non-negotiable and is closed by #540: the default is
+/// now `false`, so platform root is something a config *says* and never
+/// something it *omits*. The legacy answer survives as an explicit opt-in
+/// ([`Self::implicit_platform_operator`] `= true`), because deleting it outright
+/// would leave an upgrading operator whose bootstrap key is root today with no
+/// one-line way back.
+///
+/// Semantic 2 deliberately stays permissive; see
+/// [`Self::require_registered_tenant`] for why the two are not siblings.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenancyConfig {
-    /// DEPRECATED (#515 stage 1). `true` (the legacy default) keeps the
-    /// pre-#515 behaviour: an API key that declares neither `organization_id`
-    /// nor `platform_operator` is treated as a platform-root credential.
+    /// Whether a key that declares neither `organization_id` nor
+    /// `platform_operator` is platform root.
     ///
-    /// Set to `false` to fail closed: such a credential is then refused at
-    /// authentication with `tenant_identity_required` instead of being promoted
-    /// to root, and every key that legitimately administers the whole platform
-    /// must say `platform_operator = true` out loud.
+    /// `false` -- the default since #540, and what an omitted field means -- is
+    /// fail closed. Such a key is refused: at *load* when it is a static
+    /// `[[api_keys]]` entry (`Config::validate` names it by id and prints the
+    /// fix, so an upgrade stops at the restart rather than 403-ing production
+    /// traffic afterwards), and at *authentication* with
+    /// `tenant_identity_required` when it arrives from a source the config
+    /// cannot see -- a durable/virtual key or the external auth service.
     ///
-    /// Migration: set `platform_operator = true` on your bootstrap/operator
-    /// `[[api_keys]]` entries first (that is accepted under both settings),
-    /// then flip this to `false`.
-    #[serde(default = "default_true")]
+    /// `true` restores the pre-#515 behaviour: an undeclared key is promoted to
+    /// an unrestricted, cross-tenant credential, and every key in that state is
+    /// logged by id at startup. It exists only so an operator can keep an
+    /// existing deployment running while annotating its keys, and it can only
+    /// be reached by writing it down -- there is no input that lands here by
+    /// accident.
+    ///
+    /// Migration, in the order that never drops traffic: add `platform_operator
+    /// = true` to the keys that really administer the whole platform and an
+    /// `organization_id` to the rest (both accepted under either setting),
+    /// *then* remove this switch.
+    #[serde(default)]
     pub implicit_platform_operator: bool,
-    /// `false` (the legacy default) keeps an `organization_id` that resolves to
-    /// no `tenants` row acceptable on `POST`/`PUT /admin/v1/api-keys`; the
-    /// dangling reference is reported in the gateway log and the admin audit
-    /// trail (exactly like an unresolvable `project_id`/`workspace_id`) instead
-    /// of being refused.
+    /// `false` (the default) keeps an `organization_id` that resolves to no
+    /// `tenants` row acceptable on `POST`/`PUT /admin/v1/api-keys`; the dangling
+    /// reference is reported in the gateway log and the admin audit trail
+    /// (exactly like an unresolvable `project_id`/`workspace_id`) instead of
+    /// being refused.
     ///
     /// `true` makes `organization_id` a checked foreign key on that write path:
     /// naming a tenant that does not exist is a `400`, so a typo can no longer
     /// silently create a tenancy island that no console, quota policy or RBAC
     /// binding will ever match.
+    ///
+    /// #540 flipped [`Self::implicit_platform_operator`] and deliberately left
+    /// this one alone. They look like a pair and are not: an *undeclared* key
+    /// failed OPEN (it reached every tenant), while a *misspelled*
+    /// `organization_id` already fails CLOSED -- the key is scoped to
+    /// `Tenant("typo")` and can reach nothing but an empty island. Turning this
+    /// on is a data-integrity improvement, not a privilege one, and it has no
+    /// load-time signal to precede it: whether a tenant is registered lives in
+    /// the control-plane store, not the config, so a default flip here would
+    /// surface for the first time as a `400` from a console that could mint keys
+    /// yesterday, with no equivalent of the startup refusal above to warn
+    /// anybody first. It flips when there is a migration that can prove the
+    /// tenants exist.
     #[serde(default)]
     pub require_registered_tenant: bool,
 }
@@ -334,7 +361,11 @@ pub struct TenancyConfig {
 impl Default for TenancyConfig {
     fn default() -> Self {
         Self {
-            implicit_platform_operator: true,
+            // #540. NOT `true`: an omitted config field must not grant platform
+            // root. `Config::validate` refuses a static key that relies on the
+            // old answer and names the two ways to fix it, so this is a stop at
+            // the restart, not a silent downgrade of a running data plane.
+            implicit_platform_operator: false,
             require_registered_tenant: false,
         }
     }
@@ -1573,8 +1604,11 @@ pub struct ApiKey {
     /// data plane too, not just on admin routes.
     ///
     /// `None` (field omitted) is resolved by
-    /// [`super::TenancyConfig::implicit_platform_operator`]: root under the
-    /// legacy default, refused at authentication once that is flipped off.
+    /// [`super::TenancyConfig::implicit_platform_operator`], which since #540
+    /// defaults to `false`: a static key in this state is refused at load with
+    /// the fix named, and a key from a source the config cannot enumerate is
+    /// refused at authentication. It is root only where an operator explicitly
+    /// turned the legacy switch back on.
     #[serde(default)]
     pub platform_operator: Option<bool>,
     #[serde(default)]

@@ -48,12 +48,14 @@ name = "Models only"
 key = "models-secret"
 scopes = ["models.read"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "chat_limited"
@@ -61,6 +63,7 @@ name = "Chat limited"
 key = "chat-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "disabled_key"
@@ -69,6 +72,7 @@ key = "disabled-secret"
 enabled = false
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "expired_key"
@@ -77,6 +81,7 @@ key = "expired-secret"
 expires_at_unix = 1
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "budget_empty"
@@ -85,6 +90,7 @@ key = "budget-secret"
 monthly_token_budget = 0
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "rate_empty"
@@ -93,6 +99,7 @@ key = "rate-secret"
 request_limit_per_minute = 0
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "provider_limited"
@@ -101,6 +108,7 @@ key = "provider-limited-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 allowed_providers = ["other-provider"]
+platform_operator = true
 
 [[api_keys]]
 id = "model_denied"
@@ -109,6 +117,7 @@ key = "model-denied-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 denied_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "provider_denied"
@@ -118,6 +127,7 @@ scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 allowed_providers = ["openai"]
 denied_providers = ["openai"]
+platform_operator = true
 
 [[api_keys]]
 id = "tenant_denied"
@@ -125,6 +135,7 @@ name = "Tenant denied"
 key = "tenant-denied-secret"
 scopes = ["chat.completions"]
 allowed_models = ["tenant-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "policy_key"
@@ -314,6 +325,7 @@ key = "rate-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 request_limit_per_minute = 1
+platform_operator = true
 "#
         ),
     )
@@ -368,6 +380,7 @@ key = "budget-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 monthly_token_budget = 8
+platform_operator = true
 "#
         ),
     )
@@ -426,6 +439,7 @@ key = "budget-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 monthly_token_budget = 8
+platform_operator = true
 "#
         ),
     )
@@ -513,6 +527,7 @@ id = "operator_models"
 name = "Operator models"
 key = "operator-models-secret"
 scopes = ["models.read"]
+platform_operator = true
 "#
         ),
     )

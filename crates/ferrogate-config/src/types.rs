@@ -133,6 +133,19 @@ pub struct GatewayApiKey {
     pub denied_providers: Vec<String>,
     pub monthly_token_budget: Option<u64>,
     pub request_limit_per_minute: Option<u64>,
+    /// `organization_id <tenants.id>` inside an `api_key` block (#540): the
+    /// tenant this bridged key speaks for.
+    #[serde(default)]
+    pub organization_id: Option<String>,
+    /// `platform_operator on|off` inside an `api_key` block (#540).
+    ///
+    /// `None` -- both directives omitted -- is deliberately preserved rather
+    /// than defaulted to either answer. It is what the bridge knew before #515
+    /// (nothing), and inventing `Some(true)` here would put the omitted-field-
+    /// grants-root bug back one layer down, in a form `Config::validate` could
+    /// no longer tell apart from an operator who wrote it on purpose.
+    #[serde(default)]
+    pub platform_operator: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -29,6 +29,10 @@ fn write_config(path: &std::path::Path, gateway_addr: &str) {
 /// `[[api_keys]]` entries, so the #515 cases below can start a gateway whose
 /// `require_registered_tenant` / `implicit_platform_operator` answers differ
 /// from the defaults without duplicating the whole fixture.
+///
+/// The `admin` key declares `platform_operator = true` since #540: it drives
+/// every cross-tenant admin call here, and a key that declared neither identity
+/// no longer loads under the default `[tenancy]`.
 fn write_config_with(path: &std::path::Path, gateway_addr: &str, tenancy: &str, extra_keys: &str) {
     std::fs::write(
         path,
@@ -42,6 +46,7 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 {extra_keys}
 "#
         ),
@@ -226,10 +231,15 @@ fn create_rejects_cross_tenant_pairs_but_tolerates_dangling_references() {
     // `Config::validate` performs no storage lookup, so refusing it here would
     // make the admin API stricter than the config path. It is accepted and
     // reported (audit event + operator warning) instead.
+    //
+    // #540: the payload names its tenant, which it did not have to before. That
+    // is a separate rule (a key must declare a tenant identity) and keeping the
+    // two apart is the point -- the DANGLING reference under test is still the
+    // project, and it is still accepted.
     let dangling = post(
         &gateway_addr,
         "/admin/v1/api-keys",
-        r#"{"id":"k-ghost","name":"Dangling project","key":"s","project_id":"project-ghost"}"#,
+        r#"{"id":"k-ghost","name":"Dangling project","key":"s","organization_id":"tenant-key-a","project_id":"project-ghost"}"#,
     );
     assert!(
         status_line(&dangling).contains("201"),
@@ -293,12 +303,32 @@ fn create_rejects_cross_tenant_pairs_but_tolerates_dangling_references() {
 ///
 /// This drives that exact sequence over HTTP: GET, add the secret back (the
 /// only field the response redacts), PUT verbatim, and then keep using the key.
+///
+/// #540: the undeclared-key premise now needs the legacy opt-in, because the
+/// default refuses such a key at load. That is not a weakening -- the opt-in is
+/// exactly the population still exposed to this hazard, and it is the one an
+/// upgrading operator turns on before annotating anything.
 #[test]
 fn reading_an_operator_key_and_writing_it_back_does_not_lock_the_admin_api_out() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("ferrogate.toml");
-    write_config(&config_path, &gateway_addr);
+    write_config_with(
+        &config_path,
+        &gateway_addr,
+        "\n[tenancy]\nimplicit_platform_operator = true\n",
+        r#"
+[[api_keys]]
+id = "legacy-admin"
+name = "Undeclared legacy admin"
+key = "legacy-admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#,
+    );
+    let legacy_admin: [&str; 2] = [
+        "Authorization: Bearer legacy-admin-secret",
+        "Content-Type: application/json",
+    ];
 
     let mut gateway = start_gateway(&config_path);
     wait_for_gateway(&gateway_addr);
@@ -306,7 +336,7 @@ fn reading_an_operator_key_and_writing_it_back_does_not_lock_the_admin_api_out()
     let fetched = body_json(&http_request(
         &gateway_addr,
         "GET",
-        "/admin/v1/api-keys/admin",
+        "/admin/v1/api-keys/legacy-admin",
         &ADMIN,
         "",
     ));
@@ -317,23 +347,23 @@ fn reading_an_operator_key_and_writing_it_back_does_not_lock_the_admin_api_out()
         serde_json::Value::Null,
         "a key that declared nothing must not be reported as having declared false: {fetched}"
     );
-    // Effective: under the default `[tenancy] implicit_platform_operator` this
+    // Effective: under this config's `[tenancy] implicit_platform_operator` the
     // key IS root right now, which is the question an operator is asking.
     assert_eq!(
         fetched["key"]["effective_platform_operator"], true,
-        "the deprecated default makes this key platform root; the surface added to make root \
-         visible must say so: {fetched}"
+        "the legacy opt-in makes this key platform root; the surface added to make root visible \
+         must say so: {fetched}"
     );
 
     // The canonical read-modify-write: every field exactly as returned, plus the
     // secret the response redacts. `effective_platform_operator` is sent back
     // too and must be ignored rather than 400'd or persisted as a declaration.
     let mut round_trip = fetched["key"].clone();
-    round_trip["key"] = serde_json::Value::String("admin-secret".into());
+    round_trip["key"] = serde_json::Value::String("legacy-admin-secret".into());
     let replaced = http_request(
         &gateway_addr,
         "PUT",
-        "/admin/v1/api-keys/admin",
+        "/admin/v1/api-keys/legacy-admin",
         &ADMIN,
         &round_trip.to_string(),
     );
@@ -342,12 +372,20 @@ fn reading_an_operator_key_and_writing_it_back_does_not_lock_the_admin_api_out()
         "writing back the document we just read must be accepted: {replaced}"
     );
 
-    // The lockout assertion: the very same credential still authenticates.
-    let after = http_request(&gateway_addr, "GET", "/admin/v1/api-keys", &ADMIN, "");
+    // The lockout assertion: the very same credential still authenticates --
+    // driven with ITS OWN bearer token, not the declared-root admin one, or the
+    // self-lockout this test exists for would be invisible.
+    let after = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/api-keys",
+        &legacy_admin,
+        "",
+    );
     assert!(
         status_line(&after).contains("200"),
-        "the admin key must still work after a read-modify-write of its own document; a 403 here \
-         is the self-lockout (tenant_identity_required): {after}"
+        "the legacy admin key must still work after a read-modify-write of its own document; a \
+         403 here is the self-lockout (tenant_identity_required): {after}"
     );
 
     // ...and it is still reported with the same identity, so the round-trip is
@@ -355,7 +393,7 @@ fn reading_an_operator_key_and_writing_it_back_does_not_lock_the_admin_api_out()
     let reread = body_json(&http_request(
         &gateway_addr,
         "GET",
-        "/admin/v1/api-keys/admin",
+        "/admin/v1/api-keys/legacy-admin",
         &ADMIN,
         "",
     ));
@@ -376,8 +414,14 @@ fn reading_an_operator_key_and_writing_it_back_does_not_lock_the_admin_api_out()
 /// Finding 1's second half: `platform_operator` (declared) and
 /// `effective_platform_operator` (resolved) are different questions, and the
 /// resolved one has to actually consult `[tenancy]` rather than echo the
-/// declaration. Four key shapes, with the deprecated default OFF -- where the
-/// undeclared key is no longer root.
+/// declaration.
+///
+/// #540 moved which config can hold the four shapes. An undeclared static key
+/// is refused at load under the default now, so this runs under the legacy
+/// opt-in -- which sharpens the pin rather than weakening it: `legacy` and
+/// `tenant-scoped` have the SAME declaration (`null`) and OPPOSITE effective
+/// answers in one response, so an `effective_platform_operator` that echoed the
+/// declaration, or that hardcoded either answer, cannot produce this listing.
 #[test]
 fn the_api_key_response_reports_declared_and_effective_platform_root_separately() {
     let gateway_addr = free_addr();
@@ -386,9 +430,8 @@ fn the_api_key_response_reports_declared_and_effective_platform_root_separately(
     write_config_with(
         &config_path,
         &gateway_addr,
-        "\n[tenancy]\nimplicit_platform_operator = false\n",
-        r#"platform_operator = true
-
+        "\n[tenancy]\nimplicit_platform_operator = true\n",
+        r#"
 [[api_keys]]
 id = "legacy"
 name = "Undeclared legacy key"
@@ -435,8 +478,9 @@ organization_id = "tenant-key-a"
     assert_eq!(admin["platform_operator"], true, "{admin}");
     assert_eq!(admin["effective_platform_operator"], true, "{admin}");
 
-    // The whole point of the pair: same declaration (`null`) as in the test
-    // above, opposite effective answer, because `[tenancy]` changed.
+    // The whole point of the pair: this key and `tenant-scoped` below declare
+    // the same thing (`null`) and get opposite effective answers, because the
+    // resolver reads `[tenancy]` and the tenant, not the declaration.
     let legacy = key_of("legacy");
     assert_eq!(
         legacy["platform_operator"],
@@ -444,9 +488,9 @@ organization_id = "tenant-key-a"
         "{legacy}"
     );
     assert_eq!(
-        legacy["effective_platform_operator"], false,
-        "with the deprecated default off an undeclared key is NOT root; an effective answer that \
-         merely echoes the declaration cannot produce this: {legacy}"
+        legacy["effective_platform_operator"], true,
+        "the legacy opt-in is on, so this undeclared key IS root right now -- which is the whole \
+         reason the surface reports it: {legacy}"
     );
 
     let refuses_root = key_of("refuses-root");
@@ -617,6 +661,116 @@ fn a_dangling_tenant_reference_is_tolerated_until_the_deployment_opts_in() {
         warned,
         "the unresolved tenant reference must still leave audit evidence -- this is what proves \
          the tenant lookup ran at all on the default path: {audit}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+/// #540 acceptance, #515's original probe driven end to end: `GET
+/// /admin/v1/tenant-roles/{other-tenant}` no longer answers 200 to a key with
+/// no declared tenant identity -- because that key can no longer be brought
+/// into existence.
+///
+/// Both doors are checked in one run, on a config that writes no `[tenancy]`
+/// section at all (so the DEFAULT is what is under test):
+///
+/// 1. the admin API refuses to mint one. `upsert_api_key` runs the candidate
+///    through `Config::validate`, so `ensure_every_key_declares_tenant_identity`
+///    applies to a runtime mutation exactly as it does to a config file, and the
+///    handler returns `400 invalid_api_key` carrying the message. The static
+///    half -- the same key written into `ferrogate.toml` -- is pinned in
+///    `check_command.rs`; the authentication half in `auth_admission_test.rs`.
+/// 2. the probe itself, from the tenant-scoped key that the refusal tells you to
+///    create instead: still not 200, now via `authorize_tenant_scope`.
+///
+/// The two controls are load-bearing, not decoration. Without the 201 in
+/// between, a handler that 400'd every api-key POST would pass step 1; without
+/// the final 200, a 404 route or a gateway refusing all admin calls would pass
+/// step 2 while proving nothing about tenant isolation. Flip
+/// `TenancyConfig::default()` back to `true` and step 1 turns into a 201.
+#[test]
+fn an_unscoped_key_can_no_longer_read_another_tenants_roles() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+    seed_two_tenant_hierarchies(&gateway_addr);
+
+    // Neither organization_id nor platform_operator: the pre-#515 shape that
+    // used to be silently minted as a platform-root credential.
+    let refused = post(
+        &gateway_addr,
+        "/admin/v1/api-keys",
+        r#"{"id":"unscoped","name":"Unscoped","key":"unscoped-secret","scopes":["admin.read"]}"#,
+    );
+    assert!(
+        status_line(&refused).contains("400"),
+        "#540: the admin API must not mint a credential with no tenant identity: {refused}"
+    );
+    assert!(
+        refused.contains("platform_operator") && refused.contains("organization_id"),
+        "and must say which of the two to add: {refused}"
+    );
+
+    let never_created = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenant-roles/tenant-key-b",
+        &["Authorization: Bearer unscoped-secret"],
+        "",
+    );
+    assert!(
+        status_line(&never_created).contains("401"),
+        "#515's probe: the secret from the refused mint must not authenticate at all: \
+         {never_created}"
+    );
+
+    // Control: the SAME payload with a tenant named is accepted, so the 400
+    // above is about the missing identity and not about this endpoint.
+    let scoped = post(
+        &gateway_addr,
+        "/admin/v1/api-keys",
+        r#"{"id":"scoped","name":"Scoped","key":"scoped-secret","scopes":["admin.read"],"organization_id":"tenant-key-a"}"#,
+    );
+    assert!(
+        status_line(&scoped).contains("201"),
+        "declaring the tenant is the fix the refusal names, so it must work: {scoped}"
+    );
+
+    // The probe, from the key an operator is now steered towards: tenant A's
+    // key reading tenant B's roles.
+    let probe = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenant-roles/tenant-key-b",
+        &["Authorization: Bearer scoped-secret"],
+        "",
+    );
+    assert!(
+        !status_line(&probe).contains("200"),
+        "a tenant-scoped key must not read another tenant's roles: {probe}"
+    );
+    assert!(
+        status_line(&probe).contains("403"),
+        "and it fails closed rather than 404-ing its way to a pass: {probe}"
+    );
+
+    // Control: the declared platform operator still administers every tenant,
+    // so the route exists and tenant-key-b is really there.
+    let operator = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenant-roles/tenant-key-b",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        status_line(&operator).contains("200"),
+        "a declared platform operator must still administer every tenant: {operator}"
     );
 
     gateway.kill().unwrap();

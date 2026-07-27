@@ -39,6 +39,11 @@
             scopes models.read chat.completions responses.create admin.read
             allowed_models fast-chat
             allowed_providers openai
+            # Issue #540: every key states its tenant identity or the config is
+            # refused. This one carries admin.read across the whole gateway, so
+            # it declares root; a tenant-scoped key says
+            # `organization_id <tenants.id>` instead.
+            platform_operator on
         }
     }
 }

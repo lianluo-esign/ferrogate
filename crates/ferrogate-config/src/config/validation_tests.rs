@@ -3996,7 +3996,9 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         allowed_providers: vec![],
         denied_providers: vec![],
         organization_id: None,
-        platform_operator: None,
+        // #540: root by declaration; this fixture's key named no tenant and
+        // was platform root under the pre-#540 default.
+        platform_operator: Some(true),
         team_id: None,
         project_id: None,
         workspace_id: None,

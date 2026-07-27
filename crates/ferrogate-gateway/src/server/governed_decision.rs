@@ -372,7 +372,7 @@ pub(crate) const GOVERNED_ERROR_VOCABULARY: &[GovernedErrorCode] = &[
     // `finalize_auth` refuses it rather than guessing a tenancy, so it is an
     // admission-stage refusal like the rest of this group. A fixture is
     // required: it is reachable only through a specific config posture
-    // (`[tenancy] implicit_platform_operator = false` plus an under-declared
+    // (the `[tenancy] implicit_platform_operator = false` default plus an under-declared
     // key), which is exactly the kind of combination a conformance fixture
     // exists to hold.
     code(

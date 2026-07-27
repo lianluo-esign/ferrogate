@@ -328,9 +328,9 @@ const UNSCOPED_TENANT_ID: &str = "";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CallerScope<'a> {
     /// Unrestricted, cross-tenant. Reached only via an explicit
-    /// `platform_operator = true` (or the deprecated `[tenancy]
-    /// implicit_platform_operator` compatibility default, which says so in the
-    /// startup log).
+    /// `platform_operator = true` -- or, at a deployment that explicitly opted
+    /// back in with `[tenancy] implicit_platform_operator = true`, by a key
+    /// that declared nothing, which the startup log names one by one.
     PlatformOperator,
     /// Scoped to exactly one `tenants.id`.
     Tenant(&'a str),
@@ -344,12 +344,13 @@ pub(crate) enum CallerScope<'a> {
 ///   something an operator wrote down, and an explicit `false` is a refusal
 ///   that survives any compatibility default;
 /// * a credential that names a tenant is that tenant, never root;
-/// * a credential that declares neither is the legacy shape. It is root only
-///   while `[tenancy] implicit_platform_operator` is on (the deprecated
-///   default, which keeps existing deployments' bootstrap keys working and is
-///   warned about at config load); with it off the credential is
-///   unclassifiable and [`finalize_auth`] refuses it outright rather than
-///   guessing.
+/// * a credential that declares neither is the legacy shape. Since #540 it is
+///   NOT root by default: the credential is unclassifiable and
+///   [`finalize_auth`] refuses it outright rather than guessing (a static
+///   `[[api_keys]]` entry in this state does not even load). It is root only
+///   where a deployment set `[tenancy] implicit_platform_operator = true` to
+///   keep its un-annotated bootstrap keys working, which is warned about at
+///   config load.
 pub(crate) fn resolve_platform_operator(
     implicit_platform_operator: bool,
     declared: Option<bool>,
@@ -461,9 +462,9 @@ pub(crate) fn enforce_tenant_filter(
 ///
 /// #515 narrowed what gets through: it is no longer "any credential whose
 /// `organization_id` happens to be absent" but "a credential that declared
-/// itself a platform operator". Under `[tenancy] implicit_platform_operator =
-/// false` an unclassified credential never reaches here at all -- it is
-/// refused at authentication.
+/// itself a platform operator". Under the #540 default an unclassified
+/// credential never reaches here at all -- it is refused at authentication, and
+/// refused at config load if it was a static key.
 pub(crate) fn require_platform_operator(auth: &AuthContext) -> Result<(), AuthError> {
     if !auth.is_platform_operator() {
         return Err(AuthError {
@@ -1378,10 +1379,13 @@ async fn finalize_auth(
     // key for quota, metering and lifecycle, so an unscoped identity is wrong
     // on the data plane too, not just on admin routes.
     //
-    // Reachable only when an operator has set `[tenancy]
-    // implicit_platform_operator = false`; under the (deprecated) legacy
-    // default such a credential is classified as an operator, exactly as
-    // before #515, and this never fires.
+    // Live by default since #540. It does not fire for a static `[[api_keys]]`
+    // entry -- `Config::validate` refuses that config before a listener is
+    // bound -- so what reaches here is a credential the config could not
+    // enumerate: a durable/virtual key or one minted by the external auth
+    // service. It never fires at a deployment that set `[tenancy]
+    // implicit_platform_operator = true`, where such a credential is classified
+    // as an operator exactly as before #515.
     if !auth.platform_operator && auth.organization_id.is_none() {
         return Err(AuthError {
             status: StatusCode::FORBIDDEN,

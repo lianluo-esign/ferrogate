@@ -282,6 +282,7 @@ id = "admin"
 name = "Target capability live admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [agent_runtime]
 enabled = true

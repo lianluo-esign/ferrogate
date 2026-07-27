@@ -292,6 +292,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [agent_runtime]
 enabled = true
@@ -475,6 +476,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [agent_runtime]
 enabled = true

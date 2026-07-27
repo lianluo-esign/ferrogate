@@ -205,12 +205,14 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "reader"
 name = "Read-only operator"
 key = "reader-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [scheduler]
 enabled = false
@@ -730,12 +732,14 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+platform_operator = true
 
 [[extensions]]
 id = "mcp.http"
@@ -1059,12 +1063,14 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "reader"
 name = "Read-only operator"
 key = "reader-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "tenant-b"

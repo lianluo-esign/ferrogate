@@ -241,6 +241,86 @@ fn check_offers_a_keyless_caddyfile_a_remedy_it_can_actually_write() {
     assert!(stdout.contains("auth_required=false"), "{stdout}");
 }
 
+/// #540, where an operator meets the flip. `ferrogate check` is the documented
+/// pre-flight, so a config whose bootstrap key is root only by omission must be
+/// refused HERE -- before the restart that would otherwise come up and answer
+/// `403 tenant_identity_required` to its own traffic.
+///
+/// Pins `Config::ensure_every_key_declares_tenant_identity` and the
+/// `self.ensure_every_key_declares_tenant_identity()?` call in
+/// `Config::validate`. Downgrade it back to a warning (the #515 stage-1
+/// behaviour) and this prints `FerroGate config OK` and exits 0. Change
+/// `TenancyConfig::default()` back to `implicit_platform_operator: true` and it
+/// does the same -- which is why this test writes no `[tenancy]` block at all.
+#[test]
+fn check_refuses_a_key_that_would_be_platform_root_only_by_omission() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.toml");
+    let undeclared = r#"
+listen = "127.0.0.1:0"
+
+[[api_keys]]
+id = "bootstrap"
+name = "Bootstrap key"
+key = "bootstrap-secret"
+scopes = ["admin.read", "admin.write"]
+"#;
+    std::fs::write(&path, undeclared).unwrap();
+
+    let refused = ferrogate()
+        .args(["check", "--config", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!refused.status.success());
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!stdout.contains("FerroGate config OK"), "{stdout}");
+    assert!(
+        stderr.contains("bootstrap"),
+        "the refusal must name the key an operator has to edit: {stderr}"
+    );
+    assert!(
+        stderr.contains("platform_operator = true") && stderr.contains("organization_id"),
+        "and print both fixes: {stderr}"
+    );
+    assert!(
+        stderr.contains("implicit_platform_operator = true"),
+        "and the one-line way back for a deployment that is already running: {stderr}"
+    );
+
+    // Declaring the identity is the fix, and it is accepted -- otherwise the
+    // refusal above would be a dead end rather than a migration.
+    std::fs::write(&path, format!("{undeclared}platform_operator = true\n")).unwrap();
+    let accepted = ferrogate()
+        .args(["check", "--config", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        accepted.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&accepted.stdout).contains("FerroGate config OK"));
+
+    // ...and so is the escape hatch, on the untouched original.
+    std::fs::write(
+        &path,
+        format!("{undeclared}\n[tenancy]\nimplicit_platform_operator = true\n"),
+    )
+    .unwrap();
+    let opted_in = ferrogate()
+        .args(["check", "--config", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        opted_in.status.success(),
+        "the documented way to keep an un-annotated deployment running must actually work; \
+         stderr: {}",
+        String::from_utf8_lossy(&opted_in.stderr)
+    );
+}
+
 #[test]
 fn reload_validates_config_and_reports_planned_execution() {
     let output = ferrogate()
@@ -334,6 +414,7 @@ listen = "127.0.0.1:0"
 id = "key_dev"
 name = "Development key"
 key = "super-secret-inline"
+platform_operator = true
 "#,
     )
     .unwrap();
@@ -361,6 +442,7 @@ listen = "127.0.0.1:0"
 id = "key_dev"
 name = "Development key"
 key_env = "FERROGATE_TEST_SECRET"
+platform_operator = true
 "#,
     )
     .unwrap();

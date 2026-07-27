@@ -103,6 +103,7 @@ impl Config {
         self.validate_admin_api()?;
         self.add_mcp_policy_targets(&mut model_names, &mut provider_names);
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
+        self.ensure_every_key_declares_tenant_identity()?;
         self.warn_implicit_platform_operators();
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_gateway_configs(&api_key_ids)?;
@@ -1883,40 +1884,88 @@ impl Config {
         Ok(ids)
     }
 
-    /// #515. Names, at load time, every static key that is a platform-root
-    /// credential only because it happens to declare no tenant -- the implicit
-    /// default this issue is about.
+    /// Every static key whose tenant-isolation identity is undeclared: it names
+    /// no `organization_id` and never says `platform_operator` either way.
     ///
-    /// Deliberately a warning and not an error: a hard failure here would take
-    /// down every existing deployment whose bootstrap/env-derived key is root
-    /// today (the exact migration hazard #515 flags), and "your gateway no
-    /// longer starts" is a worse first contact with this change than "your
-    /// gateway told you which keys to annotate". Once `[tenancy]
-    /// implicit_platform_operator = false` those same keys are refused at
-    /// authentication instead, so the warning is the migration window, not the
-    /// fix.
+    /// This is the shape that used to mean platform root purely by omission
+    /// (#515). What happens to it now is the caller's decision -- refused by
+    /// [`Self::ensure_every_key_declares_tenant_identity`], or promoted and
+    /// logged by [`Self::warn_implicit_platform_operators`] -- and the list
+    /// itself is the same list in both cases, so the refusal and the warning can
+    /// never disagree about which keys they are talking about.
+    pub fn api_keys_without_tenant_identity(&self) -> Vec<&str> {
+        self.api_keys
+            .iter()
+            .filter(|key| key.platform_operator.is_none() && key.organization_id.is_none())
+            .map(|key| key.id.as_str())
+            .collect()
+    }
+
+    /// #540, the flip. Refuses, at load, a config whose static keys would only
+    /// be authorized by the pre-#515 "no tenant means root" rule.
+    ///
+    /// #515 stage 1 made this a warning on purpose: the default was still
+    /// permissive, so an error would have taken down every deployment on
+    /// upgrade. Now the default is `false`, and the choice is no longer
+    /// "warn or error" but "*where* does the operator find out". The
+    /// alternative -- boot happily and let `finalize_auth` return
+    /// `tenant_identity_required` -- is the failure mode this issue is most
+    /// afraid of: the gateway comes up, `ferrogate check` says OK, and the
+    /// operator discovers the flip as a wall of 403s on live traffic from a key
+    /// the config could have named before the restart. So a static key that
+    /// cannot be classified stops the process, by id, with both fixes spelled
+    /// out -- the same fail-closed-and-name-the-switch shape as #542's
+    /// `lifecycle::ensure_auth_posture_is_declared`.
+    ///
+    /// Credentials this cannot see -- durable/virtual keys, the external auth
+    /// service -- are unaffected here and are still refused at authentication;
+    /// `finalize_auth` remains the backstop, not a duplicate of this.
+    fn ensure_every_key_declares_tenant_identity(&self) -> AnyResult<()> {
+        if self.tenancy.implicit_platform_operator {
+            return Ok(());
+        }
+        let undeclared = self.api_keys_without_tenant_identity();
+        if undeclared.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "refusing to start: these API keys declare neither organization_id nor \
+             platform_operator, so they have no tenant identity to authorize against and would \
+             be refused at authentication (tenant_identity_required): {}.\n\nBefore FerroGate \
+             #540 an omitted field meant UNRESTRICTED cross-tenant (platform-operator) access, \
+             so a key that says nothing is the one shape that must not be guessed. Say what each \
+             one is:\n\n[[api_keys]]\n# ... this key administers every tenant\nplatform_operator \
+             = true\n\n[[api_keys]]\n# ... this key belongs to one tenant\norganization_id = \
+             \"<tenants.id>\"\n\nBoth are accepted by every FerroGate version since #515. To keep \
+             the pre-#515 behaviour while you annotate them -- every key above admitted as an \
+             unrestricted platform operator -- say so by name:\n\n[tenancy]\n\
+             implicit_platform_operator = true",
+            undeclared.join(", ")
+        );
+    }
+
+    /// The legacy opt-in's running commentary (#515): while `[tenancy]
+    /// implicit_platform_operator = true` is set, name every key it is silently
+    /// promoting to platform root, so "I turned the switch on to get unblocked"
+    /// does not quietly become the permanent posture.
     ///
     /// Returns the ids it warned about so the behaviour is assertable without
-    /// scraping a log.
+    /// scraping a log. Empty under the #540 default, where
+    /// [`Self::ensure_every_key_declares_tenant_identity`] has already refused
+    /// the same keys outright.
     pub fn warn_implicit_platform_operators(&self) -> Vec<&str> {
         if !self.tenancy.implicit_platform_operator {
             return Vec::new();
         }
-        let implicit: Vec<&str> = self
-            .api_keys
-            .iter()
-            .filter(|key| key.platform_operator.is_none() && key.organization_id.is_none())
-            .map(|key| key.id.as_str())
-            .collect();
+        let implicit = self.api_keys_without_tenant_identity();
         if !implicit.is_empty() {
             tracing::warn!(
                 api_key_ids = %implicit.join(", "),
                 "these API keys declare neither organization_id nor platform_operator, so they \
-                 are granted UNRESTRICTED cross-tenant (platform-operator) access by the \
-                 deprecated [tenancy] implicit_platform_operator default. Add \
+                 are granted UNRESTRICTED cross-tenant (platform-operator) access because this \
+                 config sets [tenancy] implicit_platform_operator = true. Add \
                  platform_operator = true to the ones that really administer the whole platform, \
-                 give the rest an organization_id, then set [tenancy] \
-                 implicit_platform_operator = false (issue #515)."
+                 give the rest an organization_id, then remove that switch (issues #515, #540)."
             );
         }
         implicit

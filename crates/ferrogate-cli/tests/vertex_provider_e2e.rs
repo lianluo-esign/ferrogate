@@ -48,6 +48,7 @@ name = "Vertex client"
 key = "vertex-secret"
 scopes = ["chat.completions"]
 allowed_models = ["vertex-chat"]
+platform_operator = true
 "#
         ),
     )

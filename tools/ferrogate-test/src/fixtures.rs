@@ -363,6 +363,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[gateway_configs]]
 id = "static-profile"
@@ -538,12 +539,14 @@ name = "Development key"
 key = "client-secret"
 scopes = ["models.read", "chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
     )
 }
@@ -587,6 +590,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[guardrails]]
 id = "block-secret"
@@ -649,6 +653,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[guardrails]]
 id = "redact-provider-output"
@@ -711,6 +716,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[guardrails]]
 id = "block-ticket-regex"
@@ -812,6 +818,7 @@ key = "redis-rate-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 request_limit_per_minute = 1
+platform_operator = true
 
 [[api_keys]]
 id = "redis_budget"
@@ -820,12 +827,14 @@ key = "redis-budget-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 monthly_token_budget = 8
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
     )
 }
@@ -881,6 +890,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
     .to_string()
 }
@@ -936,6 +946,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
     .to_string()
 }

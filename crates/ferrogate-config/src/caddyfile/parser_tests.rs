@@ -180,6 +180,131 @@ fn global_auth_directive_refuses_an_argument_it_does_not_understand() {
     }
 }
 
+/// #540: the bridged config format can now state a key's tenant identity, which
+/// is what makes the load-time refusal fixable in a Caddyfile at all.
+///
+/// Pins the `"organization_id"` and `"platform_operator"` arms of
+/// `Parser::parse_ai_api_key` AND the two fields' journey through
+/// `Config::from_gateway_config`. Reading the parsed `GatewayConfig` alone would
+/// stay green if the bridge dropped them on the floor -- which is exactly the
+/// half that decides whether a real deployment boots -- so assert on the
+/// resolved `Config`, past both.
+#[test]
+fn api_key_tenancy_directives_reach_the_native_config() {
+    let config = crate::Config::from_caddyfile_str(
+        r#"
+:8080 {
+    ai_gateway {
+        provider openai {
+            base_url https://api.openai.com/v1
+            api_key {env.OPENAI_API_KEY}
+        }
+        model fast-chat -> openai:gpt-4o-mini {
+            capabilities chat
+        }
+        api_key root {
+            key root-secret
+            scopes admin.read
+            platform_operator on
+        }
+        api_key tenant {
+            key tenant-secret
+            scopes chat.completions
+            organization_id acme-corp
+        }
+        api_key refuses {
+            key refuses-secret
+            scopes chat.completions
+            organization_id acme-corp
+            platform_operator off
+        }
+    }
+}
+"#,
+        "Ferrogate/Caddyfile",
+    )
+    .expect("every key declares an identity, so this config loads under the #540 default");
+
+    let key = |id: &str| {
+        config
+            .api_keys
+            .iter()
+            .find(|key| key.id == id)
+            .unwrap_or_else(|| panic!("api key {id}"))
+    };
+    assert_eq!(key("root").platform_operator, Some(true));
+    assert_eq!(key("root").organization_id, None);
+    assert_eq!(key("tenant").platform_operator, None);
+    assert_eq!(key("tenant").organization_id.as_deref(), Some("acme-corp"));
+    assert_eq!(
+        key("refuses").platform_operator,
+        Some(false),
+        "`off` must survive as an explicit refusal of root, not collapse into the absent state"
+    );
+}
+
+/// The bridge must not invent an identity for a key that states none: doing so
+/// would put #540's own bug -- an omitted field granting root -- back one layer
+/// down, where neither the refusal nor the warning could ever see it again.
+#[test]
+fn a_caddyfile_key_that_declares_no_tenancy_is_refused_rather_than_defaulted() {
+    let keyless = r#"
+:8080 {
+    ai_gateway {
+        provider openai {
+            base_url https://api.openai.com/v1
+            api_key {env.OPENAI_API_KEY}
+        }
+        model fast-chat -> openai:gpt-4o-mini {
+            capabilities chat
+        }
+        api_key silent {
+            key silent-secret
+            scopes admin.read
+        }
+    }
+}
+"#;
+    let parsed = parse_caddyfile(keyless, "Ferrogate/Caddyfile").unwrap();
+    assert_eq!(
+        parsed.api_keys[0].platform_operator, None,
+        "the parser must carry the ABSENCE across; a synthesised Some(true) here is \
+         indistinguishable from an operator who meant it"
+    );
+
+    let error = crate::Config::from_caddyfile_str(keyless, "Ferrogate/Caddyfile")
+        .expect_err("#540: an undeclared key must not load")
+        .to_string();
+    assert!(
+        error.contains("silent"),
+        "the refusal names the key that has to change: {error}"
+    );
+}
+
+/// The tenancy directives are closed the same way the rest of the grammar is: a
+/// misspelled argument is refused with a span, never read as either answer.
+#[test]
+fn platform_operator_directive_refuses_an_argument_it_does_not_understand() {
+    for bad in [
+        "platform_operator",
+        "platform_operator yes",
+        "platform_operator 1",
+    ] {
+        let error = parse_caddyfile(
+            &format!(
+                "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            {bad}\n        }}\n    }}\n}}\n"
+            ),
+            "Ferrogate/Caddyfile",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("platform_operator on") && error.contains("organization_id"),
+            "`{bad}` must be refused with the spellings that work: {error}"
+        );
+    }
+}
+
 #[test]
 fn unsupported_directive_reports_file_line_column_and_suggestion() {
     let error = parse_caddyfile(

@@ -216,12 +216,14 @@ id = "cp-admin"
 name = "Control-plane operator"
 key = "{CP_ADMIN_SECRET}"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "{client_id}"
 name = "Tenant client key"
 key = "{client_secret}"
 scopes = ["models.read"]
+platform_operator = true
 "#,
             state_path = self.state_path.display(),
             signing_seed = self.signing_seed_b64,
@@ -255,12 +257,14 @@ id = "{admin_id}"
 name = "Data-plane bootstrap admin"
 key = "{admin_secret}"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "{seed_id}"
 name = "Data-plane bootstrap key"
 key = "{seed_secret}"
 scopes = ["models.read"]
+platform_operator = true
 "#,
             storage = self.data_plane_storage_toml,
             state_path = self.state_path.display(),

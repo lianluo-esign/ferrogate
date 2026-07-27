@@ -50,7 +50,9 @@ fn reader_state(tenant: Option<&str>) -> AppState {
             allowed_providers: vec![],
             denied_providers: vec![],
             organization_id: tenant.map(ToOwned::to_owned),
-            platform_operator: None,
+            // #540: root only where this fixture names no tenant -- exactly the
+            // keys the pre-#540 default promoted, and nothing more.
+            platform_operator: tenant.is_none().then_some(true),
             team_id: None,
             project_id: None,
             workspace_id: None,

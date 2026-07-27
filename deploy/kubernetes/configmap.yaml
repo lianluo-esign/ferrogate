@@ -63,9 +63,16 @@ data:
     scopes = ["models.read", "chat.completions", "responses.create"]
     allowed_models = ["fast-chat"]
     allowed_providers = ["openai"]
+    # Issue #540: every key states its tenant identity or the gateway refuses
+    # to start. A data-plane key belongs to one tenant -- change this to your
+    # tenants.id.
+    organization_id = "default"
 
     [[api_keys]]
     id = "admin"
     name = "Kubernetes admin key"
     key_env = "FERROGATE_ADMIN_SECRET"
     scopes = ["admin.read", "admin.write"]
+    # Issue #540: this one administers every tenant, so it says so out loud
+    # instead of inheriting root from an omitted organization_id.
+    platform_operator = true

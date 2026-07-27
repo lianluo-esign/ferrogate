@@ -155,6 +155,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[policies]]
 name = "disabled smart chat audit"
@@ -533,6 +534,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 "#
         ),
     )
@@ -842,6 +844,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 "#
         ),
     )
@@ -986,12 +989,14 @@ name = "Prompt denied"
 key = "denied-secret"
 scopes = ["prompts.render"]
 allowed_models = ["other-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -1255,6 +1260,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -1447,6 +1453,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
     );
     std::fs::write(&config, &base_config).unwrap();
@@ -1589,12 +1596,14 @@ name = "Other key"
 key = "other-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[gateway_configs]]
 id = "no-cache-agent"
@@ -1771,6 +1780,7 @@ scopes = ["chat.completions", "admin.read"]
 allowed_models = ["fast-chat"]
 monthly_token_budget = 8
 cache_enabled = true
+platform_operator = true
 "#
         ),
     )
@@ -2062,6 +2072,7 @@ id = "admin"
 name = "Admin"
 key = "{admin_secret}"
 scopes = ["admin.read"]
+platform_operator = true
 "#
     )
 }
@@ -2122,6 +2133,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["router-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -2194,12 +2206,14 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["deepseek-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 "#
         ),
     )
@@ -2368,6 +2382,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["responses.create"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -2430,6 +2445,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["responses.create"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -2516,6 +2532,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["responses.create"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -2585,6 +2602,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["responses.create"]
 allowed_models = ["claude-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -2649,6 +2667,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["responses.create"]
 allowed_models = ["flash-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -2713,6 +2732,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["responses.create"]
 allowed_models = ["claude-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -2781,12 +2801,14 @@ name = "Client"
 key = "client-secret"
 scopes = ["models.read"]
 allowed_models = ["old-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -2821,11 +2843,13 @@ scopes = ["admin.read", "admin.write"]
             key client-secret
             scopes models.read
             allowed_models new-chat
+            platform_operator on
         }}
         api_key admin {{
             name Admin
             key admin-secret
             scopes admin.read admin.write
+            platform_operator on
         }}
     }}
 }}
@@ -2886,12 +2910,14 @@ name = "Client"
 key = "client-secret"
 scopes = ["models.read"]
 allowed_models = ["file-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -2944,11 +2970,13 @@ scopes = ["admin.read", "admin.write"]
             name Client
             key client-secret
             scopes models.read
+            platform_operator on
         }
         api_key admin {
             name Admin
             key admin-secret
             scopes admin.read admin.write
+            platform_operator on
         }
     }
 }
@@ -3034,6 +3062,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -3193,6 +3222,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -3825,12 +3855,14 @@ name = "Client"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -4009,12 +4041,14 @@ key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 cache_enabled = true
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -4250,6 +4284,7 @@ name = "Client"
 key = "client-secret"
 scopes = ["models.read"]
 allowed_models = ["old-chat"]
+platform_operator = true
 "#,
             pid_file.display(),
             upgrade_sock.display()
@@ -4300,6 +4335,7 @@ name = "Client"
 key = "client-secret"
 scopes = ["models.read"]
 allowed_models = ["new-chat"]
+platform_operator = true
 "#,
             pid_file.display(),
             upgrade_sock.display()
@@ -4367,6 +4403,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -4435,6 +4472,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -4518,6 +4556,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["messages.create"]
 allowed_models = ["claude-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -4637,6 +4676,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -4716,12 +4756,14 @@ name = "Development key"
 key = "client-secret"
 scopes = ["messages.create"]
 allowed_models = ["claude-chat"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 "#
         ),
     )
@@ -4835,6 +4877,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["flash-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -4906,6 +4949,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -4991,6 +5035,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -5081,6 +5126,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -5158,6 +5204,7 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+platform_operator = true
 "#
         ),
     )
@@ -5227,6 +5274,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 "#
         ),
     )

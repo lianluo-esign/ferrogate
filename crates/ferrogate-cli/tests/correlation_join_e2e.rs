@@ -419,6 +419,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "agent-client"
@@ -459,6 +460,7 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [scheduler]
 enabled = true

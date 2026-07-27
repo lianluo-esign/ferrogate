@@ -34,12 +34,14 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "chat-only"
 name = "Data-plane only key"
 key = "chat-secret"
 scopes = ["chat.completions"]
+platform_operator = true
 
 [[api_keys]]
 id = "tenant-a-console"
@@ -82,12 +84,14 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "chat-only"
 name = "Data-plane only key"
 key = "chat-secret"
 scopes = ["chat.completions"]
+platform_operator = true
 
 [[api_keys]]
 id = "tenant-a-console"
@@ -509,6 +513,7 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#
         ),
     )
@@ -740,6 +745,7 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 "#,
             free_addr(),
             free_addr(),

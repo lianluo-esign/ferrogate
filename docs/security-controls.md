@@ -50,6 +50,38 @@ the store whose keys are being ignored — next to a durable `[storage]` backend
 since such a backend also holds request logs, audit events and routes and so is
 not by itself a statement about authentication.
 
+**Platform root is declared, never inherited** (issues #515, #540). An API key
+holds unrestricted, cross-tenant access only if it says `platform_operator =
+true`; a key that names an `organization_id` is that tenant and nothing else.
+Until #540 a key that said *neither* was silently promoted to platform root — an
+omitted config field granted root — and `[tenancy] implicit_platform_operator`
+defaulted to `true` to preserve it. That default is now `false`:
+
+- a static `[[api_keys]]` entry with no declared identity **refuses to load**,
+  naming the key by id and printing both fixes plus the legacy switch
+  (`Config::ensure_every_key_declares_tenant_identity`,
+  `crates/ferrogate-config/src/config/validate.rs`), so an upgrade stops at
+  `ferrogate check`/`ferrogate run` rather than 403-ing live traffic afterwards;
+- a credential the config cannot enumerate — a durable/virtual key, or one from
+  the external auth service — is refused at authentication with
+  `403 tenant_identity_required` (`finalize_auth`,
+  `crates/ferrogate-gateway/src/auth.rs`);
+- `resolve_platform_operator` (same file) is the single chokepoint every auth
+  source funnels through, so a new source cannot reintroduce "no tenant means
+  root";
+- a Caddyfile states the same thing as `platform_operator on` /
+  `organization_id <tenants.id>` inside an `api_key` block; the bridge carries
+  the declaration across and invents nothing;
+- `[tenancy] implicit_platform_operator = true` restores the pre-#515 behaviour
+  for a deployment mid-migration, and every key it promotes is logged by id at
+  startup.
+
+`[tenancy] require_registered_tenant` remains `false` by default: a misspelled
+`organization_id` already fails closed (the key is scoped to an island it can
+read nothing from), so it is a data-integrity setting rather than a privilege
+one, and whether a tenant row exists is a fact about the control-plane store
+that no load-time check can warn about first.
+
 Admin-console user passwords are hashed with Argon2 (`argon2` crate) before
 storage — never stored or compared in plain text
 (`crates/ferrogate-auth-service/src/lib.rs:1253` `hash_password`,

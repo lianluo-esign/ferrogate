@@ -34,6 +34,7 @@ output_price_per_1m = 2.0
 id = "admin"
 name = "Admin bootstrap key"
 key = "admin-secret"
+platform_operator = true
 "#
         ),
     )
@@ -248,6 +249,7 @@ id = "admin"
 name = "Platform operator"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "usage-a-console"

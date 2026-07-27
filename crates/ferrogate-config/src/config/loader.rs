@@ -211,18 +211,23 @@ impl Config {
                     denied_models: key.denied_models,
                     allowed_providers: key.allowed_providers,
                     denied_providers: key.denied_providers,
-                    // #515: the Caddyfile bridge has no tenancy surface at all,
-                    // so a bridged key can neither name a tenant nor declare
-                    // itself a platform operator. Both stay absent rather than
-                    // being invented here, which means such a key is classified
-                    // by the deployment-wide `[tenancy]
-                    // implicit_platform_operator` switch -- root under the
-                    // legacy default (unchanged from before #515), refused at
-                    // authentication once an operator flips that off. What it
-                    // must NOT do is keep quietly *meaning* root at a site that
-                    // never says the word.
-                    organization_id: None,
-                    platform_operator: None,
+                    // #540: the bridge carries the DECLARED tenancy across --
+                    // `organization_id <id>` / `platform_operator on` inside an
+                    // `api_key` block, added because the load-time refusal
+                    // below must be fixable in the format it fires on.
+                    //
+                    // It does not invent one. A Caddyfile that says neither
+                    // still lands on `None`/`None`, which is now refused by
+                    // `Config::validate` naming the key and both directives.
+                    // The rejected alternative was to have the bridge stamp
+                    // `platform_operator: Some(true)` so bridged deployments
+                    // keep working: that is the #540 bug re-created one layer
+                    // down, and worse than the original, because a synthesised
+                    // `Some(true)` is indistinguishable from an operator who
+                    // meant it -- neither the refusal nor the startup warning
+                    // could ever see it again.
+                    organization_id: key.organization_id,
+                    platform_operator: key.platform_operator,
                     team_id: None,
                     project_id: None,
                     workspace_id: None,
@@ -310,8 +315,14 @@ impl Config {
             // #405: the Caddyfile bridge has no Cloudflare surface; it stays
             // disabled here and is only configurable via the native config.
             cloudflare: None,
-            // #515: no `[tenancy]` surface in a Caddyfile either, so bridged
-            // deployments get the legacy-compatible defaults.
+            // #515/#540: a Caddyfile has no `[tenancy]` section, so bridged
+            // deployments get the defaults -- which since #540 means
+            // `implicit_platform_operator = false`, i.e. a bridged key must
+            // declare itself via the `organization_id`/`platform_operator`
+            // directives mapped above. The legacy escape hatch is deliberately
+            // NOT reachable from a Caddyfile: it is a whole-deployment decision
+            // to keep granting root by omission, and per-key directives express
+            // the same intent without the blanket.
             tenancy: crate::config::TenancyConfig::default(),
             // #542 rework: a Caddyfile CAN now say "this gateway is open" --
             // `auth off` in the global options block -- so the bridge carries

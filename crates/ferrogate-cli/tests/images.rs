@@ -59,12 +59,14 @@ name = "Images client"
 key = "art-secret"
 scopes = ["images.generate"]
 allowed_models = ["art"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 {extra_toml}
 "#
@@ -245,6 +247,7 @@ name = "Anthropic images client"
 key = "anthropic-secret"
 scopes = ["images.generate"]
 allowed_models = ["claude-art"]
+platform_operator = true
 "#,
     );
 

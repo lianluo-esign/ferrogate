@@ -55,12 +55,17 @@ stringData:
     name = "Control-plane operator"
     key_env = "FERROGATE_ADMIN_SECRET"
     scopes = ["admin.read", "admin.write"]
+    # Issue #540: administers every tenant, and says so. A key that declares
+    # neither this nor an organization_id is refused when the config loads.
+    platform_operator = true
 
     [[api_keys]]
     id = "acme-app-1"
     name = "Acme app key"
     key_env = "FERROGATE_CLIENT_SECRET"
     scopes = ["models.read", "chat.completions"]
+    # Issue #540: a client key names the tenant it bills and isolates to.
+    organization_id = "acme-corp"
 ---
 apiVersion: v1
 kind: Secret
@@ -117,6 +122,8 @@ data:
     name = "VPC bootstrap admin"
     key_env = "FERROGATE_ADMIN_SECRET"
     scopes = ["admin.read"]
+    # Issue #540: reads the whole node's admin surface, not one tenant's.
+    platform_operator = true
 
     [[providers]]
     name = "openai"

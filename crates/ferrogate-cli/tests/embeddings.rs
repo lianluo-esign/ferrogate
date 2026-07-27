@@ -56,12 +56,14 @@ name = "Embeddings client"
 key = "embed-secret"
 scopes = ["embeddings.create"]
 allowed_models = ["fast-embed", "fallback-embed"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 {extra_toml}
 "#

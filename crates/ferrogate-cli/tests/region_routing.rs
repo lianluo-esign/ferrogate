@@ -55,6 +55,7 @@ key = "eu-only-secret"
 scopes = ["chat.completions"]
 allowed_models = ["eu-only-chat", "multi-region-chat"]
 region_allowlist = ["eu-west-1"]
+platform_operator = true
 
 [[api_keys]]
 id = "us_only_client"
@@ -63,6 +64,7 @@ key = "us-only-secret"
 scopes = ["chat.completions"]
 allowed_models = ["eu-only-chat", "multi-region-chat"]
 region_allowlist = ["us-east-1"]
+platform_operator = true
 
 [[api_keys]]
 id = "unrestricted_client"
@@ -70,6 +72,7 @@ name = "Unrestricted client"
 key = "unrestricted-secret"
 scopes = ["chat.completions"]
 allowed_models = ["eu-only-chat", "multi-region-chat"]
+platform_operator = true
 "#
         ),
     )

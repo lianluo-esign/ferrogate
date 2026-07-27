@@ -1371,6 +1371,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
@@ -1447,6 +1448,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "agent-client"
@@ -1500,6 +1502,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "agent-client"
@@ -1579,6 +1582,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "agent-client"
@@ -1601,12 +1605,14 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+platform_operator = true
 
 [[extensions]]
 id = "mcp.http"
@@ -1651,12 +1657,14 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+platform_operator = true
 
 [[extensions]]
 id = "mcp.http"
@@ -1692,6 +1700,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "admin-a"
@@ -1745,12 +1754,14 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read"]
+platform_operator = true
 
 [[extensions]]
 id = "tool.echo"
@@ -1808,6 +1819,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"
@@ -1866,6 +1878,7 @@ id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+platform_operator = true
 
 [[mcp_servers]]
 name = "local"
@@ -1893,6 +1906,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "tool-client"

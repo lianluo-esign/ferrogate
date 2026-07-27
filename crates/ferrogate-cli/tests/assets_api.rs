@@ -384,6 +384,7 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "asset-client"
@@ -397,6 +398,7 @@ id = "no-tenant-client"
 name = "No tenant client"
 key = "no-tenant-secret"
 scopes = ["assets.read", "assets.write"]
+platform_operator = true
 "#
     )
 }

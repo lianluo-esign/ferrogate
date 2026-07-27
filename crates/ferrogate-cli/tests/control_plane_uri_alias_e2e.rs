@@ -32,18 +32,21 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+platform_operator = true
 
 [[api_keys]]
 id = "reader"
 name = "Reader"
 key = "reader-secret"
 scopes = ["admin.read"]
+platform_operator = true
 
 [[api_keys]]
 id = "chat"
 name = "Chat only"
 key = "chat-secret"
 scopes = ["chat.completions"]
+platform_operator = true
 
 [[api_keys]]
 id = "tenant-a-console"

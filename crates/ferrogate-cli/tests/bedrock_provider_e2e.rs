@@ -47,6 +47,7 @@ name = "Bedrock client"
 key = "bedrock-secret"
 scopes = ["chat.completions"]
 allowed_models = ["bedrock-chat"]
+platform_operator = true
 "#
         ),
     )
