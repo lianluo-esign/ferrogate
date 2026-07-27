@@ -25,8 +25,9 @@ use ferrogate_cloudflare::{
 };
 
 use crate::{
-    cf_binding_env_var, CfSecretBindings, CloudflareSecretResolver, SecretRef, SecretResolver,
-    SecretResolverRegistry, CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES,
+    cf_binding_env_var, cf_binding_name_is_unambiguous, CfSecretBindings, CfSecretsStoreConfig,
+    CloudflareSecretResolver, SecretRef, SecretResolver, SecretResolverRegistry, CF_ACCOUNT_ID_ENV,
+    CF_API_TOKEN_ENV, CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES,
 };
 
 const BASE: &str = "https://api.test/client/v4/accounts/acct-123/secrets_store";
@@ -138,10 +139,248 @@ fn binding_env_var_follows_documented_convention() {
         cf_binding_env_var("openai-api-key"),
         "FERROGATE_CF_SECRET_OPENAI_API_KEY"
     );
+    // The mapping itself is lossy — this is precisely the hazard the
+    // canonical-name guard below exists to contain, not a supported lookup.
     assert_eq!(
         cf_binding_env_var("db.password/v2"),
         "FERROGATE_CF_SECRET_DB_PASSWORD_V2"
     );
+}
+
+// --- aliasing guard: a cf:// ref must never serve a different credential ----
+
+#[test]
+fn canonical_names_are_unambiguous_and_everything_else_is_not() {
+    // Canonical shape `[a-z0-9-]+`: lowercase → A-Z, digits → digits, `-` → `_`
+    // are three disjoint images, so the mapping is injective here.
+    for name in ["openai-api-key", "gateway-token-2", "abc", "a-1-b"] {
+        assert!(
+            cf_binding_name_is_unambiguous(name),
+            "{name} should be canonical"
+        );
+    }
+    // Every non-canonical form collapses onto some other name's variable.
+    for name in [
+        "openai.api.key",
+        "openai_api_key",
+        "OpenAI-API-Key",
+        "OPENAI-API-KEY",
+        "db.password/v2",
+        "openai api key",
+        "openai\u{2013}api\u{2013}key",
+        "",
+    ] {
+        assert!(
+            !cf_binding_name_is_unambiguous(name),
+            "{name} must not be treated as unambiguous"
+        );
+    }
+}
+
+#[test]
+fn distinct_names_that_alias_onto_one_variable_error_instead_of_resolving() {
+    // The exact collision the review named: four *distinct* Cloudflare secrets
+    // all map to FERROGATE_CF_SECRET_ALIAS_HAZARD_KEY. Only the canonical
+    // spelling may read it; the others must fail loudly rather than silently
+    // hand back a credential the operator did not name.
+    let aliases = [
+        "alias.hazard.key",
+        "alias_hazard_key",
+        "Alias-Hazard-Key",
+        "ALIAS-HAZARD-KEY",
+    ];
+    for name in aliases {
+        assert_eq!(
+            cf_binding_env_var(name),
+            cf_binding_env_var("alias-hazard-key"),
+            "test premise: {name} must collide with the canonical spelling"
+        );
+    }
+
+    std::env::set_var("FERROGATE_CF_SECRET_ALIAS_HAZARD_KEY", "sk-canonical-owner");
+    let bindings = CfSecretBindings::new();
+
+    // The canonical owner resolves.
+    assert_eq!(
+        bindings.lookup("alias-hazard-key").unwrap().as_deref(),
+        Some("sk-canonical-owner")
+    );
+
+    // Every aliasing spelling errors — and, critically, never yields the
+    // canonical owner's value.
+    for name in aliases {
+        let result = bindings.lookup(name);
+        let error = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| panic!("{name} must not resolve, got {result:?}"));
+        assert!(
+            !error.contains("sk-canonical-owner"),
+            "the aliased value leaked into the error: {error}"
+        );
+        assert!(
+            error.contains("FERROGATE_CF_SECRET_ALIAS_HAZARD_KEY"),
+            "the error must name the shared variable: {error}"
+        );
+        assert!(
+            error.contains("[a-z0-9-]+") && error.contains("from_map"),
+            "the error must offer both remedies (rename / exact injection): {error}"
+        );
+    }
+}
+
+#[test]
+fn injected_map_resolves_non_canonical_names_exactly() {
+    // The lossless escape hatch: an exact-keyed binding works for any name
+    // Cloudflare accepts, and two colliding names keep their own values.
+    let mut bindings = CfSecretBindings::new();
+    bindings.insert("Alias-Exact-Key", "sk-upper");
+    bindings.insert("alias.exact.key", "sk-dotted");
+    assert_eq!(
+        bindings.lookup("Alias-Exact-Key").unwrap().as_deref(),
+        Some("sk-upper")
+    );
+    assert_eq!(
+        bindings.lookup("alias.exact.key").unwrap().as_deref(),
+        Some("sk-dotted")
+    );
+    // A third colliding spelling was never injected → still refused, not
+    // silently served one of the two above.
+    assert!(bindings.lookup("alias_exact_key").is_err());
+}
+
+#[test]
+fn registry_refuses_an_ambiguous_cf_reference_before_the_rest_backend() {
+    // A REST resolver with no scripted routes: reaching it would surface the
+    // loud "unscripted request" error, so its absence proves the binding
+    // context refuses first.
+    let registry = SecretResolverRegistry::new().with_cloudflare(resolver_with(HashMap::new()));
+    let error = registry
+        .resolve("cf://provider-keys/Registry_Ambiguous.Key")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("not canonical"),
+        "ambiguous cf:// must be refused with the aliasing reason: {error}"
+    );
+    assert!(
+        !error.contains("unscripted request"),
+        "the refusal must fire before any REST call: {error}"
+    );
+}
+
+// --- secret material must never reach a Debug rendering (#489/#492) --------
+
+#[test]
+fn cf_bindings_debug_redacts_bound_values() {
+    let mut bindings = CfSecretBindings::new();
+    bindings.insert("openai-api-key", "sk-live-debug-leak-canary");
+    bindings.insert("mcp-oauth-client-secret", "cs-live-debug-leak-canary");
+
+    let rendered = format!("{bindings:?}");
+    assert!(
+        !rendered.contains("sk-live-debug-leak-canary"),
+        "bound secret value leaked into CfSecretBindings Debug: {rendered}"
+    );
+    assert!(
+        !rendered.contains("cs-live-debug-leak-canary"),
+        "bound secret value leaked into CfSecretBindings Debug: {rendered}"
+    );
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    // Names are not secret and must stay, or the redaction traded a leak for
+    // an undiagnosable binding context (the #492 rule for VaultConfig).
+    assert!(rendered.contains("CfSecretBindings"), "{rendered}");
+    assert!(rendered.contains("openai-api-key"), "{rendered}");
+    assert!(rendered.contains("mcp-oauth-client-secret"), "{rendered}");
+}
+
+#[test]
+fn registry_debug_redacts_nested_binding_values() {
+    // The path that actually shows up in logs: `SecretResolver` requires
+    // `Debug`, and `SecretResolverRegistry` derives it over a
+    // `CfSecretBindings` field — so a single `tracing::debug!(?registry)` three
+    // levels up used to print every bound credential.
+    let mut bindings = CfSecretBindings::new();
+    bindings.insert("openai-api-key", "sk-registry-debug-canary");
+    let registry = SecretResolverRegistry::new().with_cf_bindings(bindings);
+
+    let rendered = format!("{registry:?}");
+    assert!(
+        !rendered.contains("sk-registry-debug-canary"),
+        "bound secret value leaked through SecretResolverRegistry Debug: {rendered}"
+    );
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+#[test]
+fn cf_secrets_store_config_debug_redacts_an_inline_token() {
+    let config = CfSecretsStoreConfig {
+        account_id: "acct-123".into(),
+        api_token_ref: "cf-live-api-token-canary".into(),
+        api_base_url: Some("https://api.test/client/v4".into()),
+    };
+    let rendered = format!("{config:?}");
+    assert!(
+        !rendered.contains("cf-live-api-token-canary"),
+        "inline CF API token leaked into CfSecretsStoreConfig Debug: {rendered}"
+    );
+    assert!(rendered.contains("<redacted"), "{rendered}");
+    // Non-secret diagnostics survive.
+    assert!(rendered.contains("acct-123"), "{rendered}");
+    assert!(
+        rendered.contains("https://api.test/client/v4"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn cf_secrets_store_config_debug_keeps_an_env_reference_visible() {
+    // `env://VAR` names a variable, not a credential: redacting it would hide
+    // which variable the client reads without protecting anything.
+    let config = CfSecretsStoreConfig {
+        account_id: "acct-123".into(),
+        api_token_ref: format!("env://{CF_API_TOKEN_ENV}"),
+        api_base_url: None,
+    };
+    let rendered = format!("{config:?}");
+    assert!(
+        rendered.contains("env://CLOUDFLARE_API_TOKEN"),
+        "the token reference should stay legible: {rendered}"
+    );
+}
+
+#[test]
+fn from_env_stores_a_token_reference_and_never_the_token_value() {
+    std::env::set_var(CF_ACCOUNT_ID_ENV, "acct-from-env");
+    std::env::set_var(CF_API_TOKEN_ENV, "cf-from-env-token-canary");
+
+    let config = CfSecretsStoreConfig::from_env().expect("both variables are set");
+    assert_eq!(config.account_id, "acct-from-env");
+    assert_eq!(config.api_token_ref, "env://CLOUDFLARE_API_TOKEN");
+    assert!(
+        !config.api_token_ref.contains("cf-from-env-token-canary"),
+        "from_env copied the token VALUE into the config"
+    );
+
+    // And the value must not survive into the client config either — which is
+    // `Debug + Serialize`, so a token there is both printable and persistable.
+    let resolver = CloudflareSecretResolver::new(config).expect("client builds offline");
+    let client_config = resolver.client().config();
+    assert_eq!(client_config.api_token, "env://CLOUDFLARE_API_TOKEN");
+    assert!(
+        !format!("{client_config:?}").contains("cf-from-env-token-canary"),
+        "the CF API token reached CloudflareConfig's Debug"
+    );
+    assert!(
+        !serde_json::to_string(client_config)
+            .unwrap()
+            .contains("cf-from-env-token-canary"),
+        "the CF API token reached CloudflareConfig's Serialize output"
+    );
+
+    std::env::remove_var(CF_ACCOUNT_ID_ENV);
+    std::env::remove_var(CF_API_TOKEN_ENV);
 }
 
 #[test]

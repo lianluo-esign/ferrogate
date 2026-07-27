@@ -60,14 +60,43 @@ fn plaintext_reference_passes_through() {
     assert_eq!(token.expose(), "inline-plaintext-token");
 }
 
+/// `cf://` is a **permanent crate boundary**, not a deferral (issue #417 is
+/// implemented — in `ferrogate-secrets`, which depends on this crate, so the
+/// reverse edge would be a cycle). This test replaces the former
+/// `cf_scheme_is_deferred_to_417` marker: it pins that the rejection is
+/// *actionable and timeless* rather than a pointer at a finished issue, which
+/// is exactly what a stale "deferred to #<n>" message stops being.
 #[test]
-fn cf_scheme_is_deferred_to_417() {
+fn cf_scheme_is_a_permanent_crate_boundary_not_a_deferral() {
     let resolver = EnvTokenResolver::with_env_lookup(|_| None);
     let err = resolver.resolve("cf://secrets/cf-token").unwrap_err();
     match err {
         CloudflareError::TokenResolution(msg) => {
-            assert!(msg.contains("#417"), "message should point at #417: {msg}");
-            assert!(msg.contains("not yet supported"));
+            // Names the crate that does own cf://, and the reason it cannot
+            // move here.
+            assert!(
+                msg.contains("ferrogate-secrets"),
+                "message should name the owning crate: {msg}"
+            );
+            assert!(
+                msg.contains("dependency cycle"),
+                "message should state why this crate cannot resolve cf://: {msg}"
+            );
+            // Tells the operator exactly what to write instead.
+            assert!(
+                msg.contains("env://FERROGATE_CF_SECRET_"),
+                "message should give the Worker-binding spelling: {msg}"
+            );
+            // And must NOT promise a future implementation or point at an
+            // issue number that is already closed.
+            assert!(
+                !msg.contains("not yet supported") && !msg.contains("deferred"),
+                "the rejection must not read as a deferral: {msg}"
+            );
+            assert!(
+                !msg.contains("#417"),
+                "the rejection must not point at a completed issue: {msg}"
+            );
         }
         other => panic!("expected TokenResolution, got {other:?}"),
     }

@@ -2,7 +2,7 @@
 // Developed by the commercial cloud service company represented by https://token4ai.cloud.
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-23
-// description: Token-resolver seam for Cloudflare API credentials (env/plaintext now, cf:// deferred to #417).
+// description: Token-resolver seam for Cloudflare API credentials (env/plaintext here; cf:// is a permanent crate-boundary rejection).
 
 //! Token resolution seam (issue #405).
 //!
@@ -16,12 +16,28 @@
 //! - anything without a recognised `scheme://` prefix — treated as an inline
 //!   plaintext token (convenient for tests / dev; discouraged for prod).
 //!
-//! The `cf://` scheme (Cloudflare Secrets Store) is a **separate sub-issue
-//! (#417)** and is deliberately NOT implemented here. It is left as a clearly
-//! documented extension point: `EnvTokenResolver` returns a typed
-//! [`CloudflareError::TokenResolution`] naming #417, and a future
-//! `CfSecretsStoreResolver` can implement [`TokenResolver`] without touching
-//! any consumer of this trait.
+//! The `cf://` scheme (Cloudflare Secrets Store) is **permanently out of this
+//! crate's scope** — not a deferral. `EnvTokenResolver` rejects it with a typed
+//! [`CloudflareError::TokenResolution`] that says why and what to write
+//! instead. Three independent reasons, none of which time out:
+//!
+//! 1. **Dependency direction.** `cf://` resolution lives in
+//!    `ferrogate-secrets` (`SecretRef::CfSecret` + `SecretResolverRegistry`,
+//!    issue #417), and that crate already depends on this one for its API
+//!    client. Resolving `cf://` here would require the reverse edge — a cycle.
+//! 2. **Secrets Store values are write-only over REST** (decision #423). The
+//!    REST surface this client speaks cannot read a value back at all, so
+//!    there is no implementation to defer to; values arrive only via a Workers
+//!    binding, which reaches a process as an ordinary environment variable.
+//! 3. **Bootstrap circularity.** The credential in question is the token that
+//!    authenticates *to* the Cloudflare API, so sourcing it from a Cloudflare
+//!    API-managed store cannot bootstrap itself.
+//!
+//! An operator inside a Worker-bound runtime writes
+//! `env://FERROGATE_CF_SECRET_<NAME>` (the binding variable the
+//! `ferrogate-secrets` convention exports); everyone else writes `env://VAR`.
+//! A future `TokenResolver` impl for any other backend still slots in without
+//! touching a consumer of this trait — the seam is unchanged.
 
 use std::fmt;
 
@@ -130,13 +146,21 @@ impl TokenResolver for EnvTokenResolver {
             };
         }
 
-        // Extension point (#417): the Cloudflare Secrets Store backend. Left
-        // unimplemented on purpose so this foundation crate carries no cf://
-        // storage logic; a `CfSecretsStoreResolver` will slot in here.
+        // Permanent crate boundary, not a deferral — see the module docs.
+        // `cf://` is owned by `ferrogate-secrets`, which depends on this crate;
+        // resolving it here would invert that edge.
         if reference.starts_with("cf://") {
             return Err(CloudflareError::TokenResolution(
-                "cf:// (Cloudflare Secrets Store) token references are not yet supported; \
-                 that backend is deferred to issue #417 — use env:// or an inline token for now"
+                "cf:// (Cloudflare Secrets Store) token references are not resolvable by \
+                 ferrogate-cloudflare, and will not become so: cf:// is owned by the \
+                 ferrogate-secrets SecretResolverRegistry, which already depends on this crate \
+                 (resolving it here would be a dependency cycle); Secrets Store values are \
+                 write-only over the REST API this client speaks, so a value only ever reaches a \
+                 process through a Workers binding; and a token that authenticates to the \
+                 Cloudflare API cannot be bootstrapped from a Cloudflare API-managed store. \
+                 Write env://FERROGATE_CF_SECRET_<NAME> to read a Worker-bound Secrets Store \
+                 value, or env://VAR / an inline token otherwise — see \
+                 docs/cloudflare-secrets-resolution.md"
                     .to_string(),
             ));
         }

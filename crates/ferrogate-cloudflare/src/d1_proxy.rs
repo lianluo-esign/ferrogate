@@ -140,7 +140,8 @@ impl D1ProxyClient {
     /// `base_url` is the Worker's deployed origin (e.g.
     /// `https://ferrogate-d1-proxy.<subdomain>.workers.dev`); the `/d1/*` paths
     /// are appended. `token_reference` is resolved through `resolver` (an
-    /// `env://VAR`, an inline plaintext token, or — deferred to #417 — `cf://`).
+    /// `env://VAR` or an inline plaintext token; `cf://` is rejected — see
+    /// [`crate::resolver`]).
     pub fn new(
         base_url: impl Into<String>,
         transport: Arc<dyn HttpTransport>,

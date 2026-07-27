@@ -80,6 +80,8 @@ consults, in order:
       unset. Only the secret *name* keys the lookup — the store segment does
       not — because the Secrets Store beta allows exactly one store per
       account; the convention can grow a store qualifier if that cap lifts.
+      **The env convention accepts only canonical secret names** — see the
+      next section.
 2. **The REST backend** (`CloudflareSecretResolver`, requires
    `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`) — an **existence check
    only**: missing store/secret resolves to "not found" (`Ok(None)`, mirrors
@@ -88,6 +90,46 @@ consults, in order:
 3. Neither configured / both miss → a clear error naming the exact
    `FERROGATE_CF_SECRET_*` variable that was checked and the configuration
    options.
+
+### Name your secrets `[a-z0-9-]+` — the env convention refuses anything else
+
+`FERROGATE_CF_SECRET_<NAME>` is a **lossy** encoding: it uppercases and
+collapses every non-alphanumeric character to `_`. So these four *distinct*
+Cloudflare secrets all name one variable:
+
+| Secret name | Environment variable |
+| --- | --- |
+| `openai-api-key` | `FERROGATE_CF_SECRET_OPENAI_API_KEY` |
+| `openai.api.key` | `FERROGATE_CF_SECRET_OPENAI_API_KEY` |
+| `openai_api_key` | `FERROGATE_CF_SECRET_OPENAI_API_KEY` |
+| `OpenAI-API-Key` | `FERROGATE_CF_SECRET_OPENAI_API_KEY` |
+
+Reading that variable for all four would let a `cf://` reference silently
+resolve to **a credential the operator did not name** — the worst failure mode
+a secret resolver has.
+
+The encoding is injective exactly on the **canonical shape `^[a-z0-9-]+$`**
+(lowercase letters, digits and `-` land in disjoint parts of `[A-Z0-9_]`), so:
+
+- a **canonical** name resolves from the environment convention as documented;
+- a **non-canonical** name is **refused with an error** naming the shared
+  variable and both remedies — it is never resolved from the ambiguous
+  variable. The predicate is
+  `ferrogate_secrets::cf_binding_name_is_unambiguous`.
+
+Two remedies:
+
+1. **Rename the Secrets Store secret** to the canonical shape (e.g.
+   `openai-api-key`). This is Cloudflare's own naming style and what every
+   example here uses.
+2. **Inject the value under its exact name** via
+   `CfSecretBindings::from_map` / `insert` +
+   `SecretResolverRegistry::with_cf_bindings`. That map is keyed by the exact
+   name, never collapses, and therefore works for any name Cloudflare accepts
+   — including two colliding spellings side by side.
+
+The refusal happens in the binding context, **before** the REST fallback, so an
+ambiguous reference never reaches the network either.
 
 ### Deployment recipes
 
@@ -134,6 +176,33 @@ write-only over REST, naming the exact `FERROGATE_CF_SECRET_*` variable to
 set for Worker-binding resolution, and pointing at `vault://`/`env://` for
 self-hosted gateways. FerroGate never fabricates a value.
 
+## Credential handling inside the resolver
+
+Two rules the slice holds itself to, both regression-tested:
+
+- **No secret material in a `Debug` rendering.** `CfSecretBindings` holds
+  *resolved plaintext values* and is reachable from `SecretResolverRegistry`'s
+  derived `Debug`, so it hand-writes a `Debug` that prints the bound secret
+  *names* (not secret — they are written verbatim in config) and `<redacted>`
+  for the values. Same rule as `VaultConfig` (issue #492), `ResolvedToken` and
+  `HttpRequest.bearer_token`.
+- **The Cloudflare API token is held as a reference, never as a value.**
+  `CfSecretsStoreConfig::from_env` only *probes* `CLOUDFLARE_API_TOKEN` for
+  presence and stores the reference `env://CLOUDFLARE_API_TOKEN` in
+  `api_token_ref`; that reference is what reaches
+  `ferrogate_cloudflare::CloudflareConfig` (a `Debug + Serialize` struct). The
+  live token is materialized by `EnvTokenResolver` per request, at the
+  `Authorization` header and nowhere else — #405's design. Side benefit:
+  rotating `CLOUDFLARE_API_TOKEN` takes effect without rebuilding the client.
+
+`ferrogate-cloudflare`'s own `EnvTokenResolver` **rejects** `cf://` token
+references permanently (not "deferred"): `cf://` is owned by
+`ferrogate-secrets`, which already depends on `ferrogate-cloudflare`, so
+resolving it there would be a dependency cycle; Secrets Store values are
+unreadable over REST anyway; and a token that authenticates *to* the Cloudflare
+API cannot bootstrap itself from a Cloudflare-API-managed store. Inside a
+Worker-bound runtime, spell it `env://FERROGATE_CF_SECRET_<NAME>` instead.
+
 ## Test coverage
 
 `crates/ferrogate-secrets/src/cloudflare_test.rs` (no live network; the REST
@@ -148,7 +217,16 @@ API is scripted through `ferrogate-cloudflare`'s `HttpTransport` seam):
 - REST existence checks: missing store/secret → `Ok(None)`; existing secret →
   the precise write-only error naming the binding variable and the
   readable-backend alternative;
-- the manage plane: secret create over REST + client-side beta value-size cap.
+- the manage plane: secret create over REST + client-side beta value-size cap;
+- the aliasing guard: canonical vs non-canonical name classification, four
+  colliding spellings refused (with the canonical owner's value proven absent
+  from the error), exact-map injection resolving two colliding names to their
+  own distinct values, and the registry refusing an ambiguous ref before any
+  REST call;
+- credential redaction: `CfSecretBindings` `Debug` (direct and nested through
+  `SecretResolverRegistry`), `CfSecretsStoreConfig` `Debug` for an inline
+  token, and `from_env` storing `env://CLOUDFLARE_API_TOKEN` with the token
+  value absent from `CloudflareConfig`'s `Debug` *and* its `Serialize` output.
 
 **Not testable locally** (requires a live Cloudflare account): an end-to-end
 Worker binding actually delivering a Secrets Store value into a deployed

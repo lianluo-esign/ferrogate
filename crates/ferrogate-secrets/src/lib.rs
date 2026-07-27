@@ -37,10 +37,13 @@ mod cloudflare_bindings;
 mod cloudflare_caps;
 
 pub use cloudflare::{
-    CfSecretsStoreConfig, CloudflareSecretResolver, CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT,
+    CfSecretsStoreConfig, CloudflareSecretResolver, CF_ACCOUNT_ID_ENV, CF_API_BASE_URL_ENV,
+    CF_API_TOKEN_ENV, CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT,
     CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT, CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES,
 };
-pub use cloudflare_bindings::{cf_binding_env_var, CfSecretBindings, CF_BINDING_ENV_PREFIX};
+pub use cloudflare_bindings::{
+    cf_binding_env_var, cf_binding_name_is_unambiguous, CfSecretBindings, CF_BINDING_ENV_PREFIX,
+};
 pub use cloudflare_caps::{
     CfSecretsCapacityPolicy, CfSecretsCapacityWarning, CF_SECRETS_MAX_SECRETS_ENV,
     CF_SECRETS_MAX_VALUE_BYTES_ENV, CF_SECRETS_WARN_AT_ENV, DEFAULT_CF_SECRETS_WARN_AT,
@@ -272,6 +275,12 @@ impl SecretResolver for VaultSecretResolver {
 /// and a precise unsupported-resolve error for an existing one. A reference
 /// whose backend is not configured fails clearly rather than silently
 /// returning `None`.
+///
+/// A `cf://` reference whose secret name is not canonical
+/// ([`cf_binding_name_is_unambiguous`]) and has no exact injected binding
+/// errors **in the binding context, before the REST fallback** — the variable
+/// it would read is shared with other secrets, so resolving it could serve a
+/// credential the operator did not name.
 #[derive(Debug, Default)]
 pub struct SecretResolverRegistry {
     vault: Option<VaultSecretResolver>,

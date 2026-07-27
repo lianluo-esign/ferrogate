@@ -40,37 +40,86 @@ pub const CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT: usize = 100;
 /// - At most **1024 bytes** per secret value.
 pub const CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES: usize = 1024;
 
+/// Environment variable naming the Cloudflare account the Secrets Store lives
+/// in.
+pub const CF_ACCOUNT_ID_ENV: &str = "CLOUDFLARE_ACCOUNT_ID";
+/// Environment variable holding a Cloudflare API token with Secrets Store
+/// Read/Write. Its **value is never copied into any FerroGate struct** — see
+/// [`CfSecretsStoreConfig::api_token_ref`].
+pub const CF_API_TOKEN_ENV: &str = "CLOUDFLARE_API_TOKEN";
+/// Optional `client/v4` base override (defaults to the public Cloudflare API;
+/// handy for tests / self-hosted proxies).
+pub const CF_API_BASE_URL_ENV: &str = "CLOUDFLARE_API_BASE_URL";
+
 /// Connection details for a Cloudflare Secrets Store, sourced from environment
 /// variables (mirroring how [`crate::VaultConfig::from_env`] reads `VAULT_ADDR`
 /// / `VAULT_TOKEN`) so the synchronous [`crate::SecretResolverRegistry::from_env`]
 /// can enable the backend without threading the parsed `[cloudflare]` config
-/// block through this crate. The same account id + token an operator writes
-/// under `[cloudflare]` are exported here for the loader that constructs the
-/// registry.
+/// block through this crate.
 ///
-/// - `CLOUDFLARE_ACCOUNT_ID` — the account the Secrets Store lives in.
-/// - `CLOUDFLARE_API_TOKEN` — a token with Secrets Store Read/Write.
-/// - `CLOUDFLARE_API_BASE_URL` — optional `client/v4` base override (defaults
-///   to the public Cloudflare API; handy for tests / self-hosted proxies).
-#[derive(Debug, Clone)]
+/// - [`CF_ACCOUNT_ID_ENV`] — the account the Secrets Store lives in.
+/// - [`CF_API_TOKEN_ENV`] — a token with Secrets Store Read/Write.
+/// - [`CF_API_BASE_URL_ENV`] — optional `client/v4` base override.
+///
+/// # The token is held as a *reference*, never as a value
+///
+/// `api_token_ref` is a `ferrogate_cloudflare::TokenResolver` reference
+/// (`env://VAR`, or an inline plaintext token for tests) — **not** the token
+/// itself. [`from_env`](Self::from_env) only *probes* [`CF_API_TOKEN_ENV`] for
+/// presence and stores `env://CLOUDFLARE_API_TOKEN`; the live token is
+/// materialized by `EnvTokenResolver` at the moment the `Authorization` header
+/// is written, exactly as #405 designed. That keeps a live CF API token out of
+/// this struct, out of the `Debug + Serialize`
+/// [`ferrogate_cloudflare::CloudflareConfig`] it is copied into, and makes
+/// token rotation take effect without rebuilding the client.
+///
+/// `Debug` is hand-written anyway (issue #492's pattern, as for
+/// [`crate::VaultConfig`]): a caller may still construct this type with an
+/// inline plaintext token, and that must not be printable. A recognised
+/// non-secret `env://` reference *is* rendered, because redacting it would
+/// leave the operator unable to see which variable the client will read.
+#[derive(Clone)]
 pub struct CfSecretsStoreConfig {
     pub account_id: String,
-    pub api_token: String,
+    /// A token *reference*, not a token. See the type docs.
+    pub api_token_ref: String,
     pub api_base_url: Option<String>,
 }
 
+impl std::fmt::Debug for CfSecretsStoreConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `env://VAR` names a variable, not a credential — safe and useful to
+        // print. Anything else may be an inline plaintext token.
+        let token_ref: &dyn std::fmt::Debug = if self.api_token_ref.starts_with("env://") {
+            &self.api_token_ref
+        } else {
+            &"<redacted inline token>"
+        };
+        f.debug_struct("CfSecretsStoreConfig")
+            .field("account_id", &self.account_id)
+            .field("api_token_ref", token_ref)
+            .field("api_base_url", &self.api_base_url)
+            .finish()
+    }
+}
+
 impl CfSecretsStoreConfig {
-    /// Reads `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optionally
-    /// `CLOUDFLARE_API_BASE_URL`). Returns `None` if either required value is
+    /// Reads [`CF_ACCOUNT_ID_ENV`] and probes [`CF_API_TOKEN_ENV`] (optionally
+    /// [`CF_API_BASE_URL_ENV`]). Returns `None` if either required value is
     /// unset/empty, so callers can treat "no Cloudflare Secrets Store
     /// configured" as a normal, non-error case (mirrors Vault).
+    ///
+    /// The token variable is checked for presence only — its **value is never
+    /// read into the returned struct**; `api_token_ref` is the reference
+    /// `env://CLOUDFLARE_API_TOKEN`, resolved per request downstream.
     pub fn from_env() -> Option<Self> {
-        let account_id = non_empty_env("CLOUDFLARE_ACCOUNT_ID")?;
-        let api_token = non_empty_env("CLOUDFLARE_API_TOKEN")?;
+        let account_id = non_empty_env(CF_ACCOUNT_ID_ENV)?;
+        // Presence probe only: the value is deliberately dropped here.
+        non_empty_env(CF_API_TOKEN_ENV)?;
         Some(Self {
             account_id,
-            api_token,
-            api_base_url: non_empty_env("CLOUDFLARE_API_BASE_URL"),
+            api_token_ref: format!("env://{CF_API_TOKEN_ENV}"),
+            api_base_url: non_empty_env(CF_API_BASE_URL_ENV),
         })
     }
 }
@@ -154,11 +203,17 @@ impl std::fmt::Debug for CloudflareSecretResolver {
 
 impl CloudflareSecretResolver {
     /// Build a production resolver from account/token config: a real reqwest
-    /// transport via [`CloudflareClient::new`]. The token is passed inline (the
-    /// value already resolved from `CLOUDFLARE_API_TOKEN`) so no further token
-    /// indirection is needed here.
+    /// transport via [`CloudflareClient::new`].
+    ///
+    /// The token **reference** — not the token — is what lands in
+    /// [`CloudflareConfig`] (whose `api_token` field is documented as a
+    /// reference and which derives `Debug + Serialize`). The attached
+    /// [`EnvTokenResolver`] materializes the live token per request, at the
+    /// `Authorization` header and nowhere else, so no plaintext CF API token is
+    /// ever reachable from a `{:?}` or a serialization of this resolver's
+    /// config (issue #492's rule; #405's `TokenResolver` seam).
     pub fn new(config: CfSecretsStoreConfig) -> AnyResult<Self> {
-        let mut cf_config = CloudflareConfig::new(config.account_id, config.api_token);
+        let mut cf_config = CloudflareConfig::new(config.account_id, config.api_token_ref);
         if let Some(base) = config.api_base_url {
             cf_config.api_base_url = base;
         }
@@ -189,6 +244,14 @@ impl CloudflareSecretResolver {
     pub fn with_capacity_policy(mut self, capacity: CfSecretsCapacityPolicy) -> Self {
         self.capacity = capacity;
         self
+    }
+
+    /// The shared Cloudflare API client backing this resolver. Exposed so
+    /// callers (and the tests that pin the "reference, never a token value"
+    /// invariant on [`CloudflareClient::config`]) can inspect the client's
+    /// configuration; `CloudflareClient` itself holds no plaintext credential.
+    pub fn client(&self) -> &CloudflareClient {
+        &self.client
     }
 
     /// Create (or overwrite) a secret value in the store — the **write** side

@@ -37,8 +37,14 @@ pub struct CloudflareConfig {
     pub account_id: String,
 
     /// The default API token reference, resolved via [`crate::TokenResolver`]
-    /// (`env://VAR`, an inline plaintext token, or — deferred to #417 —
-    /// `cf://…`). This is a *reference*, not necessarily the secret itself.
+    /// (`env://VAR` or an inline plaintext token; `cf://` is rejected — see
+    /// [`crate::resolver`] for why that is a permanent crate boundary).
+    ///
+    /// This is a **reference, not the secret itself**: this struct derives
+    /// `Debug + Serialize`, so a caller that stores a resolved token here
+    /// makes it printable and serializable. Producers must pass a reference —
+    /// `ferrogate_secrets::CfSecretsStoreConfig` holds `api_token_ref` for
+    /// exactly this reason.
     pub api_token: String,
 
     /// Optional per-tenant token references, keyed by tenant id. A request
