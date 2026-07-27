@@ -14,6 +14,13 @@
 //!
 //! Opt-in only — requires:
 //!   FERROGATE_CF_ACCOUNT_ID / FERROGATE_CF_API_TOKEN
+//!
+//! SKIPS cleanly (prints a notice, exits 0) when `FERROGATE_CF_ACCOUNT_ID` is
+//! unset, so `cargo run --example d1_live_probe` is a no-op without creds —
+//! the same convention as `r2_live_probe` next door (#495). It used to return
+//! `Err` here and exit **1**, which read as a failure on the machine of every
+//! contributor without Cloudflare credentials.
+//!
 //! Run: cargo run -p ferrogate-cloudflare --example d1_live_probe
 
 use std::sync::Arc;
@@ -27,8 +34,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let account_id = std::env::var("FERROGATE_CF_ACCOUNT_ID")
-        .map_err(|_| "FERROGATE_CF_ACCOUNT_ID is required (live probe is opt-in)")?;
+    // Skip cleanly when the opt-in creds are absent (the gate sets them).
+    let Ok(account_id) = std::env::var("FERROGATE_CF_ACCOUNT_ID") else {
+        println!(
+            "d1_live_probe: SKIP (set FERROGATE_CF_ACCOUNT_ID and FERROGATE_CF_API_TOKEN to run \
+             the live D1 create/query/delete probe)"
+        );
+        return Ok(());
+    };
     let config = CloudflareConfig::new(account_id, "env://FERROGATE_CF_API_TOKEN");
     let client = CloudflareClient::new(config, Arc::new(EnvTokenResolver::from_process_env()))?;
     let d1 = D1Client::new(Arc::new(client));

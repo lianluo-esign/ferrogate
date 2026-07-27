@@ -57,9 +57,20 @@
 //! ```
 //!
 //! [`OPT_IN_VAR`] is implicit — do not list it. `tests/d1_live_probe_env_audit.rs`
-//! holds this contract over the real `examples/` tree: a new `d1_live_*.rs` that
-//! reads `std::env::var` directly, skips the module, misnames its `PROBE`, or
-//! reads a variable it never declared fails that audit.
+//! holds this contract over every `crates/*/examples/*.rs` in the workspace, not
+//! just this directory and not just files named `d1_live_*`: a new example in
+//! THIS crate that reads `std::env::var` directly, skips the module, misnames
+//! its `PROBE`, reads a variable it never declared, **or turns the `None` back
+//! into anything other than `return Ok(());`** fails that audit. An example in a
+//! crate this module cannot reach (`#[path]` is relative to the including file,
+//! so it cannot cross package boundaries) is held to the floor instead: its
+//! first environment read must be a `let … else` that prints a notice and
+//! returns `Ok(())`.
+//!
+//! The `else` arm is the whole point and is checked as such. Calling `opt_in`
+//! and then writing `else { return Err(...) }` — or `?.expect(...)` — is the
+//! pre-#495 behaviour with one extra function call in front of it, and the
+//! audit rejects it.
 //!
 //! This file lives in `examples/support/` rather than `examples/` because Cargo
 //! auto-discovers every `examples/*.rs` as its own example target; a nested

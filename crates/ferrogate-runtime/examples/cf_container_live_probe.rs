@@ -14,6 +14,13 @@
 //! Opt-in only — requires:
 //!   FERROGATE_CF_GATEWAY_URL (e.g. https://ferrogate-agent-gateway.<acct>.workers.dev)
 //!   FERROGATE_CF_GATEWAY_CONTROL_TOKEN
+//!
+//! `FERROGATE_CF_GATEWAY_URL` is the opt-in switch: unset, the probe prints a
+//! notice and exits **0**, so running it without a deployed Worker is a no-op
+//! rather than a failure. Set it with the control token missing and the probe
+//! hard-errors — a half-configured environment is an operator mistake, not an
+//! opt-out (#495, `ferrogate-storage/examples/support/probe_env.rs`).
+//!
 //! Run: cargo run -p ferrogate-runtime --example cf_container_live_probe
 
 use ferrogate_runtime::{
@@ -21,10 +28,19 @@ use ferrogate_runtime::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let base_url = std::env::var("FERROGATE_CF_GATEWAY_URL")
-        .map_err(|_| "FERROGATE_CF_GATEWAY_URL is required (live probe is opt-in)")?;
-    let token = std::env::var("FERROGATE_CF_GATEWAY_CONTROL_TOKEN")
-        .map_err(|_| "FERROGATE_CF_GATEWAY_CONTROL_TOKEN is required (live probe is opt-in)")?;
+    // Skip cleanly when the opt-in switch is absent (the gate sets it).
+    let Ok(base_url) = std::env::var("FERROGATE_CF_GATEWAY_URL") else {
+        println!(
+            "cf_container_live_probe: SKIP (set FERROGATE_CF_GATEWAY_URL and \
+             FERROGATE_CF_GATEWAY_CONTROL_TOKEN to run the live container-control bridge probe)"
+        );
+        return Ok(());
+    };
+    // Opted in but half-configured is a hard error, not a second opt-out.
+    let token = std::env::var("FERROGATE_CF_GATEWAY_CONTROL_TOKEN").map_err(|_| {
+        "FERROGATE_CF_GATEWAY_CONTROL_TOKEN is required once FERROGATE_CF_GATEWAY_URL is set \
+         (the live probe is opted IN); unset FERROGATE_CF_GATEWAY_URL to skip it instead"
+    })?;
 
     let client = ContainerControlClient::production(base_url, token)?;
     let identity = AgentInstanceIdentity::new("gate", "liveprobe", "prod-bridge");
