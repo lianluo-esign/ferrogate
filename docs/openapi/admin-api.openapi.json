@@ -18644,7 +18644,7 @@
           },
           "runtime_cancel_dispatched": {
             "type": "boolean",
-            "description": "true when a cancel_run dispatch was handed to the runtime transport, which happens only when a worker had already leased the job. Queued work nobody has picked up is withdrawn from the lease queue instead, so false means nothing was executing it -- not that the cancel did not take effect."
+            "description": "true when a cancel_run dispatch was handed to the runtime transport, which happens whenever the serving node could not simply WITHDRAW the queued work itself: a worker had already leased the job, or the job was submitted through a peer replica that still holds the runnable copy in its own lease queue. false means the serving node held the only copy and took it back. The field reports WHICH of the two remedies ran, never whether the cancel took effect -- a receipt with cancelled=true stopped the work either way."
           },
           "cancelled_at_unix": {
             "type": [

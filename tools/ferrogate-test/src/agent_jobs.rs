@@ -317,10 +317,18 @@ pub(crate) fn run_agent_jobs_api(args: &LocalArgs) -> Result<()> {
             cancelled.body
         );
     }
+    // `false` is deterministic HERE because this harness runs a SINGLE gateway
+    // process, so the node serving the cancel is necessarily the node holding
+    // the runnable copy. It is not a wire contract: the same cancel legitimately
+    // answers `true` on a multi-replica deployment where the copy lives on a
+    // peer, because then a durable `cancel_run` is the only supersedable
+    // evidence available. The field reports WHICH remedy ran; `cancelled` above
+    // is what reports that the cancel took effect.
     if cancelled_receipt["runtime_cancel_dispatched"] != Value::Bool(false) {
         bail!(
-            "no worker had leased this job, so there was no holder to hand a cancel_run to; \
-             the receipt must report runtime_cancel_dispatched=false: {}",
+            "no worker had leased this job and this harness runs one gateway process, so there \
+             was no holder to hand a cancel_run to; the receipt must report \
+             runtime_cancel_dispatched=false: {}",
             cancelled.body
         );
     }

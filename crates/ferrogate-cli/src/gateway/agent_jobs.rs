@@ -21,7 +21,7 @@
 //! | status | `GET /v1/agent-jobs/{run_id}` | `AppState::agent_run_timeline` + `AppState::self_hosted_run_timeline` |
 //! | events | `GET /v1/agent-jobs/{run_id}/events` | the existing agent-run timeline (`agent_run_events`) |
 //! | result | `GET /v1/agent-jobs/{run_id}/result` | the same timeline + worker-reported artifact events, including #472 coding-agent work products |
-//! | cancel | `POST /v1/agent-jobs/{run_id}/cancel` | run terminalization + either withdrawal of the start dispatch or a `cancel_run` (#414) -- see [`cancel_agent_job_in_runtime`] |
+//! | cancel | `POST /v1/agent-jobs/{run_id}/cancel` | run terminalization + either withdrawal of the start dispatch or a `cancel_run` (#414) -- see [`cancel_agent_job`] |
 //!
 //! **Durability.** Submission writes the `agent_runs` row through the same
 //! durable seam the synchronous create path uses and enqueues a
@@ -373,16 +373,31 @@ struct AgentJobCancelResponse {
     /// `true` when this call terminalized the run; `false` when it was already
     /// terminal (cancel is idempotent).
     cancelled: bool,
-    /// `true` when a `cancel_run` dispatch was handed to the runtime transport.
-    /// That happens whenever this node could not simply WITHDRAW the queued
-    /// work itself: a worker had already leased it, or the job was submitted
-    /// through a peer replica that still holds the runnable copy in its own
-    /// lease queue. `false` therefore means "this node held the only copy and
-    /// took it back", not "the cancel did not take effect" (#502).
+    /// See [`RUNTIME_CANCEL_DISPATCHED_DESCRIPTION`], which is the one copy of
+    /// this sentence and is pinned to the published one by
+    /// `the_published_meaning_of_runtime_cancel_dispatched_matches_the_code`.
     runtime_cancel_dispatched: bool,
     cancelled_at_unix: Option<u64>,
     request_id: String,
 }
+
+/// What `runtime_cancel_dispatched` means, written ONCE (#551 rework).
+///
+/// It had been written twice -- here and in the published OpenAPI description
+/// (which the console's generated TypeScript then copies a third time) -- and
+/// the two said different things: the published copy claimed a `cancel_run`
+/// "happens only when a worker had already leased the job", which
+/// `a_cancel_on_a_replica_that_never_served_the_submit_still_reaches_the_runtime`
+/// disproves. Nothing read both, so nothing could notice; `check-openapi.py`
+/// compares shapes, not prose, and any wording at all survived it. This
+/// constant is the source, and the test named above fails when the published
+/// description drifts from it again.
+///
+/// Nothing reads it at runtime -- the wire copy is the published document, and
+/// this is what that document is checked against -- so it is dead outside the
+/// test build by construction, not by oversight.
+#[cfg_attr(not(test), allow(dead_code))]
+const RUNTIME_CANCEL_DISPATCHED_DESCRIPTION: &str = "true when a cancel_run dispatch was handed to the runtime transport, which happens whenever the serving node could not simply WITHDRAW the queued work itself: a worker had already leased the job, or the job was submitted through a peer replica that still holds the runnable copy in its own lease queue. false means the serving node held the only copy and took it back. The field reports WHICH of the two remedies ran, never whether the cancel took effect -- a receipt with cancelled=true stopped the work either way.";
 
 impl FerroGateway {
     /// Fan out the whole `/v1/agent-jobs[...]` surface by path suffix + method.
@@ -898,51 +913,41 @@ impl FerroGateway {
             )
             .await;
         };
-        if agent_job_status_is_terminal(&run.status) {
-            // Nothing to cancel -- but this is also the REPAIR path (#502). The
-            // run settled through some other route (worker telemetry, most
-            // often) and this node may still be holding its dispatch rows: on
-            // the replica that served the submit but not the completion, those
-            // rows are exactly what an admission count would otherwise keep
-            // reading. Draining them here makes a retried cancel a real remedy
-            // instead of a no-op that returns `cancelled: false` and leaves the
-            // rows where they were.
-            state.reclaim_settled_run_dispatches(run_id);
+        let now = now_unix_seconds();
+        // Everything the cancel DOES lives in `cancel_agent_job`, including the
+        // already-terminal repair branch, so a test can drive the same sequence
+        // the handler drives instead of re-assembling it by hand (#551 rework --
+        // the repair branch was reachable only from here and therefore asserted
+        // by nothing).
+        let decision = match cancel_agent_job(&state, &run, ctx.request_id.as_str(), now) {
+            Ok(decision) => decision,
+            Err(message) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "agent_job_cancel_unavailable",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if !decision.cancelled {
+            // Already terminal: the repair ran, but there is no new run state
+            // and therefore no run event and no audit event to write.
             let response = AgentJobCancelResponse {
                 object: "agent_job_cancel",
                 run_id: run_id.to_string(),
                 terminal: true,
-                status: run.status.clone(),
+                status: decision.status,
                 cancelled: false,
-                runtime_cancel_dispatched: false,
-                cancelled_at_unix: run.completed_at_unix,
+                runtime_cancel_dispatched: decision.runtime_cancel_dispatched,
+                cancelled_at_unix: decision.cancelled_at_unix,
                 request_id: ctx.request_id.clone(),
             };
             return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
         }
-
-        let now = now_unix_seconds();
-        let runtime_cancel_dispatched =
-            match cancel_agent_job_in_runtime(&state, &run, ctx.request_id.as_str(), now) {
-                Ok(dispatched) => dispatched,
-                Err(message) => {
-                    return write_json_error(
-                        session,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "agent_job_cancel_unavailable",
-                        message,
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-            };
-        // Terminalize the run itself: the cancel is not "requested", it is the
-        // run's end state, so a caller polling status/result sees a terminal
-        // job even if the worker never comes back for its lease.
-        let mut cancelled = run.clone();
-        cancelled.status = "cancelled".to_string();
-        cancelled.completed_at_unix = Some(now);
-        state.record_agent_run(cancelled);
+        let runtime_cancel_dispatched = decision.runtime_cancel_dispatched;
         state.record_agent_run_event(StoredAgentRunEvent {
             id: format!("agent-job-cancelled:{run_id}"),
             run_id: run_id.to_string(),
@@ -983,15 +988,95 @@ impl FerroGateway {
         let response = AgentJobCancelResponse {
             object: "agent_job_cancel",
             run_id: run_id.to_string(),
-            status: "cancelled".to_string(),
+            status: decision.status,
             terminal: true,
             cancelled: true,
             runtime_cancel_dispatched,
-            cancelled_at_unix: Some(now),
+            cancelled_at_unix: decision.cancelled_at_unix,
             request_id: ctx.request_id.clone(),
         };
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
     }
+}
+
+/// What one cancel did, as the handler needs to report it.
+#[derive(Debug, PartialEq, Eq)]
+struct AgentJobCancelDecision {
+    /// The run's status AFTER the call.
+    status: String,
+    /// Whether THIS call terminalized the run (`false` = already terminal).
+    cancelled: bool,
+    /// See [`RUNTIME_CANCEL_DISPATCHED_DESCRIPTION`].
+    runtime_cancel_dispatched: bool,
+    cancelled_at_unix: Option<u64>,
+}
+
+/// Cancel `run`: settle it, then stop its work in the runtime. **In that
+/// order, and the order is the guarantee (#551 rework).**
+///
+/// A cancel destroys evidence -- on the withdrawable arm it deletes the
+/// `self_hosted_run_dispatches` row outright, which is the only thing a PEER
+/// replica holding its own in-memory copy of that dispatch could ever have
+/// been superseded by. What replaces it is the settled `agent_runs` row, the
+/// one record every replica reads (`AppState::start_run_lease_is_settled`).
+/// Writing the run row AFTER the deletion, as this path did until now, leaves
+/// a window in which neither exists: on the durable backend `record_agent_run`
+/// hands the row to a background writer that returns immediately and is
+/// allowed to DROP it under back-pressure, so the window is not merely small,
+/// it can be unbounded. A peer that polls inside it hands a worker the
+/// cancelled job's `start_run` -- #474's defect, on the arm the withdrawal was
+/// introduced to close.
+///
+/// So: [`AppState::record_agent_run_durably`] first, and a failed write aborts
+/// the cancel having destroyed nothing (the caller sees 503 and may retry --
+/// and a retry, once some other route settles the run, lands in the repair
+/// branch below). [`cancel_agent_job_in_runtime`] then REFUSES a run that is
+/// not already terminal, so this ordering cannot be quietly inverted by a
+/// later edit: inverting it turns every cancel into a 503.
+fn cancel_agent_job(
+    state: &AppState,
+    run: &StoredAgentRun,
+    request_id: &str,
+    now_unix: u64,
+) -> Result<AgentJobCancelDecision, String> {
+    if agent_job_status_is_terminal(&run.status) {
+        // Nothing to cancel -- but this is also the REPAIR path (#502). The run
+        // settled through some other route (worker telemetry, most often) and
+        // this node may still be holding its dispatch rows: on the replica that
+        // served the submit but not the completion, those rows are exactly what
+        // an admission count would otherwise keep reading. Draining them here
+        // makes a retried cancel a real remedy instead of a no-op that returns
+        // `cancelled: false` and leaves the rows where they were.
+        state.reclaim_settled_run_dispatches(&run.id);
+        return Ok(AgentJobCancelDecision {
+            status: run.status.clone(),
+            cancelled: false,
+            runtime_cancel_dispatched: false,
+            cancelled_at_unix: run.completed_at_unix,
+        });
+    }
+
+    // Terminalize the run itself: the cancel is not "requested", it is the
+    // run's end state, so a caller polling status/result sees a terminal job
+    // even if the worker never comes back for its lease -- and every replica
+    // sees it before the work it would otherwise start is unprotected.
+    let mut settled = run.clone();
+    settled.status = "cancelled".to_string();
+    settled.completed_at_unix = Some(now_unix);
+    if !state.record_agent_run_durably(settled.clone()) {
+        return Err(format!(
+            "agent job {} could not be settled durably, so its work was left alone",
+            run.id
+        ));
+    }
+    let runtime_cancel_dispatched =
+        cancel_agent_job_in_runtime(state, &settled, request_id, now_unix)?;
+    Ok(AgentJobCancelDecision {
+        status: settled.status,
+        cancelled: true,
+        runtime_cancel_dispatched,
+        cancelled_at_unix: settled.completed_at_unix,
+    })
 }
 
 /// Stop `run` in the runtime, and reclaim what it leaves behind.
@@ -1050,8 +1135,14 @@ impl FerroGateway {
 /// that closes them is not in this function at all: it is
 /// [`AppState::poll_self_hosted_worker_run`], which refuses to hand out a
 /// `start_run` whose `agent_runs` row has already SETTLED, read durably --
-/// the one record every replica shares, and the one this handler writes
-/// immediately after this call returns.
+/// the one record every replica shares, and the one [`cancel_agent_job`] has
+/// already written, and flushed, BEFORE calling this.
+///
+/// That ordering is a precondition, not a convention, so it is checked: `run`
+/// must already be terminal or this returns `Err` and touches nothing. A
+/// cancel that withdrew first would delete the peer's only supersedable
+/// evidence while the row meant to replace it was still queued in a background
+/// evidence writer that is permitted to drop it (#551 rework).
 ///
 /// Residue, stated rather than left implied: a worker that is ALREADY
 /// executing the run is stopped only by collecting its `cancel_run`, so the
@@ -1068,6 +1159,15 @@ fn cancel_agent_job_in_runtime(
     request_id: &str,
     now_unix: u64,
 ) -> Result<bool, String> {
+    if !agent_job_status_is_terminal(&run.status) {
+        // The ordering guard. Failing here costs the caller a 503 on a cancel
+        // that has changed nothing; the alternative it prevents is a peer
+        // starting cancelled work with no evidence left anywhere to stop it.
+        return Err(format!(
+            "agent job {} must be settled before its queued work is withdrawn",
+            run.id
+        ));
+    }
     let Some(start) = state.self_hosted_dispatch_for_run(&run.id, SelfHostedRunAction::StartRun)
     else {
         return Ok(false);

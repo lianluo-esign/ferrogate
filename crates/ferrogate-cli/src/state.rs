@@ -4418,6 +4418,22 @@ impl AppState {
         Self::try_new(config).expect("failed to initialize app state")
     }
 
+    /// A SECOND node over the SAME durable tables -- what a peer replica behind
+    /// a load balancer actually is (#551 rework).
+    ///
+    /// Multi-replica tests used to be written as two independent `AppState`s
+    /// with rows hand-copied between them, which can only ever assert what the
+    /// test chose to copy: copying a settled `agent_runs` row across supplies
+    /// the very precondition the code under test is supposed to establish, and
+    /// the assertion then holds whether or not it does. Sharing the repository
+    /// handle removes the choice -- the peer reads exactly what the other node
+    /// wrote, when it wrote it.
+    #[cfg(test)]
+    pub(crate) fn new_peer_replica(&self, config: Config) -> Self {
+        Self::try_new_with_repositories(config, Arc::clone(&self.repositories), true)
+            .expect("failed to initialize peer replica app state")
+    }
+
     pub(crate) fn try_new(config: Config) -> anyhow::Result<Self> {
         let repositories = Arc::new(runtime_storage_repositories(&config)?);
         Self::try_new_with_repositories(config, repositories, true)

@@ -704,8 +704,16 @@ impl AppState {
     /// offering the same `start_run` to the next worker that polls it, which is
     /// #474's original defect verbatim.
     ///
-    /// The run row is the one record every replica shares, and cancel writes it
-    /// before anything else, so it is the only sound predicate. Read durably
+    /// The run row is the one record every replica shares, so it is the only
+    /// sound predicate -- but only if it is already THERE when a peer looks.
+    /// That is an ordering obligation on the cancel, not a property of this
+    /// function: `cancel_agent_job` settles the row through
+    /// [`AppState::record_agent_run_durably`] and refuses to go on unless the
+    /// write landed, BEFORE `cancel_agent_job_in_runtime` deletes the durable
+    /// dispatch row that a peer would otherwise still be stopped by. Written
+    /// the other way round (as it was until #551's rework) there is a window in
+    /// which the evidence is gone and its replacement is still queued in a
+    /// background writer that is allowed to drop it. Read durably
     /// (`settled_agent_run_ids`) for the same reason. A run with NO row is not
     /// settled -- absence of evidence never stops work, exactly as it never
     /// releases a submit slot -- so dispatches created through non-job paths
@@ -1597,6 +1605,47 @@ impl AppState {
             ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.upsert_agent_run(run))
         {
             warn!("failed to persist agent run record: {error}");
+        }
+    }
+
+    /// Record `run` and return only once the row is DURABLY there -- or report
+    /// that it is not (#551 rework).
+    ///
+    /// [`AppState::record_agent_run`] is fire-and-forget by design, and on the
+    /// durable backend that means two things this caller cannot live with: the
+    /// enqueue returns before the row is visible to anybody, and
+    /// `EvidenceWriter::enqueue` DROPS the job outright when the queue stays
+    /// full past its timeout, which `record_agent_run` cannot even observe
+    /// because it discards the returned `bool`. For telemetry that is the right
+    /// trade. For the cancel path it is not: the settled `agent_runs` row is
+    /// the ONLY predicate that stops a peer replica handing a cancelled job's
+    /// `start_run` to a worker (`AppState::start_run_lease_is_settled`), and
+    /// the cancel then DESTROYS the durable dispatch row that would otherwise
+    /// have carried a `cancel_run` as evidence. Deleting the evidence before
+    /// the replacement predicate is visible reopens #474's defect on exactly
+    /// the arm the withdrawal was supposed to close.
+    ///
+    /// So this is the ordered write: enqueue, then FLUSH, and answer whether
+    /// the row is now readable. `false` obliges the caller to destroy nothing
+    /// and fail the request -- a cancel that could not be recorded has not
+    /// happened.
+    pub(crate) fn record_agent_run_durably(&self, run: StoredAgentRun) -> bool {
+        if self.evidence_writes_deferred() {
+            if !self
+                .evidence_writer
+                .enqueue(EvidenceWriteJob::AgentRun(run))
+            {
+                warn!("agent run record was dropped by the evidence writer; not settled");
+                return false;
+            }
+            return self.evidence_writer.flush();
+        }
+        match ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.upsert_agent_run(run)) {
+            Ok(_) => true,
+            Err(error) => {
+                warn!("failed to persist agent run record: {error}");
+                false
+            }
         }
     }
 
