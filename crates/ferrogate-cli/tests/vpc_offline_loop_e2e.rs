@@ -134,22 +134,33 @@ fn wait_until(what: &str, timeout: Duration, mut probe: impl FnMut() -> bool) {
 
 /// Mint a data-plane client key through the control plane's admin API.
 ///
-/// `platform_operator` is declared because that is what the two config-declared
-/// client keys in this file declare, and this key is the ROTATION of one of
-/// them (`vpc-client-v1` -> `vpc-client-v2`): a rotation that changed the
-/// credential's tenancy would not be testing rotation. #540 made a key that
-/// declares neither `organization_id` nor `platform_operator` a hard refusal
-/// on this path too (`upsert_api_key` runs the candidate through the same
-/// `Config::validate`), and #540's own fixture sweep only rewrote `[[api_keys]]`
-/// TOML blocks -- a key minted from a JSON body at runtime was invisible to it.
-fn create_api_key(publisher_addr: &str, admin_secret: &str, id: &str, secret: &str) {
+/// The key NAMES A TENANT. #540 made a key that declares neither
+/// `organization_id` nor `platform_operator` a hard refusal on this path too
+/// (`upsert_api_key` runs the candidate through the same `Config::validate`),
+/// and #540's own fixture sweep only rewrote `[[api_keys]]` TOML blocks -- a
+/// key minted from a JSON body at runtime was invisible to it, so the
+/// control-plane publisher answered 400 to its own rotation.
+///
+/// The first fix declared `platform_operator = true`, to match the two
+/// config-declared client keys this one rotates. That satisfied the refusal by
+/// re-creating the posture #540 exists to abolish: a `models.read` data-plane
+/// credential holding unrestricted cross-tenant root. The objection to
+/// correcting it was that tenant-scoping might empty the `GET /v1/models`
+/// listing the probe reads. Measured, both ways: this pair's configs declare no
+/// models at all, so the body is `{"object":"list","data":[]}` under BOTH
+/// postures. The probe's whole statement is 200-vs-401 -- is this credential
+/// authorized by the ACTIVATED snapshot -- and tenant-scoping costs it nothing.
+/// So the client keys here, config-declared and minted alike, name
+/// `snapshot_tenant_id`; only the two admin keys, which really do administer
+/// the control plane, stay `platform_operator`.
+fn create_api_key(publisher_addr: &str, admin_secret: &str, id: &str, secret: &str, tenant: &str) {
     let auth = format!("Authorization: Bearer {admin_secret}");
     let body = serde_json::json!({
         "id": id,
         "name": format!("issued key {id}"),
         "key": secret,
         "scopes": ["models.read"],
-        "platform_operator": true,
+        "organization_id": tenant,
     })
     .to_string();
     let response = http_request(
@@ -234,7 +245,7 @@ id = "{client_id}"
 name = "Tenant client key"
 key = "{client_secret}"
 scopes = ["models.read"]
-platform_operator = true
+organization_id = "{tenant}"
 "#,
             state_path = self.state_path.display(),
             signing_seed = self.signing_seed_b64,
@@ -275,7 +286,7 @@ id = "{seed_id}"
 name = "Data-plane bootstrap key"
 key = "{seed_secret}"
 scopes = ["models.read"]
-platform_operator = true
+organization_id = "{tenant}"
 "#,
             storage = self.data_plane_storage_toml,
             state_path = self.state_path.display(),
@@ -415,6 +426,7 @@ fn data_plane_survives_control_plane_interruption_on_last_known_good_snapshot() 
         CP_ADMIN_SECRET,
         "vpc-client-v2",
         "vpc-client-secret-v2",
+        pair.tenant,
     );
     wait_until(
         "data plane picks up the newer signed snapshot after reconnect",
@@ -553,6 +565,7 @@ fn persisted_replay_floor_rejects_older_signed_snapshot_after_data_plane_restart
         CP_ADMIN_SECRET,
         "cp-issued-b",
         &key_b_secret,
+        pair.tenant,
     );
     wait_until(
         "data plane activates signed generation 2",
@@ -604,6 +617,7 @@ fn persisted_replay_floor_rejects_older_signed_snapshot_after_data_plane_restart
         CP_ADMIN_SECRET,
         "cp-issued-c",
         &key_c_secret,
+        pair.tenant,
     );
     wait_until(
         "data plane activates signed generation 4 after the restart",

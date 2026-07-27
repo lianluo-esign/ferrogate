@@ -302,9 +302,23 @@ provider_response_body_max_bytes = 32
 // the whole gateway trunk out of `ferrogate-cli/src/gateway/`, and this guard
 // -- like the three `asset_bucket.rs` allow-lists #561 repaired -- kept naming
 // the old location. It did NOT go quiet, because `source` panics on a missing
-// file rather than skipping it; it went red, and no CI job selected this
-// target, so nothing read the red. Keeping the loud panic is the point: a
-// second move must fail here rather than pass over an empty set.
+// file rather than skipping it: it went red at `a772842`.
+//
+// This target is NOT one of #561's unselected 50. It is its own matrix slice in
+// `.github/workflows/rust-ai-proxy-tests.yml` and it runs in
+// `scripts/local-test-modules.sh`, which makes the fact worse rather than
+// better: `ci.yml` fires on `release: published` only, the last release
+// (`v2026.07.18`) predates `a772842`, so the RELEASE GATE has been red since
+// that commit and no run has been asked to read it. Selection is not health --
+// a job that never fires selects nothing in practice.
+//
+// The `.contains(...)` bans below have an existence floor (`source` panics on
+// ENOENT, so a deletion is loud) but no content floor on their own: splitting
+// `chat.rs` into `chat.rs` + `chat_stream.rs`, leaving a `pub use` behind and
+// putting the pump in the new file, would leave every read succeeding, nothing
+// matching, and the guard green. Each file therefore also has to still CONTAIN
+// the streaming machinery it is being checked for -- so a move takes the
+// sentinel with it and reds here instead of passing over a shell.
 #[test]
 fn streaming_pipeline_has_no_blocking_thread_shim() {
     let source = |relative: &str| {
@@ -316,15 +330,33 @@ fn streaming_pipeline_has_no_blocking_thread_shim() {
         std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
     };
-    for file in [
-        "src/server/dispatch.rs",
-        "src/server/chat.rs",
-        "src/server/messages.rs",
-        "src/messages_stream.rs",
-        "src/responses_stream.rs",
-        "src/responses.rs",
+    // (file, the streaming item that file owns). The sentinel is the thing the
+    // ban is ABOUT: if it is not here any more, the pipeline moved and the
+    // absence of `spawn_blocking` in this file says nothing.
+    for (file, sentinel) in [
+        (
+            "src/server/dispatch.rs",
+            "impl StreamingBodySource for ProviderBodyStream",
+        ),
+        (
+            "src/server/chat.rs",
+            "async fn read_provider_streaming_body",
+        ),
+        ("src/server/messages.rs", "write_streaming_response("),
+        ("src/messages_stream.rs", "struct MessagesStreamNormalizer"),
+        (
+            "src/responses_stream.rs",
+            "struct ResponsesStreamNormalizer",
+        ),
+        ("src/responses.rs", "trait StreamingBodySource"),
     ] {
         let contents = source(file);
+        assert!(
+            contents.contains(sentinel),
+            "{file} no longer contains `{sentinel}`: the streaming pipeline moved, so this \
+             file's clean bill of health is about an empty shell. Re-point the guard at \
+             wherever the pump now lives."
+        );
         assert!(
             !contents.contains("spawn_blocking"),
             "{file} reintroduced a spawn_blocking streaming shim"

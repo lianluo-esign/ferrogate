@@ -2268,6 +2268,73 @@ fn a_create_harvests_the_server_assigned_id() {
     );
 }
 
+/// The fourth arm: `collection_scoped_mutation` — a collection verb where NO
+/// response document was obtained, so no id was ever assigned to name.
+///
+/// This is the arm that distinguishes "the server created something and the
+/// document did not say what" (`response_names_no_resource_id`, above) from
+/// "nothing was created". An audit query reading the first as the second, or
+/// vice versa, draws the opposite conclusion about whether a write happened.
+///
+/// It had no assertion anywhere in the repo (issue #564 review, minor 6): the
+/// five references that named it were the pre-#505 expectations on the create
+/// legs, and those became wrong when the receipt started harvesting, so
+/// correcting them left the code reachable and uncovered. Collapsing the
+/// `None =>` arm into the `Some` one — one absence code for both — reddened
+/// nothing.
+#[test]
+fn a_collection_verb_with_no_response_reports_no_id_was_ever_assigned() {
+    // A dry run: the request never left the process.
+    let registry = full_registry();
+    let verb = registry
+        .resolve("projects", "create")
+        .expect("projects create is registered");
+    let RenderGate::Receipt(renderer) = verb.render_gate() else {
+        panic!("projects create must be gated to a receipt");
+    };
+    // Explicitly NO id segments: this arm only exists for a collection verb,
+    // and `probe_spec` would hand back the longest arity the builder accepts,
+    // which would silently test the `Addressed` arm instead.
+    let input = ResourceInput::new().with_body(serde_json::json!({"probe": true}));
+    let spec = build_request("projects", "create", &input).expect("create takes no id segments");
+    let context = test_context();
+    let plan = MutationPlan::new(
+        renderer,
+        "projects",
+        spec,
+        &[],
+        &context,
+        &ClientActionIdentity::fixture(),
+        true,
+    )
+    .expect("plan");
+    let dry = plan.dry_run();
+    let receipt = dry.receipt().expect("receipt");
+    assert_eq!(
+        receipt.target.resource_id.value, None,
+        "a dry run creates nothing, so there is no id to name"
+    );
+    assert_eq!(
+        receipt.target.resource_id.absent_code(),
+        Some(absence_codes::COLLECTION_SCOPED_MUTATION),
+        "the null must say NOTHING WAS CREATED, not that a response omitted the id"
+    );
+
+    // And the failure case the same arm covers: the call was made and no
+    // authoritative answer came back.
+    let dead = execute_with_no_answer("projects", "create", &[], "connection reset");
+    assert_eq!(
+        dead.output()
+            .receipt()
+            .expect("receipt")
+            .target
+            .resource_id
+            .absent_code(),
+        Some(absence_codes::COLLECTION_SCOPED_MUTATION),
+        "no response document was obtained, so no id can be attested"
+    );
+}
+
 /// `object_version` is the version of the **changed object**, so the harvest is
 /// bounded to the response envelope and its key priority is fixed.
 ///

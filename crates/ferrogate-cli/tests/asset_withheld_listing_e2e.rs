@@ -133,12 +133,14 @@ fn register_tenant(gateway_addr: &str, id: &str, name: &str, slug: &str) {
 /// Push an asset and pin the EXACT status the publish terminal answers.
 ///
 /// #528 made the status the discriminator between a clean publish and a
-/// withheld one: a push whose screening landed `pending_scan`/`quarantined`
-/// answers `202 Accepted`, a scanned-clean one `200`/`201`. Accepting "any
-/// 2xx" here would let a regression back to a flat `200` -- the exact silence
-/// #528 removed, where the console said "Asset pushed" for an object nobody
-/// could find -- pass unnoticed, so each caller states which terminal it
-/// expects.
+/// withheld one: `asset_mutation_status` answers `200 OK` when the stored
+/// asset is downloadable and `202 Accepted` when it is not, and those are the
+/// only two codes this path emits -- `201` never was one, so the old
+/// `200 || 201` was a widened expectation that happened to exclude the very
+/// status carrying the withholding. Accepting "any 2xx" here would let a
+/// regression back to a flat `200` -- the exact silence #528 removed, where
+/// the console said "Asset pushed" for an object nobody could find -- pass
+/// unnoticed, so each caller states which terminal it expects.
 fn push_asset(gateway_addr: &str, key: &str, name: &str, content: &str, expect_status: &str) {
     let push = http_request(
         gateway_addr,

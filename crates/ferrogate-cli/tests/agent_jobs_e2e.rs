@@ -165,13 +165,19 @@ fn worker_identity(worker_id: &str, transport_secret: &str) -> serde_json::Value
 /// makes that run "held by a worker" for the rest of the test. That is not
 /// theoretical -- it is what made
 /// `an_agent_job_is_submitted_idempotently_observed_collected_and_cancelled`
-/// fail from the day it was written: it had two jobs open, this loop leased
-/// and abandoned the second, and the cancel that expected to WITHDRAW an
-/// unheld dispatch found a held one. The queue is a `BTreeMap` keyed by
-/// `agent-job-start-<run_id>` and `run_id` is a hash of the idempotency key,
-/// so which of two open jobs a poll offers first is not submission order and
-/// is not guessable from the test. Failing loudly is the only way that stays
-/// visible.
+/// fail: it had two jobs open, this loop leased and abandoned the second, and
+/// the cancel that expected to WITHDRAW an unheld dispatch found a held one.
+///
+/// The lease theft is as old as the helper, but the failure is not, and the
+/// difference is the point. At `928e82c` and `e6517d7` the cancel asserted
+/// `runtime_cancel_dispatched == true`, which a HELD dispatch satisfies -- the
+/// hazard was there and invisible. `b67cb40` (#502 slice 2) flipped both legs
+/// to `false` to pin the withdrawal arm, and that is the commit the target
+/// turned red at: a latent harness bug made load-bearing by a later, correct
+/// tightening. The queue is a `BTreeMap` keyed by `agent-job-start-<run_id>`
+/// and `run_id` is a hash of the idempotency key, so which of two open jobs a
+/// poll offers first is not submission order and is not guessable from the
+/// test. Failing loudly is the only way that stays visible.
 fn lease_dispatch_for(
     gateway_addr: &str,
     worker_id: &str,
@@ -195,19 +201,27 @@ fn lease_dispatch_for(
             &worker_transport_headers(),
             &body,
         );
+        // 204 is "nothing leasable right now" and is the ordinary answer while
+        // the submit's dispatch is still being enqueued -- it is what this loop
+        // exists to wait out. Demanding a 200 on every iteration is what made
+        // the retry below dead code: the first empty queue exited the whole
+        // helper with `worker poll should be accepted: HTTP/1.1 204`, blaming
+        // the transport for a race.
         assert!(
-            response.contains("HTTP/1.1 200"),
-            "worker poll should be accepted: {response}"
+            response.contains("HTTP/1.1 200") || response.contains("HTTP/1.1 204"),
+            "worker poll should be accepted or empty: {response}"
         );
-        let lease = response_json(&response);
-        match lease["run_id"].as_str() {
-            Some(leased) if leased == run_id => return lease,
-            Some(leased) => panic!(
-                "the poll leased {leased}, not {run_id}: this helper cannot give a \
-                 foreign lease back, so accepting it would silently mark that run \
-                 held by a worker. Leave only one job leasable before calling this."
-            ),
-            None => {}
+        if response.contains("HTTP/1.1 200") {
+            let lease = response_json(&response);
+            match lease["run_id"].as_str() {
+                Some(leased) if leased == run_id => return lease,
+                Some(leased) => panic!(
+                    "the poll leased {leased}, not {run_id}: this helper cannot give a \
+                     foreign lease back, so accepting it would silently mark that run \
+                     held by a worker. Leave only one job leasable before calling this."
+                ),
+                None => panic!("a 200 poll named no run_id: {response}"),
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }

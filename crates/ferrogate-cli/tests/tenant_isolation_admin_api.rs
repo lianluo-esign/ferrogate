@@ -391,6 +391,16 @@ fn tenant_scoped_admin_key_cannot_change_its_own_plan_or_status() {
         status_line(&bogus_status).contains("400"),
         "an unrecognized lifecycle token is refused by the parser: {bogus_status}"
     );
+    // The status code alone cannot carry the distinction. This same handler
+    // answers `400 invalid_tenant` for `plan_id must not be empty` and for
+    // `plan {x} does not exist`, so a bare `contains("400")` would be satisfied
+    // by exactly the other-refusal confusion this leg was added to prevent.
+    // Pin the parser's own words, the way the 403 above pins
+    // `platform_operator_required`.
+    assert!(
+        bogus_status.contains("is not a recognized lifecycle state"),
+        "the 400 must be the lifecycle parser's, not some other invalid_tenant: {bogus_status}"
+    );
 
     // But a cosmetic self-edit (name) is still allowed for the tenant.
     let self_rename = http_request(

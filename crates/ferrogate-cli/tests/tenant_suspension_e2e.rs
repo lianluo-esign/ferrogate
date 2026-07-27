@@ -521,11 +521,31 @@ fn a_tenant_can_re_enable_the_project_it_disabled() {
     ));
     assert_eq!(
         console_key["key"]["organization_id"], "tenant-off",
-        "the session key must be tenant-scoped, not platform root: {console_key}"
+        "the session key must be tenant-scoped: {console_key}"
     );
     assert_eq!(
         console_key["key"]["project_id"], "proj-off",
         "...and chained to the project it disables: {console_key}"
+    );
+    // "not platform root" is a separate claim from "has an organization_id",
+    // and the message above asserted only the second. Root is what would make
+    // this whole scenario unreachable: a platform-operator key is never gated
+    // by `authenticate()`, so the lock-out the test exists to reproduce would
+    // stop happening and the test would go on passing for the wrong reason.
+    //
+    // Adding `platform_operator = true` beside the `organization_id` above does
+    // NOT sneak past -- measured: `Config::validate` refuses the pair, the
+    // gateway never listens, and all four tests here fail on readiness. What
+    // that leaves unpinned is the rule underneath: `resolve_platform_operator`
+    // answering `false` for a key that names a tenant and declares nothing
+    // (#515). Flip that one arm to `true` and the config is still legal, the
+    // gateway still starts, `organization_id` is still `tenant-off` -- and this
+    // credential is root. `effective_platform_operator` is the read-only
+    // resolved answer, so it is the field that sees it.
+    assert_eq!(
+        console_key["key"]["effective_platform_operator"], false,
+        "a console session must NOT hold platform root, or the disable gate it \
+         is written to survive never fires: {console_key}"
     );
 
     let disabled = as_key(

@@ -159,9 +159,12 @@ fn pending_scan_asset_is_promoted_visible_and_quarantined_with_audit_evidence() 
         content,
     );
     // 202, not "any 2xx": #528 made the status the wire statement that this
-    // publish is WITHHELD pending its scan. A clean publish answers 200/201, so
-    // pinning the exact code is what makes a regression back to a flat 200 --
-    // "Asset pushed" for an object no read surface will serve -- fail here.
+    // publish is WITHHELD pending its scan. `asset_mutation_status` is one
+    // function over one predicate -- `200` when the asset is downloadable,
+    // `202` when it is not -- so `201` is not a status this path can produce
+    // and "200 || 201" was accepting the withheld case by accident. Pinning the
+    // exact code is what makes a regression back to a flat 200 -- "Asset
+    // pushed" for an object no read surface will serve -- fail here.
     assert!(
         push.contains("HTTP/1.1 202"),
         "a deferred-scan push must answer 202 Accepted: {push}"
