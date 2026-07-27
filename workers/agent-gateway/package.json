@@ -17,10 +17,10 @@
     "agents": "0.0.109"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.18.8",
-    "@cloudflare/workers-types": "4.20250620.0",
+    "@cloudflare/vitest-pool-workers": "0.18.1",
+    "@cloudflare/workers-types": "4.20260702.1",
     "typescript": "5.5.4",
     "vitest": "4.1.10",
-    "wrangler": "^4.114.0"
+    "wrangler": "4.107.1"
   }
 }

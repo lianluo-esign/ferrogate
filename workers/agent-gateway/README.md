@@ -195,7 +195,7 @@ real `CONTAINER_SANDBOX` binding + network and is the test gate's to prove.
 ## Deploy
 
 ```sh
-npm install                       # installs the PINNED agents + wrangler versions
+npm ci                            # installs the PINNED agents + wrangler versions
 wrangler secret put GATEWAY_CONTROL_TOKEN   # seed the DIY auth secret
 wrangler deploy                   # PUT the script + DO migration
 ```
@@ -211,7 +211,41 @@ pipeline in `crates/ferrogate-runtime/src/cloudflare_gateway_deploy.rs`.
 - `agents` (Agents SDK) — **pre-1.0**, pinned exactly in `package.json`
   (`0.0.109`). The pre-1.0 API surface (`routeAgentRequest`, `getAgentByName`,
   `Agent`) can change between patch releases, so the pin is exact, not a range.
-- `wrangler` — pinned exactly (`4.20.5`).
+- `wrangler` — pinned exactly (`4.107.1`). **Do not float this range** (#468); see
+  below.
+- `@cloudflare/workers-types` — pinned exactly (`4.20260702.1`), the last release
+  of the v4 line.
+- `@cloudflare/vitest-pool-workers` — pinned exactly (`0.18.1`), the last release
+  whose bundled `wrangler` dependency is `4.107.1`.
+
+### Why the Cloudflare toolchain is held on `workers-types` v4 (#468)
+
+`agents@0.0.109` → `partyserver` declares a **hard** peer on
+`@cloudflare/workers-types@^4`, and it still does on `partyserver@0.5.8` (latest
+at the time of writing) — the whole `partyserver` line is v4-only. `wrangler`
+crossed to `@cloudflare/workers-types@^5` in **4.108.0**; `4.107.1` is the last
+release whose `peerOptional` is still `^4` (`^4.20260702.1`). Those two ranges
+are simultaneously satisfiable only below that boundary, so the tree is pinned
+to the v4 side of it:
+
+| package | pin | reason |
+| --- | --- | --- |
+| `@cloudflare/workers-types` | `4.20260702.1` | last v4 release; satisfies `partyserver`'s `^4.20240729.0` **and** `wrangler@4.107.1`'s `^4.20260702.1` |
+| `wrangler` | `4.107.1` | last release with a v4 `peerOptional`; `4.108.0`+ demands v5 |
+| `@cloudflare/vitest-pool-workers` | `0.18.1` | pins `wrangler` as a **hard dependency**, so it, not the devDependency, decides which `wrangler` lands in the tree — `0.18.8` pins `wrangler@4.114.0` and reintroduces the v5 peer |
+
+`wrangler` was previously `^4.114.0`, i.e. floating. That float is what made the
+lockfile unregenerable: a `^` range silently walked the tree across the v4→v5
+`workers-types` boundary and produced an unsatisfiable peer graph. All three
+packages are therefore pinned exactly, not ranged.
+
+With these pins `npm ci` installs from a clean checkout with **no
+`--legacy-peer-deps`**, and every entry in `package-lock.json` carries
+`resolved` + `integrity`.
+
+**Unpinning is a coupled move.** Going to `wrangler@4.108.0`+ /
+`@cloudflare/workers-types@^5` requires a `partyserver` (hence `agents`) release
+that accepts the v5 peer. None exists yet. Bump all four together or not at all.
 
 ## SDK migration caveat (exports vs. legacy `migrations`)
 
@@ -234,5 +268,6 @@ interchangeable across all versions.
 
 This Worker needs a real Cloudflare account/token and network to deploy and to
 prove a live control round-trip. In the offline dev sandbox only
-`npm run typecheck` (tsc) can be attempted, and only if dependencies are already
-installed. The live deploy + round-trip are the test agent's to prove.
+`npm run typecheck` (tsc) can be attempted. `npm ci` needs registry access but no
+Cloudflare account, so a clean checkout can reach the typecheck offline-of-CF
+(#468). The live deploy + round-trip are the test agent's to prove.
