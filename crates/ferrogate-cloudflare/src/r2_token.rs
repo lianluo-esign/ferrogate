@@ -217,11 +217,28 @@ struct PermissionGroupRef {
 
 /// The `result` of a create-token response. Cloudflare returns the plaintext
 /// `value` exactly once, here.
-#[derive(Debug, Deserialize)]
-struct CreateTokenResult {
-    id: String,
+///
+/// `Debug` is hand-written (issue #492, same treatment as [`R2ScopedToken`]
+/// above and #489's `client::HttpResponse` one frame earlier on this same
+/// path). `value` is a `String`, so a derived `Debug` renders the one-time
+/// token as *readable plaintext* — strictly worse than the `Vec<u8>` body
+/// #489 closed. Whether the value was present still renders (`Some(..)` vs
+/// `None`), because that is the distinction
+/// [`CloudflareClient::create_scoped_r2_token`] turns into a `Decode` error.
+#[derive(Deserialize)]
+pub(crate) struct CreateTokenResult {
+    pub(crate) id: String,
     #[serde(default)]
-    value: Option<String>,
+    pub(crate) value: Option<String>,
+}
+
+impl fmt::Debug for CreateTokenResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateTokenResult")
+            .field("id", &self.id)
+            .field("value", &self.value.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl CloudflareClient {

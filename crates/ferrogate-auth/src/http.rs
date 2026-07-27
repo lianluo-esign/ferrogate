@@ -100,7 +100,26 @@ pub(crate) fn bad_request(error: serde_json::Error) -> HttpResponse {
 /// admin-api serve` (issue #315) -- can REUSE this #147-hardened HTTP
 /// plumbing instead of growing yet another hand-rolled copy (the exact
 /// duplication #147 had to fix across auth and billing).
-#[derive(Debug)]
+///
+/// `Debug` is hand-written (issue #492, following `ferrogate-cloudflare`'s
+/// `client::HttpRequest`) because every credential this service accepts
+/// arrives inside one of three fields:
+///
+/// - `body` — the **plaintext admin password** on `POST /v1/admin/register`
+///   and `/v1/admin/login`, parsed out of these very bytes in
+///   [`crate::server`]; also refresh and logout tokens;
+/// - `headers` — `authorization: Bearer <access_token>` on every
+///   authenticated admin/SCIM route, plus any `x-*-token` a sibling service
+///   sends;
+/// - `query` — the OAuth2 authorization `code` on the OIDC SSO callback
+///   (issue #160), which is a single-use credential exchangeable for tokens.
+///
+/// A derived `Debug` over `body: Vec<u8>` does **not** print text, it prints
+/// the decimal byte list (`body: [123, 34, 112, ...]`) — a trivially decodable
+/// leak that no plaintext-substring guard would catch. That is the #489
+/// vacuity shape, so it is closed here rather than papered over: only the
+/// method, the path and *lengths* are rendered, plus the sorted header
+/// **names** (never their values), which is what triage actually needs.
 pub struct HttpRequest {
     pub method: String,
     pub path: String,
@@ -112,6 +131,23 @@ pub struct HttpRequest {
     /// Header names lowercased for case-insensitive lookup.
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Header *names* are not secret and are the useful part for triage
+        // ("was there an authorization header at all?"); the values are the
+        // secret, so they are never rendered. Sorted for a stable rendering.
+        let mut header_names: Vec<&str> = self.headers.keys().map(String::as_str).collect();
+        header_names.sort_unstable();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("query_len", &self.query.len())
+            .field("header_names", &header_names)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl HttpRequest {
@@ -370,10 +406,29 @@ pub(crate) fn bounded_body_end(
 /// A minimal `Connection: close` JSON response writer, shared (like
 /// [`HttpRequest`]) with sibling side services so the #147 hardening work
 /// stays in one place instead of being copied per service.
-#[derive(Debug)]
+///
+/// `Debug` is hand-written for the same reason as [`HttpRequest`] above
+/// (issue #492): `body` is the **serialized** response payload, so it holds a
+/// minted credential in plaintext at the one moment it exists —
+/// `AdminScimTokenResponse` is serialized into it at
+/// [`crate::scim::handle_admin_scim_token_create`], and every admin session
+/// reply carries access/refresh tokens. Redacting `AdminScimTokenResponse`'s
+/// own `Debug` is not enough: by the time the value is in here it is bytes,
+/// and that impl can no longer run. A derived `Debug` would print those bytes
+/// as a decimal list, which is #489's exact vacuity trap. Only `status` and
+/// `body_len` are rendered.
 pub struct HttpResponse {
     pub(crate) status: u16,
     pub(crate) body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl HttpResponse {

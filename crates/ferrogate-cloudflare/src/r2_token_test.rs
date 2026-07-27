@@ -17,8 +17,8 @@ use crate::config::CloudflareConfig;
 use crate::error::CloudflareError;
 use crate::r2::r2_bucket_name_for_tenant;
 use crate::r2_token::{
-    R2ScopedTokenRequest, R2TokenAccess, R2_BUCKET_ITEM_READ_PERMISSION_GROUP_ID,
-    R2_BUCKET_ITEM_WRITE_PERMISSION_GROUP_ID,
+    CreateTokenResult, R2ScopedTokenRequest, R2TokenAccess,
+    R2_BUCKET_ITEM_READ_PERMISSION_GROUP_ID, R2_BUCKET_ITEM_WRITE_PERMISSION_GROUP_ID,
 };
 use crate::resolver::EnvTokenResolver;
 
@@ -444,4 +444,53 @@ fn debug_redacts_the_secret_access_key() {
         !rendered.contains(SHA256_OF_ABC),
         "secret leaked into Debug: {rendered}"
     );
+}
+
+/// Issue #492: `CreateTokenResult` holds Cloudflare's **one-time plaintext**
+/// token value — the input the R2 secret access key is derived from — in a
+/// `String`, so a derived `Debug` renders it verbatim. That is strictly worse
+/// than the `Vec<u8>` response body #489 closed one frame earlier on this same
+/// path: no decoding needed, and it is one `{:?}`, `unwrap()` or `anyhow`
+/// context away from a log line.
+#[test]
+fn create_token_result_debug_redacts_the_one_time_value() {
+    const ONE_TIME_VALUE: &str = "v1.0-cloudflare-one-time-token-value";
+
+    let result = CreateTokenResult {
+        id: "tok123".to_string(),
+        value: Some(ONE_TIME_VALUE.to_string()),
+    };
+    let rendered = format!("{result:?}");
+
+    assert!(
+        !rendered.contains(ONE_TIME_VALUE),
+        "one-time token value leaked into CreateTokenResult Debug: {rendered}"
+    );
+    // A prefix is a leak too (this value is machine-generated entropy).
+    for prefix_len in [4usize, 8, 16] {
+        assert!(
+            !rendered.contains(&ONE_TIME_VALUE[..prefix_len]),
+            "a {prefix_len}-char prefix of the one-time token value leaked: {rendered}"
+        );
+    }
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    // The token id is not secret and is what a revoke/triage needs.
+    assert!(rendered.contains("tok123"), "{rendered}");
+}
+
+/// Present-vs-absent must survive the redaction: `create_scoped_r2_token` turns
+/// a missing `value` into a typed `Decode` error, and a `Debug` that rendered
+/// `<redacted>` either way would make that failure undiagnosable.
+#[test]
+fn create_token_result_debug_distinguishes_a_missing_value() {
+    let rendered = format!(
+        "{:?}",
+        CreateTokenResult {
+            id: "tok123".to_string(),
+            value: None,
+        }
+    );
+
+    assert!(rendered.contains("None"), "{rendered}");
+    assert!(!rendered.contains("<redacted>"), "{rendered}");
 }

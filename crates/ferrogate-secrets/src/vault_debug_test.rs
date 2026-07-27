@@ -71,4 +71,27 @@ fn vault_resolver_debug_redacts_the_nested_token() {
         "Vault token leaked through VaultSecretResolver Debug: {rendered}"
     );
     assert!(rendered.contains("<redacted>"), "{rendered}");
+    assert_no_token_prefix(&rendered, "VaultSecretResolver");
+}
+
+/// A partial leak is a leak: 16 characters of a live `hvs.` service token is a
+/// disclosure, and the two full-secret assertions above do not see it.
+/// `.field("token_prefix", &&self.token[..16])` on `VaultConfig::fmt` renders
+/// `hvs.CAESIJsuper-` — which contains neither `VAULT_TOKEN` nor the
+/// `super-secret-live-vault-token` body substring, and leaves `<redacted>` in
+/// place — so without this guard both tests above stay green while the token
+/// prints.
+fn assert_no_token_prefix(rendered: &str, what: &str) {
+    for prefix_len in [4usize, 8, 16] {
+        let prefix = &VAULT_TOKEN[..prefix_len];
+        assert!(
+            !rendered.contains(prefix),
+            "a {prefix_len}-char Vault token prefix leaked into {what} Debug: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn vault_config_debug_prints_no_prefix_of_the_token() {
+    assert_no_token_prefix(&format!("{:?}", config()), "VaultConfig");
 }
