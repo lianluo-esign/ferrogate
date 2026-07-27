@@ -998,3 +998,252 @@ fn a_coding_runs_work_product_is_retrievable_from_the_job_result_and_is_tenant_s
         .self_hosted_run_timeline(&run_id, Some("tenant-b"))
         .is_none());
 }
+
+// ---------------------------------------------------------------------------
+// #502: the per-tenant submit budget. Before this slice the cap had NO test at
+// all -- dropping the tenant filter, the acknowledged filter or the whole gate
+// reddened nothing -- and cancelling, the remedy its own 429 names, freed zero
+// slots, so a tenant whose workers never acked was locked out of the surface
+// permanently. Every assertion below is on what the CALLER observes
+// (`agent_job_submit_refusal` is the verbatim status + error code the handler
+// writes back, or `None` for the 202 path), at the cap boundary.
+// ---------------------------------------------------------------------------
+
+/// Submits `count` genuinely new jobs for `tenant_id` exactly the way
+/// `handle_agent_job_submit` does -- enqueue the start dispatch, then claim the
+/// run row -- and returns their run ids in submission order.
+fn submit_open_jobs(
+    state: &AppState,
+    tenant_id: &str,
+    key_prefix: &str,
+    count: usize,
+) -> Vec<String> {
+    (0..count)
+        .map(|index| {
+            let run_id = agent_job_run_id(tenant_id, &format!("{key_prefix}-{index}"));
+            state
+                .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&run_id, tenant_id))
+                .expect("submit enqueues the start dispatch");
+            state.record_agent_run(queued_run(&run_id, tenant_id));
+            run_id
+        })
+        .collect()
+}
+
+/// Cancels `run_id` exactly the way `handle_agent_job_cancel` does: dispatch a
+/// `cancel_run` to the runtime, then terminalize the run row.
+fn cancel_open_job(state: &AppState, run_id: &str) {
+    let run = state
+        .agent_run_record(run_id)
+        .expect("the job has a run row");
+    assert_eq!(
+        cancel_agent_job_in_runtime(state, &run, "fg-cancel", 300),
+        Ok(true),
+        "cancelling a live job must reach the runtime transport"
+    );
+    let mut cancelled = run;
+    cancelled.status = "cancelled".to_string();
+    cancelled.completed_at_unix = Some(300);
+    state.record_agent_run(cancelled);
+}
+
+#[test]
+fn the_submit_budget_admits_below_the_cap_and_refuses_exactly_at_it() {
+    let state = AppState::new(Config::default());
+    let opened = submit_open_jobs(&state, "tenant-a", "cap", AGENT_JOB_MAX_OPEN_PER_TENANT - 1);
+    assert_eq!(opened.len(), AGENT_JOB_MAX_OPEN_PER_TENANT - 1);
+
+    // cap-1 open: the caller is still admitted (the 202 path).
+    assert_eq!(
+        agent_job_submit_refusal(&state, "tenant-a"),
+        None,
+        "a tenant one below the cap must still be able to submit"
+    );
+
+    // The last permitted slot is taken; the very next submit is refused.
+    submit_open_jobs(&state, "tenant-a", "cap-last", 1);
+    let (status, code, message) =
+        agent_job_submit_refusal(&state, "tenant-a").expect("a tenant AT the cap must be refused");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code, "agent_job_open_limit_reached");
+    assert!(
+        message.contains(&format!(
+            "tenant already has {AGENT_JOB_MAX_OPEN_PER_TENANT} agent jobs in flight"
+        )),
+        "the refusal reports the real open count: {message}"
+    );
+    // The remedies the text names must both be real (see the two tests below).
+    assert!(
+        message.contains("wait for or cancel an existing job"),
+        "{message}"
+    );
+}
+
+#[test]
+fn cancelling_a_job_frees_exactly_one_submit_slot_when_no_worker_will_ever_ack() {
+    // The #502 lockout, reproduced: no worker is registered, so NOTHING on the
+    // ack path will ever clear these dispatches. Cancel is the only remedy the
+    // tenant has, and the 429 promises it works.
+    let state = AppState::new(Config::default());
+    let opened = submit_open_jobs(&state, "tenant-a", "lockout", AGENT_JOB_MAX_OPEN_PER_TENANT);
+    assert!(
+        agent_job_submit_refusal(&state, "tenant-a").is_some(),
+        "the tenant is at the cap"
+    );
+
+    cancel_open_job(&state, &opened[0]);
+    assert_eq!(
+        agent_job_submit_refusal(&state, "tenant-a"),
+        None,
+        "cancelling must free the slot the 429 tells the caller to free"
+    );
+
+    // Exactly ONE slot: the next submit consumes it and the gate closes again,
+    // so the release is per-cancel and not a blanket disabling of the cap.
+    submit_open_jobs(&state, "tenant-a", "after-one-cancel", 1);
+    assert!(
+        agent_job_submit_refusal(&state, "tenant-a").is_some(),
+        "one cancel frees one slot, not the whole budget"
+    );
+
+    // Cancelling every remaining job clears the whole backlog, which is the
+    // escape hatch a workerless tenant never had.
+    for run_id in &opened[1..] {
+        cancel_open_job(&state, run_id);
+    }
+    assert_eq!(agent_job_submit_refusal(&state, "tenant-a"), None);
+}
+
+#[test]
+fn a_runtime_acknowledgement_frees_a_submit_slot() {
+    // The other remedy the refusal names ("wait for"): a worker that leases and
+    // acks a start dispatch releases its slot. Drives the REAL poll/ack seam.
+    let state = AppState::new(Config::default());
+    let (worker, transport_secret) = state
+        .register_self_hosted_worker(crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+            tenant: tenant("tenant-a"),
+            workspace_id: "ws-1".to_string(),
+            worker_name: "job-worker".to_string(),
+            identity_fingerprint: "sha256:job-worker".to_string(),
+            identity_expires_at_unix: Some(4_000_000_000),
+            orchestration_enabled: true,
+            capability_envelope_json: Some(
+                r#"{"frameworks":["claude-code"],"capabilities":["shell"]}"#.to_string(),
+            ),
+        })
+        .expect("worker registers");
+    submit_open_jobs(&state, "tenant-a", "acked", AGENT_JOB_MAX_OPEN_PER_TENANT);
+    assert!(agent_job_submit_refusal(&state, "tenant-a").is_some());
+
+    let identity = ferrogate_runtime::SelfHostedWorkerIdentity {
+        tenant_id: "tenant-a".to_string(),
+        workspace_id: "ws-1".to_string(),
+        worker_id: worker.id.clone(),
+        token_id: "sha256:job-worker".to_string(),
+        token_secret: transport_secret,
+        observed_at_unix: None,
+    };
+    let lease = state
+        .poll_self_hosted_worker_run(ferrogate_runtime::SelfHostedRunPollRequest {
+            protocol_version: 1,
+            identity: identity.clone(),
+            supported_capabilities: vec!["shell".to_string()],
+            now_unix: 1_000,
+            lease_duration_secs: 60,
+        })
+        .expect("poll is accepted")
+        .expect("the worker leases one of the tenant's queued jobs");
+    assert!(
+        lease
+            .dispatch_id
+            .starts_with(AGENT_JOB_START_DISPATCH_PREFIX),
+        "the worker must have leased a submitted job, not the registration seed: {}",
+        lease.dispatch_id
+    );
+    state
+        .ack_self_hosted_worker_run(ferrogate_runtime::SelfHostedRunAckRequest {
+            protocol_version: 1,
+            identity,
+            dispatch_id: lease.dispatch_id.clone(),
+            action: lease.action,
+            lease_id: lease.lease_id.clone(),
+            run_id: lease.run_id.clone(),
+            status: ferrogate_runtime::SelfHostedRunAckStatus::Accepted,
+            reported_at_unix: 1_010,
+        })
+        .expect("ack is accepted");
+
+    assert_eq!(
+        agent_job_submit_refusal(&state, "tenant-a"),
+        None,
+        "an acknowledged job is no longer open and must free its slot"
+    );
+}
+
+#[test]
+fn one_tenants_backlog_never_consumes_another_tenants_submit_budget() {
+    let state = AppState::new(Config::default());
+    submit_open_jobs(&state, "tenant-b", "noisy", AGENT_JOB_MAX_OPEN_PER_TENANT);
+    assert!(
+        agent_job_submit_refusal(&state, "tenant-b").is_some(),
+        "the tenant that filled the queue is refused"
+    );
+    assert_eq!(
+        agent_job_submit_refusal(&state, "tenant-a"),
+        None,
+        "a neighbour's backlog must never refuse this tenant's first submit"
+    );
+
+    // ...and tenant-a still gets its OWN full budget, not a share of one.
+    submit_open_jobs(
+        &state,
+        "tenant-a",
+        "quiet",
+        AGENT_JOB_MAX_OPEN_PER_TENANT - 1,
+    );
+    assert_eq!(agent_job_submit_refusal(&state, "tenant-a"), None);
+    submit_open_jobs(&state, "tenant-a", "quiet-last", 1);
+    assert!(agent_job_submit_refusal(&state, "tenant-a").is_some());
+}
+
+#[test]
+fn background_start_dispatches_do_not_consume_the_callers_submit_budget() {
+    // A schedule fire (#426) and a worker-registration seed enqueue `start_run`
+    // dispatches for the same tenant into the SAME queue. The caller never
+    // asked for either, so neither may eat the caller-facing submit budget.
+    let state = AppState::new(Config::default());
+    submit_open_jobs(
+        &state,
+        "tenant-a",
+        "budget",
+        AGENT_JOB_MAX_OPEN_PER_TENANT - 1,
+    );
+    for (dispatch_id, run_id) in [
+        (
+            "schedule-dispatch-nightly-sweep-1700000000",
+            "schedule-run-nightly-sweep-1700000000",
+        ),
+        (
+            "self-hosted-dispatch-self-hosted-worker-1",
+            "self-hosted-run-self-hosted-worker-1",
+        ),
+    ] {
+        state
+            .enqueue_scheduled_self_hosted_dispatch(SelfHostedRunDispatch {
+                dispatch_id: dispatch_id.to_string(),
+                run_id: run_id.to_string(),
+                agent_run_id: Some(run_id.to_string()),
+                ..start_dispatch("unused", "tenant-a")
+            })
+            .expect("background producers share the lease queue");
+    }
+
+    assert_eq!(
+        agent_job_submit_refusal(&state, "tenant-a"),
+        None,
+        "scheduled and seeded runs must not spend the caller's submit budget"
+    );
+    // The caller's own last slot still closes the gate.
+    submit_open_jobs(&state, "tenant-a", "budget-last", 1);
+    assert!(agent_job_submit_refusal(&state, "tenant-a").is_some());
+}

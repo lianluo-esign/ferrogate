@@ -609,3 +609,127 @@ fn a_submitted_agent_job_survives_a_restart_of_the_serving_component() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+/// Mirrors `AGENT_JOB_MAX_OPEN_PER_TENANT` in `gateway/agent_jobs.rs` (private
+/// to the binary crate, so the boundary is restated here). Changing the cap
+/// without changing this constant reddens this test, which is the point: the
+/// boundary is part of the contract's `429` response.
+const OPEN_JOB_CAP: usize = 200;
+
+/// Submits one NEW job under `idempotency_key` and returns `(status line, body)`.
+fn submit_job(gateway_addr: &str, idempotency_key: &str) -> (String, serde_json::Value) {
+    let headers = [
+        "Authorization: Bearer job-secret".to_string(),
+        "Content-Type: application/json".to_string(),
+        format!("Idempotency-Key: {idempotency_key}"),
+    ];
+    let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+    let response = http_request(
+        gateway_addr,
+        "POST",
+        "/v1/agent-jobs",
+        &headers,
+        &serde_json::json!({ "input": "hold a slot", "required_capabilities": ["shell"] })
+            .to_string(),
+    );
+    let status = response
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    (status, response_json(&response))
+}
+
+#[test]
+fn cancelling_frees_a_submit_slot_so_a_workerless_tenant_is_never_locked_out() {
+    // Issue #502, over the REAL HTTP surface. NO worker is registered, so
+    // nothing will ever acknowledge a start dispatch -- the exact tenant that
+    // used to be locked out of `POST /v1/agent-jobs` permanently once it hit
+    // the cap, because the 429's "cancel an existing job" remedy freed nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let gateway_addr = free_addr();
+    std::fs::write(&config_path, gateway_config(&gateway_addr)).unwrap();
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    // Fill the budget to exactly the cap. Every one of these is admitted --
+    // including the LAST one, submitted with cap-1 jobs already open.
+    let mut first_run_id = String::new();
+    for index in 0..OPEN_JOB_CAP {
+        let (status, body) = submit_job(&gateway_addr, &format!("cap-{index}"));
+        assert!(
+            status.contains("202"),
+            "submit {index} (below the cap) must be accepted: {status} {body}"
+        );
+        if index == 0 {
+            first_run_id = body["run_id"].as_str().unwrap().to_string();
+        }
+    }
+
+    // At the cap: refused, with the contract's declared code.
+    let (over_status, over_body) = submit_job(&gateway_addr, "cap-over");
+    assert!(
+        over_status.contains("429"),
+        "the cap must refuse the {}th open job: {over_status} {over_body}",
+        OPEN_JOB_CAP + 1
+    );
+    assert_eq!(over_body["error"]["code"], "agent_job_open_limit_reached");
+
+    // The budget is per tenant: a different tenant's key is unaffected by this
+    // tenant's backlog.
+    let intruder: [&str; 3] = [
+        "Authorization: Bearer intruder-secret",
+        "Content-Type: application/json",
+        "Idempotency-Key: neighbour-1",
+    ];
+    let neighbour = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-jobs",
+        &intruder,
+        &serde_json::json!({ "input": "a neighbour's job" }).to_string(),
+    );
+    assert!(
+        neighbour.contains("HTTP/1.1 202"),
+        "one tenant at its cap must never refuse another tenant: {neighbour}"
+    );
+
+    // The remedy the 429 names: cancel one job.
+    let cancel = http_request(
+        &gateway_addr,
+        "POST",
+        &format!("/v1/agent-jobs/{first_run_id}/cancel"),
+        &CALLER,
+        "",
+    );
+    assert!(cancel.contains("HTTP/1.1 200"), "{cancel}");
+    let cancel = response_json(&cancel);
+    assert_eq!(cancel["cancelled"], true);
+    assert_eq!(cancel["runtime_cancel_dispatched"], true);
+
+    // ...and the slot is genuinely free: the SAME submit that was refused a
+    // moment ago now succeeds. This is the assertion the defect fails.
+    let (after_cancel, after_cancel_body) = submit_job(&gateway_addr, "cap-over");
+    assert!(
+        after_cancel.contains("202"),
+        "cancelling must free a slot the caller can actually use: \
+         {after_cancel} {after_cancel_body}"
+    );
+    assert_eq!(after_cancel_body["deduplicated"], false);
+
+    // Exactly one slot was freed -- the cap still holds for the next submit.
+    let (refused_again, refused_body) = submit_job(&gateway_addr, "cap-over-again");
+    assert!(
+        refused_again.contains("429"),
+        "one cancel frees one slot, not the whole cap: {refused_again} {refused_body}"
+    );
+    assert_eq!(
+        refused_body["error"]["code"],
+        "agent_job_open_limit_reached"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

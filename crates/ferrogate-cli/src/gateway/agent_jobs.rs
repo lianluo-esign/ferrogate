@@ -105,15 +105,21 @@ const AGENT_JOB_WRITE_SCOPE: &str = "agent.runs.create";
 /// Scope required to observe a job (status / events / result).
 const AGENT_JOB_READ_SCOPE: &str = "agent.runs.read";
 
-/// Max jobs one tenant may hold OPEN (submitted, not yet acknowledged by the
-/// runtime) at once (#474 rework).
+/// Max jobs one tenant may hold OPEN at once (#474 rework): submitted through
+/// THIS surface, not yet acknowledged by the runtime, and not yet cancelled by
+/// the caller.
 ///
 /// Every submit writes a durable dispatch row, and `/v1/agent-jobs` is the
 /// first surface that lets an ordinary tenant API key create those at will. The
 /// cap is per tenant and counts only in-flight work, so a tenant that keeps
-/// finishing its jobs is never throttled, while a runaway submit loop is
-/// refused with 429 instead of growing the shared dispatch table without bound.
+/// finishing (or cancelling) its jobs is never throttled, while a runaway
+/// submit loop is refused with 429 instead of growing the shared dispatch table
+/// without bound.
 const AGENT_JOB_MAX_OPEN_PER_TENANT: usize = 200;
+
+/// Error code of the retention refusal. Named once so the handler, the
+/// contract and the tests that hold the boundary all spell it the same way.
+const AGENT_JOB_OPEN_LIMIT_CODE: &str = "agent_job_open_limit_reached";
 
 /// Run statuses that mean "this job will not change again". A caller polling
 /// status stops here; `.../result` only answers 200 in these states.
@@ -148,14 +154,56 @@ fn agent_job_run_id(tenant_id: &str, idempotency_key: &str) -> String {
     id
 }
 
+/// Dispatch-id namespace of the START dispatches THIS surface mints. It is the
+/// only thing that distinguishes a caller's submit from the other producers of
+/// `start_run` dispatches in the same queue -- schedule fires
+/// (`schedule-dispatch-*`, #426) and worker-registration seeds
+/// (`self-hosted-dispatch-*`) -- so the submit budget can be scoped to work the
+/// caller actually asked for (#502).
+const AGENT_JOB_START_DISPATCH_PREFIX: &str = "agent-job-start-";
+
 /// Deterministic dispatch ids derived from the job id, so a racing double
 /// submit/cancel enqueues the SAME dispatch (the lease queue dedups on id).
 fn agent_job_start_dispatch_id(run_id: &str) -> String {
-    format!("agent-job-start-{run_id}")
+    format!("{AGENT_JOB_START_DISPATCH_PREFIX}{run_id}")
 }
 
 fn agent_job_cancel_dispatch_id(run_id: &str) -> String {
     format!("agent-job-cancel-{run_id}")
+}
+
+/// The submit retention gate, as a value: `None` means "admit this submit",
+/// `Some((status, code, message))` is the VERBATIM refusal the handler writes
+/// back. Split out of the handler so the boundary (cap-1 admits, cap refuses,
+/// a cancel re-admits) is testable as the response a caller observes rather
+/// than as an internal counter (#502; #500's rule that an assertion which
+/// cannot fail is not coverage).
+///
+/// Reached only on a genuinely NEW job -- a retry of an existing idempotency
+/// key deduplicates before this point and is never refused -- so a caller can
+/// always re-poll and cancel what it already has.
+fn agent_job_submit_refusal(
+    state: &AppState,
+    tenant_id: &str,
+) -> Option<(StatusCode, &'static str, String)> {
+    let open_jobs =
+        state.self_hosted_open_start_dispatch_count(tenant_id, AGENT_JOB_START_DISPATCH_PREFIX);
+    if open_jobs < AGENT_JOB_MAX_OPEN_PER_TENANT {
+        return None;
+    }
+    Some((
+        StatusCode::TOO_MANY_REQUESTS,
+        AGENT_JOB_OPEN_LIMIT_CODE,
+        // Both remedies this names are real: the runtime's ack releases a slot,
+        // and so does `POST /v1/agent-jobs/{run_id}/cancel` (#502 -- before that
+        // fix cancelling freed nothing and this sentence was a lie for any
+        // tenant whose workers were not acking).
+        format!(
+            "tenant already has {open_jobs} agent jobs in flight (limit \
+             {AGENT_JOB_MAX_OPEN_PER_TENANT}); wait for or cancel an existing job before \
+             submitting another"
+        ),
+    ))
 }
 
 /// The caller's submission document. `input` is the task; everything else
@@ -496,24 +544,9 @@ impl FerroGateway {
             return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
         }
 
-        // Retention gate (#474 rework). Reached only on a genuinely NEW job --
-        // a retry of an existing key deduplicates above and is never refused --
-        // so a tenant can always re-poll and cancel what it already has.
-        let open_jobs =
-            state.self_hosted_open_dispatch_count(&tenant_id, SelfHostedRunAction::StartRun);
-        if open_jobs >= AGENT_JOB_MAX_OPEN_PER_TENANT {
-            return write_json_error(
-                session,
-                StatusCode::TOO_MANY_REQUESTS,
-                "agent_job_open_limit_reached",
-                format!(
-                    "tenant already has {open_jobs} agent jobs in flight (limit \
-                     {AGENT_JOB_MAX_OPEN_PER_TENANT}); wait for or cancel an existing job before \
-                     submitting another"
-                ),
-                &ctx.request_id,
-            )
-            .await;
+        // Retention gate (#474 rework, corrected by #502).
+        if let Some((status, code, message)) = agent_job_submit_refusal(&state, &tenant_id) {
+            return write_json_error(session, status, code, message, &ctx.request_id).await;
         }
 
         let now = now_unix_seconds();

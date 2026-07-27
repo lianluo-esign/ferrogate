@@ -399,29 +399,64 @@ impl AppState {
         persist_self_hosted_dispatch_records(&self.repositories, records)
     }
 
-    /// How many self-hosted dispatches this tenant currently has in flight
-    /// (queued or leased, never acknowledged) for `action`.
+    /// How many `start_run` dispatches this tenant still holds OPEN against a
+    /// caller-facing submit budget.
     ///
     /// #474 (rework): the caller-facing job surface uses this to cap the number
     /// of open jobs one tenant can hold, so an ordinary tenant API key cannot
     /// grow the shared dispatch table without bound by submitting in a loop.
-    /// Only UNACKED dispatches count, so a tenant that keeps finishing its jobs
-    /// is never throttled.
-    pub(crate) fn self_hosted_open_dispatch_count(
+    ///
+    /// #502 fixes what that first cut counted. A dispatch is only OPEN when ALL
+    /// of these hold:
+    ///
+    /// * it belongs to `tenant_id` -- one tenant's backlog never throttles
+    ///   another's submits;
+    /// * it is UNACKNOWLEDGED -- a tenant whose runtime keeps finishing its work
+    ///   is never throttled;
+    /// * its dispatch id starts with `dispatch_id_prefix`, i.e. the SUBMIT
+    ///   surface minted it. Schedule fires (#426) and worker-registration seeds
+    ///   enqueue `start_run` dispatches into the same queue, and background work
+    ///   the caller never asked for must not silently eat the caller's budget;
+    /// * no `cancel_run` dispatch exists for the same run. Cancelling is the
+    ///   remedy the 429 names, so it must actually return the slot: nothing else
+    ///   ever clears a start dispatch, so a tenant with no worker (or whose
+    ///   workers stopped acking) was otherwise locked out of the surface
+    ///   PERMANENTLY once it reached the cap.
+    ///
+    /// Node-local by construction: the count reads this process's lease queue,
+    /// so with N replicas the effective cap is N x the caller's cap. That is a
+    /// deliberately retained limitation (a cluster-wide count needs a durable
+    /// aggregate the control-plane store does not expose) and is why the refusal
+    /// text promises only what a single node can honour.
+    pub(crate) fn self_hosted_open_start_dispatch_count(
         &self,
         tenant_id: &str,
-        action: SelfHostedRunAction,
+        dispatch_id_prefix: &str,
     ) -> usize {
         let records = match self.self_hosted_dispatch.lock() {
             Ok(runtime) => runtime.queue.run_records(),
             Err(poisoned) => poisoned.into_inner().queue.run_records(),
         };
+        // Runs this tenant has already asked the runtime to cancel. The cancel
+        // dispatch is the durable evidence of the release, so the slot stays
+        // free across a restart exactly like the start dispatch it releases.
+        let cancelled_runs: HashSet<&str> = records
+            .iter()
+            .filter(|record| {
+                record.dispatch.action == SelfHostedRunAction::CancelRun
+                    && record.dispatch.tenant_id == tenant_id
+            })
+            .map(|record| record.dispatch.run_id.as_str())
+            .collect();
         records
-            .into_iter()
+            .iter()
             .filter(|record| record.acknowledged_status.is_none())
             .filter(|record| {
-                record.dispatch.action == action && record.dispatch.tenant_id == tenant_id
+                record.dispatch.action == SelfHostedRunAction::StartRun
+                    && record.dispatch.tenant_id == tenant_id
             })
+            .filter(|record| record.dispatch.dispatch_id.starts_with(dispatch_id_prefix))
+            .filter(|record| !cancelled_runs.contains(record.dispatch.run_id.as_str()))
             .count()
     }
 
