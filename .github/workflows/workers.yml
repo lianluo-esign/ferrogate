@@ -1,0 +1,66 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-27
+# description: Cloudflare Workers gate — typecheck + workerd E2E for workers/**.
+
+name: Workers
+
+# Why this workflow triggers on push/pull_request when every other module is
+# `workflow_call`-only (issue #499):
+#
+# `ci.yml` runs on `release: published`, deliberately, so day-to-day work does
+# not spend cloud runner-minutes. That policy is right for the Rust suites,
+# which are minutes each and reproducible locally. It is wrong for this gate:
+# #475 landed a Worker with a lost `/**` comment opener, `agent-gateway` was
+# undeployable on `main` for as long as it took a human to notice, and a
+# release-only gate would have reported it after the fact.
+#
+# The cost asymmetry makes the exception cheap: this job is `npm ci` + `tsc
+# --noEmit` (+ workerd vitest for the Workers that opt in), on a path filter
+# that fires only when `workers/**` or the gate itself changes. It cannot run
+# for a Rust-only commit.
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    paths:
+      - "workers/**"
+      - "scripts/check-workers.sh"
+      - "scripts/node-env.sh"
+      - ".github/workflows/workers.yml"
+  pull_request:
+    paths:
+      - "workers/**"
+      - "scripts/check-workers.sh"
+      - "scripts/node-env.sh"
+      - ".github/workflows/workers.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workers:
+    name: workers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      # The script owns the per-Worker logic: it locates Node and refuses
+      # loudly when it cannot (#508), installs dependencies, runs
+      # `tsc --noEmit` for every Worker, and boots the ones shipping a
+      # `vitest.config.ts` in workerd via @cloudflare/vitest-pool-workers --
+      # no Docker, no live Cloudflare account. Keeping the logic in the script
+      # rather than in YAML is what makes the same gate runnable locally.
+      - name: Run workers gate
+        run: ./scripts/check-workers.sh

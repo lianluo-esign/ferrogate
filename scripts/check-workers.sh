@@ -43,7 +43,32 @@ for worker in "${WORKERS[@]}"; do
   echo "== workers/$worker =="
   cd "$ROOT/workers/$worker"
 
-  if [ ! -d node_modules ]; then
+  # #499: "node_modules exists" is NOT "node_modules is usable". Testing the
+  # directory let a tree that predates a dependency being added satisfy the
+  # check: workers/agent-gateway had a node_modules with no `vitest` and no
+  # @cloudflare/vitest-pool-workers, so `npm test` died with `vitest: not
+  # found` while the script silently skipped the reinstall that would have
+  # fixed it -- the gate quietly degraded to typecheck-only, which is exactly
+  # the silent-skip class this issue is about.
+  #
+  # So ask for what the gate is about to RUN, not for a directory: `tsc` for
+  # the typecheck every Worker gets, and `vitest` for the Workers that opt
+  # into the workerd E2E by committing a vitest.config.ts. Deliberately not
+  # `npm ls`, which reports non-zero on agent-gateway's known-broken peer
+  # graph (#468) and would reinstall on every single run.
+  worker_tree_is_usable() {
+    [ -d node_modules ] || return 1
+    [ -x node_modules/.bin/tsc ] || return 1
+    if [ -f vitest.config.ts ]; then
+      [ -x node_modules/.bin/vitest ] || return 1
+    fi
+    return 0
+  }
+
+  if ! worker_tree_is_usable; then
+    if [ -d node_modules ]; then
+      echo "-- reinstalling: node_modules is present but does not satisfy the gate" >&2
+    fi
     if [ -f package-lock.json ]; then
       echo "-- npm ci (node_modules missing)"
       # A committed lockfile that is out of sync with package.json makes `npm ci`

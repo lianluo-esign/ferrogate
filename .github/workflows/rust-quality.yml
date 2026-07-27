@@ -59,6 +59,12 @@ jobs:
           cargo test -p ferrogate-cli --all-features config::tests
           cargo test -p ferrogate-cli --all-features config::validation_tests
 
+      # #499 (related): check-module-layout.py enforces the per-file line caps
+      # that keep ferrogate-storage's lib.rs reviewable. It appeared in no
+      # workflow either -- same silent-skip class as the workers gate itself.
+      - name: Validate module layout
+        run: python3 scripts/check-module-layout.py
+
       - name: Validate OpenAPI schemas
         run: |
           PYTHONPATH=scripts python3 -m unittest scripts/test_openapi_contract.py

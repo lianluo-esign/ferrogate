@@ -30,6 +30,10 @@ jobs:
     name: rust-quality
     uses: ./.github/workflows/rust-quality.yml
 
+  workers:
+    name: workers
+    uses: ./.github/workflows/workers.yml
+
   core-policy-tests:
     name: rust-core-policy-tests
     uses: ./.github/workflows/rust-core-policy-tests.yml
