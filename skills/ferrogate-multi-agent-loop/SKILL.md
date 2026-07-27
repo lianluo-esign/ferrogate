@@ -66,6 +66,13 @@ it writes:**
   agent runs; only their *execution* moves downstream. Writing an assertion so
   it is not vacuous is still the dev's job (see `ferrogate-dev-loop`, "mutation
   -verify" — it survives as *design* guidance, not as a proof obligation).
+- **No exception when the issue's own acceptance asks for mutation
+  verification.** #516, #492 and #502 each have an acceptance box of the form
+  "verify by actually inverting it, not by writing a test that looks right".
+  The user was asked directly and chose: the dev lane never runs tests, these
+  included. So write the test, make the inversion trivial for whoever runs it,
+  and say in the handoff that the issue's central ask is **not** met by dev.
+  Do not re-litigate this per issue.
 - **Disclose, don't imply.** The handoff comment and the commit's `Not-tested:`
   trailer must say plainly that nothing was executed, and name the mutations the
   downstream agent should apply. A slice that reads as if it were verified is
