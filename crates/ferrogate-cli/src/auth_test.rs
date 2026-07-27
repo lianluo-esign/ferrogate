@@ -1610,6 +1610,48 @@ fn tenant_scoped_static_key_is_never_platform_root() {
 /// A durable/virtual key is minted under a tenant, so it is tenant-scoped no
 /// matter what the compatibility switch says: the storage path can never
 /// produce a platform-root credential.
+/// #542, pinned as the HOLE it is rather than left invisible.
+///
+/// `auth_required()` is `auth_service.enabled || !api_keys.is_empty()` -- it
+/// counts STATIC config keys only. So a deployment whose credentials live in
+/// storage, with an empty `api_keys` section, has authentication switched off
+/// entirely: `authenticate()` takes the zero-config early return, admits a
+/// request that presented NO credential at all, and hands back the wildcard
+/// scope plus `platform_operator: true`. The seeded durable key is never read.
+///
+/// This asserts the CURRENT, WRONG behaviour on purpose. Before #538 the
+/// suite exercised this posture only by accident, in
+/// `durable_virtual_key_is_never_platform_root`, which omitted the decoy key
+/// that every other durable test carries and so never reached the durable
+/// branch at all. Adding the decoy was the right fix for that test, but it
+/// removed the file's only exercise of the zero-config path and would have
+/// left #542 landable with nothing going red in either direction.
+///
+/// WHEN #542 IS FIXED THIS TEST MUST FAIL. That is the point. Invert it to the
+/// contract -- no credential, no admission -- and delete this comment.
+#[test]
+fn zero_config_admits_an_unauthenticated_request_as_platform_root_issue_542() {
+    let secret = "fg_live_e2e_0123456789abcdef";
+    // No static api_keys and no auth service: auth_required() is false.
+    let state = AppState::new(Config::default());
+    seed_durable_virtual_key(&state, "vk-542", secret, |_| {});
+
+    // Note the headers: EMPTY. Nothing is presented, and it is admitted.
+    let auth = authenticate(&state, &HeaderMap::new(), "chat.completions", "req-542")
+        .expect("#542: zero-config admits an unauthenticated request today");
+
+    assert!(
+        auth.is_platform_operator(),
+        "#542: the zero-config context is platform root today -- if this now \
+         fails, #542 has been fixed and this test must be inverted to the \
+         contract rather than deleted"
+    );
+    assert!(
+        auth.api_key_id.is_none(),
+        "#542: no credential was consulted, so nothing is attributed"
+    );
+}
+
 #[test]
 fn durable_virtual_key_is_never_platform_root() {
     let secret = "fg_live_e2e_0123456789abcdef";

@@ -1,0 +1,71 @@
+{
+  "id": "auth/tenant-identity-required",
+  "schema": 1,
+  "description": "A credential that declares neither `platform_operator` nor an `organization_id` is unclassifiable once the deprecated compatibility switch is off (#515). `finalize_auth` refuses it rather than guessing a tenancy: the alternative -- treating an omitted field as platform root -- is the exact default #515 exists to remove, and guessing a tenant would be worse. The posture needs BOTH halves to be reachable: `[tenancy] implicit_platform_operator = false`, and a key that states no identity at all. With the switch on (the deprecated default) this same key is still admitted as root, which is what #540 flips.",
+  "world": {
+    "config": {
+      "tenancy": {
+        "implicit_platform_operator": false
+      },
+      "providers": [
+        {
+          "name": "primary",
+          "kind": "openai-compatible",
+          "base_url": "https://provider.invalid/v1",
+          "region": "us-east-1"
+        }
+      ],
+      "models": [
+        {
+          "name": "fast-chat",
+          "provider": "primary",
+          "provider_model": "gpt-4o-mini"
+        }
+      ],
+      "api_keys": [
+        {
+          "id": "key-undeclared",
+          "name": "key that names neither a tenant nor platform root",
+          "key": "secret-undeclared",
+          "scopes": [
+            "chat.completions"
+          ]
+        }
+      ]
+    }
+  },
+  "request": {
+    "endpoint": "chat.completions",
+    "headers": {
+      "authorization": "Bearer secret-undeclared"
+    },
+    "now_unix": 1784937600,
+    "body": {
+      "model": "fast-chat",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "schema": 1,
+    "outcome": "deny",
+    "status": 403,
+    "code": "tenant_identity_required",
+    "durable_writes": [
+      "request_log"
+    ],
+    "audit_events": []
+  },
+  "worker_shell": {
+    "deny_list": [],
+    "expect": {
+      "schema": 1,
+      "outcome": "defer",
+      "status": 0
+    }
+  }
+}
