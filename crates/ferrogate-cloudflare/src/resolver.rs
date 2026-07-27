@@ -84,8 +84,14 @@ pub trait TokenResolver: Send + Sync {
 /// without mutating `std::env`.
 type EnvLookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// The default resolver: `env://` + inline plaintext. `cf://` is rejected with
-/// a pointer to #417.
+/// The default resolver: `env://` + inline plaintext.
+///
+/// `cf://` is refused here permanently, not deferred (#417): the scheme is
+/// owned by `ferrogate-secrets`, which depends on THIS crate, so resolving it
+/// here would be a dependency cycle. The refusal points the operator at
+/// `env://FERROGATE_CF_SECRET_<NAME>` -- the binding convention -- rather than
+/// at an issue number, and `resolver_test.rs` asserts the message carries no
+/// issue reference precisely so this doc cannot drift back.
 ///
 /// A custom `getenv` can be injected for tests so environment resolution is
 /// exercised without mutating the process environment.

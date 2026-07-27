@@ -115,7 +115,29 @@ The encoding is injective exactly on the **canonical shape `^[a-z0-9-]+$`**
 - a **non-canonical** name is **refused with an error** naming the shared
   variable and both remedies — it is never resolved from the ambiguous
   variable. The predicate is
-  `ferrogate_secrets::cf_binding_name_is_unambiguous`.
+  `ferrogate_secrets::cf_binding_name_is_unambiguous`, and FerroGate's own
+  write path (`create_secret`) refuses the same shape, so FerroGate cannot
+  create the collision it would then refuse to read.
+
+#### The invariant is about the STORE, not about the reference
+
+Refusing a non-canonical *reference* is not the whole guarantee, and it is
+worth being precise about the residual risk rather than letting the section
+above read as complete.
+
+The soundness of the read guard rests on **every secret in the store being
+canonically named**. If a non-canonical secret exists there anyway — written
+by the Cloudflare dashboard, by `wrangler`, or by anything that is not
+FerroGate — then a *canonical* reference like `cf://provider-keys/openai-api-key`
+sails past the guard, reads `FERROGATE_CF_SECRET_OPENAI_API_KEY`, and gets
+whichever of the colliding secrets the deploy glue exported last.
+
+**FerroGate cannot detect that case.** The reference is well-formed, the
+variable exists, and nothing in the value says which secret it came from. The
+guard refuses the spellings FerroGate can see; it cannot audit the store's
+contents. So: keep every secret in the store canonically named, and treat a
+non-canonical secret appearing there as a live incident rather than a naming
+preference.
 
 Two remedies:
 

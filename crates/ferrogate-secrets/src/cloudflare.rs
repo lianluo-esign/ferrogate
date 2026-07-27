@@ -139,13 +139,34 @@ struct CfNamedResource {
 /// The write-side body for `POST .../secrets` (batch create). `value` is
 /// write-only on Cloudflare's side. `scopes` is fixed to `["workers"]` (the
 /// only scope Secrets Store currently supports).
-#[derive(Debug, serde::Serialize)]
+#[derive(serde::Serialize)]
 struct CfSecretCreate<'a> {
     name: &'a str,
     value: &'a str,
     scopes: [&'a str; 1],
     #[serde(skip_serializing_if = "Option::is_none")]
     comment: Option<&'a str>,
+}
+
+/// Hand-written so the secret being WRITTEN cannot reach a log line, an
+/// `anyhow` chain or a panic message (#417 review item 1; same precedent as
+/// #489/#492 and as `CfSecretsStoreConfig` in this file).
+///
+/// This is the request body of the write path, so it carries the plaintext at
+/// the one moment FerroGate holds it deliberately. `value_len` is kept because
+/// the beta cap is a byte limit and "which secret was too large" is the
+/// question an operator actually asks.
+impl std::fmt::Debug for CfSecretCreate<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CfSecretCreate")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("value_len", &self.value.len())
+            .field("scopes", &self.scopes)
+            .field("comment", &self.comment)
+            .finish()
+    }
 }
 
 /// Manages `cf://<store>/<name>` secrets against a Cloudflare Secrets Store
@@ -277,6 +298,29 @@ impl CloudflareSecretResolver {
         self.capacity.check_value_size(store, name, value)?;
         if name.is_empty() {
             bail!("Cloudflare Secrets Store secret name must not be empty");
+        }
+        // #417 review item 2: the aliasing guard was read-side only, so
+        // FerroGate itself could write `openai_api_key` into a store already
+        // holding `openai-api-key`. Both export to
+        // FERROGATE_CF_SECRET_OPENAI_API_KEY, and the CANONICAL reference --
+        // which sails past the read-side guard -- then reads whichever the
+        // deploy glue exported last. The read guard refuses a non-canonical
+        // *reference*; it cannot tell that the variable a canonical reference
+        // reads was written by a non-canonical sibling. Refusing the write is
+        // what makes the read guard's premise true.
+        //
+        // It also stops the write path minting secrets the resolver is then
+        // guaranteed to refuse to read.
+        if !crate::cloudflare_bindings::cf_binding_name_is_unambiguous(name) {
+            bail!(
+                "Cloudflare Secrets Store secret name {name:?} is not canonical: it must match \
+                 [a-z0-9-]+ so that exactly one secret maps to \
+                 {prefix}{upper}. Writing a non-canonical name would let it \
+                 collide with a canonical sibling under the same environment variable, and the \
+                 resolver would refuse to read it back",
+                prefix = crate::cloudflare_bindings::CF_BINDING_ENV_PREFIX,
+                upper = name.to_ascii_uppercase().replace('-', "_"),
+            );
         }
         block_on_cloudflare(self.create_secret_async(store, name, value, comment))
     }

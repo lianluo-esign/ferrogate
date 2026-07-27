@@ -17,9 +17,11 @@
 //!   seam, not stored decoded), optional per-tenant token overrides, and the
 //!   three Cloudflare base URLs with defaults.
 //! - [`TokenResolver`] — the credential seam. [`EnvTokenResolver`] ships
-//!   `env://` + inline-plaintext resolution; the `cf://` Secrets Store backend
-//!   is a **separate sub-issue (#417)** and is a documented extension point,
-//!   not implemented here.
+//!   `env://` + inline-plaintext resolution. The `cf://` Secrets Store backend
+//!   lives in `ferrogate-secrets` (#417, landed) and stays there permanently:
+//!   that crate depends on this one, so the reverse edge would be a cycle.
+//!   Inside a Worker, a `cf://` secret reaches this crate as
+//!   `env://FERROGATE_CF_SECRET_<NAME>`.
 //! - [`CloudflareClient`] — thin reqwest-based client with Bearer auth,
 //!   `{account_id}` templating, [`CloudflareEnvelope`] decoding, typed
 //!   [`CloudflareError`] mapping, and a deterministic retry/backoff loop that

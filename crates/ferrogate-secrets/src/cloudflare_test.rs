@@ -686,3 +686,61 @@ fn create_secret_allows_overwrite_when_store_is_at_the_budget() {
         .unwrap();
     assert_eq!(id, "sec-7");
 }
+
+/// #417 review item 2: the aliasing guard was read-side only, so FerroGate
+/// could WRITE the collision it refuses to READ.
+///
+/// `openai_api_key` and `openai-api-key` both export to
+/// `FERROGATE_CF_SECRET_OPENAI_API_KEY`. The read guard refuses the
+/// non-canonical *reference*, but a canonical reference reading a variable
+/// that a non-canonical sibling wrote is undetectable -- so the write path has
+/// to refuse the shape too, which is what makes the read guard's premise true.
+///
+/// The transport is left UNSCRIPTED, so a refusal that happened after the call
+/// was issued would surface as the mock's distinctive "unscripted request"
+/// error instead. That is what makes this an ordering proof rather than just
+/// an error-text assertion.
+#[test]
+fn create_secret_refuses_a_non_canonical_name_before_reaching_the_store() {
+    let resolver = resolver_with(HashMap::new());
+
+    for name in ["openai_api_key", "OpenAI-API-Key", "openai.api.key"] {
+        let error = resolver
+            .create_secret("provider-keys", name, "sk-should-never-be-written", None)
+            .expect_err("a non-canonical secret name must be refused on the write path")
+            .to_string();
+
+        assert!(
+            error.contains("not canonical"),
+            "{name}: unexpected refusal: {error}"
+        );
+        assert!(
+            error.contains("FERROGATE_CF_SECRET_OPENAI_API_KEY"),
+            "{name}: the error must name the variable it would collide on: {error}"
+        );
+        assert!(
+            !error.contains("unscripted"),
+            "{name}: the refusal must happen BEFORE any request is issued: {error}"
+        );
+        assert!(
+            !error.contains("sk-should-never-be-written"),
+            "{name}: the refusal must not echo the secret value: {error}"
+        );
+    }
+
+    // Positive control: the canonical spelling passes THIS guard. It still
+    // fails -- the transport is unscripted -- and that is exactly what proves
+    // the guard let it through to the request rather than refusing everything.
+    let canonical = resolver
+        .create_secret("provider-keys", "openai-api-key", "sk-fine", None)
+        .expect_err("unscripted transport")
+        .to_string();
+    assert!(
+        !canonical.contains("not canonical"),
+        "the canonical name must pass the name guard: {canonical}"
+    );
+    assert!(
+        canonical.contains("unscripted"),
+        "the canonical name must have reached the transport: {canonical}"
+    );
+}

@@ -55,8 +55,11 @@
 //! create and never lets it be read back, so there is no way to recover an
 //! existing token's secret. [`CloudflareClient::ensure_tenant_r2_credentials`]
 //! keeps the *bucket* idempotent (reusing #461's ensure) and mints a fresh
-//! scoped token each call; the caller owns storing it. Dedup/rotation and secret
-//! storage (the `cf://` Secrets Store resolver, #417) are deferred.
+//! scoped token each call; the caller owns storing it. Dedup/rotation are
+//! deferred, and so is writing the minted token INTO Secrets Store -- note
+//! that is a different deferral from the `cf://` resolver itself, which
+//! landed under #417; this one is about who persists a freshly minted R2
+//! credential.
 
 use std::collections::BTreeMap;
 use std::fmt;
