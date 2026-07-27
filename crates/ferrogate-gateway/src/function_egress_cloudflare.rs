@@ -44,7 +44,7 @@ use super::function_egress::{normalize_base_url, FUNCTION_TOKEN_ISSUER};
 /// Which hosted-function platform the `/v1/functions/execute` broker targets —
 /// the `FG_FN_TARGET_KIND` config discriminant (#435).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FunctionTargetKind {
+pub(crate) enum FunctionTargetKind {
     /// Supabase edge functions — the default, preserving pre-#435 behavior.
     Supabase,
     /// A hosted Cloudflare Worker declared via `FG_FN_CF_WORKER`.
@@ -55,7 +55,7 @@ pub(super) enum FunctionTargetKind {
 /// pre-#435 default); an unknown value returns `None` so BOTH broker branches
 /// stay disabled (fail-closed) instead of silently falling back to Supabase
 /// with credentials the operator meant for another platform.
-pub(super) fn parse_function_target_kind(value: Option<&str>) -> Option<FunctionTargetKind> {
+pub(crate) fn parse_function_target_kind(value: Option<&str>) -> Option<FunctionTargetKind> {
     match value.map(str::trim) {
         None | Some("") | Some("supabase") => Some(FunctionTargetKind::Supabase),
         Some("cloudflare_worker") => Some(FunctionTargetKind::CloudflareWorker),
@@ -71,7 +71,7 @@ pub(super) fn parse_function_target_kind(value: Option<&str>) -> Option<Function
 }
 
 /// Read the discriminant from the environment.
-pub(super) fn env_function_target_kind() -> Option<FunctionTargetKind> {
+pub(crate) fn env_function_target_kind() -> Option<FunctionTargetKind> {
     parse_function_target_kind(std::env::var("FG_FN_TARGET_KIND").ok().as_deref())
 }
 
@@ -80,7 +80,7 @@ pub(super) fn env_function_target_kind() -> Option<FunctionTargetKind> {
 /// environment; the signing secret is resolved at runtime and never persisted
 /// to the control-plane DB. Disabled (fail-closed) unless the operator
 /// explicitly selected the Cloudflare kind AND declared a valid Worker target.
-pub(super) struct CloudflareFunctionEgressGatewayConfig {
+pub struct CloudflareFunctionEgressGatewayConfig {
     allowlist: FunctionEgressAllowlist,
     minter: FunctionTokenMinter,
     /// The operator-declared Worker target. Its `auth_key_ref` is the
@@ -93,7 +93,7 @@ impl CloudflareFunctionEgressGatewayConfig {
     /// Load from the environment. Returns `None` (branch disabled) unless
     /// `FG_FN_TARGET_KIND=cloudflare_worker`, a signing secret is configured,
     /// and `FG_FN_CF_WORKER` declares a valid Worker target.
-    pub(super) fn from_env() -> Option<Self> {
+    pub(crate) fn from_env() -> Option<Self> {
         Self::from_values(
             std::env::var("FG_FN_TARGET_KIND").ok(),
             std::env::var("FG_FN_JWT_SECRET").ok(),
@@ -177,8 +177,8 @@ impl CloudflareFunctionEgressGatewayConfig {
 
 /// Process-wide Cloudflare branch config, resolved once from the environment —
 /// the Worker-side mirror of `function_egress_config`.
-pub(super) fn cloudflare_function_egress_config(
-) -> Option<&'static CloudflareFunctionEgressGatewayConfig> {
+pub fn cloudflare_function_egress_config() -> Option<&'static CloudflareFunctionEgressGatewayConfig>
+{
     static CONFIG: OnceLock<Option<CloudflareFunctionEgressGatewayConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(CloudflareFunctionEgressGatewayConfig::from_env)
@@ -190,7 +190,7 @@ pub(super) fn cloudflare_function_egress_config(
 /// allowlist, mint a short-lived scoped token, and build the governed HTTP
 /// request (runtime pipeline from #416). Returns the request, the invoke path
 /// for the outcome/audit record, and the timeout. No network I/O.
-pub(super) fn prepare_cloudflare_invocation(
+pub fn prepare_cloudflare_invocation(
     config: &CloudflareFunctionEgressGatewayConfig,
     tenant: &str,
     request: &WorkerInvocationRequest,

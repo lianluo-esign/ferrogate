@@ -1,0 +1,54 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-27
+# description: Token4AI Cloud, FerroGate AI Gateway -- the gateway data-plane
+# subsystems extracted out of ferrogate-cli (issue #553).
+
+[package]
+name = "ferrogate-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FerroGate gateway data-plane subsystems."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["ai", "gateway", "llm", "proxy", "rust"]
+categories = ["web-programming::http-server"]
+
+[lib]
+name = "ferrogate_gateway"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+blake2.workspace = true
+bytes.workspace = true
+ed25519-dalek.workspace = true
+ferrogate-guardrails = { path = "../ferrogate-guardrails" }
+ferrogate-providers = { path = "../ferrogate-providers" }
+ferrogate-runtime = { path = "../ferrogate-runtime" }
+ferrogate-storage = { path = "../ferrogate-storage" }
+pingora.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `io-util` is named explicitly rather than inherited by feature unification
+# with ferrogate-cli: `asset_scan`'s clamd client is an AsyncRead/AsyncWrite
+# user, and this crate must build on its own.
+tokio = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+# `function_egress`'s SSRF/TLS probes stand up a self-signed local TLS server.
+rcgen.workspace = true
+
+[features]
+default = []

@@ -24,20 +24,14 @@ mod asset_egress;
 mod asset_inline_publish;
 mod asset_presign;
 mod asset_publish_gate;
-mod asset_registry;
-mod asset_scan;
 mod asset_security;
-mod asset_signature;
 mod asset_stream;
 pub(crate) mod assets;
 mod billing_outbox;
-mod body;
 mod chat;
 mod dispatch;
 mod embeddings;
 mod external_actions;
-mod function_egress;
-mod function_egress_cloudflare;
 /// #470: the governed decision as a value, its error vocabulary, and the
 /// directional-conformance predicate for a veto-only second host.
 ///
@@ -61,7 +55,6 @@ mod managed_action_guardrail;
 mod mcp_identity;
 mod mcp_rpc;
 mod messages;
-mod messages_stream;
 pub(crate) mod observed_agent_activity;
 // #352: read-only Admin API over durable x402 payment attempts.
 mod payment_attempts;
@@ -70,7 +63,6 @@ mod plans;
 mod proxy;
 mod quota_policies;
 mod rbac;
-mod responses_stream;
 mod route_groups;
 mod shadow;
 mod site_domain_verification;
@@ -82,6 +74,16 @@ mod wallets;
 /// #351: read-only effective x402 spend-policy diagnostics (declarations,
 /// effective policy + revision for a scope chain, and dry-run decisions).
 mod x402_spend_policy;
+
+/// #553 stage 2: these eight are no longer modules of this crate -- they now
+/// live in `ferrogate-gateway`. They are re-exported under their old names so
+/// the ~30 sibling modules that reach them as `super::body` /
+/// `crate::gateway::asset_scan` are untouched by the move: the extraction is a
+/// crate boundary appearing, not a rename sweep across the callers.
+pub(crate) use ferrogate_gateway::{
+    asset_registry, asset_scan, asset_signature, body, function_egress, function_egress_cloudflare,
+    messages_stream, responses_stream,
+};
 
 use anyhow::{Context, Result as AnyResult};
 use http::HeaderMap;

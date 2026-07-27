@@ -5,6 +5,36 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 //! Shared FerroGate domain primitives.
+//!
+//! # What belongs here (issue #553's open question, answered)
+//!
+//! The rule this crate is held to: a type belongs here when more than one
+//! layer must AGREE on how to read it, and reading it needs nothing from a
+//! layer above. [`TenantContext`] and [`WorkspaceScope`] are the model: they
+//! say who a request is attributed to, and every crate that touches
+//! attribution reads them the same way.
+//!
+//! Two types were named explicitly by the `ferrogate-gateway` extraction, and
+//! they come out opposite ways:
+//!
+//! * `CallerScope` (today `ferrogate-cli`'s `auth.rs`) **belongs here**. It is
+//!   the authorization reading of the identity [`TenantContext`] is the
+//!   attribution reading of, and issue #515 exists precisely because that
+//!   question used to be re-derived as `organization_id.is_none()` at a dozen
+//!   call sites. Once the Admin API surface lives in `ferrogate-gateway` while
+//!   `ctl` and the standalone admin-api service stay in `ferrogate-cli`, both
+//!   sides must read a caller's scope; if the type does not sit under both,
+//!   one of them re-derives it and #515's defect returns. `UNSCOPED_TENANT_ID`
+//!   moves with it -- the sentinel is part of the type's meaning.
+//! * `AuthContext` **does not**. It is the OUTPUT of the authentication
+//!   pipeline, carrying a `ferrogate_policy::EffectiveQuota` and a
+//!   `ferrogate_auth::PolicySubject`, so moving it down would drag
+//!   `ferrogate-policy` and `ferrogate-auth` underneath the crate they are
+//!   built on. It travels sideways into `ferrogate-gateway` with the handlers
+//!   that consume it, not downward.
+//!
+//! Neither move is made yet: see `ferrogate-gateway/src/lib.rs` for why stage
+//! 2 did not need either one.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

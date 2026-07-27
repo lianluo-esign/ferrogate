@@ -1207,6 +1207,7 @@ dependencies = [
  "ferrogate-cloudflare",
  "ferrogate-config",
  "ferrogate-core",
+ "ferrogate-gateway",
  "ferrogate-guardrails",
  "ferrogate-mcp",
  "ferrogate-observability",
@@ -1292,6 +1293,31 @@ version = "2026.7.9"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ferrogate-gateway"
+version = "2026.7.9"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "blake2",
+ "bytes",
+ "ed25519-dalek",
+ "ferrogate-guardrails",
+ "ferrogate-providers",
+ "ferrogate-runtime",
+ "ferrogate-storage",
+ "pingora",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

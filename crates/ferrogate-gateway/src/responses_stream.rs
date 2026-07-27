@@ -11,7 +11,7 @@ use std::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ResponsesStreamProviderKind {
+pub enum ResponsesStreamProviderKind {
     OpenAiCompatible,
     Anthropic,
     Gemini,
@@ -19,7 +19,7 @@ pub(super) enum ResponsesStreamProviderKind {
 }
 
 #[derive(Debug)]
-pub(super) struct ResponsesStreamNormalizer<R> {
+pub struct ResponsesStreamNormalizer<R> {
     reader: R,
     provider_kind: ResponsesStreamProviderKind,
     request_id: String,
@@ -90,7 +90,7 @@ impl ProviderUsageState {
 }
 
 impl<R: Read> ResponsesStreamNormalizer<R> {
-    pub(super) fn new(
+    pub fn new(
         reader: R,
         provider_kind: ResponsesStreamProviderKind,
         request_id: impl Into<String>,

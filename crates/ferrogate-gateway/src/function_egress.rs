@@ -44,7 +44,7 @@ const BODY_EXCERPT_MAX_BYTES: usize = 2048;
 const FUNCTION_CAPABILITY: &str = "function";
 /// Shared token issuer for both hosted-function broker branches (Supabase here,
 /// Cloudflare Worker in `function_egress_cloudflare`).
-pub(super) const FUNCTION_TOKEN_ISSUER: &str = "ferrogate";
+pub(crate) const FUNCTION_TOKEN_ISSUER: &str = "ferrogate";
 
 /// Runtime configuration for the gateway function egress broker.
 ///
@@ -52,7 +52,7 @@ pub(super) const FUNCTION_TOKEN_ISSUER: &str = "ferrogate";
 /// secret is resolved at runtime and never persisted to the control-plane DB.
 /// The broker is disabled unless `FG_FN_JWT_SECRET` is set, so it is
 /// fail-closed by default.
-pub(super) struct FunctionEgressGatewayConfig {
+pub struct FunctionEgressGatewayConfig {
     allowlist: FunctionEgressAllowlist,
     minter: FunctionTokenMinter,
     apikey: String,
@@ -60,7 +60,7 @@ pub(super) struct FunctionEgressGatewayConfig {
 
 /// Why the gateway rejected a brokered function invocation before executing it.
 #[derive(Debug)]
-pub(super) enum FunctionBrokerError {
+pub enum FunctionBrokerError {
     Denied(FunctionEgressDenied),
     Token(FunctionTokenError),
     Build(SupabaseEdgeFunctionError),
@@ -85,7 +85,7 @@ impl FunctionEgressGatewayConfig {
     /// `FG_FN_TARGET_KIND` discriminant (#435) is unset or `supabase`, and is
     /// disabled (fail-closed, no shared credentials misrouted) when the
     /// operator declared a Cloudflare Worker target or an unknown kind.
-    pub(super) fn from_env() -> Option<Self> {
+    pub(crate) fn from_env() -> Option<Self> {
         if !matches!(
             super::function_egress_cloudflare::env_function_target_kind(),
             Some(super::function_egress_cloudflare::FunctionTargetKind::Supabase)
@@ -150,7 +150,7 @@ impl FunctionEgressGatewayConfig {
 /// Normalize a project base URL for comparison, matching the allowlist's own
 /// normalization (trim surrounding whitespace and any trailing slash). Shared
 /// with the Cloudflare Worker broker branch.
-pub(super) fn normalize_base_url(base_url: &str) -> String {
+pub(crate) fn normalize_base_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
 }
 
@@ -174,7 +174,7 @@ fn allowlist_is_single_project(rules: &[FunctionEgressRule]) -> bool {
 }
 
 /// Process-wide broker config, resolved once from the environment.
-pub(super) fn function_egress_config() -> Option<&'static FunctionEgressGatewayConfig> {
+pub fn function_egress_config() -> Option<&'static FunctionEgressGatewayConfig> {
     static CONFIG: OnceLock<Option<FunctionEgressGatewayConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(FunctionEgressGatewayConfig::from_env)
@@ -184,7 +184,7 @@ pub(super) fn function_egress_config() -> Option<&'static FunctionEgressGatewayC
 /// Fail-closed pipeline: authorize the target against the tenant's allowlist,
 /// mint a short-lived scoped token, and build the governed HTTP request. Returns
 /// the request and the function slug for the outcome. No network I/O.
-pub(super) fn prepare_brokered_invocation(
+pub fn prepare_brokered_invocation(
     config: &FunctionEgressGatewayConfig,
     tenant: &str,
     request: &FunctionInvocationRequest,
@@ -222,7 +222,7 @@ pub(super) fn prepare_brokered_invocation(
 }
 
 /// Execute a brokered edge-function request and return a bounded outcome.
-pub(super) async fn execute_edge_function_request(
+pub async fn execute_edge_function_request(
     request: &EdgeFunctionHttpRequest,
     function_slug: &str,
     timeout: Duration,

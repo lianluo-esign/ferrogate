@@ -15,6 +15,7 @@ members = [
     "crates/ferrogate-cloudflare",
     "crates/ferrogate-config",
     "crates/ferrogate-core",
+    "crates/ferrogate-gateway",
     "crates/ferrogate-guardrails",
     "crates/ferrogate-mcp",
     "crates/ferrogate-observability",

@@ -27,7 +27,7 @@ use serde::Serialize;
 
 /// Which detached-signature encoding a push carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SignatureFormat {
+pub enum SignatureFormat {
     /// A minisign signature file (`untrusted comment:` header + base64 body).
     Minisign,
     /// A bare base64 Ed25519 signature over the raw blob bytes.
@@ -36,7 +36,7 @@ pub(super) enum SignatureFormat {
 
 impl SignatureFormat {
     /// Parse the `X-Asset-Signature-Format` header value; defaults to minisign.
-    pub(super) fn parse(raw: &str) -> Option<Self> {
+    pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "minisign" => Some(Self::Minisign),
             "ed25519" | "cosign" => Some(Self::Ed25519),
@@ -47,42 +47,38 @@ impl SignatureFormat {
 
 /// The detached signature material presented at push time.
 #[derive(Debug, Clone)]
-pub(super) struct AssetSignatureInput {
-    pub(super) format: SignatureFormat,
+pub struct AssetSignatureInput {
+    pub format: SignatureFormat,
     /// The signature file text (minisign) or bare base64 signature (ed25519).
-    pub(super) material: String,
+    pub material: String,
     /// Optional publisher key-id hint (for the bare-Ed25519 path).
-    pub(super) key_id: Option<String>,
+    pub key_id: Option<String>,
 }
 
 /// Publisher-registered verification keys. Minisign keys are indexed by their
 /// embedded 8-byte key id; bare Ed25519 keys are indexed by a caller-supplied
 /// label.
 #[derive(Debug, Default, Clone)]
-pub(super) struct PublisherKeyRegistry {
+pub struct PublisherKeyRegistry {
     minisign: BTreeMap<[u8; 8], VerifyingKey>,
     ed25519: BTreeMap<String, VerifyingKey>,
 }
 
 impl PublisherKeyRegistry {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// Register a minisign public key (`RW...` base64, optionally preceded by
     /// an `untrusted comment:` line).
-    pub(super) fn register_minisign(&mut self, public_key: &str) -> Result<[u8; 8], String> {
+    pub(crate) fn register_minisign(&mut self, public_key: &str) -> Result<[u8; 8], String> {
         let (key_id, verifying_key) = parse_minisign_public_key(public_key)?;
         self.minisign.insert(key_id, verifying_key);
         Ok(key_id)
     }
 
     /// Register a bare base64 32-byte Ed25519 public key under `key_id`.
-    pub(super) fn register_ed25519(
-        &mut self,
-        key_id: &str,
-        public_key_b64: &str,
-    ) -> Result<(), String> {
+    pub fn register_ed25519(&mut self, key_id: &str, public_key_b64: &str) -> Result<(), String> {
         let bytes = BASE64_STANDARD
             .decode(public_key_b64.trim())
             .map_err(|error| format!("public key is not valid base64: {error}"))?;
@@ -98,7 +94,7 @@ impl PublisherKeyRegistry {
 
     /// Build a registry from newline/comma-separated env config. Bare keys use
     /// `label=base64`; minisign keys are the full public-key string.
-    pub(super) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         let mut registry = Self::new();
         if let Ok(raw) = std::env::var("FERROGATE_ASSET_PUBLISHER_ED25519_KEYS") {
             for entry in raw
@@ -124,7 +120,7 @@ impl PublisherKeyRegistry {
 /// into the verification manifest so agents can decide whether to trust a blob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(super) enum SignatureStatus {
+pub enum SignatureStatus {
     /// No signature was presented (allowed per policy, but labeled).
     Unsigned,
     /// Signature verified against a registered publisher key.
@@ -139,11 +135,11 @@ pub(super) enum SignatureStatus {
 }
 
 impl SignatureStatus {
-    pub(super) fn is_verified(&self) -> bool {
+    pub fn is_verified(&self) -> bool {
         matches!(self, SignatureStatus::Verified { .. })
     }
 
-    pub(super) fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             SignatureStatus::Unsigned => "unsigned",
             SignatureStatus::Verified { .. } => "verified",
@@ -154,7 +150,7 @@ impl SignatureStatus {
 }
 
 /// Verify a detached signature over `content` against the publisher registry.
-pub(super) fn verify_asset_signature(
+pub fn verify_asset_signature(
     content: &[u8],
     signature: &AssetSignatureInput,
     keys: &PublisherKeyRegistry,
@@ -348,16 +344,16 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// plus scan/signature/approval state. Tampering with a stored blob is
 /// detectable because the fetched bytes will not hash to `content_sha256`.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct VerificationManifest {
-    pub(super) object: &'static str,
-    pub(super) asset_id: String,
-    pub(super) content_sha256: String,
-    pub(super) size_bytes: u64,
-    pub(super) scan_state: &'static str,
-    pub(super) scan_backend: &'static str,
-    pub(super) signature: SignatureStatus,
-    pub(super) publish_visibility: &'static str,
-    pub(super) approval_state: &'static str,
+pub struct VerificationManifest {
+    pub object: &'static str,
+    pub asset_id: String,
+    pub content_sha256: String,
+    pub size_bytes: u64,
+    pub scan_state: &'static str,
+    pub scan_backend: &'static str,
+    pub signature: SignatureStatus,
+    pub publish_visibility: &'static str,
+    pub approval_state: &'static str,
 }
 
 #[cfg(test)]

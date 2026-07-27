@@ -52,6 +52,7 @@ ferrogate-cli-core = { path = "../ferrogate-cli-core" }
 ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-gateway = { path = "../ferrogate-gateway" }
 ferrogate-guardrails = { path = "../ferrogate-guardrails" }
 ferrogate-mcp = { path = "../ferrogate-mcp" }
 ferrogate-observability = { path = "../ferrogate-observability" }
