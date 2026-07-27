@@ -1,6 +1,6 @@
 ---
 name: ferrogate-code-review
-description: Use when running the FerroGate code-review role of the three-agent board loop — the session that watches the GitHub Project "In review" lane, judges what the dev agent handed off, and either advances the item to "Testing" or bounces it back to "In progress" with findings (e.g. "run the review agent", "work the In review lane", "review what the dev loop landed"). Covers the fixed lane/edges, the board handles, the review methodology (acceptance-box audit first, static verification over rebuild, report-never-edit, `review-rejected` on bounce), and the shared discipline (GraphQL quota rationing, cached lane tooling, worktree isolation, never build in the main worktree). Neighbouring roles: ferrogate-dev-loop (upstream) and ferrogate-test (downstream); all three at once: ferrogate-multi-agent-loop.
+description: Use when running the FerroGate code-review role of the three-agent board loop — the session that watches the GitHub Project "In review" lane, judges what the dev agent handed off, and either advances the item to "Testing" or bounces it back to "In progress" with findings (e.g. "run the review agent", "work the In review lane", "review what the dev loop landed"). Covers the fixed lane/edges, the board handles, the review methodology (acceptance-box audit first, static verification only, never builds or runs tests, report-never-edit, `review-rejected` on bounce), and the shared discipline (GraphQL quota rationing, cached lane tooling, worktree isolation, never build in the main worktree). Neighbouring roles: ferrogate-dev-loop (upstream) and ferrogate-test (downstream); all three at once: ferrogate-multi-agent-loop.
 ---
 
 # FerroGate Code-Review Agent
@@ -65,27 +65,43 @@ Plus `AGENTS.md` commit hygiene: issue-referenced subject, Lore trailers.
 ### What this actually catches — evidence from the first full cycle
 
 42 items reviewed on 2026-07-25 (15 passed, 27 bounced). The bounce rate is high
-**by design**: the dev agent runs in speed mode, so `cargo test`,
-`clippy -D warnings`, `check-openapi.py` and `check-module-layout.py` findings
-all land here. Running those four is cheap and worth doing every time.
+**by design**: the dev agent runs in speed mode, so the defects those gates would
+have caught arrive here intact — and this lane finds them by reading, then hands
+the execution to the test gate.
 
 **Speed mode narrowed again on 2026-07-27** (owner directive, recorded in
 `ferrogate-dev-loop` / `ferrogate-multi-agent-loop`): the dev lane now keeps only
 **`cargo check --all-targets`** — not even `cargo build`. Tests are still
-*written*, never *executed*. Two consequences for this session:
+*written*, never *executed*.
 
-- **This lane is the first place any test is executed.** A green suite is no
-  longer something upstream established and this session spot-checks; if this
-  session does not run it, nobody has. Running the narrow
-  `cargo test -p <crate> <filter>` is now worth materially more than it was, and
-  a `Not-tested:` trailer is *expected* rather than suspicious — what is
+**This session does not close that gap, and must not try to.** Owner directive,
+2026-07-27: *"你是 codereview agent 只负责 codereview，而不做任何的单元测试或者其他
+测试和编译。编译和测试是交给 test agent 来负责的。"* This lane **reads**. It does
+not run `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`, `vitest`, or
+any other compiler or test runner — not even in a throwaway worktree, not even
+the narrowest filter. Execution belongs to the test gate, which owns the
+`Testing` lane. (This reverses the earlier "read, don't rebuild — build only
+when a claim cannot be checked by reading" carve-out: there is now no such
+exception.)
+
+What that leaves this session, and it is the larger half:
+
+- **The mutation audit is done by reading, and it always was.** "If I broke the
+  thing this test names, would this assertion notice?" is answered by reading
+  the assertion, the fixture and the code under test. Every finding this method
+  has produced — #460's substring-pinned SQL, #517's unpinned cross-tenant
+  guard, #526's `ManagedExternalAction`-only exhaustive match — was visible in
+  the source. Report the mutation and the reason it survives; the test gate
+  confirms it live.
+- **A claim about a gate's result is a claim to audit, not to reproduce.** If a
+  commit says `Tested: 107 passed`, check the trailer exists and is specific;
+  do not re-run it. If a slice touched a spec and not its generated client, that
+  is visible in `git diff --stat` without running the generator.
+- **State findings as "would" and let the gate say "did".** An unexecutable
+  claim is still a legitimate bounce when the *artifact* is missing, stubbed or
+  dishonest — that judgement needs no compiler.
+- A `Not-tested:` trailer is now *expected* rather than suspicious; what is
   unacceptable is a silent one, or one covering an acceptance box.
-- **`cargo fmt --check` is this lane's to catch** and is a legitimate bounce
-  (#493 was bounced on it; the carve-out is now written into both dev skills, so
-  a repeat is a regression, not a misunderstanding). Same for the other things
-  `cargo check` structurally cannot see: `check-openapi.py`, `tsc --noEmit` on
-  `workers/**`, and the admin-console generated-client drift (`npm run
-  check:api-types`, which bounced #518).
 - An interrupted verification can leave a **scratch mutation live in the tree at
   commit time** — #493 shipped with two. Grep the diff for edits that look like
   a deliberately broken assertion.
@@ -165,16 +181,19 @@ Two second-order lessons worth carrying:
   issue is still open.** Tell the dev agent to prefer `Refs #<n>` until an item
   actually passes.
 
-### Depth and stop condition — read, don't rebuild
+### Depth and stop condition — read, never build
 
-Default to **static verification**: read the code and read the tests. This
-session does **not** re-run the dev agent's `cargo build`/`cargo test` as a
-matter of course — that evidence is cheap to fake and expensive to reproduce,
-and a test that *passes* while asserting nothing is exactly the defect being
-hunted, which reading catches and re-running does not. Build only when a claim
-genuinely cannot be checked by reading, and then only the narrowest
-`cargo test -p <crate> <filter>` with `CARGO_INCREMENTAL=0`, in this session's
-own worktree.
+**Static verification only**: read the code and read the tests. This session runs
+no compiler and no test runner at all — see the owner directive above. Beyond
+being the rule, it is the right instrument: a test that *passes* while asserting
+nothing is exactly the defect being hunted, and reading catches it while
+re-running does not. A green suite was never the evidence this lane trades in.
+
+When a claim genuinely cannot be settled by reading, that is a finding to
+**report**, not a build to run: name the claim, name what would settle it, and
+hand it to the test gate. "This assertion cannot fail, here is the mutation that
+proves it" needs no compiler; "this passes live against Postgres" is the gate's
+sentence to write, not this session's.
 
 Do **not** stop at the first defect. Complete the acceptance sweep so one bounce
 carries the whole list — the dev agent reworks from the comment alone, and a
@@ -262,15 +281,17 @@ labels, and moves cards.
 - **Default to zero GraphQL per tick.** When the quota is low, defer board reads
   and moves, keep working via git + REST, and batch the deferred moves after the
   reset rather than retrying into a wall.
-- **Worktree isolation + immediate cleanup.** If this session needs to build or
-  run anything, do it in its own throwaway git worktree branched from
-  `origin/main`, and delete it (`git worktree remove --force …` +
-  `git branch -D …`) the moment the item is judged. Each Rust `target/` is
-  ~13 GB.
-- **Never build in the primary working directory** (`/home/dev/ferrogate`). All
-  three sessions share it and the test gate uses it as its test bed; its
-  `target/` once reached 86 GB. Check `git status --porcelain` before relying on
-  that tree — if it is dirty with someone else's WIP, touch nothing.
+- **Worktree isolation + immediate cleanup.** This session builds nothing (see
+  "read, never build"), so it normally needs no worktree at all — read
+  `origin/main` in place with `git show origin/main:<path>`, which costs nothing
+  and cannot dirty a shared tree. If a worktree is ever created for a bulk read,
+  delete it (`git worktree remove --force …` + `git branch -D …`) the moment the
+  item is judged.
+- **Never build in the primary working directory** (`/home/dev/ferrogate`) — or
+  anywhere else. All three sessions share that tree, the test gate uses it as
+  its test bed, and its `target/` once reached 86 GB. Note it is frequently
+  behind `origin/main`; check `git rev-parse HEAD origin/main` before reading it,
+  and state which ref a finding is against.
 
 ## Loop prompt (code-review session)
 
@@ -286,5 +307,6 @@ but do not change the lane or the edges.
 1- 最多 3 个 sub agent 并行评审。
 2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，三个 session 共用同一份配额）；
    只在关键节点读看板，其余一律用 REST (gh api) 与本地缓存。
-3- 你只负责代码评审，不写产品代码，也不做端到端测试；不要把 issue 移到 Done。
+3- 你只负责代码评审：不写产品代码，不做编译，也不跑任何单元测试或端到端测试——
+   编译与测试由 test agent 负责；不要把 issue 移到 Done。
 ```
