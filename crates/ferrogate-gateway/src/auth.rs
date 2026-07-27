@@ -72,7 +72,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ferrogate_auth::ApiKeyAuthenticator;
+use ferrogate_auth_service::ApiKeyAuthenticator;
 use ferrogate_config::ApiKey;
 use ferrogate_core::TenantContext;
 
@@ -114,7 +114,7 @@ pub(crate) struct AuthContext {
     pub workspace_id: Option<String>,
     pub user_id: Option<String>,
     pub log_bodies: bool,
-    pub rbac_subject: Option<ferrogate_auth::PolicySubject>,
+    pub rbac_subject: Option<ferrogate_auth_service::PolicySubject>,
     /// Resolved once per request in `finalize_auth`, merging every
     /// `quota_policies` scope in the tenant/project/workspace/key chain
     /// (P1-3). Model-allowlist and TPM checks that need the request body
@@ -281,7 +281,7 @@ impl AuthContext {
 
     pub(crate) fn service_account_id(&self) -> Option<&str> {
         match self.rbac_subject.as_ref() {
-            Some(ferrogate_auth::PolicySubject::ServiceAccount { service_account_id }) => {
+            Some(ferrogate_auth_service::PolicySubject::ServiceAccount { service_account_id }) => {
                 Some(service_account_id)
             }
             _ => None,
@@ -373,7 +373,7 @@ pub struct AuthError {
 /// #185): `authenticate()` only ever checks *scope* (`admin.read`/
 /// `admin.write`), never whether the caller's own tenant matches the
 /// tenant the request actually targets. `provision_gateway_api_key`
-/// (`ferrogate-auth`) mints a key tied to the logging-in user's own tenant
+/// (`ferrogate-auth-service`) mints a key tied to the logging-in user's own tenant
 /// on every admin-console login -- scoped to their membership tier since
 /// issue #517, so `admin.write` only for `owner`/`admin`, but scope is not
 /// tenancy: an `owner`'s key still carries `admin.read`+`admin.write` and
@@ -600,13 +600,13 @@ pub(crate) fn authorize_external_rbac(
             message: "external auth service did not return an RBAC subject".into(),
         });
     };
-    let request = ferrogate_auth::AuthorizeRequest {
+    let request = ferrogate_auth_service::AuthorizeRequest {
         tenant: auth.tenant_context(),
         subject,
         action: action.to_string(),
         resource: resource.to_string(),
     };
-    let decision: ferrogate_auth::AuthorizationDecision =
+    let decision: ferrogate_auth_service::AuthorizationDecision =
         auth_service_post_json(auth_service, "/v1/auth/authorize", &request)
             .map_err(external_authorize_error)?;
     if decision.allowed {
@@ -629,10 +629,10 @@ pub(crate) fn authenticate_external(
     required_scope: &str,
     request_id: &str,
 ) -> std::result::Result<AuthContext, AuthError> {
-    let request = ferrogate_auth::ResolveApiKeyRequest {
+    let request = ferrogate_auth_service::ResolveApiKeyRequest {
         presented_key: provided_key.to_string(),
     };
-    let decision: ferrogate_auth::AuthDecision =
+    let decision: ferrogate_auth_service::AuthDecision =
         auth_service_post_json(service, "/v1/auth/resolve-api-key", &request)
             .map_err(|error| external_auth_error(error, request_id))?;
     let auth = AuthContext {
@@ -645,7 +645,7 @@ pub(crate) fn authenticate_external(
         denied_providers: HashSet::new(),
         monthly_token_budget: decision.monthly_token_budget,
         request_limit_per_minute: decision.request_limit_per_minute,
-        // #515: the external auth contract (`ferrogate_auth::AuthDecision`)
+        // #515: the external auth contract (`ferrogate_auth_service::AuthDecision`)
         // has no way to say "platform operator", so an external service can
         // only produce a tenant-scoped identity or an unclassified one -- and
         // the unclassified one is governed by the same deployment-wide switch
@@ -1324,7 +1324,7 @@ fn authenticate_durable(
         monthly_token_budget: decision.monthly_token_budget,
         request_limit_per_minute: decision.request_limit_per_minute,
         // #515: a durable/virtual key is minted under a tenant
-        // (`ferrogate_auth::api_key` sets `organization_id = Some(tenant_id)`),
+        // (`ferrogate_auth_service::api_key` sets `organization_id = Some(tenant_id)`),
         // so it is always tenant-scoped and there is no way to *declare* root
         // over this path. The same resolver still runs so the compatibility
         // switch has exactly one meaning across every auth source.

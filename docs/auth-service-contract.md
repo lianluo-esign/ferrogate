@@ -1,9 +1,12 @@
 # External Auth Service Contract
 
 FerroGate can keep tenant RBAC outside the gateway process by enabling an
-external auth service. The built-in implementation is `ferrogate-auth`, but the
-gateway only depends on the REST contract below, so a third-party service can
-replace it.
+external auth service. The built-in implementation is the
+`ferrogate-auth-service` crate — which still builds a binary named
+`ferrogate-auth` and still reports `"service": "ferrogate-auth"`, because those
+two are the shipped deployment and wire names, not the crate name. The gateway
+only depends on the REST contract below, so a third-party service can replace
+it.
 
 ## Gateway Configuration
 

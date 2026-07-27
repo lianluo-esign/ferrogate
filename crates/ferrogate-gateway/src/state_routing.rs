@@ -811,7 +811,7 @@ impl AppState {
 
     pub(crate) fn durable_api_key_authenticator(
         &self,
-    ) -> &Arc<ferrogate_auth::StorageApiKeyAuthenticator> {
+    ) -> &Arc<ferrogate_auth_service::StorageApiKeyAuthenticator> {
         &self.durable_api_key_authenticator
     }
     pub(crate) fn match_runtime_route(

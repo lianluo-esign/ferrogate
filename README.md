@@ -405,7 +405,8 @@ crates/
                              governed CLI/tool/MCP/browser/REST/filesystem actions
   ferrogate-admin           Scaffolding for a future dedicated admin-API service;
                              not yet wired into any binary
-  ferrogate-auth            Standalone tenant and RBAC REST API service
+  ferrogate-auth-service    Standalone identity service: SSO/SAML/SCIM,
+                             admin-console sessions, tenant and RBAC REST API
   ferrogate-billing         Standalone billing service: rate cards, ledger
                              charging, durable outbox delivery
   ferrogate-cli             CLI, Pingora runtime wiring, gateway/auth/billing/

@@ -23,27 +23,27 @@ if absent, no `bridge_runtime` bridge is needed there.
 
 ## Architecture — bridge the sync admin-console HTTP server (established pattern)
 
-Every one of the ~44 call sites is in `crates/ferrogate-auth/src/lib.rs`, and
+Every one of the ~44 call sites is in `crates/ferrogate-auth-service/src/lib.rs`, and
 **all are in sync `fn`s** — the admin-console / SCIM / SSO HTTP handlers
 (`handle_admin_register`, `handle_admin_login`, `handle_admin_refresh`,
 `handle_admin_logout`, `handle_admin_me`, `current_admin_session`,
 `handle_admin_team_*`, `handle_scim_*`, `handle_sso_callback`, `issue_session`,
 `deactivate_admin_user`, `reactivate_admin_user`, `membership_role_in_tenant`).
 
-`ferrogate-auth` **already owns** a `block_on_sync_bridge` (lib.rs:1124 — same
+`ferrogate-auth-service` **already owns** a `block_on_sync_bridge` (lib.rs:1124 — same
 `Handle::try_current()` + multi-thread-flavor check as the CLI's, falling back
 to a scoped current-thread runtime) and already uses it for the tenancy-slice
 methods (`upsert_tenant_account`/`upsert_project`/`upsert_workspace`). So this
 slice keeps the sync HTTP handlers sync and wraps each now-async
 `console.repositories.<admin_user_method>(...)` call in `block_on_sync_bridge`.
-No handler signature changes; blast radius confined to `ferrogate-auth/src/lib.rs`.
+No handler signature changes; blast radius confined to `ferrogate-auth-service/src/lib.rs`.
 
 ## Steps
 
 1. Storage: 10 methods → async simple-CRUD; add `admin_user_operation()`.
 2. Facades → async, `.await` Postgres arm.
 3. Confirm no migration-snapshot involvement (grep); bridge if present.
-4. `ferrogate-auth/src/lib.rs`: wrap the ~44 sync call sites in
+4. `ferrogate-auth-service/src/lib.rs`: wrap the ~44 sync call sites in
    `block_on_sync_bridge(...)`, preserving the surrounding `?`/`match`/`if let`
    shapes.
 5. Test fixups: storage-lib unit tests + `admin_console_test.rs` (already uses
@@ -54,7 +54,7 @@ No handler signature changes; blast radius confined to `ferrogate-auth/src/lib.r
 
 `cargo +1.88.0 check/test/fmt/clippy -D warnings` workspace-wide;
 `scripts/security-check.sh`; config-validation + Python CI-gate tests;
-storage-lib, ferrogate-auth, CLI-bin unit tests; admin-console / SCIM / SSO
+storage-lib, ferrogate-auth-service, CLI-bin unit tests; admin-console / SCIM / SSO
 integration tests. No reachable Postgres → real async-pool path exercised only
 via in-memory + structural tests; docker-gated supabase tests skip gracefully.
 

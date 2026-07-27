@@ -69,7 +69,7 @@ impl AuthHarness {
     pub(crate) fn start(ferrogate_auth_bin: &Path) -> Result<Self> {
         if !ferrogate_auth_bin.exists() {
             bail!(
-                "ferrogate-auth binary does not exist at {}; run `cargo build -p ferrogate-auth` first or pass --ferrogate-auth-bin",
+                "ferrogate-auth binary does not exist at {}; run `cargo build -p ferrogate-auth-service` first or pass --ferrogate-auth-bin",
                 ferrogate_auth_bin.display()
             );
         }

@@ -382,7 +382,7 @@ FerroGate：
 - [`crates/ferrogate-gateway/src/state_routing.rs`](../../crates/ferrogate-gateway/src/state_routing.rs)
 - [`crates/ferrogate-config/src/config/types.rs`](../../crates/ferrogate-config/src/config/types.rs)
 - [`crates/ferrogate-policy/src/quota.rs`](../../crates/ferrogate-policy/src/quota.rs)
-- [`crates/ferrogate-auth/src/lib.rs`](../../crates/ferrogate-auth/src/lib.rs)
+- [`crates/ferrogate-auth-service/src/lib.rs`](../../crates/ferrogate-auth-service/src/lib.rs)
 - [`docs/openapi/admin-api.openapi.json`](../openapi/admin-api.openapi.json)
 - [`scripts/check-openapi.py`](../../scripts/check-openapi.py)
 - [`docs/product-overview.md`](../product-overview.md)

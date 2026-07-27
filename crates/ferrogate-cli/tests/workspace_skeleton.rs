@@ -17,7 +17,7 @@ fn repo_root() -> &'static Path {
 fn each_p0_crate_has_manifest_and_lib_or_bin_target() {
     let crates = [
         "ferrogate-admin",
-        "ferrogate-auth",
+        "ferrogate-auth-service",
         "ferrogate-billing",
         "ferrogate-cli",
         "ferrogate-config",

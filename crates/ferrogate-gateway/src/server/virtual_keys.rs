@@ -13,7 +13,7 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ferrogate_auth::virtual_api_key_material;
+use ferrogate_auth_service::virtual_api_key_material;
 use ferrogate_core::TenantContext;
 use ferrogate_storage::{
     DeleteProjectOutcome, DeleteWorkspaceOutcome, LifecycleStatus, StoredApiKey, StoredProject,
@@ -2341,7 +2341,7 @@ impl FerroGateway {
             .id
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| next_hierarchy_id("vk"));
-        let secret = match ferrogate_auth::generate_virtual_api_key_secret() {
+        let secret = match ferrogate_auth_service::generate_virtual_api_key_secret() {
             Ok(secret) => secret,
             Err(error) => {
                 return write_json_error(
@@ -2512,7 +2512,7 @@ impl FerroGateway {
             .await;
         }
 
-        let secret = match ferrogate_auth::generate_virtual_api_key_secret() {
+        let secret = match ferrogate_auth_service::generate_virtual_api_key_secret() {
             Ok(secret) => secret,
             Err(error) => {
                 return write_json_error(
@@ -2876,8 +2876,10 @@ mod tests {
 
     #[test]
     fn generated_secrets_are_unique_fg_prefixed_and_verifiable() {
-        let first = ferrogate_auth::generate_virtual_api_key_secret().expect("first secret");
-        let second = ferrogate_auth::generate_virtual_api_key_secret().expect("second secret");
+        let first =
+            ferrogate_auth_service::generate_virtual_api_key_secret().expect("first secret");
+        let second =
+            ferrogate_auth_service::generate_virtual_api_key_secret().expect("second secret");
 
         assert!(first.starts_with("fg_"));
         assert_ne!(first, second, "secrets must not repeat across calls");

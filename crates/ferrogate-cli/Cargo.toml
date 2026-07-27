@@ -43,7 +43,7 @@ clap_complete.workspace = true
 ed25519-dalek.workspace = true
 ferrogate-admin = { path = "../ferrogate-admin" }
 ferrogate-billing = { path = "../ferrogate-billing" }
-ferrogate-auth = { path = "../ferrogate-auth" }
+ferrogate-auth-service = { path = "../ferrogate-auth-service" }
 ferrogate-cli-core = { path = "../ferrogate-cli-core" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }

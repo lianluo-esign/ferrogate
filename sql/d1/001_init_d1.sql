@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
 -- This column is a privilege tier, not a descriptive enum -- it decides which
 -- scopes a console session's gateway API key is minted with -- so the two
 -- backends must agree on its domain. `MembershipRole::parse`
--- (crates/ferrogate-auth/src/membership_role.rs) is the enforcement that
+-- (crates/ferrogate-auth-service/src/membership_role.rs) is the enforcement that
 -- covers BOTH backends and already-provisioned databases (SQLite cannot add a
 -- CHECK to an existing table); this constraint is the second layer, binding
 -- every newly-provisioned D1 database.

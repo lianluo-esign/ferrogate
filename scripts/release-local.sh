@@ -77,7 +77,7 @@ else
     # No-daemon host: run the docker-free harness (run-all without --include-docker).
     # `ci` would abort on the first Docker-backed scenario. run-all needs the two
     # debug binaries it drives.
-    cargo +1.88.0 build -p ferrogate-cli -p ferrogate-auth
+    cargo +1.88.0 build -p ferrogate-cli -p ferrogate-auth-service
     ./target/release/ferrogate-test run-all \
       --ferrogate-bin target/debug/ferrogate \
       --ferrogate-auth-bin target/debug/ferrogate-auth

@@ -116,8 +116,8 @@ pub fn run() -> AnyResult<()> {
         Commands::Auth(args) => match args.command {
             AuthCommands::Serve(args) => {
                 let data = match args.data {
-                    Some(path) => ferrogate_auth::AuthServiceData::load_yaml(path)?,
-                    None => ferrogate_auth::AuthServiceData::default(),
+                    Some(path) => ferrogate_auth_service::AuthServiceData::load_yaml(path)?,
+                    None => ferrogate_auth_service::AuthServiceData::default(),
                 };
                 // When a Supabase DSN is provided, resolve hashed durable
                 // virtual API keys against storage; otherwise fall back to the
@@ -137,9 +137,9 @@ pub fn run() -> AnyResult<()> {
                     _ => None,
                 };
                 let api_key_authenticator = repositories.clone().map(|repositories| {
-                    Arc::new(ferrogate_auth::StorageApiKeyAuthenticator::new(
+                    Arc::new(ferrogate_auth_service::StorageApiKeyAuthenticator::new(
                         repositories,
-                    )) as Arc<dyn ferrogate_auth::ApiKeyAuthenticator>
+                    )) as Arc<dyn ferrogate_auth_service::ApiKeyAuthenticator>
                 });
                 let admin_jwt_secret = ferrogate_gateway::service_storage::resolve_secret(
                     args.admin_jwt_secret.as_deref(),
@@ -147,7 +147,7 @@ pub fn run() -> AnyResult<()> {
                 )?;
                 let admin_console = match (repositories, admin_jwt_secret) {
                     (Some(repositories), Some(jwt_secret)) => {
-                        Some(ferrogate_auth::AdminConsoleConfig {
+                        Some(ferrogate_auth_service::AdminConsoleConfig {
                             repositories,
                             jwt_secret,
                         })
@@ -158,7 +158,7 @@ pub fn run() -> AnyResult<()> {
                     ),
                     _ => None,
                 };
-                ferrogate_auth::serve(ferrogate_auth::AuthServiceConfig {
+                ferrogate_auth_service::serve(ferrogate_auth_service::AuthServiceConfig {
                     listen: args.listen,
                     data,
                     api_key_authenticator,

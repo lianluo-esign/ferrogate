@@ -26,7 +26,7 @@ already present there.
 Same reasoning and precedent as the observability slice
 (`docs/design/async-postgres-observability-migration-2026-07.md`), the
 `wallet_balance_exhausted`/`resolve_effective_quota` pattern, and the
-`ferrogate-auth` bridge.
+`ferrogate-auth-service` bridge.
 
 The AppState wrappers `record_agent_run` and `record_agent_run_event`
 (`state_agent_runtime.rs`) are fire-and-forget (swallow the storage error with

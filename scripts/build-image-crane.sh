@@ -153,7 +153,7 @@ build_arch() { # <amd64|arm64>
 
   rustup +1.88.0 target list --installed | grep -q "^${rust_target}$" \
     || rustup +1.88.0 target add "$rust_target"
-  cargo +1.88.0 build --release -p ferrogate-cli -p ferrogate-auth --target "$rust_target"
+  cargo +1.88.0 build --release -p ferrogate-cli -p ferrogate-auth-service --target "$rust_target"
   local D="target/${rust_target}/release"
   verify_static "$D/ferrogate" "$mach"
   verify_static "$D/ferrogate-auth" "$mach"

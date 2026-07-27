@@ -10,6 +10,22 @@
 //! gateway should consume the REST API decision output, not embed role,
 //! permission, or binding evaluation in the request hot path.
 //!
+//! # Why `-service` is in the name
+//!
+//! Until #553 stage 4 this crate was `ferrogate-auth`, one word away from
+//! `ferrogate_gateway::auth` — the gateway's *request authenticator*, which
+//! decides whether a presented credential may make a given call. The two are
+//! different things: this crate is the identity SERVICE the gateway talks to
+//! over HTTP (`AuthDecision`, `AuthorizationDecision`), and it also carries
+//! SSO/SAML/SCIM and the admin-console session API, none of which the
+//! authenticator knows about. The `-service` suffix makes the import line say
+//! which one you mean.
+//!
+//! The name change stops at the crate: the binary is still `ferrogate-auth`
+//! (`[[bin]]` in `Cargo.toml`) and `/health` still reports
+//! `"service": "ferrogate-auth"`, because those are the deployment and wire
+//! contracts, and stage 4 changes no behaviour.
+//!
 //! The crate entry file stays thin (docs/engineering-standards.md, issue
 //! #433): each concern lives in a sibling module below and the full public
 //! API is re-exported here unchanged.

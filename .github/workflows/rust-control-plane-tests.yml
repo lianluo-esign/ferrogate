@@ -28,7 +28,7 @@ jobs:
             package: ferrogate-admin
             args: --all-features
           - slice: auth
-            package: ferrogate-auth
+            package: ferrogate-auth-service
             args: --all-features
           - slice: storage
             package: ferrogate-storage

@@ -274,7 +274,7 @@ NEW   ferrogate-guardrails  Built-in guardrail/mutator hooks (PII, regex, json-s
 NEW   ferrogate-skills      Skill loader (SKILL.md progressive disclosure) — stretch
 ACT.  ferrogate-runtime     Agent runtime / agent loop (today: only reload state)
 ACT.  ferrogate-routing     Composable/conditional routing strategies (today: skeleton)
-ACT.  ferrogate-auth        Standalone tenant/RBAC REST service boundary
+ACT.  ferrogate-auth-service  Standalone tenant/RBAC REST service boundary
 GROW  ferrogate-providers   Canonical tool-calling model; async pooled dispatch
 GROW  ferrogate-core        Canonical tool types (ToolDef, ToolCall, ToolResult)
 GROW  ferrogate-billing     Per-tool-call + per-agent-turn cost accounting
@@ -383,7 +383,7 @@ Design rules (Bifrost/Envoy/LiteLLM-proven):
 - **Tool namespacing:** `serverName-toolName`; **deny-by-default** allowlists
   (`tools_to_execute`, `tools_to_auto_execute`); `toolSelector`-style include/regex.
 - **Auth:** `none | headers | oauth | per_user_oauth | per_user_headers`;
-  **credential injection** so secrets never leave the gateway — reuse `ferrogate-auth`.
+  **credential injection** so secrets never leave the gateway — reuse `ferrogate-auth-service`.
 - **Explicit-by-default execution:** `POST /v1/mcp/tool/execute`; opt-in auto-exec.
 - **Resilience:** exp backoff (5 retries, 1s→30s), 10s health checks, auto-reconnect.
 - **Endpoints:** `/mcp` and `/mcp/{server}` (LiteLLM-style) when FerroGate is the MCP server.
@@ -449,7 +449,7 @@ free vs. Bifrost's manual `fasthttp` tuning).
 
 Mirror Portkey's line. **OSS FerroGate**: routing, plugin pipeline, guardrail hooks,
 simple caching, virtual keys, MCP host/client, tool calling, opt-in agent loop,
-Prometheus/OTLP emission, and the standalone `ferrogate-auth` service boundary
+Prometheus/OTLP emission, and the standalone `ferrogate-auth-service` service boundary
 for tenant/RBAC decisions. **Token4AI Cloud (hosted control plane)**: analytics
 dashboard, Prompt Engineering Studio, org→workspace RBAC management + budgets
 governance UI, Model Catalog, MCP registry/discovery UI, semantic caching, and

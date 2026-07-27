@@ -322,8 +322,8 @@ advisories FAILED, bans ok, licenses ok, sources ok
   | Advisory | Crate | Reached via |
   | -------- | ----- | ----------- |
   | RUSTSEC-2026-0190 (unsound) | `anyhow 1.0.102` | workspace-wide, predates this crate |
-  | RUSTSEC-2026-0194 (vuln) | `quick-xml 0.37.5` | `ferrogate-auth` → `ferrogate-cli` |
-  | RUSTSEC-2026-0195 (vuln) | `quick-xml 0.37.5` | `ferrogate-auth` → `ferrogate-cli` |
+  | RUSTSEC-2026-0194 (vuln) | `quick-xml 0.37.5` | `ferrogate-auth-service` → `ferrogate-cli` |
+  | RUSTSEC-2026-0195 (vuln) | `quick-xml 0.37.5` | `ferrogate-auth-service` → `ferrogate-cli` |
 
   None of `anyhow` or `quick-xml` appears in `cargo tree -p
   ferrogate-payments` (see the tree above: `base64`, `serde`, `serde_json`,

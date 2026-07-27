@@ -1146,7 +1146,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrogate-auth"
+name = "ferrogate-auth-service"
 version = "2026.7.9"
 dependencies = [
  "anyhow",
@@ -1198,7 +1198,7 @@ dependencies = [
  "clap_complete",
  "ed25519-dalek",
  "ferrogate-admin",
- "ferrogate-auth",
+ "ferrogate-auth-service",
  "ferrogate-billing",
  "ferrogate-cli-core",
  "ferrogate-config",
@@ -1303,7 +1303,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "ferrogate-admin",
- "ferrogate-auth",
+ "ferrogate-auth-service",
  "ferrogate-billing",
  "ferrogate-cloudflare",
  "ferrogate-config",

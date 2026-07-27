@@ -35,7 +35,7 @@ use std::{
     time::Duration,
 };
 
-use ferrogate_auth::{
+use ferrogate_auth_service::{
     read_http_request_bounded, serve_connections, ApiKeyAuthenticator, HttpRequest, HttpResponse,
     RequestLengthError, StorageApiKeyAuthenticator,
 };

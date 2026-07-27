@@ -115,7 +115,7 @@ fn seed_durable_virtual_key(
     let mut tenant = TenantContext::default();
     scope.apply_to(&mut tenant);
     tenant.api_key_id = Some(key_id.into());
-    let material = ferrogate_auth::virtual_api_key_material(secret).unwrap();
+    let material = ferrogate_auth_service::virtual_api_key_material(secret).unwrap();
     let mut key = StoredApiKey {
         id: key_id.into(),
         workspace_id: scope.workspace_id,
@@ -241,7 +241,7 @@ fn durable_virtual_key_rotation_invalidates_previous_secret() {
     let mut key = block_on(state.get_virtual_api_key("vk-rotate"))
         .unwrap()
         .unwrap();
-    let material = ferrogate_auth::virtual_api_key_material(new_secret).unwrap();
+    let material = ferrogate_auth_service::virtual_api_key_material(new_secret).unwrap();
     key.key_prefix = material.key_prefix;
     key.key_hash = material.key_hash;
     key.last4 = material.last4;

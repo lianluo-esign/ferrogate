@@ -118,7 +118,7 @@ Ported from the core tables of `sql/001_init_postgres.sql`
   `CHECK (role IN ('owner','admin','member','viewer'))`, because that column
   is a privilege tier (it selects the scopes a console session's gateway API
   key is minted with), not a descriptive enum. `MembershipRole::parse`
-  (`crates/ferrogate-auth/src/membership_role.rs`) is the enforcement that
+  (`crates/ferrogate-auth-service/src/membership_role.rs`) is the enforcement that
   covers both backends and already-provisioned databases — SQLite cannot add
   a `CHECK` to an existing table, so the constraint only binds newly
   provisioned D1 databases and is a second layer, not the primary one.

@@ -10,7 +10,7 @@ servers), infrastructure (self-hosted/managed workers), and observability
 It is deployed as its own service, separate from the gateway and the auth
 service, and talks to both over HTTP:
 
-- `ferrogate-auth`'s admin-console endpoints (`/v1/admin/register|login|refresh|logout|me`)
+- `ferrogate-auth-service`'s admin-console endpoints (`/v1/admin/register|login|refresh|logout|me`)
   for human login/registration and session management.
 - The gateway's Admin API (`/admin/v1/*`) for everything else, authenticated
   with a virtual API key minted by the auth service on register/login.

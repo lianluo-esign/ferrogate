@@ -8,7 +8,7 @@
 members = [
     "crates/ferrogate-admin",
     "crates/agent-worker",
-    "crates/ferrogate-auth",
+    "crates/ferrogate-auth-service",
     "crates/ferrogate-billing",
     "crates/ferrogate-cli",
     "crates/ferrogate-cli-core",
@@ -72,7 +72,7 @@ croner = "3"
 deadpool-postgres = "0.14.1"
 # Inflate the DEFLATE-compressed SAML `SAMLResponse` payload delivered over the
 # HTTP-Redirect binding (#283). Already resolved transitively; declared here
-# for direct use in ferrogate-auth's SAML SP flow.
+# for direct use in ferrogate-auth-service's SAML SP flow.
 flate2 = "1"
 # Asymmetric signatures for signed policy-snapshot verification (#206). Ed25519
 # lets the control plane sign snapshots with a private key the data plane never

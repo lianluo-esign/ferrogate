@@ -19,7 +19,7 @@ two transactions become async-local `client.transaction().await`. Add a
 
 ## Blast radius — entirely within lib.rs, ZERO external callers
 
-Confirmed by grep: no ferrogate-cli / ferrogate-auth / tools caller touches
+Confirmed by grep: no ferrogate-cli / ferrogate-auth-service / tools caller touches
 `upsert`/`get_document`/`list_documents`/`delete`/`replace_kind`/
 `seed_missing_resources`/`list_resource_documents`. Every caller is a sync
 method inside lib.rs:

@@ -68,14 +68,15 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertIn("some-binary-crate/src/main.rs: 801 lines", result.stderr)
 
     def test_split_auth_crate_needs_no_baseline(self) -> None:
-        # ferrogate-auth was split under the cap in the same change that
-        # widened the gate (#433); it must never regrow a baseline entry.
+        # ferrogate-auth-service (named `ferrogate-auth` until #553 stage 4)
+        # was split under the cap in the same change that widened the gate
+        # (#433); it must never regrow a baseline entry.
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            self.write_crate(root, "ferrogate-auth", 801)
+            self.write_crate(root, "ferrogate-auth-service", 801)
             result = self.run_checker("--root", str(root))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ferrogate-auth/src/lib.rs: 801 lines", result.stderr)
+        self.assertIn("ferrogate-auth-service/src/lib.rs: 801 lines", result.stderr)
 
     def test_baseline_covers_pre_existing_offender(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

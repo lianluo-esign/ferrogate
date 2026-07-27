@@ -432,7 +432,7 @@ pub(crate) fn handle_admin_register(
         // #514: a suspended/deleted tenancy is a 403 with the gateway's own
         // `tenancy_suspended` code, not a 500 -- and, crucially, not a live
         // `fg_...` secret, which is what this path returned before the gate
-        // became reachable from `ferrogate-auth`.
+        // became reachable from `ferrogate-auth-service`.
         Err(error) => return error.into_response(),
     };
 
@@ -537,7 +537,7 @@ pub(crate) fn handle_admin_login(
         // #514: a suspended/deleted tenancy is a 403 with the gateway's own
         // `tenancy_suspended` code, not a 500 -- and, crucially, not a live
         // `fg_...` secret, which is what this path returned before the gate
-        // became reachable from `ferrogate-auth`.
+        // became reachable from `ferrogate-auth-service`.
         Err(error) => return error.into_response(),
     };
 
@@ -1328,7 +1328,7 @@ pub(crate) fn provision_gateway_api_key(
     admin_user_id: &str,
     role: MembershipRole,
 ) -> Result<String, ProvisionSessionKeyError> {
-    // #514, the attach-time seam -- reached from `ferrogate-auth`, which is why
+    // #514, the attach-time seam -- reached from `ferrogate-auth-service`, which is why
     // the decision had to move down into `ferrogate-storage`. This function is
     // a credential MINT: it writes a live `StoredApiKey` with a freshly
     // generated `fg_...` secret. While the gate lived in `ferrogate-cli` it was

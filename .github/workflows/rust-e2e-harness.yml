@@ -30,7 +30,7 @@ jobs:
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Build FerroGate test harness
-        run: cargo build -p ferrogate-cli -p ferrogate-auth -p ferrogate-test --locked
+        run: cargo build -p ferrogate-cli -p ferrogate-auth-service -p ferrogate-test --locked
 
       - name: Run FerroGate API E2E harness
         run: ./target/debug/ferrogate-test ci

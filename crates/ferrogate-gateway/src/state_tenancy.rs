@@ -279,7 +279,7 @@ impl AppState {
     /// a credential never named, the pure per-seam decision, and the
     /// fail-CLOSED mapping of a control-plane read failure onto a retryable
     /// 503 -- lives in `ferrogate_storage::check_usable_tenancy`, shared with
-    /// `ferrogate-auth`'s admin-console credential mints. This method exists
+    /// `ferrogate-auth-service`'s admin-console credential mints. This method exists
     /// only to hand back this crate's [`AuthError`], so a lifecycle refusal is
     /// rendered by the same three lines every `authenticate()` refusal is.
     pub(crate) async fn require_usable_tenancy(

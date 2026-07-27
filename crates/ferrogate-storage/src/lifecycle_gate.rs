@@ -7,7 +7,7 @@
 // share. This lives in `ferrogate-storage` -- the crate that owns the rows --
 // rather than in `ferrogate-cli`, because "one place per seam" is only true if
 // EVERY credential-minting caller can reach it. The first landing put the
-// decision in `ferrogate-cli`, which left `ferrogate-auth`'s admin-console
+// decision in `ferrogate-cli`, which left `ferrogate-auth-service`'s admin-console
 // login/register/SSO paths unable to call it: they kept minting live gateway
 // keys under a suspended tenant, which is literally the probe row the issue
 // enumerates.
@@ -139,7 +139,7 @@ pub struct LifecycleRejection {
 impl LifecycleRejection {
     /// Kept as a bare `u16` rather than an `http::StatusCode` so the storage
     /// crate does not grow an HTTP dependency for one enum; both HTTP surfaces
-    /// (`ferrogate-cli`'s pingora handlers and `ferrogate-auth`'s hand-rolled
+    /// (`ferrogate-cli`'s pingora handlers and `ferrogate-auth-service`'s hand-rolled
     /// side-service responder) already speak in codes at their boundary.
     pub fn http_status(&self) -> u16 {
         403
@@ -233,7 +233,7 @@ impl LifecycleGateError {
 }
 
 /// The three row reads [`resolve_lifecycle_chain`] needs, as a trait rather
-/// than a concrete handle for two reasons: `ferrogate-auth` and
+/// than a concrete handle for two reasons: `ferrogate-auth-service` and
 /// `ferrogate-cli` reach storage through different wrappers, and a test can
 /// implement a *failing* source to hold the fail-closed claim (a claim that,
 /// as landed, no test held -- swapping the error mapping for

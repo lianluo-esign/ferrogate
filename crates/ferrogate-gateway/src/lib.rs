@@ -79,17 +79,36 @@
 //! (`auth_test.rs`, `auth_admission_test.rs`) so that neither set of cases had
 //! to be renamed to avoid the other's helpers.
 //!
-//! # `CallerScope` is still owed a move to `ferrogate-core`
+//! Stage 4 removed the other half of that confusion: the crate formerly named
+//! `ferrogate-auth` is now `ferrogate-auth-service`. It is the standalone
+//! identity SERVICE this crate talks to over HTTP (and the home of SSO/SAML/
+//! SCIM and the admin-console session API); [`auth`] is the *request
+//! authenticator*. One word used to name both, in every import line in this
+//! file.
 //!
-//! Recorded in stage 2 and unchanged: `CallerScope` is the one interpreter of
-//! "which tenant is this caller, and is it root?" and belongs in
-//! `ferrogate-core` next to `TenantContext`, with `UNSCOPED_TENANT_ID`. It is
-//! still not moved, and still for the same reason -- it is returned by
-//! `AuthContext::caller_scope()` and read by the deciders next to it, so
-//! moving it alone splits one vocabulary for no caller that exists yet. It
-//! becomes worth doing when `ctl` or the standalone control-api service has to
-//! read a caller's scope without depending on this crate. `AuthContext`
-//! itself is settled: it travelled with the vocabulary rather than down.
+//! # `CallerScope` stays here, re-checked in stage 4
+//!
+//! Stage 2 recorded that `CallerScope` -- the one interpreter of "which tenant
+//! is this caller, and is it root?" -- belongs in `ferrogate-core` next to
+//! `TenantContext`, with `UNSCOPED_TENANT_ID`, and named the trigger: when
+//! `ctl` or the standalone control-api service has to read a caller's scope
+//! without depending on this crate. Stage 4 tested that trigger against the
+//! finished split and it is not met. The control-api service
+//! (`ferrogate-cli`'s `admin_api.rs`) authenticates at the edge through
+//! [`auth::authenticate_admin_gate`] and forwards, deliberately leaving this
+//! crate the single enforcement authority for tenant scoping; it never asks
+//! the scope question. `ctl` speaks to the Control Plane API over HTTP and has
+//! no caller to scope. Every use of `CallerScope` on the current tree is in
+//! this crate, and the type is still `pub(crate)`.
+//!
+//! So the move stays unmade, and now for a measured reason rather than a
+//! deferred one: it would publish a `pub` type with no external reader, and
+//! separate the enum from its only producer (`AuthContext::caller_scope()`,
+//! which carries `EffectiveQuota`/`PolicySubject` and so cannot follow it
+//! down) and from the deciders beside it. Re-test the trigger, not the
+//! calendar: the day a crate that must NOT depend on `ferrogate-gateway` needs
+//! the answer, move the enum and the sentinel together. `AuthContext` itself
+//! is settled: it travelled with the vocabulary rather than down.
 //!
 //! # What is NOT here, and should be
 //!

@@ -5,11 +5,17 @@
 # description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 [package]
-name = "ferrogate-auth"
+# Named for the service it is, not for the word "auth": the gateway's request
+# authenticator is `ferrogate_gateway::auth`, and while this crate was called
+# `ferrogate-auth` the two were one word apart in every import and doc link
+# (#553 stage 4). This crate is the standalone identity SERVICE -- SSO/SAML/
+# SCIM, the admin-console session API, RBAC membership roles -- and the gateway
+# talks to it over HTTP, not by linking it.
+name = "ferrogate-auth-service"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Virtual API key and tenant resolution boundaries for FerroGate."
+description = "Standalone FerroGate identity service: SSO/SAML/SCIM, admin-console sessions, membership roles, and virtual API key/tenant resolution boundaries."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -41,6 +47,13 @@ x509-parser.workspace = true
 tempfile.workspace = true
 
 [[bin]]
+# Deliberately NOT renamed with the package. `ferrogate-auth` is a deployment
+# artifact name: it is the file the Dockerfile installs into
+# /usr/local/bin/ferrogate-auth, what scripts/build-image-crane.sh packs, and
+# what scripts/release-local.sh passes as --ferrogate-auth-bin. Renaming the
+# package fixes the Rust-namespace collision with `ferrogate_gateway::auth`;
+# renaming the binary would change a shipped interface for nothing, and #553
+# stage 4 is a rename-only slice.
 name = "ferrogate-auth"
 path = "src/main.rs"
 

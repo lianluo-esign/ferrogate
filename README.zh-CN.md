@@ -292,7 +292,8 @@ crates/
                              framework-handler adapter、受治理的
                              CLI/tool/MCP/browser/REST/filesystem 动作
   ferrogate-admin           未来独立 admin-API 服务的脚手架；尚未接入任何二进制
-  ferrogate-auth            独立租户与 RBAC REST API 服务
+  ferrogate-auth-service    独立身份服务：SSO/SAML/SCIM、admin-console 会话、
+                             租户与 RBAC REST API
   ferrogate-billing         独立计费服务：rate card、ledger 记账、durable
                              outbox 投递
   ferrogate-cli             CLI、Pingora runtime 接线、gateway/auth/billing/

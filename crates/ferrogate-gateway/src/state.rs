@@ -1381,7 +1381,7 @@ pub(crate) struct AppState {
     /// Shared across config reloads (like `guardrail_evidence_permits`) so
     /// FIFO ordering and the drain-on-shutdown guarantee span reloads.
     evidence_writer: Arc<EvidenceWriter>,
-    durable_api_key_authenticator: Arc<ferrogate_auth::StorageApiKeyAuthenticator>,
+    durable_api_key_authenticator: Arc<ferrogate_auth_service::StorageApiKeyAuthenticator>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     analytics_export: Arc<Mutex<ObservabilityExportRuntime>>,
@@ -4666,7 +4666,7 @@ impl AppState {
             metering_exporter,
             billing_reporter,
             durable_api_key_authenticator: Arc::new(
-                ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::clone(&repositories)),
+                ferrogate_auth_service::StorageApiKeyAuthenticator::new(Arc::clone(&repositories)),
             ),
             evidence_writer: Arc::new(EvidenceWriter::new(Arc::clone(&repositories))),
             repositories,
@@ -4721,7 +4721,7 @@ impl AppState {
         next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
         next.metering_events = Arc::clone(&self.metering_events);
         next.durable_api_key_authenticator = Arc::new(
-            ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::clone(&next.repositories)),
+            ferrogate_auth_service::StorageApiKeyAuthenticator::new(Arc::clone(&next.repositories)),
         );
         next.metrics = Arc::clone(&self.metrics);
         next.analytics_export = Arc::clone(&self.analytics_export);

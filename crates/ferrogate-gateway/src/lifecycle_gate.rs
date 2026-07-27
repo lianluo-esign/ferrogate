@@ -7,7 +7,7 @@
 // The decision, the vocabulary and the hierarchy WALK all live in
 // `ferrogate_storage::lifecycle_gate` -- the crate that owns the rows -- so
 // that every credential-minting caller can reach them. That relocation is not
-// cosmetic: while this module owned the decision, `ferrogate-auth`'s
+// cosmetic: while this module owned the decision, `ferrogate-auth-service`'s
 // admin-console login/register/SSO paths could not call it and kept minting
 // live gateway keys under a suspended tenant. All that is left here is the
 // mapping from the shared refusal to this crate's `AuthError`, which is how

@@ -106,7 +106,7 @@ redundant — an on-CF profile runs plain `add_tcp` on 8080.
 
 **Container packaging already exists.** The repo root
 [`Dockerfile`](../Dockerfile) is a two-stage build: `rust:bookworm` builder
-compiling `ferrogate-cli` + `ferrogate-auth` with `--locked` (`Dockerfile:7-20`),
+compiling `ferrogate-cli` + `ferrogate-auth-service` with `--locked` (`Dockerfile:7-20`),
 `debian:bookworm-slim` runtime with `ca-certificates` + `curl`
 (`Dockerfile:22-30`), binaries at `/usr/local/bin/ferrogate{,-auth}`
 (`Dockerfile:31-32`), `EXPOSE 8080`, `ENV FERROGATE_CONFIG=/etc/ferrogate/Caddyfile`,

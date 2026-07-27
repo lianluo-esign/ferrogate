@@ -8,7 +8,7 @@
 // behavior of the shared admin auth gate.
 
 use super::*;
-use ferrogate_auth::AuthDecision;
+use ferrogate_auth_service::AuthDecision;
 use ferrogate_config::AuthServiceConfig;
 use ferrogate_core::TenantContext;
 use ferrogate_gateway::auth::authenticate_admin_gate;
@@ -49,11 +49,11 @@ struct StubAuthenticator {
     scopes: Vec<String>,
 }
 
-impl ferrogate_auth::ApiKeyAuthenticator for StubAuthenticator {
+impl ferrogate_auth_service::ApiKeyAuthenticator for StubAuthenticator {
     fn authenticate(&self, presented_key: &str) -> Option<AuthDecision> {
         (presented_key == self.key).then(|| AuthDecision {
             tenant: TenantContext::default(),
-            subject: ferrogate_auth::PolicySubject::User {
+            subject: ferrogate_auth_service::PolicySubject::User {
                 user_id: "user-1".into(),
             },
             scopes: self.scopes.clone(),

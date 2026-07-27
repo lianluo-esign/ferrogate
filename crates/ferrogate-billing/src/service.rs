@@ -8,7 +8,7 @@
 //!
 //! An isolated process that receives token-usage [`BillingEvent`]s from the
 //! gateway over REST and returns settled [`LedgerEntry`]s. It deliberately
-//! mirrors the `ferrogate-auth` service shape: a blocking `TcpListener` with a
+//! mirrors the `ferrogate-auth-service` service shape: a blocking `TcpListener` with a
 //! thread per connection and a hand-rolled HTTP/1.1 parser, so it carries no
 //! async runtime and no framework dependency. Persistence is injected as an
 //! `Arc<dyn LedgerSink>` so the same server runs against the in-memory sink in

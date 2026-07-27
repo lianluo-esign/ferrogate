@@ -86,7 +86,7 @@ run_core_policy() {
 run_control_plane() {
   ensure_toolchain
   cargo test -p ferrogate-admin --all-features
-  cargo test -p ferrogate-auth --all-features
+  cargo test -p ferrogate-auth-service --all-features
   cargo test -p ferrogate-storage --all-features
   cargo test -p ferrogate-billing --all-features
   cargo test -p ferrogate-observability --all-features
@@ -124,7 +124,7 @@ run_gateway_runtime() {
 
 run_e2e_harness() {
   ensure_toolchain
-  cargo build -p ferrogate-cli -p ferrogate-auth -p ferrogate-test --locked
+  cargo build -p ferrogate-cli -p ferrogate-auth-service -p ferrogate-test --locked
   ./target/debug/ferrogate-test ci
 }
 

@@ -798,7 +798,7 @@ fn complete_sso_login(
         // #514: a suspended/deleted tenancy is a 403 with the gateway's own
         // `tenancy_suspended` code, not a 500 -- and, crucially, not a live
         // `fg_...` secret, which is what this path returned before the gate
-        // became reachable from `ferrogate-auth`.
+        // became reachable from `ferrogate-auth-service`.
         Err(error) => return error.into_response(),
     };
     match issue_session(console, &user.id, email, tenant_id, effective_role.as_str()) {

@@ -52,32 +52,32 @@ not by itself a statement about authentication.
 
 Admin-console user passwords are hashed with Argon2 (`argon2` crate) before
 storage — never stored or compared in plain text
-(`crates/ferrogate-auth/src/lib.rs:1253` `hash_password`,
-`crates/ferrogate-auth/src/lib.rs:1261` `verify_password`, called from
-registration and login at `crates/ferrogate-auth/src/lib.rs:802` and `:918`).
+(`crates/ferrogate-auth-service/src/lib.rs:1253` `hash_password`,
+`crates/ferrogate-auth-service/src/lib.rs:1261` `verify_password`, called from
+registration and login at `crates/ferrogate-auth-service/src/lib.rs:802` and `:918`).
 Sessions use short-lived JWT access tokens plus durable, hashed,
 single-use-rotated refresh tokens; logout and refresh-token reuse both revoke
-the stored token (`crates/ferrogate-auth/src/lib.rs` `issue_session`,
+the stored token (`crates/ferrogate-auth-service/src/lib.rs` `issue_session`,
 `handle_admin_refresh`, `handle_admin_logout`).
 
 External IdP login via OIDC Authorization Code + PKCE is supported —
 discovery-document and JWKS-based ID token verification, group-claim-to-role
 mapping, and just-in-time user provisioning on first login
-(`crates/ferrogate-auth/src/lib.rs` `handle_sso_authorize`,
+(`crates/ferrogate-auth-service/src/lib.rs` `handle_sso_authorize`,
 `handle_sso_callback`). SAML and MFA are not yet implemented.
 
 User provisioning also supports a simplified SCIM 2.0 endpoint
 (`/scim/v2/Users`, `/scim/v2/Groups`) authenticated by a dedicated
 `scim.provision`-scoped credential, for IdP-driven user lifecycle management
-(`crates/ferrogate-auth/src/lib.rs` `handle_scim_user_create`,
+(`crates/ferrogate-auth-service/src/lib.rs` `handle_scim_user_create`,
 `handle_scim_user_patch`).
 
 ## Authorization
 
 Gateway request authorization is enforced by a generic RBAC engine —
-`Permission` (`crates/ferrogate-auth/src/lib.rs:105`), `Role`
-(`crates/ferrogate-auth/src/lib.rs:111`), and `PolicyBinding`
-(`crates/ferrogate-auth/src/lib.rs:119`) — matched by `RbacAuthService` with
+`Permission` (`crates/ferrogate-auth-service/src/lib.rs:105`), `Role`
+(`crates/ferrogate-auth-service/src/lib.rs:111`), and `PolicyBinding`
+(`crates/ferrogate-auth-service/src/lib.rs:119`) — matched by `RbacAuthService` with
 wildcard action/resource support. Virtual API keys additionally carry
 per-key/workspace/project/tenant scopes, model/provider allowlists and
 denylists, request-rate limits, and token budgets, enforced in
@@ -87,7 +87,7 @@ Roles and bindings are managed at runtime through the Admin API
 (`/v1/rbac/roles`, `/v1/rbac/bindings`) without a process restart, and
 non-owner console users can be invited, promoted/demoted, and revoked from a
 tenant's team, with a last-owner guard preventing a tenant from being left
-without an owner (`crates/ferrogate-auth/src/lib.rs`
+without an owner (`crates/ferrogate-auth-service/src/lib.rs`
 `handle_admin_team_invite`, `handle_admin_team_change_role`,
 `handle_admin_team_revoke`).
 

@@ -5,7 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use clap::{Args, Parser, Subcommand};
-use ferrogate_auth::{ApiKeyAuthenticator, AuthServiceConfig, AuthServiceData};
+use ferrogate_auth_service::{ApiKeyAuthenticator, AuthServiceConfig, AuthServiceData};
 use ferrogate_storage::{
     ControlPlaneDocuments, PostgresStorageConfig, PostgresTlsMode, RuntimeStorageOptions,
     RuntimeStorageRepositories, StorageProviderKind,
@@ -110,7 +110,7 @@ fn main() -> anyhow::Result<()> {
             // AuthServeArgs) -- this standalone binary is a secondary
             // entrypoint that predates the console and stays scoped to the
             // original virtual-key-resolution feature.
-            ferrogate_auth::serve(AuthServiceConfig {
+            ferrogate_auth_service::serve(AuthServiceConfig {
                 listen: args.listen,
                 data,
                 api_key_authenticator,
@@ -150,7 +150,7 @@ fn supabase_api_key_authenticator(
     .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     Ok(Some(Arc::new(
-        ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::new(repositories)),
+        ferrogate_auth_service::StorageApiKeyAuthenticator::new(Arc::new(repositories)),
     )))
 }
 

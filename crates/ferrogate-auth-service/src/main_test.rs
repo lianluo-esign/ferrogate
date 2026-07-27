@@ -4,7 +4,7 @@
 // Created: 2026-07-23
 // description: Unit coverage for the standalone ferrogate-auth Supabase connection config building (#386).
 
-//! Proves the custom TLS CA path threads from the standalone `ferrogate-auth`
+//! Proves the custom TLS CA path threads from the standalone `ferrogate-auth-service`
 //! serve args into [`PostgresStorageConfig::tls_ca_cert_path`] (#386, twin of
 //! #382): this binary previously hardcoded `None`, so `verify_ca`/`verify_full`
 //! against Supabase's self-signed pooler chain could never complete the

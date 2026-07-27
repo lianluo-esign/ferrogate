@@ -24,7 +24,7 @@ unmaintainable. Measured on the current tree (2026-07-24):
 | Crate `lib.rs` | Lines | Status |
 |---|---:|---|
 | `ferrogate-storage` | 21,146 | cautionary tale; refactor tracked separately (#419/#425) |
-| `ferrogate-auth` | 4,395 | pre-existing offender |
+| `ferrogate-auth-service` | 4,395 | pre-existing offender |
 | `ferrogate-mcp` | 1,837 | pre-existing offender; contains inline Cloudflare managed-MCP logic |
 | `ferrogate-secrets` | 1,032 | pre-existing offender; the `cf://` Secrets Store backend lives inline |
 | `ferrogate-runtime` | 166 | good: `cloudflare_worker.rs`, `cloudflare_gateway_deploy.rs`, … are sibling modules |

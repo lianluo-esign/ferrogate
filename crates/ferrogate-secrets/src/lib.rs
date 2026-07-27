@@ -386,7 +386,7 @@ impl SecretResolverRegistry {
 
 /// rustls 0.23 requires selecting a process-wide default `CryptoProvider`
 /// once more than one crypto backend is compiled into the binary — which
-/// happens here because `ferrogate-auth` depends on `rustls` with the
+/// happens here because `ferrogate-auth-service` depends on `rustls` with the
 /// `ring` feature while this crate uses the default `aws-lc-rs` backend.
 /// Installing the default explicitly and idempotently avoids the "Could not
 /// automatically determine the process-level CryptoProvider" panic in any

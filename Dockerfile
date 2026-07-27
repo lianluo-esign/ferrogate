@@ -17,7 +17,7 @@ COPY Ferrogate ./Ferrogate
 COPY config ./config
 COPY sql ./sql
 COPY docs ./docs
-RUN cargo build --release -p ferrogate-cli -p ferrogate-auth --locked
+RUN cargo build --release -p ferrogate-cli -p ferrogate-auth-service --locked
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.vendor="Token4AI Cloud" \

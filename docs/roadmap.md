@@ -162,7 +162,7 @@ feed the pillars above:
 | MCP | `ferrogate-mcp` host/client and MCP ingress. | [#286](https://github.com/lianluo-esign/ferrogate/issues/286) |
 | Agent worker | `agent-worker` process, self-hosted and managed workers. | [#287](https://github.com/lianluo-esign/ferrogate/issues/287) |
 | Runtime | `ferrogate-runtime` isolation, sandbox, and function egress. | [#288](https://github.com/lianluo-esign/ferrogate/issues/288) |
-| Auth | `ferrogate-auth`, RBAC, SSO, and tenant entitlements. | [#289](https://github.com/lianluo-esign/ferrogate/issues/289) |
+| Auth | `ferrogate-auth-service`, RBAC, SSO, and tenant entitlements. | [#289](https://github.com/lianluo-esign/ferrogate/issues/289) |
 | Security | Security hardening and vulnerability remediation. | [#290](https://github.com/lianluo-esign/ferrogate/issues/290) |
 | Secrets | `ferrogate-secrets` and credential backends. | [#291](https://github.com/lianluo-esign/ferrogate/issues/291) |
 | Storage | `ferrogate-storage` durable control plane. | [#292](https://github.com/lianluo-esign/ferrogate/issues/292) |

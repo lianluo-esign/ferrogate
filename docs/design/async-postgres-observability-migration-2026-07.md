@@ -83,7 +83,7 @@ facades + migration-snapshot bridges are the real change.
 
 `cargo +1.88.0 check/test/fmt/clippy -D warnings` workspace-wide;
 `scripts/security-check.sh`; config-validation + Python CI-gate tests; storage-lib,
-ferrogate-auth, CLI-bin unit tests; targeted integration tests (`usage_reports_e2e`,
+ferrogate-auth-service, CLI-bin unit tests; targeted integration tests (`usage_reports_e2e`,
 `tenant_isolation_admin_api`, `ai_proxy_runtime`, `agentic_lite`, plus request-log /
 audit surfaces). No reachable Postgres in the sandbox → real async-pool path exercised
 only via in-memory + structural tests; docker-gated supabase tests skip gracefully.

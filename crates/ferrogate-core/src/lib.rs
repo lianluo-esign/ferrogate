@@ -17,24 +17,38 @@
 //! Two types were named explicitly by the `ferrogate-gateway` extraction, and
 //! they come out opposite ways:
 //!
-//! * `CallerScope` (today `ferrogate-cli`'s `auth.rs`) **belongs here**. It is
-//!   the authorization reading of the identity [`TenantContext`] is the
+//! * `CallerScope` (today `ferrogate-gateway`'s `auth.rs`) belongs here **on
+//!   the day a second crate has to read a caller's scope**. It is the
+//!   authorization reading of the identity [`TenantContext`] is the
 //!   attribution reading of, and issue #515 exists precisely because that
 //!   question used to be re-derived as `organization_id.is_none()` at a dozen
-//!   call sites. Once the Admin API surface lives in `ferrogate-gateway` while
-//!   `ctl` and the standalone admin-api service stay in `ferrogate-cli`, both
-//!   sides must read a caller's scope; if the type does not sit under both,
-//!   one of them re-derives it and #515's defect returns. `UNSCOPED_TENANT_ID`
-//!   moves with it -- the sentinel is part of the type's meaning.
+//!   call sites. `UNSCOPED_TENANT_ID` would move with it -- the sentinel is
+//!   part of the type's meaning.
 //! * `AuthContext` **does not**. It is the OUTPUT of the authentication
 //!   pipeline, carrying a `ferrogate_policy::EffectiveQuota` and a
-//!   `ferrogate_auth::PolicySubject`, so moving it down would drag
-//!   `ferrogate-policy` and `ferrogate-auth` underneath the crate they are
+//!   `ferrogate_auth_service::PolicySubject`, so moving it down would drag
+//!   `ferrogate-policy` and `ferrogate-auth-service` underneath the crate they are
 //!   built on. It travels sideways into `ferrogate-gateway` with the handlers
 //!   that consume it, not downward.
 //!
-//! Neither move is made yet: see `ferrogate-gateway/src/lib.rs` for why stage
-//! 2 did not need either one.
+//! Stage 4 re-checked the `CallerScope` half against the finished split and
+//! did **not** move it. Stage 2 predicted the trigger would arrive once the
+//! Admin API surface lived in `ferrogate-gateway` while `ctl` and the
+//! standalone control-api service stayed in `ferrogate-cli`. That split has
+//! now happened, and the prediction did not come true: the control-api
+//! service (`ferrogate-cli`'s `admin_api.rs`) is an authenticated reverse
+//! proxy that calls `ferrogate_gateway::auth::authenticate_admin_gate` at the
+//! edge and leaves the gateway as the single enforcement authority for tenant
+//! scoping, so it never asks the scope question itself. On the current tree
+//! `CallerScope` is `pub(crate)` and every one of its ~25 uses is inside
+//! `ferrogate-gateway`. Moving it here would make it `pub` for zero external
+//! readers while separating it from its only producer
+//! (`AuthContext::caller_scope()`, which cannot follow it down) and from the
+//! deciders that read it -- one vocabulary split across two crates to prevent
+//! a re-derivation nobody is positioned to write. The move becomes correct
+//! when some crate that must NOT depend on `ferrogate-gateway` needs to
+//! answer "which tenant is this caller, and is it root?"; that is the
+//! condition to test, not the calendar.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

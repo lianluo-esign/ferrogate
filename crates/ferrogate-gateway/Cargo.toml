@@ -35,7 +35,7 @@ ed25519-dalek.workspace = true
 # #553 stage 3b-0: `auth` needs the credential vocabulary (`ApiKey`,
 # `AuthServiceConfig`), the authenticator trait, the tenant identity and the
 # resolved quota that `AuthContext` carries. All four sit below this crate.
-ferrogate-auth = { path = "../ferrogate-auth" }
+ferrogate-auth-service = { path = "../ferrogate-auth-service" }
 # The rest arrived with the #553 stage 3b trunk: they are the dependency list
 # `ferrogate-cli` carried for `gateway/` and `state*.rs`, which is now here.
 ferrogate-admin = { path = "../ferrogate-admin" }
