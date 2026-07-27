@@ -99,7 +99,8 @@ fn every_bind_terminal_is_declared_in_the_openapi_document() {
         "bind terminals changed"
     );
 
-    let spec: serde_json::Value = serde_json::from_str(SPEC).expect("admin-api.openapi.json parses");
+    let spec: serde_json::Value =
+        serde_json::from_str(SPEC).expect("admin-api.openapi.json parses");
     let declared = spec["paths"]["/admin/v1/site-domains"]["post"]["responses"]
         .as_object()
         .expect("bindSiteDomain declares responses");
@@ -124,7 +125,8 @@ fn verify_declares_the_missing_tenant_bad_request() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs/openapi/admin-api.openapi.json"
     ));
-    let spec: serde_json::Value = serde_json::from_str(SPEC).expect("admin-api.openapi.json parses");
+    let spec: serde_json::Value =
+        serde_json::from_str(SPEC).expect("admin-api.openapi.json parses");
     let declared = spec["paths"]["/admin/v1/site-domains/{hostname}/verify"]["post"]["responses"]
         .as_object()
         .expect("verifySiteDomain declares responses");
