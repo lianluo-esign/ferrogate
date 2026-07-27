@@ -367,6 +367,19 @@ pub(crate) const GOVERNED_ERROR_VOCABULARY: &[GovernedErrorCode] = &[
         GovernedStage::Admission,
         FixtureCoverage::Required,
     ),
+    // #515: a credential that declares neither `platform_operator` nor an
+    // `organization_id`, with the compatibility switch off, is unclassifiable.
+    // `finalize_auth` refuses it rather than guessing a tenancy, so it is an
+    // admission-stage refusal like the rest of this group. A fixture is
+    // required: it is reachable only through a specific config posture
+    // (`[tenancy] implicit_platform_operator = false` plus an under-declared
+    // key), which is exactly the kind of combination a conformance fixture
+    // exists to hold.
+    code(
+        "tenant_identity_required",
+        GovernedStage::Admission,
+        FixtureCoverage::Required,
+    ),
     // --- quota, budget and money (auth.rs, via `finalize_auth`) ---
     code(
         "token_budget_exceeded",

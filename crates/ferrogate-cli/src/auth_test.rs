@@ -1477,7 +1477,19 @@ fn tenant_scoped_static_key_is_never_platform_root() {
 #[test]
 fn durable_virtual_key_is_never_platform_root() {
     let secret = "fg_live_e2e_0123456789abcdef";
-    let mut config = Config::default();
+    // The decoy YAML key is what every other durable-key test in this file
+    // carries, and it is load-bearing rather than decorative: `auth_required()`
+    // is `auth_service.enabled || !api_keys.is_empty()`, so a config with NO
+    // static keys switches authentication off entirely and `authenticate()`
+    // returns the zero-config wildcard context before it ever consults the
+    // durable authenticator. Without this the test asserts against a context
+    // no durable key produced -- see #542: a deployment whose
+    // only credentials are durable keys has auth off, which is what the
+    // omission accidentally surfaced.
+    let mut config = Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    };
     config.tenancy.implicit_platform_operator = true;
     let state = AppState::new(config);
     seed_durable_virtual_key(&state, "vk-515", secret, |_| {});
