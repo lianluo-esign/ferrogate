@@ -106,6 +106,15 @@ What that leaves this session, and it is the larger half:
   commit time** — #493 shipped with two. Grep the diff for edits that look like
   a deliberately broken assertion.
 
+The standard behind all of this now lives in
+`docs/testing/testing-architecture.md`, section **"Assertions must be able to
+fail"** (added by #500, and named as binding from `AGENTS.md`). It carries the
+one-minute check — name the line, name a one-token edit to it, then find the
+assertion that reds *and read it* — plus an eight-row anti-pattern table and a
+subsection on the two failures mutation reasoning alone cannot find. Read it
+once; it is the written form of the method below, with the concrete cases
+attached.
+
 Four failure modes produced most of the bounces. Hunt them by name:
 
 1. **The code asserts a primitive it never calls.** #414's `cancel()` claimed a
