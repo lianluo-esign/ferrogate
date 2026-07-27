@@ -17,7 +17,7 @@ use std::{
 use tracing::{info, warn};
 
 use crate::{
-    auth::{authenticate, authorize_external_rbac, AuthContext},
+    auth::authenticate,
     responses::{
         streaming_body_channel, write_json_error, write_json_error_and_close, write_json_response,
         write_raw_response, write_streaming_bytes_response, write_streaming_response,
@@ -33,6 +33,7 @@ use ferrogate_config::{
     AgentWorkflowNodeKind, AgentWorkflowPolicy, GuardrailEffect, GuardrailStage, Provider,
 };
 use ferrogate_core::{RequestContext, TenantContext};
+use ferrogate_gateway::auth::{authorize_external_rbac, AuthContext};
 use ferrogate_guardrails::{
     normalize_request as normalize_guardrail_request,
     normalize_response as normalize_guardrail_response, GuardrailEnvelope, GuardrailProtocol,
@@ -2903,7 +2904,7 @@ fn build_ai_request_plan(
     })?;
 
     authorize_external_rbac(
-        state,
+        &state.config.auth_service,
         &auth,
         endpoint.scope(),
         &format!("model:{}", request.model),

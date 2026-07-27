@@ -5,12 +5,12 @@
 // description: Per-user MCP OAuth/OIDC identity lifecycle and fail-closed dispatch resolution.
 
 use super::*;
-use crate::auth::AuthContext;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
     Key, XChaCha20Poly1305, XNonce,
 };
+use ferrogate_gateway::auth::AuthContext;
 use ferrogate_mcp::{McpAuthType, McpDispatchHeaders, McpOauthConfig};
 use ferrogate_storage::{
     McpCredentialRepository, McpIdentityAccessOutcome, McpIdentityAccessRequest,

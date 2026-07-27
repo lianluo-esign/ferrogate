@@ -40,7 +40,7 @@ use std::{
 use tracing::warn;
 
 use crate::{
-    auth::{authenticate, authorize_external_rbac, AuthContext},
+    auth::authenticate,
     responses::{
         streaming_body_channel, write_json_error, write_raw_response,
         write_streaming_bytes_response, write_streaming_response,
@@ -53,6 +53,7 @@ use crate::{
 use ferrogate_billing::{ProviderAttempt, TokenUsage as BillingTokenUsage};
 use ferrogate_config::{GuardrailEffect, GuardrailStage};
 use ferrogate_core::{RequestContext, TenantContext};
+use ferrogate_gateway::auth::{authorize_external_rbac, AuthContext};
 use ferrogate_guardrails::{
     normalize_request as normalize_guardrail_request,
     normalize_response as normalize_guardrail_response, GuardrailEnvelope, GuardrailProtocol,
@@ -1554,7 +1555,7 @@ fn build_messages_request_plan(
     })?;
 
     authorize_external_rbac(
-        state,
+        &state.config.auth_service,
         auth,
         MESSAGES_SCOPE,
         &format!("model:{}", request.model),

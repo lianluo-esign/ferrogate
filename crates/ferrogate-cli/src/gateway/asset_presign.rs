@@ -75,12 +75,13 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
-    auth::{authenticate, AuthContext},
+    auth::authenticate,
     // #528: this module no longer builds an `AssetSummary` itself -- every
     // terminal goes through `AssetMutationResponse::for_asset`, which derives
     // the body AND the status from the same durable row.
     responses::{write_json_error, write_json_response, AssetMutationResponse},
 };
+use ferrogate_gateway::auth::AuthContext;
 
 /// Small ceiling for the intent/commit JSON control bodies -- these carry
 /// only a size + sha256 + content-type, never object bytes (those go

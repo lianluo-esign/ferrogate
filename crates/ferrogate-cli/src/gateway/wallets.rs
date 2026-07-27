@@ -45,10 +45,11 @@ impl FerroGateway {
                 {
                     Ok(auth) => match state.list_wallets().await {
                         Ok(wallets) => {
-                            let wallets =
-                                crate::auth::filter_by_tenant_scope(&auth, wallets, |wallet| {
-                                    wallet.tenant_id.as_str()
-                                });
+                            let wallets = ferrogate_gateway::auth::filter_by_tenant_scope(
+                                &auth,
+                                wallets,
+                                |wallet| wallet.tenant_id.as_str(),
+                            );
                             let body = AdminList::new(wallets.iter().map(admin_wallet).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                                 .await
@@ -160,7 +161,9 @@ impl FerroGateway {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id).await
             {
                 Ok(auth) => {
-                    if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                    if let Err(error) =
+                        ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id)
+                    {
                         return write_json_error(
                             session,
                             error.status,
@@ -273,7 +276,7 @@ impl FerroGateway {
             )
             .await;
         };
-        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &tenant_id) {
+        if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(&auth, &tenant_id) {
             return write_json_error(
                 session,
                 error.status,
@@ -357,7 +360,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+        if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id) {
             return write_json_error(
                 session,
                 error.status,
@@ -453,7 +456,7 @@ impl FerroGateway {
         // Restrict the free-credit primitive to platform operators, matching
         // the documented "operator-issued balance correction" intent and the
         // sibling privileged mutations.
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -463,7 +466,7 @@ impl FerroGateway {
             )
             .await;
         }
-        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+        if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id) {
             return write_json_error(
                 session,
                 error.status,
@@ -578,7 +581,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+        if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id) {
             return write_json_error(
                 session,
                 error.status,
@@ -798,7 +801,9 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
-                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                if let Err(error) =
+                    ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id)
+                {
                     return write_json_error(
                         session,
                         error.status,
@@ -830,7 +835,7 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &super::ProxyContext,
         state: &crate::state::AppState,
-        auth: &crate::auth::AuthContext,
+        auth: &ferrogate_gateway::auth::AuthContext,
         wallet: ferrogate_storage::StoredWallet,
         success_status: StatusCode,
     ) -> PingoraResult<()> {
@@ -898,7 +903,9 @@ impl FerroGateway {
                             )
                             .await;
                         };
-                        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                        if let Err(error) =
+                            ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id)
+                        {
                             return write_json_error(
                                 session,
                                 error.status,
@@ -993,9 +1000,10 @@ impl FerroGateway {
                 // the path/query/body.
                 match state.get_payment_method(id).await {
                     Ok(Some(existing)) => {
-                        if let Err(error) =
-                            crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
-                        {
+                        if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(
+                            &auth,
+                            &existing.tenant_id,
+                        ) {
                             return write_json_error(
                                 session,
                                 error.status,
@@ -1122,7 +1130,7 @@ impl FerroGateway {
             )
             .await;
         };
-        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &tenant_id) {
+        if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(&auth, &tenant_id) {
             return write_json_error(
                 session,
                 error.status,

@@ -10,7 +10,7 @@
 
 use super::*;
 
-use ferrogate_storage::{check_lifecycle_chain, LifecycleRef};
+use ferrogate_storage::{check_lifecycle_chain, LifecycleRef, LifecycleSeam};
 
 #[test]
 fn a_rejection_converts_into_a_403_auth_error() {

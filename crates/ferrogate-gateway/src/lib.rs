@@ -40,12 +40,13 @@
 //! # What is deliberately NOT here
 //!
 //! The other 85 modules under `ferrogate-cli/src/gateway/` all reach back into
-//! `crate::state`, `crate::auth`, `crate::config`, `crate::responses`,
-//! `crate::approval`, or into the `FerroGateway` / `ProxyContext` types defined
-//! in `gateway/mod.rs`. Moving any of them today would need
-//! `ferrogate-gateway -> ferrogate-cli`, which is a cycle. Three near-misses are
-//! worth naming, because each is a one-type problem and each is somebody's next
-//! slice:
+//! `crate::state`, `crate::config`, `crate::responses`, `crate::approval`, or
+//! into the `FerroGateway` / `ProxyContext` types defined in `gateway/mod.rs`.
+//! Moving any of them today would need `ferrogate-gateway -> ferrogate-cli`,
+//! which is a cycle. (`crate::auth` was on that list until stage 3b-0; see
+//! [`auth`] for which half of it came and which half could not.) Three
+//! near-misses are worth naming, because each is a one-type problem and each is
+//! somebody's next slice:
 //!
 //! * `asset_publish_gate` + `asset_security` need only
 //!   `crate::approval::ApprovalStatus`. That enum cannot simply move down,
@@ -105,10 +106,28 @@
 //! not -- none of the eleven files moved in this commit touch auth -- so the
 //! decision is recorded (here and in `ferrogate-core/src/lib.rs`) and the move
 //! is left to the slice that needs it.
+//!
+//! **Stage 3b-0 update.** `CallerScope` and `AuthContext` are both in
+//! [`auth`] now, which settles the `AuthContext` half of the question the way
+//! it was called: it travelled with the vocabulary rather than down into
+//! `ferrogate-core`. `CallerScope` is still owed its move to `ferrogate-core`,
+//! and 3b-0 deliberately did not make it. It would not have fallen out: the
+//! type is returned by `AuthContext::caller_scope()` and read by the four
+//! deciders next to it, so moving it alone splits one vocabulary across two
+//! crates for no caller that exists yet. It becomes worth doing when `ctl` or
+//! the standalone admin-api service has to read a caller's scope without
+//! depending on this crate -- and `UNSCOPED_TENANT_ID` goes with it when it
+//! does.
 
 /// Asset registry version/variant resolution: semver range and channel
 /// resolution over published asset versions, and platform-variant selection.
 pub mod asset_registry;
+
+/// Who a caller is and what it may do: the `AuthContext`/`CallerScope`/
+/// `AuthError` vocabulary and its tenant-isolation deciders, the credential
+/// primitives, and the external auth-service client. NOT the request-admission
+/// pipeline -- see the module docs for why `authenticate()` stayed behind.
+pub mod auth;
 
 /// Malware screening for uploaded asset content: the scanner trait, the
 /// EICAR/clamd/HTTP backends, and the scanner-unavailable fail-open/closed
@@ -125,6 +144,13 @@ pub mod body;
 /// Brokered edge-function egress: the broker config, the invocation token, and
 /// the outbound request with its SSRF-guarded resolver.
 pub mod function_egress;
+
+/// The gateway's HTTP adapter over the shared #514 lifecycle gate: the one
+/// mapping from `ferrogate_storage`'s refusal onto [`auth::AuthError`]. It came
+/// here with `AuthError` because the orphan rule required it -- neither type is
+/// `ferrogate-cli`'s any more. Private, because it publishes no items: a trait
+/// impl is reachable wherever both of its types are.
+mod lifecycle_gate;
 
 /// The Cloudflare Workers flavour of [`function_egress`]: target-kind
 /// selection and the Cloudflare-shaped invocation.

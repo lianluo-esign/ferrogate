@@ -20,7 +20,7 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
-    auth::{authenticate, AuthContext, CallerScope},
+    auth::authenticate,
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, AdminDeleteResponse,
         AdminList, AdminPermission, AdminPermissionMutation, AdminPermissionMutationResponse,
@@ -32,6 +32,7 @@ use crate::{
 use ferrogate_config::{
     AgentUpstreamConfig, GatewayConfigProfile, Model, PolicyRule, SkillPackage,
 };
+use ferrogate_gateway::auth::{AuthContext, CallerScope};
 
 impl FerroGateway {
     pub(super) async fn handle_admin_permissions(
@@ -178,7 +179,7 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
                     return write_json_error(
                         session,
                         error.status,
@@ -333,7 +334,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -554,7 +555,7 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
                     return write_json_error(
                         session,
                         error.status,
@@ -697,7 +698,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -820,7 +821,9 @@ impl FerroGateway {
             (&Method::GET, None) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => {
-                        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                        if let Err(error) =
+                            ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id)
+                        {
                             return write_json_error(
                                 session,
                                 error.status,
@@ -877,7 +880,7 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
                     return write_json_error(
                         session,
                         error.status,
@@ -887,7 +890,9 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                if let Err(error) =
+                    ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id)
+                {
                     return write_json_error(
                         session,
                         error.status,
@@ -970,7 +975,7 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
                     return write_json_error(
                         session,
                         error.status,
@@ -980,7 +985,9 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                if let Err(error) =
+                    ferrogate_gateway::auth::authorize_tenant_scope(&auth, tenant_id)
+                {
                     return write_json_error(
                         session,
                         error.status,
@@ -1066,7 +1073,7 @@ impl FerroGateway {
 /// bound to its own tenant via `tenant_role_bindings`, and only the
 /// permission keys those roles compose. A platform-operator key
 /// (`organization_id: None`) still sees the whole catalog, matching
-/// [`crate::auth::filter_by_tenant_scope`] and every other admin list.
+/// [`ferrogate_gateway::auth::filter_by_tenant_scope`] and every other admin list.
 enum RbacCatalogScope {
     /// Platform operator: the entire catalog, unfiltered.
     Full,
@@ -1197,7 +1204,7 @@ async fn write_rbac_scope_denied(session: &mut Session, request_id: &str) -> Pin
 /// Storage-backed rows (virtual keys, projects, wallets, jobs) are a
 /// different class with a different primitive -- they carry a single owner id
 /// and are filtered row-wise by `auth.tenant_filter()` /
-/// `crate::auth::filter_by_tenant_scope` -- and are covered by #185/#186, not
+/// `ferrogate_gateway::auth::filter_by_tenant_scope` -- and are covered by #185/#186, not
 /// here.
 ///
 /// All five had the same `Ok(_) => ...` shape: authenticate, discard the

@@ -183,7 +183,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -292,7 +292,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -422,7 +422,7 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &super::ProxyContext,
         state: &crate::state::AppState,
-        auth: &crate::auth::AuthContext,
+        auth: &ferrogate_gateway::auth::AuthContext,
         plan: StoredPlan,
         success_status: StatusCode,
     ) -> PingoraResult<()> {

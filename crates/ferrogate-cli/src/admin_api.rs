@@ -35,12 +35,12 @@ use std::{
     time::Duration,
 };
 
-use crate::auth::{authenticate_admin_gate, build_auth_service_target, AuthError};
 use ferrogate_auth::{
     read_http_request_bounded, serve_connections, ApiKeyAuthenticator, HttpRequest, HttpResponse,
     RequestLengthError, StorageApiKeyAuthenticator,
 };
 use ferrogate_config::Config;
+use ferrogate_gateway::auth::{authenticate_admin_gate, build_auth_service_target, AuthError};
 
 /// Canonical wire/log identity of the standalone FerroGate Control Plane API
 /// service (issue #359). Emitted in the startup log, the connection-accept

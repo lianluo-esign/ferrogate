@@ -23,9 +23,10 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::{FerroGateway, ProxyContext};
 use crate::{
-    auth::{authenticate, authorize_tenant_scope, enforce_tenant_filter, AuthContext},
+    auth::authenticate,
     responses::{write_json_error, write_json_error_and_close, write_json_response, AdminList},
 };
+use ferrogate_gateway::auth::{authorize_tenant_scope, enforce_tenant_filter, AuthContext};
 
 /// Newest fire-history rows returned by `GET .../{id}/fires`.
 const FIRE_HISTORY_LIMIT: i64 = 100;
@@ -830,7 +831,7 @@ async fn storage_error(
 async fn write_auth_error(
     session: &mut Session,
     ctx: &ProxyContext,
-    error: crate::auth::AuthError,
+    error: ferrogate_gateway::auth::AuthError,
 ) -> PingoraResult<()> {
     write_json_error(
         session,

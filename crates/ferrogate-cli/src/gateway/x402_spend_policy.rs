@@ -61,10 +61,11 @@ use super::admin_list_query::query_value;
 use super::body::read_request_body;
 use super::{FerroGateway, ProxyContext};
 use crate::{
-    auth::{authenticate, authorize_scoped_resource, AuthContext},
+    auth::{authenticate, authorize_scoped_resource},
     responses::{write_json_error, write_json_response, AdminList},
     state::AppState,
 };
+use ferrogate_gateway::auth::AuthContext;
 
 /// Cap on the evaluate request body. A base64 `PAYMENT-REQUIRED` header is
 /// bounded by the wire contract's own `MAX_HEADER_BYTES`; this leaves ample room
@@ -626,7 +627,7 @@ pub(crate) async fn authorize_scope_chain(
     state: &AppState,
     auth: &AuthContext,
     scope: &X402ScopeRequest,
-) -> Result<(), crate::auth::AuthError> {
+) -> Result<(), ferrogate_gateway::auth::AuthError> {
     // #515: platform root is a declared property of the credential, not the
     // absence of an `organization_id`.
     if auth.is_platform_operator() {
@@ -639,7 +640,7 @@ pub(crate) async fn authorize_scope_chain(
         match tenancy_scope_kind(kind) {
             Some(tenancy) => authorize_scoped_resource(state, auth, tenancy, id).await?,
             None => {
-                return Err(crate::auth::AuthError {
+                return Err(ferrogate_gateway::auth::AuthError {
                     status: StatusCode::FORBIDDEN,
                     code: "run_scope_requires_platform_operator",
                     message: "run-scoped x402 policy diagnostics require a platform-operator \

@@ -43,7 +43,6 @@ mod dashboard;
 mod extensions;
 mod gateway;
 mod lifecycle;
-mod lifecycle_gate;
 mod metering;
 mod plans_cli;
 #[cfg(test)]
@@ -217,7 +216,10 @@ pub fn run() -> AnyResult<()> {
             Ok(())
         }
         Commands::HashKey(args) => {
-            println!("{}", auth::hash_api_key_secret(&args.secret));
+            println!(
+                "{}",
+                ferrogate_gateway::auth::hash_api_key_secret(&args.secret)
+            );
             Ok(())
         }
         Commands::Assets(args) => assets_cli::execute_assets_command(args.command),

@@ -8,10 +8,10 @@
 // behavior of the shared admin auth gate.
 
 use super::*;
-use crate::auth::authenticate_admin_gate;
 use ferrogate_auth::AuthDecision;
 use ferrogate_config::AuthServiceConfig;
 use ferrogate_core::TenantContext;
+use ferrogate_gateway::auth::authenticate_admin_gate;
 use http::StatusCode;
 
 fn disabled_auth_service() -> AuthServiceConfig {

@@ -18,10 +18,11 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::{FerroGateway, ProxyContext};
 use crate::{
-    auth::{authenticate, AuthContext, AuthError, CallerScope},
+    auth::authenticate,
     responses::{write_json_error, write_json_error_and_close, write_json_response, AdminList},
     state::AppState,
 };
+use ferrogate_gateway::auth::{AuthContext, AuthError, CallerScope};
 
 #[derive(Debug, Clone, Copy)]
 enum GuardrailPermission {

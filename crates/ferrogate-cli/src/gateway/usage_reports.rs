@@ -35,7 +35,8 @@ impl FerroGateway {
                 // Selecting it on `organization_id.is_some()` meant a credential
                 // that declared no identity skipped the narrowing entirely and
                 // read an unscoped, cross-tenant report.
-                if let crate::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() {
+                if let ferrogate_gateway::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope()
+                {
                     let tenant_id = tenant_id.to_string();
                     // `group_by=metadata.<key>` is served from
                     // `usage_metadata_rollups`, which is NOT keyed on the

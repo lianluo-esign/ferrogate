@@ -44,7 +44,7 @@
 //!
 //! **Tenant isolation.** Every read resolves the run through
 //! `AppState::agent_run_timeline` with `AgentRunFilter::organization_id` pinned
-//! by `crate::auth::enforce_tenant_filter` -- i.e. isolation is applied at the
+//! by `ferrogate_gateway::auth::enforce_tenant_filter` -- i.e. isolation is applied at the
 //! storage/query layer, before anything is shaped for the response, exactly as
 //! `handle_admin_agent_runs` does. A cross-tenant `run_id` resolves to `None`
 //! and is reported as 404 (not 403), so the surface is not an existence oracle.
@@ -81,10 +81,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    auth::{authenticate, enforce_tenant_filter, AuthContext},
+    auth::authenticate,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AgentRunFilter, AgentRunTimeline, AppState},
 };
+use ferrogate_gateway::auth::{enforce_tenant_filter, AuthContext};
 
 use super::{body::read_request_body, FerroGateway, ProxyContext};
 
@@ -1215,7 +1216,7 @@ async fn authenticate_agent_job_read(
     state: &AppState,
     headers: &HeaderMap,
     request_id: &str,
-) -> Result<AuthContext, crate::auth::AuthError> {
+) -> Result<AuthContext, ferrogate_gateway::auth::AuthError> {
     match authenticate(state, headers, AGENT_JOB_READ_SCOPE, request_id).await {
         Ok(auth) => Ok(auth),
         Err(error) if error.code == "scope_denied" => {
@@ -1561,7 +1562,7 @@ async fn method_not_allowed(
 async fn write_auth_error(
     session: &mut Session,
     ctx: &ProxyContext,
-    error: crate::auth::AuthError,
+    error: ferrogate_gateway::auth::AuthError,
 ) -> PingoraResult<()> {
     write_json_error(
         session,

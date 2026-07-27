@@ -22,7 +22,7 @@ fn authenticate(
     headers: &http::HeaderMap,
     required_scope: &str,
     request_id: &str,
-) -> Result<crate::auth::AuthContext, crate::auth::AuthError> {
+) -> Result<ferrogate_gateway::auth::AuthContext, ferrogate_gateway::auth::AuthError> {
     block_on(crate::auth::authenticate(
         state,
         headers,

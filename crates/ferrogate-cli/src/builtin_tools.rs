@@ -17,12 +17,12 @@ use std::time::Instant;
 use ferrogate_core::ApprovalPolicy;
 use ferrogate_storage::{stored_asset_id, StoredAsset};
 
-use crate::auth::AuthContext;
 use crate::extensions::{
     RegisteredTool, ToolExecutionError, ToolExecutionRequest, ToolExecutionResponse,
 };
 use crate::gateway::asset_admission::{BufferedObject, ResponseBufferBudget};
 use crate::state::{AppState, AssetReadError};
+use ferrogate_gateway::auth::AuthContext;
 
 /// The single built-in tool name. Namespaced with a `builtin.` prefix so it can
 /// never collide with an MCP `serverName-toolName` (which the chokepoint splits

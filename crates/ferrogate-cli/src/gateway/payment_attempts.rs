@@ -51,9 +51,10 @@ use ferrogate_storage::{
 use super::admin_list_query::query_value;
 use super::{FerroGateway, ProxyContext};
 use crate::{
-    auth::{authenticate, authorize_tenant_scope},
+    auth::authenticate,
     responses::{write_json_error, write_json_response},
 };
+use ferrogate_gateway::auth::authorize_tenant_scope;
 
 // ---------------------------------------------------------------------------
 // Response projections (explicit, closed)

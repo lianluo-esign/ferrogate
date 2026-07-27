@@ -11,11 +11,11 @@ use std::fmt;
 use ferrogate_storage::{stored_asset_id, StoredAsset};
 
 use crate::{
-    auth::AuthContext,
     extensions::ToolExecutionRequest,
     gateway::ProxyContext,
     state::{AdminAuditEventDraft, AppState, AssetReadError},
 };
+use ferrogate_gateway::auth::AuthContext;
 
 use super::asset_admission::ResponseBufferBudget;
 use super::local::{

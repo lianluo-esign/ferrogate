@@ -15,8 +15,8 @@ use ferrogate_storage::stored_asset_id;
 
 use super::local::admin_audit_event_draft_for_target;
 use super::ProxyContext;
-use crate::auth::AuthContext;
 use crate::state::AppState;
+use ferrogate_gateway::auth::AuthContext;
 
 /// The process-local monthly-egress-counter key for the scope that owns the
 /// egress byte budget (#262). Namespaced with an `egress:` prefix so it never

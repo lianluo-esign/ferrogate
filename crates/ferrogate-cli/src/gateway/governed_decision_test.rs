@@ -75,7 +75,17 @@ fn is_code_shaped(candidate: &str) -> bool {
 
 fn scanned_governed_codes() -> BTreeSet<String> {
     let mut codes = scan_governed_codes(include_str!("chat.rs"));
+    // #553 stage 3b-0 split the old `auth.rs` in two: the credential and
+    // tenant-isolation refusals (`invalid_api_key`, `scope_denied`,
+    // `tenant_scope_denied`, ...) went to `ferrogate-gateway` with the
+    // vocabulary that emits them, while the governance refusals
+    // (`monthly_budget_exceeded`, `rate_limit_exceeded`, ...) stayed with the
+    // admission pipeline here. Both halves must be scanned or
+    // `vocabulary_carries_no_stale_entries` would start deleting real entries.
     codes.extend(scan_governed_codes(include_str!("../auth.rs")));
+    codes.extend(scan_governed_codes(include_str!(
+        "../../../ferrogate-gateway/src/auth.rs"
+    )));
     codes
 }
 

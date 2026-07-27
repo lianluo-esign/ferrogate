@@ -45,9 +45,10 @@ use super::site_domain_verification::{
 };
 use super::{FerroGateway, ProxyContext};
 use crate::{
-    auth::{authenticate, authorize_tenant_scope, enforce_tenant_filter},
+    auth::authenticate,
     responses::{write_json_error, write_json_error_and_close, write_json_response, AdminList},
 };
+use ferrogate_gateway::auth::{authorize_tenant_scope, enforce_tenant_filter};
 
 impl FerroGateway {
     /// Data-plane resolution for a bound custom hostname (#265): when the
@@ -1221,7 +1222,7 @@ async fn storage_error(
 async fn write_auth_error(
     session: &mut Session,
     ctx: &ProxyContext,
-    error: crate::auth::AuthError,
+    error: ferrogate_gateway::auth::AuthError,
 ) -> PingoraResult<()> {
     write_json_error(
         session,

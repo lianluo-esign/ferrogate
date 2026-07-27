@@ -974,7 +974,7 @@ pub(crate) struct AdminApiKey {
     /// "did someone write it down", that one answers "is this key root now".
     pub(crate) platform_operator: Option<bool>,
     /// Whether this key holds platform root RIGHT NOW (issue #515) -- the
-    /// answer [`crate::auth::resolve_platform_operator`] will give at
+    /// answer [`ferrogate_gateway::auth::resolve_platform_operator`] will give at
     /// authentication time, i.e. [`Self::platform_operator`] resolved against
     /// `organization_id` and this deployment's `[tenancy]
     /// implicit_platform_operator` setting.

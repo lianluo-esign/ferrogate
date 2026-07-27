@@ -19,12 +19,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 use crate::{
-    auth::{authenticate, authorize_external_rbac, AuthContext},
+    auth::authenticate,
     responses::{write_json_error, write_json_response, write_raw_response},
     state::{AdminAuditEventDraft, AppState, BillingEventDraft, GuardrailEvaluationContext},
 };
 use ferrogate_billing::{ProviderAttempt, TokenUsage as BillingTokenUsage};
 use ferrogate_core::TenantContext;
+use ferrogate_gateway::auth::{authorize_external_rbac, AuthContext};
 use ferrogate_guardrails::{normalize_request as normalize_guardrail_request, GuardrailProtocol};
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::{ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest};
@@ -1032,7 +1033,7 @@ fn build_embeddings_request_plan(
     })?;
 
     authorize_external_rbac(
-        state,
+        &state.config.auth_service,
         auth,
         EMBEDDINGS_SCOPE,
         &format!("model:{}", request.model),

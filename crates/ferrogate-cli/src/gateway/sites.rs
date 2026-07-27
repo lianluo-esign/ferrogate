@@ -481,7 +481,7 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &super::ProxyContext,
-        auth: &crate::auth::AuthContext,
+        auth: &ferrogate_gateway::auth::AuthContext,
         headers: &http::HeaderMap,
         tenant_id: &str,
         site: &str,

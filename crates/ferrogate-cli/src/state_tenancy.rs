@@ -7,8 +7,8 @@
 
 use super::*;
 
-use crate::auth::AuthError;
-use crate::lifecycle_gate::{LifecycleSeam, TenancyRefs};
+use ferrogate_gateway::auth::AuthError;
+use ferrogate_storage::{LifecycleSeam, TenancyRefs};
 
 impl AppState {
     pub(crate) async fn list_tenant_accounts(&self) -> anyhow::Result<Vec<StoredTenantAccount>> {

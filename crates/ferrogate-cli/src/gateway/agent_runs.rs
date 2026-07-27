@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    auth::{authenticate, AuthContext},
+    auth::authenticate,
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AgentRunAdmission, AppState, UNATTRIBUTED_AGENT_KEY},
@@ -28,6 +28,7 @@ use ferrogate_config::{
     AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider, AgentWorkflowNode,
     AgentWorkflowNodeKind, AgentWorkflowPolicy,
 };
+use ferrogate_gateway::auth::AuthContext;
 use ferrogate_policy::{resolve_workflow_budget_envelope, WorkflowBudgetCaps};
 use ferrogate_storage::{
     workflow_run_budget_id, StoredAgentRun, StoredAgentRunEvent, WorkflowBudgetDebit,

@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use crate::gateway::dispatch::dispatch_provider_request;
 use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
-    auth::{authenticate, AuthContext},
+    auth::authenticate,
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
         write_empty_response, write_json_error, write_json_error_and_close, write_json_response,
@@ -62,6 +62,7 @@ use ferrogate_config::{
     PolicyRule, PromptTemplate, PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
     PromptTemplateVersionStatus, Provider, SkillPackage, SkillPackageCapabilityKind,
 };
+use ferrogate_gateway::auth::AuthContext;
 use ferrogate_providers::provider_compatibility_kind;
 use ferrogate_providers::{ProviderHeader, SecretValue};
 
@@ -167,7 +168,7 @@ pub(super) async fn tool_execution_entitlement_denial(
     // #515: only a declared platform operator is exempt from the tenant's plan/
     // RBAC tool entitlement. Read off `organization_id` the exemption also fell
     // to any credential that simply never named a tenant.
-    let crate::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() else {
+    let ferrogate_gateway::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() else {
         return None;
     };
     if state
@@ -230,7 +231,7 @@ async fn require_guardrail_evidence_auth(
     };
     // #515: the RBAC grant is required of every tenant-scoped caller; only a
     // declared platform operator skips it (see `require_guardrail_auth`).
-    if let crate::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() {
+    if let ferrogate_gateway::auth::CallerScope::Tenant(tenant_id) = auth.caller_scope() {
         match state
             .tenant_has_permission_result(tenant_id, "guardrails.evidence.read")
             .await
@@ -343,12 +344,13 @@ impl FerroGateway {
                     .iter()
                     .filter(|model| model.enabled)
                     .filter(|model| match caller_scope {
-                        crate::auth::CallerScope::PlatformOperator => true,
-                        crate::auth::CallerScope::Tenant(tenant_id) => state.can_tenant_use_model(
-                            &model.name,
-                            Some(tenant_id),
-                            auth.project_id.as_deref(),
-                        ),
+                        ferrogate_gateway::auth::CallerScope::PlatformOperator => true,
+                        ferrogate_gateway::auth::CallerScope::Tenant(tenant_id) => state
+                            .can_tenant_use_model(
+                                &model.name,
+                                Some(tenant_id),
+                                auth.project_id.as_deref(),
+                            ),
                     })
                     .map(|model| OpenAiModel {
                         id: model.name.clone(),
@@ -578,7 +580,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -774,7 +776,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -1018,7 +1020,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -1201,7 +1203,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -1406,7 +1408,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -1580,7 +1582,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -1820,7 +1822,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -1994,7 +1996,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -2254,7 +2256,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -2438,7 +2440,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -4227,7 +4229,7 @@ impl FerroGateway {
             Ok(auth) => {
                 let mut filter = RequestLogExportFilter::from_query(query);
                 filter.organization_id =
-                    crate::auth::enforce_tenant_filter(&auth, filter.organization_id);
+                    ferrogate_gateway::auth::enforce_tenant_filter(&auth, filter.organization_id);
                 let records = state.request_log_export_records(filter);
                 let body = render_request_log_export_jsonl(&records);
                 write_raw_response(
@@ -4265,8 +4267,10 @@ impl FerroGateway {
             Ok(auth) => {
                 if path == "/admin/v1/agent-runs" {
                     let mut filter = crate::state::AgentRunFilter::from_query(query);
-                    filter.organization_id =
-                        crate::auth::enforce_tenant_filter(&auth, filter.organization_id);
+                    filter.organization_id = ferrogate_gateway::auth::enforce_tenant_filter(
+                        &auth,
+                        filter.organization_id,
+                    );
                     let page = state.agent_runs_page(state.admin_pagination(query), filter);
                     let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                     return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
@@ -4285,7 +4289,7 @@ impl FerroGateway {
                 }
                 let mut filter = crate::state::AgentRunFilter::from_query(query);
                 filter.organization_id =
-                    crate::auth::enforce_tenant_filter(&auth, filter.organization_id);
+                    ferrogate_gateway::auth::enforce_tenant_filter(&auth, filter.organization_id);
                 let Some(timeline) = state.agent_run_timeline(run_id, filter) else {
                     return write_json_error(
                         session,
@@ -4399,7 +4403,7 @@ impl FerroGateway {
             return Ok(());
         };
         let mut filter = crate::state::GuardrailEvidenceFilter::from_query(query);
-        filter.tenant_id = crate::auth::enforce_tenant_filter(&auth, filter.tenant_id);
+        filter.tenant_id = ferrogate_gateway::auth::enforce_tenant_filter(&auth, filter.tenant_id);
         match state.guardrail_evaluations_page(state.admin_pagination(query), filter) {
             Ok(page) => {
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
@@ -4432,7 +4436,7 @@ impl FerroGateway {
             return Ok(());
         };
         let mut filter = crate::state::GuardrailEvidenceFilter::from_query(query);
-        filter.tenant_id = crate::auth::enforce_tenant_filter(&auth, filter.tenant_id);
+        filter.tenant_id = ferrogate_gateway::auth::enforce_tenant_filter(&auth, filter.tenant_id);
         match state.guardrail_investigation(filter) {
             Ok(Some(timeline)) => {
                 write_json_response(session, StatusCode::OK, &timeline, &ctx.request_id).await
@@ -6097,7 +6101,7 @@ impl FerroGateway {
                 // registration to an arbitrary other tenant.
                 let self_hosted_tenant_id = crate::state::self_hosted_tenant_id(&payload.tenant);
                 if let Err(error) =
-                    crate::auth::authorize_tenant_scope(&auth, &self_hosted_tenant_id)
+                    ferrogate_gateway::auth::authorize_tenant_scope(&auth, &self_hosted_tenant_id)
                 {
                     return write_json_error(
                         session,
@@ -7486,7 +7490,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -7674,7 +7678,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -7805,7 +7809,7 @@ impl FerroGateway {
             }
             return match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                 Ok(auth) => {
-                    let approvals = crate::auth::filter_by_tenant_scope(
+                    let approvals = ferrogate_gateway::auth::filter_by_tenant_scope(
                         &auth,
                         state.tool_approvals(),
                         |approval| {
@@ -7867,7 +7871,7 @@ impl FerroGateway {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => match state.tool_approval(id) {
                         Some(approval) => {
-                            if let Err(error) = crate::auth::authorize_tenant_scope(
+                            if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(
                                 &auth,
                                 approval
                                     .tenant
@@ -7927,7 +7931,7 @@ impl FerroGateway {
                 };
                 match state.tool_approval(id) {
                     Some(approval) => {
-                        if let Err(error) = crate::auth::authorize_tenant_scope(
+                        if let Err(error) = ferrogate_gateway::auth::authorize_tenant_scope(
                             &auth,
                             approval
                                 .tenant
@@ -8155,7 +8159,9 @@ impl FerroGateway {
             (&Method::GET, None) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => {
-                        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                        if let Err(error) =
+                            ferrogate_gateway::auth::require_platform_operator(&auth)
+                        {
                             return write_json_error(
                                 session,
                                 error.status,
@@ -8190,7 +8196,9 @@ impl FerroGateway {
             (&Method::GET, Some(id)) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => {
-                        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                        if let Err(error) =
+                            ferrogate_gateway::auth::require_platform_operator(&auth)
+                        {
                             return write_json_error(
                                 session,
                                 error.status,
@@ -8274,7 +8282,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -8384,8 +8392,8 @@ impl FerroGateway {
         let refs = ApiKeyTenancyRefs::from_key(&key);
         if let Err(error) = state
             .require_usable_tenancy(
-                crate::lifecycle_gate::LifecycleSeam::Attach,
-                crate::lifecycle_gate::TenancyRefs::new(
+                ferrogate_storage::LifecycleSeam::Attach,
+                ferrogate_storage::TenancyRefs::new(
                     refs.organization_id,
                     refs.project_id,
                     refs.workspace_id,
@@ -8479,7 +8487,7 @@ impl FerroGateway {
                     // upsert does after `resolve_workspace_scope`.
                     if let Some(owner_tenant_id) = outcome.owner_tenant_id.as_deref() {
                         if let Err(error) =
-                            crate::auth::authorize_tenant_scope(&auth, owner_tenant_id)
+                            ferrogate_gateway::auth::authorize_tenant_scope(&auth, owner_tenant_id)
                         {
                             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                                 ctx,
@@ -8638,7 +8646,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -8878,7 +8886,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -9061,7 +9069,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -9154,10 +9162,11 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
-                let refs =
-                    crate::auth::filter_by_tenant_scope(&auth, state.tenant_refs(), |tenant_ref| {
-                        tenant_ref.organization_id.as_deref().unwrap_or_default()
-                    });
+                let refs = ferrogate_gateway::auth::filter_by_tenant_scope(
+                    &auth,
+                    state.tenant_refs(),
+                    |tenant_ref| tenant_ref.organization_id.as_deref().unwrap_or_default(),
+                );
                 let body = AdminList::new(refs);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -9413,7 +9422,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -9581,7 +9590,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+        if let Err(error) = ferrogate_gateway::auth::require_platform_operator(&auth) {
             return write_json_error(
                 session,
                 error.status,
@@ -10310,7 +10319,7 @@ fn admin_api_key(
         // is what made GET -> PUT round-tripping a lockout; see
         // `AdminApiKey::platform_operator`.
         platform_operator: key.platform_operator,
-        effective_platform_operator: crate::auth::resolve_platform_operator(
+        effective_platform_operator: ferrogate_gateway::auth::resolve_platform_operator(
             tenancy.implicit_platform_operator,
             key.platform_operator,
             key.organization_id.as_deref(),
@@ -11704,7 +11713,7 @@ fn reload_from_admin_payload(
 
 fn admin_audit_event_draft(
     ctx: &ProxyContext,
-    auth: &crate::auth::AuthContext,
+    auth: &ferrogate_gateway::auth::AuthContext,
     outcome: &str,
     message: impl Into<String>,
 ) -> AdminAuditEventDraft {
@@ -11731,7 +11740,7 @@ fn render_request_log_export_jsonl(records: &[RequestLogExportRecord]) -> String
 
 fn admin_audit_event_draft_for_action(
     ctx: &ProxyContext,
-    auth: &crate::auth::AuthContext,
+    auth: &ferrogate_gateway::auth::AuthContext,
     action: impl Into<String>,
     outcome: &str,
     message: impl Into<String>,
@@ -11741,7 +11750,7 @@ fn admin_audit_event_draft_for_action(
 
 pub(super) fn admin_audit_event_draft_for_target(
     ctx: &ProxyContext,
-    auth: &crate::auth::AuthContext,
+    auth: &ferrogate_gateway::auth::AuthContext,
     action: impl Into<String>,
     target: impl Into<String>,
     outcome: &str,
@@ -11766,7 +11775,7 @@ pub(super) fn admin_audit_event_draft_for_target(
 
 fn tool_audit_event_draft_for_target(
     ctx: &ProxyContext,
-    auth: &crate::auth::AuthContext,
+    auth: &ferrogate_gateway::auth::AuthContext,
     execution: ToolExecutionContext<'_>,
     action: impl Into<String>,
     target: impl Into<String>,

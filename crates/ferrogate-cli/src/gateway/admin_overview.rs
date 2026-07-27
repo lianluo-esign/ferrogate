@@ -726,8 +726,8 @@ impl FerroGateway {
         // #515: a global (all-tenant) overview is for a declared platform
         // operator; anything else is pinned to its own tenant.
         let scope = match auth.caller_scope() {
-            crate::auth::CallerScope::PlatformOperator => OverviewScope::Global,
-            crate::auth::CallerScope::Tenant(tenant_id) => {
+            ferrogate_gateway::auth::CallerScope::PlatformOperator => OverviewScope::Global,
+            ferrogate_gateway::auth::CallerScope::Tenant(tenant_id) => {
                 OverviewScope::Tenant(tenant_id.to_string())
             }
         };

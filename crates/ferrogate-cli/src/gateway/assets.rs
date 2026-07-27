@@ -1795,7 +1795,7 @@ impl FerroGateway {
         &self,
         state: &crate::state::AppState,
         ctx: &super::ProxyContext,
-        auth: &crate::auth::AuthContext,
+        auth: &ferrogate_gateway::auth::AuthContext,
         asset_type: &str,
         name: &str,
         channel: &str,
@@ -1910,7 +1910,7 @@ impl FerroGateway {
     }
 }
 
-fn auth_tenant(auth: &crate::auth::AuthContext) -> String {
+fn auth_tenant(auth: &ferrogate_gateway::auth::AuthContext) -> String {
     auth.organization_id.clone().unwrap_or_default()
 }
 

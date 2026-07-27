@@ -459,7 +459,7 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &super::ProxyContext,
         state: &crate::state::AppState,
-        auth: &crate::auth::AuthContext,
+        auth: &ferrogate_gateway::auth::AuthContext,
         scope: QuotaPolicyScope<'_>,
         payload: AdminQuotaPolicyMutation,
     ) -> PingoraResult<()> {

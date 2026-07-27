@@ -17,11 +17,12 @@ use pingora::{proxy::Session, Result as PingoraResult};
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
-    auth::{authenticate, authorize_tenant_scope, filter_by_tenant_scope},
+    auth::authenticate,
     responses::{
         write_json_error, write_json_response, AdminBillingOutboxReplayResponse, AdminList,
     },
 };
+use ferrogate_gateway::auth::{authorize_tenant_scope, filter_by_tenant_scope};
 
 impl FerroGateway {
     pub(super) async fn handle_admin_billing_outbox_dead_letters(
