@@ -20,7 +20,8 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
-    auth::{authenticate, AuthContext},
+    auth::{authenticate, AuthContext, CallerScope},
+    config::{GatewayConfigProfile, PolicyRule},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, AdminDeleteResponse,
         AdminList, AdminPermission, AdminPermissionMutation, AdminPermissionMutationResponse,
@@ -1108,7 +1109,12 @@ async fn rbac_catalog_scope(
     state: &AppState,
     auth: &AuthContext,
 ) -> anyhow::Result<RbacCatalogScope> {
-    let Some(tenant_id) = auth.organization_id.as_deref() else {
+    // #535: read the classification through `caller_scope()`, not through
+    // `organization_id.is_none()`. The latter collapses "declared platform
+    // root" and "declared nothing at all" into the same `Full`, which is the
+    // exact shape #515 spent a slice removing; an unclassified credential now
+    // lands in `Tenant(UNSCOPED_TENANT_ID)` and reaches nothing.
+    let CallerScope::Tenant(tenant_id) = auth.caller_scope() else {
         return Ok(RbacCatalogScope::Full);
     };
     let role_ids: HashSet<String> = state
@@ -1142,6 +1148,197 @@ async fn write_rbac_scope_denied(session: &mut Session, request_id: &str) -> Pin
         StatusCode::FORBIDDEN,
         "tenant_scope_denied",
         "API key is not authorized to read this RBAC catalog entry",
+        request_id,
+    )
+    .await
+}
+
+/// How much of the *static config* catalog a caller is allowed to read
+/// (issue #535) -- the sibling of [`RbacCatalogScope`] for the two admin read
+/// surfaces #518 did not cover: `/admin/v1/policies[/{name}]` and
+/// `/admin/v1/gateway-configs[/{id}]`.
+///
+/// Both had the same `Ok(_) => ...` shape: authenticate, discard the
+/// [`AuthContext`], serialize platform-global state. A `PolicyRule` carries
+/// `organization_ids`, `project_ids` and `api_key_ids` plus the
+/// effect/models/providers that act on them, so the unscoped list handed
+/// tenant A other tenants' ids *and* which models they are denied; a
+/// `GatewayConfigProfile` carries the `api_key_ids` allowed to use it. Writes
+/// are `require_platform_operator`-gated on both, so this was pure disclosure.
+///
+/// Neither surface is public-to-tenants and neither is a blanket 403: a
+/// tenant-scoped console legitimately shows "which deny rules apply to me"
+/// and "which gateway profiles may my keys select". So a tenant-scoped
+/// caller gets the *reachable* slice, defined by the same selector semantics
+/// the runtime itself uses:
+///
+/// * an EMPTY selector list is a wildcard -- `build_policy_engine` expands it
+///   to `None` (matches every subject) and `gateway_config_use` treats an
+///   empty `api_key_ids` as "usable by any key". A rule/profile whose
+///   selectors are all empty is genuinely global and is shown verbatim.
+/// * a NON-EMPTY selector is an allow-list. It reaches the caller only if it
+///   names something the caller owns; if it names only other tenants' ids the
+///   entry is invisible, because it can never act on this caller.
+/// * what is rendered is NARROWED to the caller: other tenants' ids are
+///   stripped from a rule that names several tenants rather than the whole
+///   rule being hidden, so tenant A still sees the rule that denies it a
+///   model without learning who else it denies.
+///
+/// The narrowing preserves the wildcard/allow-list distinction by
+/// construction: [`ConfigCatalogScope::narrow`] returns `None` (entry hidden)
+/// rather than an empty vector whenever a non-empty selector loses all of its
+/// entries, so a rule scoped to tenant B can never be re-rendered as an empty
+/// -- i.e. global -- selector that reads as applying to tenant A.
+pub(super) enum ConfigCatalogScope {
+    /// Platform operator: every rule and profile, verbatim.
+    Full,
+    /// Tenant-scoped caller: the entries whose selectors reach this tenant,
+    /// rendered with only this tenant's ids.
+    Tenant {
+        tenant_id: String,
+        /// Api key ids owned by this tenant: static `[[api_keys]]` carrying
+        /// `organization_id`, plus durable/virtual keys whose `tenant_id`
+        /// matches. An id in neither set is treated as another tenant's
+        /// (fail closed).
+        api_key_ids: HashSet<String>,
+        /// Project ids owned by this tenant: stored `projects` rows plus the
+        /// `project_id` of this tenant's static keys.
+        project_ids: HashSet<String>,
+    },
+}
+
+impl ConfigCatalogScope {
+    pub(super) fn is_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// An empty selector stays empty (wildcard, preserved); a non-empty one
+    /// keeps only the caller's own ids and hides the entry outright when
+    /// nothing survives.
+    fn narrow(selector: &[String], owned: &HashSet<String>) -> Option<Vec<String>> {
+        if selector.is_empty() {
+            return Some(Vec::new());
+        }
+        let kept: Vec<String> = selector
+            .iter()
+            .filter(|id| owned.contains(*id))
+            .cloned()
+            .collect();
+        (!kept.is_empty()).then_some(kept)
+    }
+
+    /// The caller's view of one `[[policies]]` rule, or `None` if the rule
+    /// cannot act on the caller. Visibility and redaction are decided
+    /// together, in one place, so a call site cannot serialize the raw rule
+    /// after deciding it is visible.
+    pub(super) fn visible_policy(&self, rule: &PolicyRule) -> Option<PolicyRule> {
+        let Self::Tenant {
+            tenant_id,
+            api_key_ids,
+            project_ids,
+        } = self
+        else {
+            return Some(rule.clone());
+        };
+        let organization_ids = if rule.organization_ids.is_empty() {
+            Vec::new()
+        } else if rule.organization_ids.iter().any(|id| id == tenant_id) {
+            vec![tenant_id.clone()]
+        } else {
+            return None;
+        };
+        Some(PolicyRule {
+            organization_ids,
+            project_ids: Self::narrow(&rule.project_ids, project_ids)?,
+            api_key_ids: Self::narrow(&rule.api_key_ids, api_key_ids)?,
+            ..rule.clone()
+        })
+    }
+
+    /// The caller's view of one `[[gateway_configs]]` profile, or `None` if
+    /// none of the caller's keys may select it.
+    pub(super) fn visible_gateway_config(
+        &self,
+        profile: &GatewayConfigProfile,
+    ) -> Option<GatewayConfigProfile> {
+        let Self::Tenant { api_key_ids, .. } = self else {
+            return Some(profile.clone());
+        };
+        Some(GatewayConfigProfile {
+            api_key_ids: Self::narrow(&profile.api_key_ids, api_key_ids)?,
+            ..profile.clone()
+        })
+    }
+}
+
+/// Resolves the caller's [`ConfigCatalogScope`] -- the ONE place the
+/// tenant/platform-operator split is decided for the static config catalog,
+/// mirroring [`rbac_catalog_scope`] so the four read sites cannot drift
+/// (four copies of the check is precisely how this class survived #518).
+///
+/// The classification comes from [`AuthContext::caller_scope`], never from
+/// `organization_id.is_none()`: only a credential that *declared* platform
+/// root gets [`ConfigCatalogScope::Full`].
+///
+/// Storage failures propagate rather than degrading to an unfiltered scope;
+/// the callers turn them into `503 storage_unavailable`.
+pub(super) async fn config_catalog_scope(
+    state: &AppState,
+    auth: &AuthContext,
+) -> anyhow::Result<ConfigCatalogScope> {
+    let CallerScope::Tenant(tenant_id) = auth.caller_scope() else {
+        return Ok(ConfigCatalogScope::Full);
+    };
+    let own_static_keys = || {
+        state
+            .config
+            .api_keys
+            .iter()
+            .filter(|key| key.organization_id.as_deref() == Some(tenant_id))
+    };
+    let mut api_key_ids: HashSet<String> = own_static_keys().map(|key| key.id.clone()).collect();
+    let mut project_ids: HashSet<String> = own_static_keys()
+        .filter_map(|key| key.project_id.clone())
+        .collect();
+    api_key_ids.extend(
+        state
+            .list_virtual_api_keys()
+            .await?
+            .into_iter()
+            .filter(|key| key.tenant_id == tenant_id)
+            .map(|key| key.id),
+    );
+    project_ids.extend(
+        state
+            .list_projects()
+            .await?
+            .into_iter()
+            .filter(|project| project.tenant_id == tenant_id)
+            .map(|project| project.id),
+    );
+    Ok(ConfigCatalogScope::Tenant {
+        tenant_id: tenant_id.to_string(),
+        api_key_ids,
+        project_ids,
+    })
+}
+
+/// The single-object counterpart to the config-catalog list filters (#535),
+/// and the sibling of [`write_rbac_scope_denied`]: a tenant-scoped caller
+/// asking for an entry outside its reachable slice is refused *identically*
+/// whether or not the entry exists, so `GET /admin/v1/policies/{name}` and
+/// `GET /admin/v1/gateway-configs/{id}` cannot be walked as existence
+/// oracles to rebuild the catalog the lists no longer disclose.
+pub(super) async fn write_config_scope_denied(
+    session: &mut Session,
+    entity: &str,
+    request_id: &str,
+) -> PingoraResult<()> {
+    write_json_error(
+        session,
+        StatusCode::FORBIDDEN,
+        "tenant_scope_denied",
+        format!("API key is not authorized to read this {entity}"),
         request_id,
     )
     .await

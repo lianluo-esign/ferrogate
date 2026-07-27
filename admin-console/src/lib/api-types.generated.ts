@@ -849,7 +849,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List configured policy rules. */
+        /**
+         * List configured policy rules.
+         * @description Lists the policy rules visible to the caller. Scoped to the caller (issue #535): a platform-operator key receives every rule verbatim; a tenant-scoped admin.read key receives only the rules that can act on it, with other tenants' ids removed. The selector semantics match the runtime's own: an empty organization_ids/project_ids/api_key_ids is a wildcard, so a rule with no selectors at all is genuinely platform-wide and is returned unchanged; a non-empty selector is an allow-list, so the rule is hidden unless it names an organization, project or api key the caller owns, and is then rendered with only the caller's own ids. Policy rules are deliberately not public-to-tenants: they carry other tenants' organization, project and api-key ids together with the models and providers each is denied.
+         */
         get: operations["listAdminPolicies"];
         put?: never;
         /** Create a policy rule and apply it through process-local reload. */
@@ -869,7 +872,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get one policy rule. */
+        /**
+         * Get one policy rule.
+         * @description Returns one policy rule, scoped exactly as GET /admin/v1/policies is (issue #535) and rendered with only the caller's own organization, project and api-key ids. A tenant-scoped admin.read key asking for a rule outside its own slice receives 403 tenant_scope_denied -- the identical answer it receives for a name that does not exist, so this endpoint cannot be walked as an existence oracle to rebuild the list. A platform-operator key still receives 404 policy_not_found for a genuinely absent name.
+         */
         get: operations["getAdminPolicy"];
         /** Replace or create a policy by name. */
         put: operations["putAdminPolicy"];
@@ -1174,7 +1180,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List configured reusable gateway config profiles. */
+        /**
+         * List configured reusable gateway config profiles.
+         * @description Lists the reusable gateway config profiles visible to the caller. Scoped to the caller (issue #535): a platform-operator key receives every profile verbatim; a tenant-scoped admin.read key receives only the profiles one of its own api keys may actually select -- those whose api_key_ids is empty (usable by any key, exactly as profile resolution treats it) or names a key the caller owns -- and api_key_ids is rendered with only the caller's own key ids.
+         */
         get: operations["listAdminGatewayConfigs"];
         put?: never;
         /** Create a reusable gateway config profile and apply it through process-local reload. */
@@ -1194,7 +1203,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get one reusable gateway config profile. */
+        /**
+         * Get one reusable gateway config profile.
+         * @description Returns one reusable gateway config profile, scoped exactly as GET /admin/v1/gateway-configs is (issue #535), with api_key_ids rendered as only the caller's own key ids. A tenant-scoped admin.read key asking for a profile none of its keys may select receives 403 tenant_scope_denied -- the identical answer it receives for an id that does not exist. A platform-operator key still receives 404 gateway_config_not_found for a genuinely absent id.
+         */
         get: operations["getAdminGatewayConfig"];
         /** Replace or create a reusable gateway config profile by id. */
         put: operations["putAdminGatewayConfig"];

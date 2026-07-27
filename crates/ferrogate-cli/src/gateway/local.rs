@@ -76,6 +76,7 @@ use super::managed_action_guardrail::{
     evaluate_managed_action_guardrail_async, payload_text, ManagedActionGuardrailRequest,
 };
 use super::mcp_rpc;
+use super::rbac::{config_catalog_scope, write_config_scope_denied};
 use super::{FerroGateway, ProxyContext};
 
 const PROVIDER_CATALOG_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -870,64 +871,107 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/gateway-configs/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let data = state
-                            .config
-                            .gateway_configs
-                            .iter()
-                            .map(admin_gateway_config)
-                            .collect();
-                        write_json_response(
-                            session,
-                            StatusCode::OK,
-                            &AdminList::new(data),
-                            &ctx.request_id,
-                        )
-                        .await
-                    }
+                // Issue #535: same discard-the-`AuthContext` shape as
+                // /admin/v1/policies -- it leaked every profile's
+                // `api_key_ids` across tenants.
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
-                }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let data: Vec<_> = state
+                    .config
+                    .gateway_configs
+                    .iter()
+                    .filter_map(|profile| scope.visible_gateway_config(profile))
+                    .map(|profile| admin_gateway_config(&profile))
+                    .collect();
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminList::new(data),
+                    &ctx.request_id,
+                )
+                .await
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let Some(profile) = find_gateway_config(&state, id) else {
-                            return write_json_error(
-                                session,
-                                StatusCode::NOT_FOUND,
-                                "gateway_config_not_found",
-                                format!("gateway config profile {id} was not found"),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        };
-                        let body = AdminGatewayConfigMutationResponse {
-                            object: "gateway_config",
-                            gateway_config: admin_gateway_config(profile),
-                        };
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                // Issue #535: out-of-scope reads exactly like nonexistent for
+                // a tenant-scoped caller; `!scope.is_full()` preserves the
+                // operator's 404 for a genuinely absent profile id.
+                let visible = find_gateway_config(&state, id)
+                    .and_then(|profile| scope.visible_gateway_config(profile));
+                if visible.is_none() && !scope.is_full() {
+                    return write_config_scope_denied(
+                        session,
+                        "gateway config profile",
+                        &ctx.request_id,
+                    )
+                    .await;
                 }
+                let Some(profile) = visible else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "gateway_config_not_found",
+                        format!("gateway config profile {id} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                let body = AdminGatewayConfigMutationResponse {
+                    object: "gateway_config",
+                    gateway_config: admin_gateway_config(&profile),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             (&Method::POST, None) => {
                 self.handle_admin_gateway_config_upsert(session, ctx, headers, None)
@@ -8631,53 +8675,103 @@ impl FerroGateway {
         let name = path.strip_prefix("/admin/v1/policies/");
         match (method, name) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let body = AdminList::new(state.config.policies.clone());
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
+                // Issue #535: the `AuthContext` decides WHICH rules are
+                // rendered. Discarding it handed every tenant's
+                // organization/project/api-key ids, and the models they are
+                // denied, to any tenant-scoped `admin.read` key.
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
-                }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let data: Vec<_> = state
+                    .config
+                    .policies
+                    .iter()
+                    .filter_map(|rule| scope.visible_policy(rule))
+                    .collect();
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminList::new(data),
+                    &ctx.request_id,
+                )
+                .await
             }
             (&Method::GET, Some(name)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
-                    Ok(_) => {
-                        let Some(policy) = find_policy(&state, name) else {
-                            return write_json_error(
-                                session,
-                                StatusCode::NOT_FOUND,
-                                "policy_not_found",
-                                format!("policy {name} was not found"),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        };
-                        let body = AdminPolicyMutationResponse {
-                            object: "policy",
-                            policy: policy.clone(),
-                        };
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
+                let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+                {
+                    Ok(auth) => auth,
                     Err(error) => {
-                        write_json_error(
+                        return write_json_error(
                             session,
                             error.status,
                             error.code,
                             error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
+                };
+                let scope = match config_catalog_scope(&state, &auth).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                // Issue #535: out-of-scope and nonexistent are the SAME
+                // answer for a tenant-scoped caller, so the names the list no
+                // longer discloses cannot be recovered one probe at a time.
+                // `!scope.is_full()` is what keeps a platform operator's
+                // request for an absent name a 404 rather than a 403.
+                let visible = find_policy(&state, name).and_then(|rule| scope.visible_policy(rule));
+                if visible.is_none() && !scope.is_full() {
+                    return write_config_scope_denied(session, "policy", &ctx.request_id).await;
                 }
+                let Some(policy) = visible else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "policy_not_found",
+                        format!("policy {name} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                let body = AdminPolicyMutationResponse {
+                    object: "policy",
+                    policy,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             (&Method::POST, None) => {
                 self.handle_admin_policy_upsert(session, ctx, headers, None)
