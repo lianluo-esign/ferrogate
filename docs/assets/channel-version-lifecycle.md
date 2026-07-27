@@ -104,7 +104,7 @@ request id (via the standard audit draft):
 ## Static-site serve resolution + retained bundles (issue #397)
 
 A `static_site` publish reuses this channel model so console rollback (#345) is
-truthful at the runtime. The keying (`crates/ferrogate-cli/src/gateway/sites.rs`):
+truthful at the runtime. The keying (`crates/ferrogate-gateway/src/server/sites.rs`):
 
 - Each published bundle version is RETAINED and immutable, keyed under the
   `static_site` asset type / `name = {site}`:
@@ -140,7 +140,7 @@ truthful at the runtime. The keying (`crates/ferrogate-cli/src/gateway/sites.rs`
 - `crates/ferrogate-storage/src/asset_channel_lifecycle_test.rs` — the truth
   table on the in-memory backend, plus the barrier-based
   `concurrent_move_and_yank_never_strand_a_channel` race proof (no timing sleep).
-- `crates/ferrogate-cli/src/gateway/sites_test.rs` — the #397 static-site slice
+- `crates/ferrogate-gateway/src/server/sites_test.rs` — the #397 static-site slice
   on the in-memory backend: two bundle versions retain both, the serve path
   resolves the active version through the `serving` channel, a channel move to a
   prior version changes the served bytes (write == read), a legacy

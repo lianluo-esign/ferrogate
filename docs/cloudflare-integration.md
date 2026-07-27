@@ -197,7 +197,7 @@ Three CF options for serving FerroGate-hosted static assets/sites.
   presigned-GET path serves *private* objects without a public bucket.
 - **Live parity proof (gate-owned):** the env-gated test
   `live_r2_round_trips_put_get_head_list_delete_and_presigned_put_get`
-  (`crates/ferrogate-cli/src/gateway/asset_bucket.rs`) exercises put/get/head/
+  (`crates/ferrogate-gateway/src/server/asset_bucket.rs`) exercises put/get/head/
   list/delete + presigned PUT/GET against a real bucket. It SKIPS cleanly unless
   the gate sets `FERROGATE_R2_ACCOUNT_ID` (or `FERROGATE_R2_ENDPOINT` for a
   jurisdiction host), `FERROGATE_R2_BUCKET`, `FERROGATE_R2_ACCESS_KEY_ID` and
@@ -516,10 +516,10 @@ provider-adapter routing seam (§10.7).
 ### 10.1 R2 → asset object-store seam
 
 - **Seam (exists today):** `AssetObjectStore` trait —
-  `crates/ferrogate-cli/src/gateway/asset_bucket.rs:165`; concrete
+  `crates/ferrogate-gateway/src/server/asset_bucket.rs:165`; concrete
   `AssetBucketClient` (S3-compatible, SigV4) — `:137` (`impl AssetObjectStore for
   AssetBucketClient` at `:258`); `AssetBucketConfig` — `:38`. Presigned
-  upload/read: `crates/ferrogate-cli/src/gateway/asset_presign.rs`.
+  upload/read: `crates/ferrogate-gateway/src/server/asset_presign.rs`.
 - **Fit:** R2 is an `AssetBucketConfig` pointed at the R2 S3 endpoint (R2 is
   S3-compatible), or a second `AssetObjectStore` impl. The trait extraction (#411)
   has landed, so the seam is fully in place.
@@ -577,7 +577,7 @@ provider-adapter routing seam (§10.7).
   `validate_cloudflare_mcp_servers` —
   `crates/ferrogate-config/src/config/validate.rs:155` (general
   `validate_mcp_servers` at `:2769`); registration `upsert_mcp_server` —
-  `crates/ferrogate-cli/src/state.rs:674`.
+  `crates/ferrogate-gateway/src/state.rs:674`.
 - **Fit:** a Cloudflare managed (`*.mcp.cloudflare.com`) or self-hosted MCP server
   is an `McpServerConfig` with `transport: streamable_http` and either `oauth` or a
   bearer header — **pure configuration, no new transport code.**
@@ -590,7 +590,7 @@ provider-adapter routing seam (§10.7).
   `crates/ferrogate-guardrails/src/adapters/workers_ai_llama_guard.rs:156` / `:119`
   (`impl GuardrailDetector` at `:418`).
 - **Wiring:** constructed opt-in from a `[cloudflare]` block at
-  `crates/ferrogate-cli/src/state.rs:6389` (`WorkersAiLlamaGuardDetector::new`).
+  `crates/ferrogate-gateway/src/state.rs:6389` (`WorkersAiLlamaGuardDetector::new`).
 - **Fit:** the detector returns a verdict; policy composition decides enforcement
   (§7). No AI Gateway dependency.
 
@@ -606,7 +606,7 @@ provider-adapter routing seam (§10.7).
   `crates/ferrogate-config/src/config/types.rs:1055`; validated by
   `validate_cloudflare_ai_gateway_providers` (requires a `[cloudflare]` block, #405)
   — `crates/ferrogate-config/src/config/validate.rs:244`; resolved to routing at
-  `cloudflare_ai_gateway_routing` — `crates/ferrogate-cli/src/state_routing.rs:158`.
+  `cloudflare_ai_gateway_routing` — `crates/ferrogate-gateway/src/state_routing.rs:158`.
 - **Fit:** opt-in per-provider URL rewrite + `cf-aig-*` headers on the existing
   `ProviderHttpRequest` (§1); body and BYOK auth preserved, so it is a transparent
   pass-through. FerroGate stays the gateway of record.

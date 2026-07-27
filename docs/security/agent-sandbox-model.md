@@ -79,7 +79,7 @@ action, target, decision, reason).
 tool/CLI/filesystem/browser/REST/secret/memory/network request onto a
 `CapabilityAction` and calls this authorizer:
 `authorize_managed_external_action` is exactly what
-`crates/ferrogate-cli/src/gateway/external_actions.rs`'s
+`crates/ferrogate-gateway/src/server/external_actions.rs`'s
 `GatewayExternalActionAuthorizerService::authorize` calls in the running
 gateway, before any worker handler executes an action. Its result is a
 `NormalizedFrameworkEvent` whose `timeline_record()` produces a
@@ -98,7 +98,7 @@ returns `FunctionEgressDenied::NoRuleForTenant` for a tenant with no rules
 at all, and `FunctionEgressDenied::TargetNotAllowed { tenant, base_url,
 function_slug }` for a tenant with rules that don't cover the requested
 base URL + slug — an empty allowlist or unrecognized tenant is rejected,
-never implicitly allowed. `crates/ferrogate-cli/src/gateway/function_egress.rs`'s
+never implicitly allowed. `crates/ferrogate-gateway/src/function_egress.rs`'s
 `prepare_brokered_invocation` calls this `authorize` step before minting any
 scoped token or building the outbound HTTP request, so a denial happens
 before any network call is made.
@@ -158,12 +158,12 @@ inspectable evidence, not just a boolean:
   shell command or host:port), `outcome` (`"denied"` / `"allowed"` /
   `"approval_required"`), and the full canonical `event_json`. In the
   running gateway, `GatewayExternalActionAuthorizerService::record_timeline_event`
-  (`crates/ferrogate-cli/src/gateway/external_actions.rs`) persists this
+  (`crates/ferrogate-gateway/src/server/external_actions.rs`) persists this
   record as a `StoredAgentRunEvent`, visible through the admin run-timeline
   surface.
 - `function_egress.rs`: a `FunctionEgressDenied` value names the tenant,
   base URL, and function slug that were rejected. In the running gateway,
-  `crates/ferrogate-cli/src/gateway/local.rs`'s `/v1/functions/execute`
+  `crates/ferrogate-gateway/src/server/local.rs`'s `/v1/functions/execute`
   handler calls `state.record_admin_audit_event(...)` with the denial's
   `Display` output as the audit message and outcome `"denied"` before
   returning the `403 function_denied` response — the audit record is
@@ -209,7 +209,7 @@ red-teamed here):**
   can be reached. Any per-target scoping must currently live in a caller's
   own policy construction, not in this authorizer.
 - The HTTP/unix-socket transport around `authorize_managed_external_action`
-  (`crates/ferrogate-cli/src/gateway/external_actions.rs`) end to end, and
+  (`crates/ferrogate-gateway/src/server/external_actions.rs`) end to end, and
   the `/v1/functions/execute` route handler end to end — both require the
   full gateway process; this test exercises the library-level decision
   functions those handlers call, not the running process.

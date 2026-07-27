@@ -8,11 +8,11 @@ use bytes::Bytes;
 use pingora::{proxy::Session, Result as PingoraResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestBodyTooLarge {
+pub(crate) struct RequestBodyTooLarge {
     pub max_bytes: usize,
 }
 
-pub async fn read_request_body(
+pub(crate) async fn read_request_body(
     session: &mut Session,
     max_bytes: usize,
 ) -> PingoraResult<Result<Bytes, RequestBodyTooLarge>> {

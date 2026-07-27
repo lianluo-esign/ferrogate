@@ -8,7 +8,7 @@ automatically; no live bucket is flipped by the gateway.
 
 ## What the code path already provides
 
-Implemented by `crates/ferrogate-cli/src/gateway/asset_presign.rs`,
+Implemented by `crates/ferrogate-gateway/src/server/asset_presign.rs`,
 `asset_bucket.rs`, and `ferrogate-providers::presign_sigv4_query`:
 
 - **Presigned upload** - `POST /v1/assets/presign/upload/{asset_type}/{name}/{version}`

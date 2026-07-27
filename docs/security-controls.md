@@ -9,8 +9,8 @@ gaps still being closed.
 ## Audit Logging
 
 Admin-console mutations that go through virtual-key and quota-policy CRUD
-(`crates/ferrogate-cli/src/gateway/virtual_keys.rs`,
-`crates/ferrogate-cli/src/gateway/quota_policies.rs`) write an append-only
+(`crates/ferrogate-gateway/src/server/virtual_keys.rs`,
+`crates/ferrogate-gateway/src/server/quota_policies.rs`) write an append-only
 `StoredAuditEvent` (`crates/ferrogate-storage/src/lib.rs:5864`) through
 `AuditLogRepository` (`crates/ferrogate-storage/src/lib.rs:434`). Events are
 readable via the Admin API and the admin-console's read-only Audit Events
@@ -30,7 +30,7 @@ keys only: a deployment whose credentials were all durable/virtual keys, or one
 that simply omitted `[[api_keys]]`, had authentication switched off by that
 omission. A config that requires authentication but has no credential source at
 all refuses to start, naming the switch, rather than running open
-(`crates/ferrogate-cli/src/lifecycle.rs` `ensure_auth_posture_is_declared`,
+(`crates/ferrogate-gateway/src/lifecycle.rs` `ensure_auth_posture_is_declared`,
 mirroring the same gate on the Control Plane API service, and run by
 `ferrogate check` as well as by `ferrogate run` so the refusal surfaces before
 a restart rather than during one).
@@ -81,7 +81,7 @@ Gateway request authorization is enforced by a generic RBAC engine —
 wildcard action/resource support. Virtual API keys additionally carry
 per-key/workspace/project/tenant scopes, model/provider allowlists and
 denylists, request-rate limits, and token budgets, enforced in
-`crates/ferrogate-cli/src/auth.rs`.
+`crates/ferrogate-gateway/src/auth.rs`.
 
 Roles and bindings are managed at runtime through the Admin API
 (`/v1/rbac/roles`, `/v1/rbac/bindings`) without a process restart, and
@@ -96,7 +96,7 @@ without an owner (`crates/ferrogate-auth/src/lib.rs`
 FerroGate terminates TLS itself: manual certificate configuration, ACME
 HTTP-01, and ACME DNS-01 (built-in Cloudflare provider) with renewal
 scheduling and graceful-upgrade handoff on listener/certificate change
-(`crates/ferrogate-cli/src/acme.rs`).
+(`crates/ferrogate-gateway/src/acme.rs`).
 
 ## Tenant Isolation
 
@@ -112,7 +112,7 @@ admin-console CRUD page.
 
 The generalizable retention engine (`retention_policies` table +
 `ferrogate-storage::asset_lifecycle`, issue #263) is adopted by the shared
-asset-lifecycle sweeper (`crates/ferrogate-cli/src/state_asset_lifecycle.rs`,
+asset-lifecycle sweeper (`crates/ferrogate-gateway/src/state_asset_lifecycle.rs`,
 `sweep_asset_lifecycle_once`) to apply per-tenant TTL/purge to the high-write
 compliance tables `request_logs` and `audit_events` (issue #284). Each table
 resolves a per-tenant `retention_policies` row (`resource_type` =
@@ -166,7 +166,7 @@ configured should still place FerroGate behind a network-level control
 The built-in guardrail engine supports keyword, regex, and max-input-length
 rules with deny or redact effects, scoped by tenant/model/provider
 (`crates/ferrogate-config/src/config/types.rs` `GuardrailRule`,
-`crates/ferrogate-cli/src/state_quota_and_policy.rs` `match_guardrail`). A rule can instead
+`crates/ferrogate-gateway/src/state_quota_and_policy.rs` `match_guardrail`). A rule can instead
 delegate detection to an external HTTP endpoint (`provider: custom_http`) —
 e.g. a dedicated PII/jailbreak/toxicity classifier that can't be expressed as
 a regex — through the async `GuardrailDetector` contract in

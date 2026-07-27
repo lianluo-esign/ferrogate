@@ -31,7 +31,7 @@ to the customer host. Every transport request carries the identity 4-tuple
 Two transport modes are selected by the `x-ferrogate-transport-security`
 request header
 (`crates/ferrogate-runtime/src/self_hosted_worker.rs`,
-`crates/ferrogate-cli/src/gateway/local.rs`):
+`crates/ferrogate-gateway/src/server/local.rs`):
 
 | Header value    | What it actually is today                                                                 |
 | --------------- | ----------------------------------------------------------------------------------------- |

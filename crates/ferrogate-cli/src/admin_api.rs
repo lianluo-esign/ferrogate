@@ -88,11 +88,11 @@ fn max_proxy_request_bytes(config: &Config) -> usize {
         config.limits.admin_body_max_bytes(),
         config.limits.admin_config_body_max_bytes(),
         config.limits.guardrail_policy_body_max_bytes(),
-        crate::gateway::assets::INLINE_ASSET_MAX_BYTES as usize,
+        ferrogate_gateway::server::assets::INLINE_ASSET_MAX_BYTES as usize,
     ]
     .into_iter()
     .max()
-    .unwrap_or(crate::gateway::assets::INLINE_ASSET_MAX_BYTES as usize);
+    .unwrap_or(ferrogate_gateway::server::assets::INLINE_ASSET_MAX_BYTES as usize);
     largest_family_cap.saturating_add(PROXY_HEADER_HEADROOM_BYTES)
 }
 
@@ -164,7 +164,7 @@ fn body_cap_bytes(config: &Config, class: RouteClass, path: &str) -> usize {
                 config.limits.admin_body_max_bytes()
             }
         }
-        RouteClass::Assets => crate::gateway::assets::INLINE_ASSET_MAX_BYTES as usize,
+        RouteClass::Assets => ferrogate_gateway::server::assets::INLINE_ASSET_MAX_BYTES as usize,
     }
 }
 
@@ -239,7 +239,7 @@ pub(crate) fn execute_control_api_serve(config: Config) -> anyhow::Result<()> {
     // backend (the console itself requires one).
     let durable_authenticator = if durable_key_store.is_some() {
         let repositories = Arc::new(
-            crate::state::runtime_storage_repositories(&config)
+            ferrogate_gateway::state::runtime_storage_repositories(&config)
                 .context("failed to open the shared control-plane storage backend")?,
         );
         Some(Arc::new(StorageApiKeyAuthenticator::new(repositories)))

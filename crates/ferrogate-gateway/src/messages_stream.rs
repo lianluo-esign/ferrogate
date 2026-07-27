@@ -34,7 +34,7 @@ use serde_json::{json, Value};
 /// chat-completion object. The gateway buffers the provider stream so streaming
 /// requests get identical governance (guardrail block/redact, metering) to
 /// non-streaming ones before the response is re-emitted as Anthropic frames.
-pub fn chat_sse_to_completion(sse: &[u8]) -> Value {
+pub(crate) fn chat_sse_to_completion(sse: &[u8]) -> Value {
     let mut id = None;
     let mut model = None;
     let mut content = String::new();
@@ -167,7 +167,7 @@ fn sse_data_payloads(sse: &[u8]) -> Vec<String> {
 /// Serialize an Anthropic Messages object (as produced by
 /// `ferrogate_providers::anthropic_messages::chat_completion_to_message`) into
 /// the Anthropic event-frame SSE sequence.
-pub fn message_to_anthropic_sse(message: &Value) -> Vec<u8> {
+pub(crate) fn message_to_anthropic_sse(message: &Value) -> Vec<u8> {
     let mut out = Vec::new();
 
     let input_tokens = message
@@ -284,7 +284,7 @@ fn emit_content_block(out: &mut Vec<u8>, index: usize, block: &Value) {
 
 /// Serialize an Anthropic-shaped error into a single SSE `error` frame, used
 /// when a guardrail blocks a streaming response or the upstream stream fails.
-pub fn error_sse(code: &str, message: &str) -> Vec<u8> {
+pub(crate) fn error_sse(code: &str, message: &str) -> Vec<u8> {
     let mut out = Vec::new();
     write_event(
         &mut out,
@@ -306,7 +306,7 @@ pub fn error_sse(code: &str, message: &str) -> Vec<u8> {
 /// translation. The terminal `stop_reason` and `usage` mirror what the
 /// buffered `chat_sse_to_completion` -> `chat_completion_to_message` ->
 /// `message_to_anthropic_sse` pipeline would produce for the same stream.
-pub struct MessagesStreamNormalizer<R> {
+pub(crate) struct MessagesStreamNormalizer<R> {
     reader: R,
     fallback_model: String,
     buffer: String,
@@ -334,7 +334,7 @@ enum OpenBlock {
 }
 
 impl<R: Read> MessagesStreamNormalizer<R> {
-    pub fn new(reader: R, fallback_model: impl Into<String>) -> Self {
+    pub(crate) fn new(reader: R, fallback_model: impl Into<String>) -> Self {
         Self {
             reader,
             fallback_model: fallback_model.into(),

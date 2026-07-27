@@ -540,7 +540,7 @@ scripted transport.
 ## CLI construction hook (issue #445)
 
 `crates/ferrogate-cli` now constructs the D1 backend from config.
-`runtime_storage_repositories` (`crates/ferrogate-cli/src/state.rs`) branches on
+`runtime_storage_repositories` (`crates/ferrogate-gateway/src/state.rs`) branches on
 `storage.provider = "cloudflare_d1"` before the in-memory fallback: it reads the
 `[cloudflare]` block (erroring if absent — also caught by config validation),
 builds a `CloudflareClient` (`CloudflareClient::new` + `EnvTokenResolver`) and

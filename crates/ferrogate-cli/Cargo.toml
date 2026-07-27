@@ -28,11 +28,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 base64.workspace = true
-blake2.workspace = true
 bytes.workspace = true
-chacha20poly1305.workspace = true
 chrono.workspace = true
 # The `string` feature lets the generic Control Plane API resource command tree
 # (#361–#365) be built from runtime `String` group/verb names sourced from the
@@ -43,57 +40,33 @@ clap = { workspace = true, features = ["string"] }
 # <shell>` (#365) from the SAME assembled `clap::Command` the binary runs, so
 # completions cover the generic `ctl <group> <verb>` resource-family tree.
 clap_complete.workspace = true
-flate2 = "1"
 ed25519-dalek.workspace = true
 ferrogate-admin = { path = "../ferrogate-admin" }
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-auth = { path = "../ferrogate-auth" }
 ferrogate-cli-core = { path = "../ferrogate-cli-core" }
-ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-gateway = { path = "../ferrogate-gateway" }
 ferrogate-guardrails = { path = "../ferrogate-guardrails" }
-ferrogate-mcp = { path = "../ferrogate-mcp" }
-ferrogate-observability = { path = "../ferrogate-observability" }
-ferrogate-payments = { path = "../ferrogate-payments" }
-ferrogate-policy = { path = "../ferrogate-policy" }
 ferrogate-providers = { path = "../ferrogate-providers" }
-ferrogate-routing = { path = "../ferrogate-routing" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
-ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
-ferrogate-sync-bridge = { path = "../ferrogate-sync-bridge" }
-futures-util.workspace = true
-getrandom.workspace = true
 http.workspace = true
-hmac.workspace = true
-instant-acme.workspace = true
-jsonwebtoken.workspace = true
-matchit.workspace = true
 pingora.workspace = true
-redis.workspace = true
-regex.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
-rustls-native-certs.workspace = true
 rustls-pki-types.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 sha2.workspace = true
-tiktoken-rs.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1.4", features = ["fs", "process"] }
-
 [dev-dependencies]
-proptest.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 

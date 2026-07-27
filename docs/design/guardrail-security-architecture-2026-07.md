@@ -492,9 +492,9 @@ Portkey：
 FerroGate：
 
 - [`crates/ferrogate-config/src/config/types.rs`](../../crates/ferrogate-config/src/config/types.rs)
-- [`crates/ferrogate-cli/src/state_quota_and_policy.rs`](../../crates/ferrogate-cli/src/state_quota_and_policy.rs)
-- [`crates/ferrogate-cli/src/gateway/chat.rs`](../../crates/ferrogate-cli/src/gateway/chat.rs)
-- [`crates/ferrogate-cli/src/state.rs`](../../crates/ferrogate-cli/src/state.rs)
+- [`crates/ferrogate-gateway/src/state_quota_and_policy.rs`](../../crates/ferrogate-gateway/src/state_quota_and_policy.rs)
+- [`crates/ferrogate-gateway/src/server/chat.rs`](../../crates/ferrogate-gateway/src/server/chat.rs)
+- [`crates/ferrogate-gateway/src/state.rs`](../../crates/ferrogate-gateway/src/state.rs)
 - [`crates/ferrogate-secrets/src/lib.rs`](../../crates/ferrogate-secrets/src/lib.rs)
 - [`crates/ferrogate-observability/src/lib.rs`](../../crates/ferrogate-observability/src/lib.rs)
 - [`docs/security/agent-sandbox-model.md`](../security/agent-sandbox-model.md)

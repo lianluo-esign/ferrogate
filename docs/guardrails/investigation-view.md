@@ -98,8 +98,8 @@ whether the API key is tenant-scoped:
   before a tenant-scoped key can read its own evidence.
 
 Reference: the check lives in `require_guardrail_evidence_auth`
-(`crates/ferrogate-cli/src/gateway/local.rs`) and
-`require_platform_operator` (`crates/ferrogate-cli/src/auth.rs`).
+(`crates/ferrogate-gateway/src/server/local.rs`) and
+`require_platform_operator` (`crates/ferrogate-gateway/src/auth.rs`).
 
 The example config's `key_dev` key is tenant-scoped (`organization_id =
 "org_demo"`), so it will get `guardrail_rbac_denied` for this endpoint until a

@@ -142,8 +142,8 @@ returns to recording-only — a safe state from which to diagnose and re-qualify
 | Piece | Location |
 |---|---|
 | `PolicyMode::Shadow` / `enforced` / scoped selection | `crates/ferrogate-guardrails/src/policy.rs` |
-| Shadow evidence (`enforcement_status`) | `crates/ferrogate-cli/src/state_quota_and_policy.rs` |
-| Immutable revisions, activate, rollback | `crates/ferrogate-cli/src/state.rs` (`activate_guardrail_policy_revision`) |
+| Shadow evidence (`enforcement_status`) | `crates/ferrogate-gateway/src/state_quota_and_policy.rs` |
+| Immutable revisions, activate, rollback | `crates/ferrogate-gateway/src/state.rs` (`activate_guardrail_policy_revision`) |
 | `ShadowObservation` / `score_shadow_observations` / `PromotionGate` | `crates/ferrogate-guardrails/src/evaluation.rs` |
 | Evaluation corpus = human labels | `crates/ferrogate-guardrails/src/evaluation.rs` (`EvaluationCorpus`) |
 
@@ -157,7 +157,7 @@ returns to recording-only — a safe state from which to diagnose and re-qualify
     refuses to promote a PII engine on an injection bar.
 - `crates/ferrogate-guardrails/src/evaluation_test.rs` — scoring parity with a
   live run, verdict mapping, and the promote / hold / rollback gate decisions.
-- `crates/ferrogate-cli/src/state_quota_and_policy_test.rs`
+- `crates/ferrogate-gateway/src/state_quota_and_policy_test.rs`
   - `shadow_revision_records_evidence_then_promotes_by_scope_and_rolls_back` —
     the loop at the policy layer: a shadow revision records `shadow_only`
     evidence and does not block; a scoped enforce revision is promoted and

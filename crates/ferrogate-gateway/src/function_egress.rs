@@ -52,7 +52,7 @@ pub(crate) const FUNCTION_TOKEN_ISSUER: &str = "ferrogate";
 /// secret is resolved at runtime and never persisted to the control-plane DB.
 /// The broker is disabled unless `FG_FN_JWT_SECRET` is set, so it is
 /// fail-closed by default.
-pub struct FunctionEgressGatewayConfig {
+pub(crate) struct FunctionEgressGatewayConfig {
     allowlist: FunctionEgressAllowlist,
     minter: FunctionTokenMinter,
     apikey: String,
@@ -60,7 +60,7 @@ pub struct FunctionEgressGatewayConfig {
 
 /// Why the gateway rejected a brokered function invocation before executing it.
 #[derive(Debug)]
-pub enum FunctionBrokerError {
+pub(crate) enum FunctionBrokerError {
     Denied(FunctionEgressDenied),
     Token(FunctionTokenError),
     Build(SupabaseEdgeFunctionError),
@@ -174,7 +174,7 @@ fn allowlist_is_single_project(rules: &[FunctionEgressRule]) -> bool {
 }
 
 /// Process-wide broker config, resolved once from the environment.
-pub fn function_egress_config() -> Option<&'static FunctionEgressGatewayConfig> {
+pub(crate) fn function_egress_config() -> Option<&'static FunctionEgressGatewayConfig> {
     static CONFIG: OnceLock<Option<FunctionEgressGatewayConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(FunctionEgressGatewayConfig::from_env)
@@ -184,7 +184,7 @@ pub fn function_egress_config() -> Option<&'static FunctionEgressGatewayConfig> 
 /// Fail-closed pipeline: authorize the target against the tenant's allowlist,
 /// mint a short-lived scoped token, and build the governed HTTP request. Returns
 /// the request and the function slug for the outcome. No network I/O.
-pub fn prepare_brokered_invocation(
+pub(crate) fn prepare_brokered_invocation(
     config: &FunctionEgressGatewayConfig,
     tenant: &str,
     request: &FunctionInvocationRequest,
@@ -222,7 +222,7 @@ pub fn prepare_brokered_invocation(
 }
 
 /// Execute a brokered edge-function request and return a bounded outcome.
-pub async fn execute_edge_function_request(
+pub(crate) async fn execute_edge_function_request(
     request: &EdgeFunctionHttpRequest,
     function_slug: &str,
     timeout: Duration,

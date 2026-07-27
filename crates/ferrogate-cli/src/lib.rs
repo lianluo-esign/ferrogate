@@ -25,34 +25,37 @@
 //! `ip_allowlist` a load-time error, and either left behind would have meant
 //! `ferrogate-config -> ferrogate-cli`. There is deliberately NO
 //! `ferrogate_cli::config` shim; call sites name the new home.
+//!
+//! Stage 3b is the trunk: `gateway/` (now `ferrogate_gateway::server`),
+//! `state.rs` and its twenty-odd `state_*` submodules, and everything the two
+//! of them reach -- `responses`, `auth`, `builtin_tools`, `approval`,
+//! `tokenizer`, `extensions`, `acme`, `lifecycle`, `dashboard`,
+//! `billing_client`, `budget_alerts`, `metering`, `telemetry` and
+//! `service_storage`. They had to travel together: `gateway/` reaches
+//! `crate::state` 132 times and `state*.rs` reaches back 27, and each of the
+//! other modules is reached BY the trunk, so leaving any one behind would have
+//! meant `ferrogate-gateway -> ferrogate-cli` on top of the
+//! `ferrogate-cli -> ferrogate-gateway` edge that already exists. Cargo
+//! refuses crate cycles, so there was no ordering that split them.
+//!
+//! What is left here is what the crate is named after: the `clap` command
+//! tree, the `ctl` Control Plane API client, the argument-shaped subcommands
+//! (`assets`, `plans`, `storage`, `billing`), the standalone control-api
+//! service wiring, and [`run`]. Everything this file still needs from the
+//! gateway is named through `ferrogate_gateway::` -- there is no
+//! `ferrogate_cli::gateway` or `::state` shim.
 
-mod acme;
 mod admin_api;
-mod approval;
 mod assets_cli;
-mod auth;
 mod billing;
-mod billing_client;
-mod budget_alerts;
-mod builtin_tools;
 mod cli;
 mod command_tree;
 mod completions;
 mod ctl;
-mod dashboard;
-mod extensions;
-mod gateway;
-mod lifecycle;
-mod metering;
 mod plans_cli;
 #[cfg(test)]
 mod reference;
-mod responses;
-mod service_storage;
-mod state;
 mod storage;
-mod telemetry;
-mod tokenizer;
 
 use anyhow::Result as AnyResult;
 use clap::FromArgMatches;
@@ -60,16 +63,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use std::sync::Arc;
 
-use crate::{
-    cli::{AdminApiCommands, AuthCommands, BillingCommands, Cli, Commands, ControlApiCommands},
-    gateway::serve,
+use crate::cli::{
+    AdminApiCommands, AuthCommands, BillingCommands, Cli, Commands, ControlApiCommands,
+};
+use ferrogate_config::Config;
+use ferrogate_gateway::{
     lifecycle::{
         execute_admin_reload, execute_graceful_upgrade_reload, format_reload_report,
         format_validate_report,
     },
+    server::serve,
     service_storage::{build_supabase_repositories, SupabaseConnection},
 };
-use ferrogate_config::Config;
 
 /// The binary's entire behaviour, moved here from `main()` verbatim (#553
 /// stage 1).
@@ -136,7 +141,7 @@ pub fn run() -> AnyResult<()> {
                         repositories,
                     )) as Arc<dyn ferrogate_auth::ApiKeyAuthenticator>
                 });
-                let admin_jwt_secret = crate::service_storage::resolve_secret(
+                let admin_jwt_secret = ferrogate_gateway::service_storage::resolve_secret(
                     args.admin_jwt_secret.as_deref(),
                     args.admin_jwt_secret_env.as_deref(),
                 )?;

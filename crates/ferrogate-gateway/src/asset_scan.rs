@@ -23,13 +23,13 @@ use tokio::net::TcpStream;
 /// AV product recognizes deliberately, used both by the offline
 /// [`EicarScanner`] default and as the canonical "malware is detected and
 /// rejected" proof a real ClamAV/hosted-scanner integration must also pass.
-pub const EICAR_TEST_SIGNATURE: &[u8] =
+pub(crate) const EICAR_TEST_SIGNATURE: &[u8] =
     b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 
 /// Whether `content` embeds the EICAR test signature anywhere. Shared by the
 /// synchronous fast-reject in `asset_security` and the [`EicarScanner`] so the
 /// two never diverge.
-pub fn contains_eicar(content: &[u8]) -> bool {
+pub(crate) fn contains_eicar(content: &[u8]) -> bool {
     content.len() >= EICAR_TEST_SIGNATURE.len()
         && content
             .windows(EICAR_TEST_SIGNATURE.len())
@@ -41,7 +41,7 @@ pub fn contains_eicar(content: &[u8]) -> bool {
 /// `Clean` so it is never silently treated as a pass -- the caller decides,
 /// per [`ScannerUnavailablePolicy`], whether that fails closed or quarantines.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ScanVerdict {
+pub(crate) enum ScanVerdict {
     Clean,
     Infected(String),
     Unavailable(String),
@@ -51,7 +51,7 @@ pub enum ScanVerdict {
 /// malformed response). Never "allow": the choice is only between rejecting
 /// the push outright or admitting it into quarantine (stored but invisible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScannerUnavailablePolicy {
+pub(crate) enum ScannerUnavailablePolicy {
     /// Reject the push; the asset is never stored.
     FailClosed,
     /// Store the asset in quarantine (invisible) pending a later clean scan.
@@ -64,7 +64,7 @@ pub enum ScannerUnavailablePolicy {
 /// that outright rejects the content never produces a stored state -- the push
 /// itself fails, see [`ScanOutcome::Reject`].)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScanState {
+pub(crate) enum ScanState {
     Clean,
     PendingScan,
     Quarantined,
@@ -72,7 +72,7 @@ pub enum ScanState {
 
 impl ScanState {
     /// The stable wire string surfaced in the verification manifest / audit.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ScanState::Clean => "clean",
             ScanState::PendingScan => "pending_scan",
@@ -82,7 +82,7 @@ impl ScanState {
 
     /// Whether an asset in this scan state may be listed/pulled. Every
     /// not-yet-proven-clean state fails closed to invisible (#261 slice 1).
-    pub fn is_visible(self) -> bool {
+    pub(crate) fn is_visible(self) -> bool {
         matches!(self, ScanState::Clean)
     }
 }
@@ -90,7 +90,7 @@ impl ScanState {
 /// The resolved outcome of a scan once [`ScannerUnavailablePolicy`] has been
 /// applied to a [`ScanVerdict`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ScanOutcome {
+pub(crate) enum ScanOutcome {
     /// Clean -- store and make visible.
     Admit,
     /// Store but withhold from consumers (quarantine) with this reason.
@@ -101,7 +101,10 @@ pub enum ScanOutcome {
 
 /// Fold a raw [`ScanVerdict`] into a [`ScanOutcome`] under the configured
 /// unavailable policy. `Infected` always rejects; `Unavailable` never passes.
-pub fn resolve_scan_outcome(verdict: ScanVerdict, policy: ScannerUnavailablePolicy) -> ScanOutcome {
+pub(crate) fn resolve_scan_outcome(
+    verdict: ScanVerdict,
+    policy: ScannerUnavailablePolicy,
+) -> ScanOutcome {
     match verdict {
         ScanVerdict::Clean => ScanOutcome::Admit,
         ScanVerdict::Infected(reason) => {
@@ -121,7 +124,7 @@ pub fn resolve_scan_outcome(verdict: ScanVerdict, policy: ScannerUnavailablePoli
 /// A pluggable content scanner. Kept behind a trait so the default stays
 /// offline/test-friendly and real backends (clamd, hosted HTTP) are opt-in.
 #[async_trait]
-pub trait AssetScanner: Send + Sync {
+pub(crate) trait AssetScanner: Send + Sync {
     async fn scan(&self, content: &[u8]) -> ScanVerdict;
     /// Stable identifier for the manifest/audit (`eicar`, `clamav`, `http`).
     fn backend_name(&self) -> &'static str;
@@ -306,7 +309,7 @@ pub(crate) fn parse_http_scan_response(body: &[u8]) -> ScanVerdict {
 /// Which backend a deployment scans with, plus the unavailable policy and the
 /// async-scan threshold. Default = offline EICAR, fail-closed, no deferral.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetScanConfig {
+pub(crate) struct AssetScanConfig {
     pub backend: ScanBackend,
     pub unavailable_policy: ScannerUnavailablePolicy,
     /// Content strictly larger than this defers to an async scan (stored
@@ -316,7 +319,7 @@ pub struct AssetScanConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ScanBackend {
+pub(crate) enum ScanBackend {
     Eicar,
     ClamAv { addr: String, timeout_secs: u64 },
     Http { endpoint: String, timeout_secs: u64 },
@@ -336,7 +339,7 @@ impl AssetScanConfig {
     /// Build config from the environment so real backends are opt-in without a
     /// control-plane config-schema change (keeps this feature's blast radius to
     /// the gateway crate). Unknown/unset => the offline EICAR default.
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let backend = match std::env::var("FERROGATE_ASSET_SCANNER").ok().as_deref() {
             Some("clamav") => {
                 let addr = std::env::var("FERROGATE_ASSET_SCANNER_ADDR")
@@ -373,7 +376,7 @@ impl AssetScanConfig {
     }
 
     /// Instantiate the scanner adapter for this backend.
-    pub fn build_scanner(&self) -> Box<dyn AssetScanner> {
+    pub(crate) fn build_scanner(&self) -> Box<dyn AssetScanner> {
         match &self.backend {
             ScanBackend::Eicar => Box::new(EicarScanner),
             ScanBackend::ClamAv { addr, timeout_secs } => Box::new(ClamAvScanner::new(
@@ -391,7 +394,7 @@ impl AssetScanConfig {
     }
 
     /// Whether a `size`-byte object should defer to an async scan.
-    pub fn should_defer_scan(&self, size: usize) -> bool {
+    pub(crate) fn should_defer_scan(&self, size: usize) -> bool {
         matches!(self.async_threshold_bytes, Some(limit) if size > limit)
     }
 }

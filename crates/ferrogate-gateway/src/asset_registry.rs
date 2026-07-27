@@ -15,14 +15,14 @@ use ferrogate_storage::{StoredAsset, StoredAssetChannel};
 /// header so an agent can see whether it got an exact pin, a channel, or a
 /// range match.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VersionResolution {
+pub(crate) enum VersionResolution {
     Exact,
     Channel(String),
     Range(String),
 }
 
 impl VersionResolution {
-    pub fn header_value(&self, version: &str) -> String {
+    pub(crate) fn header_value(&self, version: &str) -> String {
         match self {
             VersionResolution::Exact => format!("exact={version}"),
             VersionResolution::Channel(channel) => format!("channel={channel};version={version}"),
@@ -32,7 +32,7 @@ impl VersionResolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedVersion {
+pub(crate) struct ResolvedVersion {
     pub version: String,
     /// `true` only for an exact pull of a yanked version (which still
     /// succeeds, with a deprecation warning). Channel/range resolution never
@@ -99,7 +99,7 @@ fn highest_matching(
 /// target is yanked/missing, in which case it falls back to the highest
 /// non-yanked version; (3) a semver range. `None` means the reference could
 /// not be resolved (HTTP 404).
-pub fn resolve_version(
+pub(crate) fn resolve_version(
     assets: &[StoredAsset],
     channels: &[StoredAssetChannel],
     reference: &str,
@@ -163,7 +163,7 @@ pub fn resolve_version(
 
 /// Outcome of selecting a platform/arch variant for a resolved version.
 #[derive(Debug, Clone, PartialEq)]
-pub enum VariantChoice<'a> {
+pub(crate) enum VariantChoice<'a> {
     Selected(&'a StoredAsset),
     /// A specific platform was requested but no such variant exists, or the
     /// version carries no artifacts at all.
@@ -177,7 +177,10 @@ pub enum VariantChoice<'a> {
 /// platform, only an exact variant match is served. Without one, the default
 /// (empty-variant) artifact is preferred; failing that, a lone variant is
 /// served; more than one variant is ambiguous.
-pub fn select_variant<'a>(rows: &[&'a StoredAsset], requested: Option<&str>) -> VariantChoice<'a> {
+pub(crate) fn select_variant<'a>(
+    rows: &[&'a StoredAsset],
+    requested: Option<&str>,
+) -> VariantChoice<'a> {
     if let Some(platform) = requested {
         return match rows.iter().find(|row| row.variant == platform) {
             Some(row) => VariantChoice::Selected(row),

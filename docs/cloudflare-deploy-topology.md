@@ -65,7 +65,7 @@ Every constraint in this doc follows from what the runtime concretely does.
 Citations are against the current tree.
 
 **Pingora data plane, native listeners.** The gateway is a Pingora HTTP proxy
-service: `serve()` in `crates/ferrogate-cli/src/gateway/mod.rs` builds a
+service: `serve()` in `crates/ferrogate-gateway/src/server/mod.rs` builds a
 `Server::new_with_opt_and_conf`, wraps the `FerroGateway`
 proxy in `http_proxy_service_with_name`, binds either a TLS
 listener via `service.add_tls_with_settings(&listen, ...)` (`mod.rs:307`) or a
@@ -94,13 +94,13 @@ antithesis of an isolate-friendly database client.
 binding: OTLP + analytics senders, ACME renewal, MCP health scheduler, external
 action authorizer, billing outbox sweeper, agent schedule sweeper, asset
 lifecycle sweeper, x402 TTL sweeper and settlement reconciler
-(all spawned from `serve()` in `crates/ferrogate-cli/src/gateway/mod.rs`).
+(all spawned from `serve()` in `crates/ferrogate-gateway/src/server/mod.rs`).
 These assume the process
 is **continuously running**; any scale-to-zero topology silently pauses them.
 
 **Own TLS/ACME stack.** The runtime can terminate TLS itself and run an ACME
 issuance/renewal loop, merging bound site custom domains into the certificate
-SAN set (`mod.rs:245-274`, `crates/ferrogate-cli/src/acme.rs`). Behind
+SAN set (`mod.rs:245-274`, `crates/ferrogate-gateway/src/acme.rs`). Behind
 Cloudflare (which terminates TLS at the edge) this whole subsystem is
 redundant — an on-CF profile runs plain `add_tcp` on 8080.
 
@@ -113,10 +113,10 @@ compiling `ferrogate-cli` + `ferrogate-auth` with `--locked` (`Dockerfile:7-20`)
 entrypoint `CMD ["ferrogate", "run"]` (`Dockerfile:34-36`).
 
 **Health/readiness routes exist.** `/healthz` maps to `RouteGroup::Health`
-(asserted in `crates/ferrogate-cli/src/gateway/route_groups_test.rs:135`), is
+(asserted in `crates/ferrogate-gateway/src/server/route_groups_test.rs:135`), is
 short-circuited early in request handling
-(`crates/ferrogate-cli/src/gateway/handlers.rs:145-148`) into `handle_healthz`
-at `crates/ferrogate-cli/src/gateway/local.rs:256` (returns
+(`crates/ferrogate-gateway/src/server/handlers.rs:145-148`) into `handle_healthz`
+at `crates/ferrogate-gateway/src/server/local.rs:256` (returns
 `{"status":"ok","service":...,"version":...,"runtime":"pingora"}`); `handle_readyz`
 (`local.rs:270`) additionally exercises control-plane state — i.e. proves the
 Postgres path.
@@ -505,7 +505,7 @@ curl -s localhost:8080/healthz
 ```
 
 → expect `{"status":"ok","service":"...","version":"...","runtime":"pingora"}`
-(shape grounded at `crates/ferrogate-cli/src/gateway/local.rs:256-266`). Keep
+(shape grounded at `crates/ferrogate-gateway/src/server/local.rs:256-266`). Keep
 this container running: it is the **direct-origin baseline** P8 compares the
 Worker-fronted path against — CF states end-users cannot reach a deployed
 instance except through the Worker, so no baseline exists after P4.

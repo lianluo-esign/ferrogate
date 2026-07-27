@@ -80,7 +80,7 @@ pub(crate) fn env_function_target_kind() -> Option<FunctionTargetKind> {
 /// environment; the signing secret is resolved at runtime and never persisted
 /// to the control-plane DB. Disabled (fail-closed) unless the operator
 /// explicitly selected the Cloudflare kind AND declared a valid Worker target.
-pub struct CloudflareFunctionEgressGatewayConfig {
+pub(crate) struct CloudflareFunctionEgressGatewayConfig {
     allowlist: FunctionEgressAllowlist,
     minter: FunctionTokenMinter,
     /// The operator-declared Worker target. Its `auth_key_ref` is the
@@ -177,8 +177,8 @@ impl CloudflareFunctionEgressGatewayConfig {
 
 /// Process-wide Cloudflare branch config, resolved once from the environment —
 /// the Worker-side mirror of `function_egress_config`.
-pub fn cloudflare_function_egress_config() -> Option<&'static CloudflareFunctionEgressGatewayConfig>
-{
+pub(crate) fn cloudflare_function_egress_config(
+) -> Option<&'static CloudflareFunctionEgressGatewayConfig> {
     static CONFIG: OnceLock<Option<CloudflareFunctionEgressGatewayConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(CloudflareFunctionEgressGatewayConfig::from_env)
@@ -190,7 +190,7 @@ pub fn cloudflare_function_egress_config() -> Option<&'static CloudflareFunction
 /// allowlist, mint a short-lived scoped token, and build the governed HTTP
 /// request (runtime pipeline from #416). Returns the request, the invoke path
 /// for the outcome/audit record, and the timeout. No network I/O.
-pub fn prepare_cloudflare_invocation(
+pub(crate) fn prepare_cloudflare_invocation(
     config: &CloudflareFunctionEgressGatewayConfig,
     tenant: &str,
     request: &WorkerInvocationRequest,

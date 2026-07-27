@@ -14,9 +14,9 @@
 // every other refusal in the gateway is rendered.
 //
 // #553 stage 3b-0 moved this module here rather than leaving it in
-// `ferrogate-cli`: `AuthError` is `ferrogate-gateway`'s type now and
-// `LifecycleGateError` is `ferrogate-storage`'s, so the orphan rule no longer
-// permits `ferrogate-cli` to write the conversion at all. The module is
+// `ferrogate-cli`, because the orphan rule stopped permitting the conversion
+// there the moment `AuthError` became `ferrogate-gateway`'s type while
+// `LifecycleGateError` stayed `ferrogate-storage`'s. The module is
 // private -- it publishes no items, only this impl, which is visible wherever
 // both types are. Its former `pub(crate) use` of `LifecycleSeam`/`TenancyRefs`
 // went away with it: those are `ferrogate_storage`'s names and callers now say

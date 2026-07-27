@@ -23,7 +23,7 @@ fixture, no corpus and no runner existed. That is now addressed:
 
 | Landed | Where |
 |---|---|
-| `decide_ai_request(…) -> Result<AiRequestPlan, GovernedDecision>` — the admission half of the governed path as a **value** | `crates/ferrogate-cli/src/gateway/chat.rs`, `gateway/governed_decision.rs` |
+| `decide_ai_request(…) -> Result<AiRequestPlan, GovernedDecision>` — the admission half of the governed path as a **value** | `crates/ferrogate-gateway/src/server/chat.rs`, `gateway/governed_decision.rs` |
 | The governed error vocabulary, scanned out of the source so a new code cannot ship without a coverage decision | `gateway/governed_decision.rs`, `gateway/governed_decision_test.rs` |
 | The committed corpus — 37 fixtures, mandatory money cases, decimal-string amounts | `tests/fixtures/governed-decisions/` |
 | Runner A (Rust, in-process authority) | `gateway/governed_decision_conformance_test.rs` |
@@ -76,7 +76,7 @@ is presented as a measurement.
 ## The constraint
 
 FerroGate's data plane is **Pingora** — `serve()` at
-`crates/ferrogate-cli/src/gateway/mod.rs:189` builds a Pingora `Server`, wraps
+`crates/ferrogate-gateway/src/server/mod.rs:189` builds a Pingora `Server`, wraps
 `FerroGateway` in `http_proxy_service_with_name`, binds a TCP or TLS listener
 and blocks in `run_forever()`. That is a native process with its own tokio
 runtime, its own listen sockets and a resident `deadpool`/`tokio-postgres` pool
@@ -167,7 +167,7 @@ costed without it. This is the ordered traversal of a single
 | 22 | model registry resolve, distinguishing `model_disabled` from `model_not_found` | `state.resolve_model` |
 | 23 | external RBAC authorize (`model:{name}`) | `auth.rs:764` |
 | 24 | tenant model visibility | `state.can_tenant_use_model` |
-| 25 | **usage estimation** — real BPE via `tiktoken-rs` (`cl100k_base` / `o200k_base`) with a `chars/4` fallback, plus message overhead, `max_tokens` and `n` (#282) | `crates/ferrogate-cli/src/tokenizer.rs` |
+| 25 | **usage estimation** — real BPE via `tiktoken-rs` (`cl100k_base` / `o200k_base`) with a `chars/4` fallback, plus message overhead, `max_tokens` and `n` (#282) | `crates/ferrogate-gateway/src/tokenizer.rs` |
 | 26 | candidate route computation under the tenant's region allowlist, cost-ranked | `state.candidate_model_routes` |
 | 27 | canary rollout: sticky bucket by api-key→org→project→model, promote canary route (#276) | `state_rollout.rs` |
 | 28 | region fail-closed (`region_not_allowed`, #173) | `chat.rs:2886` |
@@ -214,7 +214,7 @@ Then, **per candidate route** (fallback loop, `chat.rs:334`):
   `ferrogate-policy` (~3.6k).
 - **55 distinct static client-visible error codes**, now enumerated rather than
   estimated: `GOVERNED_ERROR_VOCABULARY` in
-  `crates/ferrogate-cli/src/gateway/governed_decision.rs` lists every code
+  `crates/ferrogate-gateway/src/server/governed_decision.rs` lists every code
   `chat.rs` and `auth.rs` can emit — **44 at admission, 9 in the dispatch loop,
   2 on the admin gate** — and a source scan
   (`governed_decision_test.rs`) fails the build if a code appears in either file
@@ -703,7 +703,7 @@ test, not an intention:
 
 ### 8b. Runner A — the authority (Rust, in-process)
 
-`crates/ferrogate-cli/src/gateway/governed_decision_conformance_test.rs` loads
+`crates/ferrogate-gateway/src/server/governed_decision_conformance_test.rs` loads
 every fixture, materialises an `AppState` from `world`, drives
 `decide_ai_request(…)`, and asserts the canonical serialisation of the resulting
 `GovernedDecisionRecord { schema, outcome, status, code, metered,

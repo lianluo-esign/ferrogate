@@ -252,5 +252,5 @@ Worker can be the governed proxy.
 seam driven by a mock VCS and by a **scripted `/container/exec` transport**, so
 `ContainerCodingAgentAdapter` is exercised as production code with the git
 commands it actually issues asserted. Plus
-`crates/ferrogate-cli/src/gateway/agent_jobs_test.rs` for the read path off the
+`crates/ferrogate-gateway/src/server/agent_jobs_test.rs` for the read path off the
 run timeline. No live GitHub, no live model, no network.

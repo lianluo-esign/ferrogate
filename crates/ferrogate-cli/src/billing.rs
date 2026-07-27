@@ -13,10 +13,8 @@ use anyhow::Context;
 use ferrogate_billing::{BillingServiceConfig, InMemoryLedgerSink, LedgerSink, PriceBook};
 use ferrogate_storage::StorageLedgerSink;
 
-use crate::{
-    cli::BillingServeArgs,
-    service_storage::{build_supabase_repositories, SupabaseConnection},
-};
+use crate::cli::BillingServeArgs;
+use ferrogate_gateway::service_storage::{build_supabase_repositories, SupabaseConnection};
 
 /// Launch the billing REST service, blocking for the process lifetime.
 pub(crate) fn execute_billing_serve(args: BillingServeArgs) -> anyhow::Result<()> {
@@ -38,7 +36,10 @@ pub(crate) fn execute_billing_serve(args: BillingServeArgs) -> anyhow::Result<()
 /// Resolve the optional server-side shared secret from an inline value or a
 /// named environment variable (issue #136).
 fn resolve_token(args: &BillingServeArgs) -> anyhow::Result<Option<String>> {
-    crate::service_storage::resolve_secret(args.token.as_deref(), args.token_env.as_deref())
+    ferrogate_gateway::service_storage::resolve_secret(
+        args.token.as_deref(),
+        args.token_env.as_deref(),
+    )
 }
 
 /// Load the rate card from a JSON file, or fall back to the built-in default

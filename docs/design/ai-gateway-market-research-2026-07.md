@@ -86,7 +86,7 @@ last_reviewed: 2026-07-09
 
 | 文档声称的现状 | 代码库核实结果 |
 |---|---|
-| `dispatch.rs` 使用同步阻塞 `TcpStream` + rustls，无连接池，是"必须先做的前置重构" | **已经不是事实**：`crates/ferrogate-cli/src/gateway/dispatch.rs` 目前使用 `reqwest::Client`(异步、连接池化) |
+| `dispatch.rs` 使用同步阻塞 `TcpStream` + rustls，无连接池，是"必须先做的前置重构" | **已经不是事实**：`crates/ferrogate-gateway/src/server/dispatch.rs` 目前使用 `reqwest::Client`(异步、连接池化) |
 | `canonical.rs` 不建模 tool，只透传原始 body | **已实现**：`ferrogate-core` 已有 `ToolDef`/`ToolCall`/`ToolResult`；`ferrogate-providers/src/anthropic.rs` 有 `inject_tools`/`extract_tool_calls`；`canonical.rs` 有 `CanonicalToolDefinition`/`CanonicalToolCall` |
 | `ferrogate-mcp` 是"NEW"待建crate | **已有 1323 行实现**，非骨架 |
 | `ferrogate-runtime` "今天：只有 reload state" | **实际上已有** `agent.rs`、`isolation.rs`(Firecracker/Kata/gVisor/RootlessDocker 多后端抽象)、`capability_boundary.rs`(gateway-mediated capability boundary，覆盖 Tool/McpTool/Cli/Skill/Filesystem/Browser/Rest/Secret/MemoryRead/MemoryWrite/NetworkEgress 十类能力)、`function_egress.rs`(fail-closed 的按租户 allowlist 出口治理)、`managed_worker.rs`(3391 行)、`self_hosted_worker.rs`(2707 行)——总计 6600+ 行，是当前项目里最重的安全基础设施之一，而非"todo" |

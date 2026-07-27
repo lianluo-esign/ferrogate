@@ -3,8 +3,9 @@
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-11
 // description: Unit tests for the authorization vocabulary, the credential
-// primitives and the external auth-service scope check -- the half of the
-// former ferrogate-cli `auth_test.rs` that never builds an `AppState`.
+// primitives and the external auth-service scope check -- the cases that need
+// nothing but a credential. The ones that build a real `AppState` are the
+// sibling `auth_admission_test.rs`, under the same `auth` module.
 
 use super::*;
 

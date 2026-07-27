@@ -27,7 +27,7 @@ use serde::Serialize;
 
 /// Which detached-signature encoding a push carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureFormat {
+pub(crate) enum SignatureFormat {
     /// A minisign signature file (`untrusted comment:` header + base64 body).
     Minisign,
     /// A bare base64 Ed25519 signature over the raw blob bytes.
@@ -36,7 +36,7 @@ pub enum SignatureFormat {
 
 impl SignatureFormat {
     /// Parse the `X-Asset-Signature-Format` header value; defaults to minisign.
-    pub fn parse(raw: &str) -> Option<Self> {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "minisign" => Some(Self::Minisign),
             "ed25519" | "cosign" => Some(Self::Ed25519),
@@ -47,7 +47,7 @@ impl SignatureFormat {
 
 /// The detached signature material presented at push time.
 #[derive(Debug, Clone)]
-pub struct AssetSignatureInput {
+pub(crate) struct AssetSignatureInput {
     pub format: SignatureFormat,
     /// The signature file text (minisign) or bare base64 signature (ed25519).
     pub material: String,
@@ -59,13 +59,13 @@ pub struct AssetSignatureInput {
 /// embedded 8-byte key id; bare Ed25519 keys are indexed by a caller-supplied
 /// label.
 #[derive(Debug, Default, Clone)]
-pub struct PublisherKeyRegistry {
+pub(crate) struct PublisherKeyRegistry {
     minisign: BTreeMap<[u8; 8], VerifyingKey>,
     ed25519: BTreeMap<String, VerifyingKey>,
 }
 
 impl PublisherKeyRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -78,7 +78,11 @@ impl PublisherKeyRegistry {
     }
 
     /// Register a bare base64 32-byte Ed25519 public key under `key_id`.
-    pub fn register_ed25519(&mut self, key_id: &str, public_key_b64: &str) -> Result<(), String> {
+    pub(crate) fn register_ed25519(
+        &mut self,
+        key_id: &str,
+        public_key_b64: &str,
+    ) -> Result<(), String> {
         let bytes = BASE64_STANDARD
             .decode(public_key_b64.trim())
             .map_err(|error| format!("public key is not valid base64: {error}"))?;
@@ -94,7 +98,7 @@ impl PublisherKeyRegistry {
 
     /// Build a registry from newline/comma-separated env config. Bare keys use
     /// `label=base64`; minisign keys are the full public-key string.
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let mut registry = Self::new();
         if let Ok(raw) = std::env::var("FERROGATE_ASSET_PUBLISHER_ED25519_KEYS") {
             for entry in raw
@@ -120,7 +124,7 @@ impl PublisherKeyRegistry {
 /// into the verification manifest so agents can decide whether to trust a blob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum SignatureStatus {
+pub(crate) enum SignatureStatus {
     /// No signature was presented (allowed per policy, but labeled).
     Unsigned,
     /// Signature verified against a registered publisher key.
@@ -135,11 +139,11 @@ pub enum SignatureStatus {
 }
 
 impl SignatureStatus {
-    pub fn is_verified(&self) -> bool {
+    pub(crate) fn is_verified(&self) -> bool {
         matches!(self, SignatureStatus::Verified { .. })
     }
 
-    pub fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> &'static str {
         match self {
             SignatureStatus::Unsigned => "unsigned",
             SignatureStatus::Verified { .. } => "verified",
@@ -150,7 +154,7 @@ impl SignatureStatus {
 }
 
 /// Verify a detached signature over `content` against the publisher registry.
-pub fn verify_asset_signature(
+pub(crate) fn verify_asset_signature(
     content: &[u8],
     signature: &AssetSignatureInput,
     keys: &PublisherKeyRegistry,
@@ -344,7 +348,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// plus scan/signature/approval state. Tampering with a stored blob is
 /// detectable because the fetched bytes will not hash to `content_sha256`.
 #[derive(Debug, Clone, Serialize)]
-pub struct VerificationManifest {
+pub(crate) struct VerificationManifest {
     pub object: &'static str,
     pub asset_id: String,
     pub content_sha256: String,

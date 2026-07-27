@@ -243,7 +243,7 @@ a **hosted control plane**. Notable features (verified):
 
 ### 5.0 Current state & the one hard constraint
 
-Request flow today (`crates/ferrogate-cli/src/gateway/`): `serve` (`mod.rs`) →
+Request flow today (`crates/ferrogate-gateway/src/server/`): `serve` (`mod.rs`) →
 Pingora `ProxyHttp::request_filter` (`proxy.rs`) → `handle_request_filter`
 (`handlers.rs`) → auth (`auth.rs`) → route match (`state.rs`) → model resolve +
 policy → `dispatch_provider_request` (`dispatch.rs`) → response/stream.
@@ -557,7 +557,7 @@ path when disabled.
   Kong AI Gateway 3.14 (MCP + Agent/A2A), Envoy AI Gateway (`MCPRoute`),
   agentgateway.dev, Docker MCP Gateway, AWS Bedrock AgentCore, LiteLLM MCP,
   Anthropic Agent Skills (`anthropic.com/engineering`, `platform.claude.com`).
-- **FerroGate:** this repo — `crates/ferrogate-cli/src/gateway/`, `crates/ferrogate-providers/`,
+- **FerroGate:** this repo — `crates/ferrogate-gateway/src/server/`, `crates/ferrogate-providers/`,
   `crates/ferrogate-cli/src/{auth,state,config}.rs`, `Cargo.toml`.
 
 *Full per-claim research with confidence levels and the adversarial verification
