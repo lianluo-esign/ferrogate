@@ -18,6 +18,10 @@ readme = "../../README.md"
 keywords = ["ai", "gateway", "llm", "proxy", "rust"]
 categories = ["web-programming::http-server", "command-line-utilities"]
 
+[lib]
+name = "ferrogate_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ferrogate"
 path = "src/main.rs"
