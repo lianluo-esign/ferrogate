@@ -361,6 +361,90 @@ fn organization_id_directive_refuses_a_missing_argument_instead_of_ignoring_it()
     );
 }
 
+/// `organization_id` accepts the same `env.NAME`, `{env.NAME}` and `{$NAME}`
+/// references as provider/API-key credentials, but resolves them to the tenant
+/// id because the typed key has no separate `organization_id_env` field.
+///
+/// Pins the `env_reference(value)` branch in `parser.rs`: storing `value`
+/// directly makes all three assertions read their placeholder literally.
+#[test]
+fn organization_id_expands_the_caddyfile_environment_reference_spellings() {
+    const ENV_NAME: &str = "FERROGATE_CADDY_ORGANIZATION_ID_TEST";
+    std::env::remove_var(ENV_NAME);
+    std::env::set_var(ENV_NAME, "tenant-from-env");
+
+    for reference in [
+        format!("env.{ENV_NAME}"),
+        format!("{{env.{ENV_NAME}}}"),
+        format!("{{${ENV_NAME}}}"),
+    ] {
+        let parsed = parse_caddyfile(
+            &format!(
+                "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            \
+                 organization_id {reference}\n        }}\n    }}\n}}\n"
+            ),
+            "Ferrogate/Caddyfile",
+        )
+        .expect("a set organization-id environment reference must parse");
+        assert_eq!(
+            parsed.api_keys[0].organization_id.as_deref(),
+            Some("tenant-from-env"),
+            "{reference} must resolve to the environment value, not become a literal tenant id"
+        );
+    }
+
+    std::env::remove_var(ENV_NAME);
+
+    let missing = parse_caddyfile(
+        &format!(
+            "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            \
+             organization_id {{$${ENV_NAME}}}\n        }}\n    }}\n}}\n"
+        ),
+        "Ferrogate/Caddyfile",
+    )
+    .expect_err("a missing organization-id environment variable must fail closed")
+    .to_string();
+    assert!(
+        missing.contains(ENV_NAME) && missing.contains("is not set"),
+        "the refusal must name the missing environment variable: {missing}"
+    );
+
+    std::env::set_var(ENV_NAME, "");
+    let empty = parse_caddyfile(
+        &format!(
+            "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            \
+             organization_id {{$${ENV_NAME}}}\n        }}\n    }}\n}}\n"
+        ),
+        "Ferrogate/Caddyfile",
+    )
+    .expect_err("an empty organization-id environment variable must fail closed")
+    .to_string();
+    assert!(
+        empty.contains(ENV_NAME) && empty.contains("empty tenant id"),
+        "the refusal must distinguish an empty value from a missing one: {empty}"
+    );
+    std::env::remove_var(ENV_NAME);
+}
+
+/// The expected-token constructor must render what is missing. Before #540's
+/// diagnostic rewrite, `directive` carried this value but `Display` dropped it,
+/// so five distinct syntax errors collapsed to one opaque sentence.
+#[test]
+fn a_missing_required_token_is_present_in_structured_and_rendered_diagnostics() {
+    let error = parse_caddyfile(
+        "\n:8080 {\n    ai_gateway {\n        api_key\n    }\n}\n",
+        "Ferrogate/Caddyfile",
+    )
+    .expect_err("api_key without an id must be refused");
+
+    assert_eq!(error.directive, "api_key id");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("expected `api_key id`"),
+        "the operator must be told which token is missing: {rendered}"
+    );
+}
+
 /// #540 rework 2, review minor 14: a directive FerroGate supports, written with
 /// an argument it does not, is no longer reported as unsupported.
 ///

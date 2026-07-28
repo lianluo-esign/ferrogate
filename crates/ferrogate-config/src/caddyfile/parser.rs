@@ -639,7 +639,34 @@ impl<'a> Parser<'a> {
                 // whole job is to be the declaration.
                 "organization_id" => match args.first() {
                     Some(value) if !value.trim().is_empty() => {
-                        api_key.organization_id = Some(value.clone());
+                        let resolved = if let Some(env_name) = env_reference(value) {
+                            match std::env::var(&env_name) {
+                                Ok(value) if !value.trim().is_empty() => value,
+                                Ok(_) => {
+                                    return Err(self.invalid_argument(
+                                        &token,
+                                        directive,
+                                        format!(
+                                            "environment variable `{env_name}` resolved to an \
+                                             empty tenant id; set it to a tenants.id"
+                                        ),
+                                    ));
+                                }
+                                Err(_) => {
+                                    return Err(self.invalid_argument(
+                                        &token,
+                                        directive,
+                                        format!(
+                                            "environment variable `{env_name}` is not set; set \
+                                             it to a tenants.id or write the tenant id literally"
+                                        ),
+                                    ));
+                                }
+                            }
+                        } else {
+                            value.clone()
+                        };
+                        api_key.organization_id = Some(resolved);
                     }
                     _ => {
                         return Err(self.invalid_argument(

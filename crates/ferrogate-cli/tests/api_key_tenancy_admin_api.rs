@@ -145,6 +145,8 @@ fn cross_project_workspace_pair_is_rejected_on_update() {
     // The secret is repeated so the pre-existing "key_env, key, or key_hash is
     // required" rejection cannot stand in for the tenancy one: without the #340
     // check this exact request returns 200 and persists the cross-project pair.
+    // #540-undeclared-on-purpose: this invalid replacement deliberately states
+    // only project/workspace ids so their cross-project pairing is the refusal.
     let rejected = http_request(
         &gateway_addr,
         "PUT",

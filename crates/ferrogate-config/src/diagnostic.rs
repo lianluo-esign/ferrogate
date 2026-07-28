@@ -15,7 +15,8 @@ pub struct CaddyfileDiagnostic {
 }
 
 /// The rendered form is `<file>:<line>:<column> <message>. <suggestion>`, and
-/// the whole diagnosis lives in `message` (#540 rework 2, review minor 14).
+/// every constructor puts its complete human diagnosis in `message` (#540
+/// rework 2, review minor 14).
 ///
 /// It used to hard-code "unsupported directive `<directive>`" ahead of the
 /// message, which made every argument error a lie: `organization_id` with a
@@ -23,7 +24,9 @@ pub struct CaddyfileDiagnostic {
 /// the FerroGate Caddyfile MVP subset" while the very next sentence told the
 /// operator to write `organization_id <tenants.id>`. The directive IS part of
 /// the subset -- #540 added it -- and only its argument was wrong. The
-/// constructors now say which of the two it is.
+/// constructors now say which of the two it is. `Parser::expected` follows the
+/// same rule: `message` includes the missing token while `directive` retains it
+/// as structured diagnostic data.
 impl std::fmt::Display for CaddyfileDiagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

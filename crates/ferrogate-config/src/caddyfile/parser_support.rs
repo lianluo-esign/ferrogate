@@ -66,12 +66,13 @@ impl<'a> Parser<'a> {
             line: 1,
             column: 1,
         });
+        let expected = what.to_string();
         CaddyfileDiagnostic {
             file: self.file.to_string(),
             line: token.line,
             column: token.column,
-            directive: what.to_string(),
-            message: "unexpected Caddyfile syntax".to_string(),
+            directive: expected.clone(),
+            message: format!("unexpected Caddyfile syntax: expected `{expected}`"),
             suggestion: "check braces and directive line breaks".to_string(),
         }
     }

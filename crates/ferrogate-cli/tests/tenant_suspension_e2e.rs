@@ -313,6 +313,8 @@ fn suspending_a_tenant_stops_its_keys_and_blocks_new_credentials() {
     //    Note the payload names ONLY `project_id`: nothing here mentions
     //    `tenant-susp`, so this 403 is only reachable if the gate walks from
     //    the project row up to its tenant.
+    //    #540-undeclared-on-purpose: declaring organization_id here would
+    //    destroy the project-only chain this fixture is written to exercise.
     let new_api_key = admin(
         &gateway_addr,
         "POST",

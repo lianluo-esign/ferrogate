@@ -2091,6 +2091,8 @@ fn assert_api_key_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
 
     // Project A paired with project B's workspace: the exact combination the
     // console cascade prevents, refused server-side with the same payload.
+    // #540-undeclared-on-purpose: the invalid body names only the pair whose
+    // ancestry must be checked; adding organization_id changes the input.
     case.expect_json(
         "POST",
         "/admin/v1/api-keys",
@@ -2137,6 +2139,8 @@ fn assert_api_key_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
 
     // The update path enforces the same invariant: a key stored with a legal
     // pair cannot be walked into an illegal one.
+    // #540-undeclared-on-purpose: same project/workspace-only refusal as the
+    // create probe above, now through full-replacement update semantics.
     case.expect_json(
         "PUT",
         "/admin/v1/api-keys/box4-consistent",

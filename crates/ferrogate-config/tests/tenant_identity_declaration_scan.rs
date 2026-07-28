@@ -33,10 +33,14 @@
 //!   including inside a fenced code block in `README.md`. That is exactly where
 //!   two of the four misses were, and a copied quickstart that refuses to start
 //!   is the worst place to find out.
-//! * **JSON** -- an object literal that names `"id"`, `"scopes"` and one of
-//!   `"key"`/`"key_hash"`/`"key_env"`. This covers `serde_json::from_value`
-//!   fixtures and `POST`/`PUT /admin/v1/api-keys` request bodies written as
-//!   string literals, which is where the remaining two misses were.
+//! * **JSON** -- an object literal that names `"id"`, one of
+//!   `"key"`/`"key_hash"`/`"key_env"`, and either `"scopes"` (the typed
+//!   `ApiKey` fixture shape) or a nearby `/admin/v1/api-keys` route literal
+//!   (the Admin API mutation shape). `id` may be a string literal or a Rust
+//!   expression; expressions are reported as `<dynamic:...>` instead of making
+//!   the whole body invisible. This covers `serde_json::from_value` fixtures
+//!   and POST/PUT/PATCH request bodies, including full-replacement bodies that
+//!   omit `scopes`.
 //! * **YAML** -- an `api_keys:` sequence whose items name `id` and a key field.
 //!   Added by the #540 rework 2 (review finding 4): `Config::from_yaml_str`
 //!   exists, `Config::load` dispatches on `.yaml`/`.yml`, `POST
@@ -64,8 +68,13 @@
 //! refuse them at the moment they are used. Also not modelled, and named rather
 //! than implied away: TOML's inline `api_keys = [{ ... }]` array-of-tables
 //! spelling (no instance in the tree today), and escape sequences other than
-//! `\n` and `\"`. A *fifth* dialect arriving later is likewise invisible --
-//! this scan cannot know about a spelling that does not exist yet.
+//! `\n` and `\"`. A JSON body without `scopes` is recognized as an Admin API
+//! mutation only when its route literal is within
+//! [`JSON_API_KEY_ROUTE_CONTEXT_LINES`] physical lines of the object; a helper
+//! that assembles both route and body in distant functions is runtime-built and
+//! belongs to the validator boundary, not this lexical scan. A *fifth* dialect
+//! arriving later is likewise invisible -- this scan cannot know about a
+//! spelling that does not exist yet.
 //!
 //! # Deliberately undeclared fixtures
 //!
@@ -93,6 +102,14 @@ const DELIBERATE_MARKER: &str = "#540-undeclared-on-purpose";
 /// -- which is a short distance in a file of back-to-back fixtures, and the
 /// review found a live instance of exactly that in `config/tests.rs`.
 const MARKER_LOOKBEHIND_LINES: usize = 20;
+
+/// Route context used to distinguish an Admin API key mutation from unrelated
+/// JSON `{id, key}` objects such as permissions and virtual-key responses.
+///
+/// The farthest current mutation fixture puts the route five physical lines
+/// beyond the object's closing brace. Eight leaves formatting room while still
+/// requiring the route and body to be one local request expression.
+const JSON_API_KEY_ROUTE_CONTEXT_LINES: usize = 8;
 
 /// Why a block appears in [`UNMARKED_EXEMPTIONS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,11 +250,13 @@ const SKIPPED_DIRS: &[&str] = &[
 /// opposite of the incentive this file wants; a floor on all declarations only
 /// grows.
 ///
-/// Measured against the tree at the commit that wrote them, where `scan` finds
-/// 311 TOML, 22 Caddyfile, 60 JSON and 37 YAML declarations across 1444 text
-/// files. Each floor sits well below its measurement so ordinary churn does not
-/// red it; a count that falls below one means the guard has stopped seeing part
-/// of the tree, and the number must be re-measured, never lowered on faith.
+/// Measured before the route-aware JSON expansion in this rework, where `scan`
+/// found 311 TOML, 22 Caddyfile, 60 JSON and 37 YAML declarations across 1444
+/// text files. The JSON count only grows when the no-`scopes` and dynamic-id
+/// mutation bodies become visible. Each floor sits well below that measurement
+/// so ordinary churn does not red it; a count that falls below one means the
+/// guard has stopped seeing part of the tree, and the number must be
+/// re-measured, never lowered on faith.
 ///
 /// Mutations these catch: narrowing `scan` to `scan_toml` alone zeroes three of
 /// the four; dropping `crates/` from the walk takes TOML to 32 and Caddyfile to
@@ -255,7 +274,7 @@ const DIALECT_FLOORS: &[(Dialect, usize)] = &[
 /// dialect it must yield.
 ///
 /// A total floor cannot catch a walk that stops entering a small directory:
-/// dropping `config/` costs three TOML declarations out of 318 and no count
+/// dropping `config/` costs three TOML declarations out of 311 and no count
 /// would notice, yet it is exactly where the two operator-facing example
 /// configs live. These anchors are per-directory positive controls -- skip
 /// `config/`, `docs/`, `tests/`, `tools/`, or everything but `crates/`, and the
@@ -275,6 +294,45 @@ const ANCHORS: &[(&str, Dialect)] = &[
     (
         "crates/ferrogate-config/src/config/tests.rs",
         Dialect::Caddyfile,
+    ),
+];
+
+/// JSON declarations named by the #540 review, pinned to their actual source
+/// files rather than inferred from the synthetic controls below.
+///
+/// The first two are declared controls whose identity deletion must remain
+/// visible. The remaining four are deliberately undeclared refusal probes;
+/// their markers may exempt them only after the scan has found them.
+const JSON_MUTATION_ANCHORS: &[(&str, &str, bool)] = &[
+    (
+        "crates/ferrogate-cli/tests/api_key_tenancy_admin_api.rs",
+        "k-cross",
+        true,
+    ),
+    (
+        "crates/ferrogate-cli/tests/vpc_offline_loop_e2e.rs",
+        "<dynamic:id>",
+        true,
+    ),
+    (
+        "crates/ferrogate-cli/tests/api_key_tenancy_admin_api.rs",
+        "k1",
+        false,
+    ),
+    (
+        "crates/ferrogate-cli/tests/tenant_suspension_e2e.rs",
+        "ak-susp",
+        false,
+    ),
+    (
+        "tools/ferrogate-test/src/scenarios.rs",
+        "box4-cross-project",
+        false,
+    ),
+    (
+        "tools/ferrogate-test/src/scenarios.rs",
+        "box4-consistent",
+        false,
     ),
 ];
 
@@ -561,7 +619,9 @@ fn scan_json(lines: &[SourceLine]) -> Vec<Declaration> {
                 // removed is what decides whether it is an api key, so a
                 // function body wrapping one is not mistaken for one.
                 let object = shallow_text(&characters, frame.start, index, &frame.children);
-                if let Some(id) = json_api_key_id(&object) {
+                let route_context =
+                    json_api_key_route_is_near(lines, frame.line, physical_line[index]);
+                if let Some(id) = json_api_key_id(&object, route_context) {
                     declarations.push(Declaration {
                         dialect: Dialect::Json,
                         id,
@@ -602,8 +662,14 @@ fn shallow_text(
     text
 }
 
-fn json_api_key_id(object: &str) -> Option<String> {
-    if !object.contains("\"id\"") || !object.contains("\"scopes\"") {
+/// Classify one shallow JSON object as an API-key declaration.
+///
+/// `scopes` is a strong structural signal for typed `ApiKey` fixtures. Admin
+/// mutation bodies do not require it, so an exact route literal nearby is the
+/// second signal. Requiring one of those two avoids sweeping unrelated
+/// permission and virtual-key objects that also happen to spell `{id, key}`.
+fn json_api_key_id(object: &str, route_context: bool) -> Option<String> {
+    if !object.contains("\"id\"") || (!object.contains("\"scopes\"") && !route_context) {
         return None;
     }
     if !object.contains("\"key\"")
@@ -614,9 +680,27 @@ fn json_api_key_id(object: &str) -> Option<String> {
     }
     let rest = &object[object.find("\"id\"")? + 4..];
     let rest = rest.trim_start().strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    if let Some(rest) = rest.strip_prefix('"') {
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+
+    // Rust `json!` fixtures commonly use `"id": id` or `"id": CONST`. The
+    // id is diagnostic metadata, not what determines whether the object is a
+    // key, so preserve the expression as a stable label rather than dropping
+    // the declaration. Stop at the field delimiter; complicated expressions
+    // may be abbreviated, which is fine because file+line remains authoritative.
+    let end = rest.find([',', '\n', '}']).unwrap_or(rest.len());
+    let expression = rest[..end].trim();
+    (!expression.is_empty()).then(|| format!("<dynamic:{expression}>"))
+}
+
+fn json_api_key_route_is_near(lines: &[SourceLine], start_line: usize, end_line: usize) -> bool {
+    let first = start_line.saturating_sub(JSON_API_KEY_ROUTE_CONTEXT_LINES);
+    let last = end_line.saturating_add(JSON_API_KEY_ROUTE_CONTEXT_LINES);
+    lines.iter().any(|line| {
+        (first..=last).contains(&line.number) && line.text.contains("/admin/v1/api-keys")
+    })
 }
 
 fn scan_yaml(lines: &[SourceLine]) -> Vec<Declaration> {
@@ -814,12 +898,13 @@ fn repository_sources() -> Vec<(String, String)> {
 /// identity, carries the deliberate marker, or is listed with a reason.
 ///
 /// Mutation this catches: delete any `platform_operator = true` /
-/// `organization_id = "..."` line from any fixture in the tree -- the four
-/// fixtures the review found, the two READMEs, or any of the ~300 others -- and
-/// this test names the file, the line, the dialect and the key id. It is
-/// deliberately NOT satisfiable by the flip being reverted, because it never
-/// reads `TenancyConfig`: it is a statement about the tree, not about the
-/// default.
+/// `organization_id = "..."` line from a static declaration shape documented
+/// above -- including the four fixtures the review found, the two READMEs, or
+/// any of the ~300 others -- and this test names the file, the line, the dialect
+/// and the key id. Runtime-assembled values remain the validator's boundary, as
+/// stated in the module limits. This is deliberately NOT satisfiable by the
+/// flip being reverted, because it never reads `TenancyConfig`: it is a
+/// statement about the tree, not about the default.
 ///
 /// And, since the #540 rework 2 (review finding 3), it is not satisfiable by
 /// the walk quietly going blind either: [`DIALECT_FLOORS`] is a positive
@@ -914,6 +999,35 @@ fn every_api_key_declaration_in_the_tree_states_a_tenant_identity() {
     );
 }
 
+/// The exact variable-id and no-`scopes` bodies that exposed the old JSON
+/// classifier must stay visible. A marker is an exemption, not proof that the
+/// declaration beside it was ever found, so the four deliberate bodies are
+/// anchored here with the declared controls that review proposed mutating.
+#[test]
+fn the_reviewed_json_mutation_bodies_are_all_visible() {
+    let sources = repository_sources();
+
+    for (path, id, declares_identity) in JSON_MUTATION_ANCHORS {
+        let source = sources
+            .iter()
+            .find(|(relative, _)| relative == path)
+            .unwrap_or_else(|| panic!("the repository walk did not reach JSON anchor {path}"));
+        let matches: Vec<_> = scan(&source.1)
+            .into_iter()
+            .filter(|declaration| {
+                declaration.dialect == Dialect::Json
+                    && declaration.id == *id
+                    && declaration.declares_identity == *declares_identity
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one JSON declaration `{id}` with declares_identity={declares_identity} in {path}, found {matches:?}"
+        );
+    }
+}
+
 /// The scan itself, against synthetic sources, so its reach is a claim that can
 /// be checked rather than a property of whatever the tree contains today.
 ///
@@ -998,9 +1112,7 @@ organization_id = "tenant-a"
         "and a quoted id is the same block, not an unreadable one"
     );
 
-    // A JSON request body / `serde_json::from_value` fixture. The third one
-    // carries a nested sub-object, which made the whole object invisible before
-    // (review minor 6).
+    // A JSON request body / `serde_json::from_value` fixture.
     let json_bodies = r#"
     // #540-undeclared-on-purpose: the input the scan must detect
     let created = post("/admin/v1/api-keys",
@@ -1013,7 +1125,7 @@ organization_id = "tenant-a"
     assert_eq!(
         json_findings.len(),
         1,
-        "an object without \"scopes\" and a key field is not an api key: {json_findings:?}"
+        "an object without a key field is not an api key: {json_findings:?}"
     );
     assert_eq!(json_findings[0].dialect, Dialect::Json);
     assert_eq!(json_findings[0].id, "undeclared-json");
@@ -1030,6 +1142,52 @@ organization_id = "tenant-a"
         "an api key with a nested sub-object is still an api key: {nested_findings:?}"
     );
     assert_eq!(nested_findings[0].id, "nested-json");
+
+    // Admin mutation bodies are full replacements and do not require `scopes`.
+    // The exact route distinguishes this from unrelated `{id, key}` JSON, and
+    // a Rust expression in `id` is retained as a diagnostic label. These are
+    // separate controls: restoring the old `scopes` requirement drops the
+    // first; restoring the string-literal-only id parser drops the second.
+    let no_scopes_mutation = r#"
+    post(
+        "/admin/v1/api-keys",
+        json!({"id":"no-scopes-json","name":"N","key":"s","organization_id":"tenant-a"}),
+    );
+"#;
+    let no_scopes = scan(no_scopes_mutation);
+    assert_eq!(
+        no_scopes.len(),
+        1,
+        "the route makes this a key body: {no_scopes:?}"
+    );
+    assert_eq!(no_scopes[0].id, "no-scopes-json");
+    assert!(no_scopes[0].declares_identity);
+
+    let unrelated_id_and_key =
+        r#"let permission = json!({"id":"permission-a","key":"permission.read"});"#;
+    assert!(
+        scan(unrelated_id_and_key).is_empty(),
+        "without scopes or a nearby api-key route, an unrelated id/key object is not a key"
+    );
+
+    // #540-undeclared-on-purpose: this is the dynamic-id mutation the scanner
+    // must see, not a key that any gateway loads.
+    let dynamic_id_mutation = r#"
+    let body = json!({
+        "id": id,
+        "name": "Rotated key",
+        "key": secret,
+        "scopes": ["models.read"],
+    });
+    post("/admin/v1/api-keys", body);
+"#;
+    let dynamic = undeclared(dynamic_id_mutation);
+    assert_eq!(
+        dynamic.len(),
+        1,
+        "a variable id must not hide the body: {dynamic:?}"
+    );
+    assert_eq!(dynamic[0].id, "<dynamic:id>");
 
     // YAML: a live loader dialect (`Config::from_yaml_str`, and the
     // `config_yaml` body of POST /admin/v1/config/validate) that no arm could
@@ -1079,12 +1237,23 @@ api_keys:
     // `platform_operator = false` still counts as declared: it says something,
     // which is all this scan is about. Whether it says something USEFUL is
     // `Config::api_keys_that_authorize_nothing`'s question, not this one.
-    let explicit_false = "\n[[api_keys]]\nid = \"k\"\nkey = \"s\"\nplatform_operator = false\n";
-    assert!(undeclared(explicit_false).is_empty());
+    let explicit_false = r#"\n[[api_keys]]\nid = \"k\"\nkey = \"s\"\nplatform_operator = false\n"#;
     assert_eq!(
-        scan(explicit_false).len(),
+        explicit_false.lines().count(),
+        1,
+        "the fixture must be one physical line carrying literal escapes; real newlines would \
+         bypass logical_lines and make this control vacuous"
+    );
+    let escaped = scan(explicit_false);
+    assert_eq!(
+        escaped.len(),
         1,
         "and the escaped one-line spelling of a TOML block is read as the block it means"
+    );
+    assert_eq!(escaped[0].id, "k", "the escaped quote is unescaped too");
+    assert!(
+        escaped[0].declares_identity,
+        "platform_operator=false still declares the key's posture"
     );
 }
 

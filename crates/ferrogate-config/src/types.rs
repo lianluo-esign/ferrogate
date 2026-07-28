@@ -134,7 +134,9 @@ pub struct GatewayApiKey {
     pub monthly_token_budget: Option<u64>,
     pub request_limit_per_minute: Option<u64>,
     /// `organization_id <tenants.id>` inside an `api_key` block (#540): the
-    /// tenant this bridged key speaks for.
+    /// tenant this bridged key speaks for. `env.NAME`, `{env.NAME}` and
+    /// `{$NAME}` use the same Caddyfile environment-reference grammar as API
+    /// key/provider credentials and are resolved during parsing.
     #[serde(default)]
     pub organization_id: Option<String>,
     /// `platform_operator on|off` inside an `api_key` block (#540).
