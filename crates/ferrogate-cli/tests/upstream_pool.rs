@@ -6,70 +6,11 @@
 
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    net::TcpListener,
     thread,
-    time::{Duration, Instant},
 };
 
-// This target predates `support` and keeps its own helpers; it is pulled in
-// only for the #568 death-signal arming below.
-#[allow(dead_code)]
 mod support;
-
-/// Pre-armed so a gateway started here dies with its test even when the test
-/// panics past the `kill()` line or the harness is SIGKILLed (#568).
-fn ferrogate() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
-    support::reap_with_test(&mut command);
-    command
-}
-
-fn free_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().to_string()
-}
-
-fn start_gateway(config: &std::path::Path) -> Child {
-    ferrogate()
-        .args(["run", "--config", config.to_str().unwrap()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
-}
-
-fn wait_for_gateway(addr: &str) {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
-        if let Ok(mut stream) = TcpStream::connect(addr) {
-            stream
-                .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .unwrap();
-            let mut buffer = [0_u8; 512];
-            if stream.read(&mut buffer).unwrap_or(0) > 0 {
-                return;
-            }
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("gateway did not become ready at {addr}");
-}
-
-fn http_get(addr: &str, path: &str) -> String {
-    let mut stream = TcpStream::connect(addr).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    response
-}
 
 fn spawn_labeled_upstream(label: &'static str) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -92,15 +33,15 @@ fn spawn_labeled_upstream(label: &'static str) -> (String, thread::JoinHandle<()
 
 #[test]
 fn upstream_pool_uses_round_robin_endpoint_selection() {
-    let gateway_addr = free_addr();
     let (first_addr, first_handle) = spawn_labeled_upstream("first");
     let (second_addr, second_handle) = spawn_labeled_upstream("second");
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    std::fs::write(
-        &config,
-        format!(
-            r#"
+    let (mut gateway, gateway_addr) = support::start_ready_gateway(&config, |gateway_addr| {
+        std::fs::write(
+            &config,
+            format!(
+                r#"
 listen = "{gateway_addr}"
 
 # #542: no credential source of any kind, so the open posture is named
@@ -118,15 +59,13 @@ name = "pool"
 upstream = "pool"
 path_prefixes = ["/pool"]
 "#
-        ),
-    )
-    .unwrap();
+            ),
+        )
+        .unwrap();
+    });
 
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
-
-    let first = http_get(&gateway_addr, "/pool");
-    let second = http_get(&gateway_addr, "/pool");
+    let first = support::http_request(&gateway_addr, "GET", "/pool", &[], "");
+    let second = support::http_request(&gateway_addr, "GET", "/pool", &[], "");
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
