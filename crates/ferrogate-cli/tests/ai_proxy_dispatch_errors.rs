@@ -43,6 +43,7 @@ base_url = "{base_url}"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
 
 [[api_keys]]
 id = "chat"
@@ -87,7 +88,10 @@ fn chat_maps_https_provider_connect_failure_to_502() {
     wait_for_gateway(&gateway_addr);
 
     let response = chat(&gateway_addr);
-    assert!(response.contains("502 Bad Gateway"));
+    assert!(
+        response.contains("502 Bad Gateway"),
+        "unexpected response: {response}"
+    );
     assert!(response.contains("provider_dispatch_error"));
     assert!(!response.contains("chat-secret"));
 

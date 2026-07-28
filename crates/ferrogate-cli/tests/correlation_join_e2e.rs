@@ -194,6 +194,7 @@ fn run_now_dispatch_lease_carries_the_admin_requests_correlation_triple() {
 
     let mut gateway = start_gateway(&config);
     wait_for_gateway(&gateway_addr);
+    bootstrap_scheduler_scope(&gateway_addr);
 
     // A schedule that would never tick on its own — only run-now fires it, so
     // the ONLY dispatch in the queue is the manually-triggered one.
@@ -361,6 +362,61 @@ fn poll_for_lease(gateway_addr: &str, transport_secret: &str, worker_id: &str) -
             "timed out waiting for the worker to lease the run-now dispatch"
         );
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn bootstrap_scheduler_scope(gateway_addr: &str) {
+    let admin = [
+        "Authorization: Bearer admin-secret",
+        "Content-Type: application/json",
+    ];
+    for (path, body, what) in [
+        (
+            "/admin/v1/plans",
+            serde_json::json!({
+                "id": "corr-plan",
+                "name": "Correlation test plan",
+                "slug": "corr-plan",
+                "self_hosted_workers_enabled": true
+            }),
+            "plan",
+        ),
+        (
+            "/admin/v1/tenant-accounts",
+            serde_json::json!({
+                "id": "org_corr",
+                "name": "Correlation tenant",
+                "slug": "org-corr",
+                "plan_id": "corr-plan"
+            }),
+            "tenant",
+        ),
+        (
+            "/admin/v1/projects",
+            serde_json::json!({
+                "id": "corr-project",
+                "tenant_id": "org_corr",
+                "name": "Correlation project",
+                "slug": "corr-project"
+            }),
+            "project",
+        ),
+        (
+            "/admin/v1/workspaces",
+            serde_json::json!({
+                "id": "ws-corr",
+                "project_id": "corr-project",
+                "name": "Correlation workspace",
+                "slug": "ws-corr"
+            }),
+            "workspace",
+        ),
+    ] {
+        let response = http_request(gateway_addr, "POST", path, &admin, &body.to_string());
+        assert!(
+            response.contains("HTTP/1.1 201"),
+            "correlation {what} setup should succeed: {response}"
+        );
     }
 }
 

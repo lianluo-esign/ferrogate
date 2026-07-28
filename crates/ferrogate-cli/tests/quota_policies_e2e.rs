@@ -28,6 +28,7 @@ base_url = "http://{provider_addr}/v1"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
 context_window = 8192
 
 [[api_keys]]

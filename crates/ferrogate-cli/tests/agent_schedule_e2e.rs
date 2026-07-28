@@ -153,15 +153,34 @@ fn scheduled_dispatch_fires_is_leased_acked_and_never_double_fires() {
     let mut gateway = start_gateway(&config_path);
     wait_for_gateway(&gateway_addr);
 
-    // 1. Bootstrap the durable tenancy chain the schedule binds to. Schedule
-    // creation resolves this chain instead of accepting orphan scope strings.
+    // 1. Bootstrap a plan that permits the self-hosted worker used below, then
+    // the durable tenancy chain the schedule binds to. The default free plan
+    // intentionally denies self-hosted worker registration.
+    let plan = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &ADMIN,
+        &serde_json::json!({
+            "id": "scheduler-e2e-plan",
+            "name": "Scheduler E2E plan",
+            "slug": "scheduler-e2e-plan",
+            "self_hosted_workers_enabled": true
+        })
+        .to_string(),
+    );
+    assert!(
+        plan.contains("HTTP/1.1 201"),
+        "schedule plan setup should succeed: {plan}"
+    );
     for (path, body) in [
         (
             "/admin/v1/tenant-accounts",
             serde_json::json!({
                 "id": TENANT,
                 "name": "Scheduler tenant",
-                "slug": TENANT
+                "slug": TENANT,
+                "plan_id": "scheduler-e2e-plan"
             }),
         ),
         (

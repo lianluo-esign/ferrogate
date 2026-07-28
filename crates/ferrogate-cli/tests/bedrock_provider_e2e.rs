@@ -40,6 +40,7 @@ aws_secret_access_key_env = "FERROGATE_TEST_BEDROCK_SECRET_KEY"
 name = "bedrock-chat"
 provider = "bedrock"
 provider_model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+capabilities = ["chat"]
 context_window = 8192
 
 [[api_keys]]

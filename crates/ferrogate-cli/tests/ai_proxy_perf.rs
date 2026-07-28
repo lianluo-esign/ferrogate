@@ -334,6 +334,7 @@ base_url = "http://{provider_addr}/v1"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
 
 [[api_keys]]
 id = "chat_perf"
@@ -379,7 +380,10 @@ platform_operator = true
         for worker in workers {
             let (latency, response) = worker.join().unwrap();
             latencies.push(latency);
-            assert!(response.contains("200 OK"));
+            assert!(
+                response.contains("200 OK"),
+                "unexpected response: {response}"
+            );
             assert!(response.contains("chatcmpl_stream_perf"));
             assert!(response.contains("data: [DONE]"));
             assert!(!response.contains("chat-secret"));

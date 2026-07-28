@@ -1197,6 +1197,9 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
     let requests = mcp_handle.join().unwrap();
     assert!(requests
         .iter()
+        .any(|request| request.contains("\"server/discover\"")));
+    assert!(!requests
+        .iter()
         .any(|request| request.contains("\"initialize\"")));
     assert!(requests
         .iter()
@@ -1812,7 +1815,7 @@ base_url = "http://{provider_addr}/v1"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
-capabilities = ["chat"]
+capabilities = ["chat", "tools"]
 
 [[api_keys]]
 id = "admin"
@@ -2083,7 +2086,9 @@ fn spawn_mcp_server_with_tool(
                 Err(error) => panic!("MCP mock accept failed: {error}"),
             };
             let request = read_http_request(&mut stream);
-            let body = if request.contains("\"initialize\"") {
+            let body = if request.contains("\"server/discover\"") {
+                r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#
+            } else if request.contains("\"initialize\"") {
                 r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"mock-mcp","version":"1.0.0"}}}"#
             } else if request.contains("\"ping\"") {
                 r#"{"jsonrpc":"2.0","id":1,"result":{}}"#
@@ -2129,7 +2134,9 @@ fn spawn_slow_mcp_server() -> (String, JoinHandle<Vec<String>>) {
                 Err(error) => panic!("slow MCP mock accept failed: {error}"),
             };
             let request = read_http_request(&mut stream);
-            let body = if request.contains("\"initialize\"") {
+            let body = if request.contains("\"server/discover\"") {
+                r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#
+            } else if request.contains("\"initialize\"") {
                 r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"mock-mcp","version":"1.0.0"}}}"#
             } else if request.contains("\"tools/list\"") {
                 r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search GitHub","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}]}}"#

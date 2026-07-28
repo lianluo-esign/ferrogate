@@ -335,7 +335,7 @@ platform_operator = true
     wait_for_gateway(&gateway_addr);
 
     let first = chat(&gateway_addr, Some("rate-secret"), "fast-chat");
-    assert!(first.contains("200 OK"));
+    assert!(first.contains("200 OK"), "unexpected response: {first}");
     assert!(first.contains("\"id\":\"chatcmpl_limit\""));
 
     let second = chat(&gateway_addr, Some("rate-secret"), "fast-chat");
@@ -372,6 +372,7 @@ base_url = "http://{provider_addr}/v1"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
 context_window = 8192
 
 [[api_keys]]
@@ -395,7 +396,7 @@ platform_operator = true
         Some("budget-secret"),
         r#"{"model":"fast-chat","messages":[],"max_tokens":4}"#,
     );
-    assert!(first.contains("200 OK"));
+    assert!(first.contains("200 OK"), "unexpected response: {first}");
     assert!(first.contains("\"id\":\"chatcmpl_budget\""));
 
     let second = chat(&gateway_addr, Some("budget-secret"), "fast-chat");
@@ -432,6 +433,7 @@ base_url = "http://{provider_addr}/v1"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
 context_window = 8192
 
 [[api_keys]]
@@ -455,7 +457,10 @@ platform_operator = true
         Some("budget-secret"),
         r#"{"model":"fast-chat","messages":[],"max_tokens":9}"#,
     );
-    assert!(response.contains("429 Too Many Requests"));
+    assert!(
+        response.contains("429 Too Many Requests"),
+        "unexpected response: {response}"
+    );
     assert!(response.contains("token_budget_exceeded"));
     assert!(!response.contains("budget-secret"));
 

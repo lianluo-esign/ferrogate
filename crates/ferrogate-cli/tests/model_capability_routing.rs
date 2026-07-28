@@ -166,6 +166,7 @@ name = "Route client"
 key = "route-secret"
 scopes = ["chat.completions"]
 allowed_models = ["tool-model"]
+platform_operator = true
 
 [[api_keys]]
 id = "route-admin"

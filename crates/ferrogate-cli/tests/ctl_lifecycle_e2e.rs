@@ -221,6 +221,62 @@ tick_interval_secs = 60
     )
 }
 
+fn create_tenant_account(gateway_addr: &str, tenant_id: &str) {
+    let response = http_request(
+        gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &ADMIN,
+        &json!({
+            "id": tenant_id,
+            "name": format!("CLI lifecycle {tenant_id}"),
+            "slug": tenant_id
+        })
+        .to_string(),
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 201"),
+        "tenant account {tenant_id} should be created: {response}"
+    );
+}
+
+fn bootstrap_schedule_scope(
+    gateway_addr: &str,
+    tenant_id: &str,
+    project_id: &str,
+    workspace_id: &str,
+) {
+    create_tenant_account(gateway_addr, tenant_id);
+    for (path, body, what) in [
+        (
+            "/admin/v1/projects",
+            json!({
+                "id": project_id,
+                "tenant_id": tenant_id,
+                "name": format!("CLI lifecycle {project_id}"),
+                "slug": project_id
+            }),
+            "project",
+        ),
+        (
+            "/admin/v1/workspaces",
+            json!({
+                "id": workspace_id,
+                "project_id": project_id,
+                "name": format!("CLI lifecycle {workspace_id}"),
+                "slug": workspace_id
+            }),
+            "workspace",
+        ),
+    ] {
+        let response = http_request(gateway_addr, "POST", path, &ADMIN, &body.to_string());
+        assert!(
+            response.starts_with("HTTP/1.1 201"),
+            "schedule {what} should be created: {response}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AC2/AC3/AC4 — guardrail revision activation + rollback via the CLI.
 // ---------------------------------------------------------------------------
@@ -487,6 +543,7 @@ fn agent_schedule_run_now_via_cli_records_run_evidence() {
     wait_for_gateway(&gateway_addr);
     let endpoint = endpoint_for(&gateway_addr);
     let schedule_id = "ctl-run-now-sched";
+    bootstrap_schedule_scope(&gateway_addr, "ctl-tenant", "ctl-project", "ctl-ws");
 
     // Create the schedule through the CLI too, proving the create verb wiring.
     let schedule = json!({
@@ -966,6 +1023,8 @@ fn insufficient_scope_and_wrong_tenant_fail_closed_via_cli() {
     let mut gateway = start_gateway(&config_path);
     wait_for_gateway(&gateway_addr);
     let endpoint = endpoint_for(&gateway_addr);
+    bootstrap_schedule_scope(&gateway_addr, "tenant-a", "project-a", "ws-a");
+    create_tenant_account(&gateway_addr, "tenant-b");
 
     // A schedule owned by tenant A, seeded via the unrestricted platform key.
     let schedule = json!({
