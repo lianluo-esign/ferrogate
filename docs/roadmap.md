@@ -84,9 +84,13 @@ These areas are implemented in the current open-source gateway:
 - Prompt/response guardrails, request logs, token metering events, usage
   aggregates, provider health, Prometheus metrics, OTLP export, and ClickHouse
   analytics delivery through Vector pipeline mode or direct warehouse mode.
-- MCP host/client support on the MCP 2026-07-28 specification, native
-  `/v1/mcp` JSON-RPC ingress including `resources/list`/`resources/read`,
-  tool execution, dispatch isolation, timeout handling, approval gates,
+- Initialize-based MCP host/client adapters and legacy `/v1/mcp` support for
+  2025-11-25 and 2025-06-18, plus native JSON-RPC ingress including
+  `resources/list`/`resources/read` and the first pinned MCP 2026-07-28
+  candidate ingress slice: stateless `server/discover`, per-request metadata,
+  required routing headers, and typed transport errors. Candidate outbound
+  negotiation and final-spec conformance remain roadmap work. Existing MCP
+  execution also includes dispatch isolation, timeout handling, approval gates,
   immutable approval fingerprints, Codex compatibility, and Claude Code
   compatibility.
 - The hosted-asset closed loop: versioned `/v1/assets/*` publish/pull/delete,

@@ -26,6 +26,11 @@ fn resources_methods_require_assets_read_scope() {
     assert_eq!(required_scope("resources/read").unwrap(), "assets.read");
 }
 
+#[test]
+fn server_discovery_requires_tools_read_scope() {
+    assert_eq!(required_scope("server/discover").unwrap(), "tools.read");
+}
+
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -367,20 +372,70 @@ fn resources_read_rejects_bad_uri_and_missing_asset() {
 }
 
 #[test]
-fn initialize_negotiates_new_protocol_version_when_client_speaks_it() {
+fn initialize_downgrades_modern_version_to_the_direct_legacy_predecessor() {
     let value = initialize_result(&serde_json::json!({"protocolVersion": "2026-07-28"}));
-    assert_eq!(value["protocolVersion"], "2026-07-28");
+    assert_eq!(value["protocolVersion"], "2025-11-25");
     assert_eq!(value["serverInfo"]["name"], "ferrogate");
 }
 
 #[test]
-fn initialize_falls_back_to_legacy_protocol_version_for_old_client() {
+fn initialize_preserves_supported_legacy_protocol_versions() {
+    let direct = initialize_result(&serde_json::json!({"protocolVersion": "2025-11-25"}));
+    assert_eq!(direct["protocolVersion"], "2025-11-25");
     let value = initialize_result(&serde_json::json!({"protocolVersion": "2025-06-18"}));
     assert_eq!(value["protocolVersion"], "2025-06-18");
 }
 
 #[test]
-fn initialize_defaults_to_new_version_when_client_omits_protocol_version() {
+fn initialize_defaults_to_the_direct_legacy_predecessor() {
     let value = initialize_result(&serde_json::json!({}));
-    assert_eq!(value["protocolVersion"], "2026-07-28");
+    assert_eq!(value["protocolVersion"], "2025-11-25");
+}
+
+#[test]
+fn discover_returns_the_pinned_candidate_contract_without_legacy_server_info() {
+    let value = discover_result();
+    assert_eq!(value["resultType"], "complete");
+    assert_eq!(value["supportedVersions"][0], "2026-07-28");
+    assert_eq!(value["supportedVersions"][1], "2025-11-25");
+    assert_eq!(value["capabilities"]["tools"], json!({}));
+    assert_eq!(value["capabilities"]["resources"], json!({}));
+    assert_eq!(
+        value["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "ferrogate"
+    );
+    assert!(value.get("serverInfo").is_none());
+    assert_eq!(value["ttlMs"], 3_600_000);
+    assert_eq!(value["cacheScope"], "public");
+}
+
+#[test]
+fn unsupported_protocol_error_serializes_official_retry_data() {
+    let response = error_with_data(
+        Some(json!(7)),
+        -32022,
+        "Unsupported protocol version",
+        Some(json!({
+            "requested": "1900-01-01",
+            "supported": ["2026-07-28", "2025-11-25", "2025-06-18"]
+        })),
+    );
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["error"]["code"], -32022);
+    assert_eq!(value["error"]["data"]["requested"], "1900-01-01");
+    assert_eq!(value["error"]["data"]["supported"][0], "2026-07-28");
+}
+
+#[test]
+fn modern_successes_gain_the_required_result_type_without_changing_errors() {
+    let mut success = result(Some(json!(1)), json!({"tools": []}));
+    success.complete_modern_result();
+    let value = serde_json::to_value(success).unwrap();
+    assert_eq!(value["result"]["resultType"], "complete");
+
+    let mut response = error(Some(json!(1)), -32601, "missing");
+    response.complete_modern_result();
+    let value = serde_json::to_value(response).unwrap();
+    assert!(value.get("result").is_none());
+    assert_eq!(value["error"]["code"], -32601);
 }

@@ -21,10 +21,14 @@
   启用控制。
 - **MCP gateway**：通过 `ferrogate-mcp` 支持 streamable HTTP、SSE、stdio
   session、`initialize`、`tools/list`、命名空间工具、默认拒绝的执行 allowlist、
-  健康检查、重连和受治理的工具执行，协议协商最高支持 MCP 2026-07-28 规范。
+  健康检查、重连和受治理的工具执行。这些适配器仍基于 `initialize`；原生入口
+  支持旧版 2025-11-25，并保留 2025-06-18。
 - **原生 MCP JSON-RPC 入口**：`POST /v1/mcp` 支持 `initialize`、`ping`、
   `tools/list`、`tools/call`，以及基于托管资产注册表的
-  `resources/list`/`resources/read`。
+  `resources/list`/`resources/read`。入口还实现了基于官方 commit
+  `71e306956a4959c9655e5036be215d41986596e6` 固定的 MCP 2026-07-28 候选规范：
+  无状态 `server/discover` 和逐请求校验。这只是入口切片，不代表候选规范的
+  出站客户端支持或最终规范一致性。
 - **托管资产闭环**：`/v1/assets/*` 上的版本化 publish/pull/delete 带租户
   配额记账、artifact registry 语义（latest/stable/canary 等 channel、
   semver 解析、平台/架构 variant、yank）、供应链信任门禁（恶意软件扫描、
@@ -102,8 +106,10 @@
   的 Token 预算处理。
 - 非流式 AI 请求的 exact-match 和 semantic（向量相似度）响应缓存。
 - Agentic Lite tools 和 MCP gateway 执行，并经过鉴权、策略、计费、审计和指标链路。
-- `POST /v1/mcp` 原生 MCP JSON-RPC 入口，包括基于托管资产的
-  `resources/list`/`resources/read` 和 MCP 2026-07-28 协议协商。
+- `POST /v1/mcp` 原生旧版 MCP JSON-RPC 入口，包括基于托管资产的
+  `resources/list`/`resources/read`。固定版本的 MCP 2026-07-28 候选规范入口切片
+  已有聚焦回归覆盖；外部 SDK 兼容性、候选规范出站客户端行为和最终规范一致性
+  仍待完成。
 - 托管资产闭环：`/v1/assets/*` 上带鉴权的 publish/pull/delete、
   channel/semver/variant 解析、签名与恶意软件扫描门禁、私有 bucket 上的
   presigned 大文件 upload/commit/download（基于 mock S3 兼容端点验证；

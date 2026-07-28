@@ -577,6 +577,7 @@
             "ping": "tools.read",
             "resources/list": "assets.read",
             "resources/read": "assets.read",
+            "server/discover": "tools.read",
             "tools/list": "tools.read",
             "tools/call": "tools.execute"
           }

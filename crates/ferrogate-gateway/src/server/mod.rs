@@ -53,6 +53,7 @@ mod images;
 mod local;
 mod managed_action_guardrail;
 mod mcp_identity;
+mod mcp_ingress;
 mod mcp_rpc;
 mod messages;
 pub(crate) mod observed_agent_activity;

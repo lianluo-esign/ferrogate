@@ -87,8 +87,11 @@ as a defect in its own right.
   services from the same binary, each with an optional durable Supabase
   backend — a durable, dead-letter-tracked outbox delivers settled usage from
   the gateway to the billing service without blocking the request hot path.
-- **Agent and tool traffic:** MCP host/client support, native `POST /v1/mcp`
-  JSON-RPC ingress on the MCP 2026-07-28 spec, explicit `POST /v1/agent-runs`,
+- **Agent and tool traffic:** initialize-based MCP host/client adapters and
+  legacy `POST /v1/mcp` support for 2025-11-25 and 2025-06-18, plus native
+  ingress for the pinned MCP 2026-07-28 candidate's stateless discovery and
+  request validation. Candidate outbound-client and final-spec conformance are
+  not yet claimed. The runtime also provides explicit `POST /v1/agent-runs`,
   cron/interval agent schedules with an admin CRUD API, governed A2A ingress
   with policy/guardrails/billing on message bodies, governed tool execution,
   plugin registration, an isolated `agent-worker` process for

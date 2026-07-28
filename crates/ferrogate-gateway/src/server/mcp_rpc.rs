@@ -78,6 +78,18 @@ pub(super) struct McpJsonRpcResponse {
 }
 
 impl McpJsonRpcResponse {
+    /// Modern MCP results require an explicit result discriminator. Legacy
+    /// responses retain their historical shape, so the ingress layer calls
+    /// this only after a request has been validated as modern.
+    pub(super) fn complete_modern_result(&mut self) {
+        let Some(Value::Object(result)) = self.result.as_mut() else {
+            return;
+        };
+        result
+            .entry("resultType")
+            .or_insert_with(|| Value::String("complete".to_string()));
+    }
+
     /// Whether this response is still holding an aggregate-budget charge for
     /// asset bytes it carries. Test instrumentation for the property that the
     /// charge outlives the read (issue #529).
@@ -91,6 +103,8 @@ impl McpJsonRpcResponse {
 struct McpJsonRpcError {
     code: i64,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -126,7 +140,40 @@ pub(super) async fn handle_request(
     rpc: McpJsonRpcRequest,
 ) -> McpJsonRpcResponse {
     match rpc.method.as_str() {
-        "initialize" => result(rpc.id, initialize_result(&rpc.params)),
+        "initialize" => {
+            let requested = rpc.params.get("protocolVersion").and_then(Value::as_str);
+            let negotiated = ferrogate_mcp::negotiate_protocol_version(requested);
+            let (action, outcome) = if requested.is_some_and(|version| version != negotiated) {
+                ("mcp.protocol_downgraded", "fallback")
+            } else {
+                ("mcp.protocol_negotiated", "success")
+            };
+            state.record_admin_audit_event(audit_event(
+                ctx,
+                auth,
+                skill_context,
+                action,
+                format!("protocol:{negotiated}"),
+                outcome,
+                format!(
+                    "legacy initialize selected protocol {negotiated} from requested {}",
+                    requested.unwrap_or("<omitted>")
+                ),
+            ));
+            result(rpc.id, initialize_result(&rpc.params))
+        }
+        "server/discover" => {
+            state.record_admin_audit_event(audit_event(
+                ctx,
+                auth,
+                skill_context,
+                "mcp.protocol_negotiated",
+                format!("protocol:{}", ferrogate_mcp::MCP_PROTOCOL_VERSION),
+                "success",
+                "served stateless server/discover for the pinned 2026-07-28 candidate",
+            ));
+            result(rpc.id, discover_result())
+        }
         "ping" => result(rpc.id, json!({})),
         "resources/list" => resources_list(state, ctx, auth, rpc.id).await,
         "resources/read" => resources_read(state, ctx, auth, rpc.id, &rpc.params).await,
@@ -179,6 +226,15 @@ pub(super) fn error(
     code: i64,
     message: impl Into<String>,
 ) -> McpJsonRpcResponse {
+    error_with_data(id, code, message, None)
+}
+
+pub(super) fn error_with_data(
+    id: Option<Value>,
+    code: i64,
+    message: impl Into<String>,
+    data: Option<Value>,
+) -> McpJsonRpcResponse {
     McpJsonRpcResponse {
         jsonrpc: "2.0",
         id,
@@ -186,15 +242,16 @@ pub(super) fn error(
         error: Some(McpJsonRpcError {
             code,
             message: message.into(),
+            data,
         }),
         budget: ResponseBufferBudget::none(),
     }
 }
 
 fn initialize_result(params: &Value) -> Value {
-    // Negotiate the protocol revision (issue #277): honour a client that speaks
-    // 2026-07-28, otherwise fall back to 2025-06-18. Both are accepted on the
-    // ingress.
+    // `initialize` is a legacy handshake. Modern 2026-07-28 requests are
+    // self-describing and enter through `server/discover` or another modern
+    // RPC; echoing that version here would falsely select removed semantics.
     let protocol_version = ferrogate_mcp::negotiate_protocol_version(
         params.get("protocolVersion").and_then(Value::as_str),
     );
@@ -214,6 +271,26 @@ fn initialize_result(params: &Value) -> Value {
             "name": "ferrogate",
             "version": env!("CARGO_PKG_VERSION")
         }
+    })
+}
+
+fn discover_result() -> Value {
+    json!({
+        "resultType": "complete",
+        "supportedVersions": ferrogate_mcp::SUPPORTED_MCP_PROTOCOL_VERSIONS,
+        "capabilities": {
+            "tools": {},
+            "resources": {}
+        },
+        "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+                "name": "ferrogate",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        },
+        "instructions": "Use FerroGate as a governed MCP gateway. Follow the server's auth, policy, approval, and billing rules for all tool calls.",
+        "ttlMs": 3_600_000,
+        "cacheScope": "public"
     })
 }
 

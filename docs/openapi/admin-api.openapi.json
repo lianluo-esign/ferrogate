@@ -303,6 +303,36 @@
               }
             }
           },
+          "400": {
+            "description": "Modern MCP metadata/header mismatch or unsupported protocol version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpJsonRpcResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown modern MCP JSON-RPC method.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpJsonRpcResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
@@ -311,6 +341,33 @@
           }
         },
         "parameters": [
+          {
+            "name": "MCP-Protocol-Version",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for modern candidate requests and must match params._meta.io.modelcontextprotocol/protocolVersion; legacy initialize-based requests retain their revision-specific behavior."
+          },
+          {
+            "name": "Mcp-Method",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for modern candidate requests and must match the JSON-RPC method."
+          },
+          {
+            "name": "Mcp-Name",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for modern tools/call, resources/read, and prompts/get requests; Base64 sentinel values are decoded before body comparison."
+          },
           {
             "$ref": "#/components/parameters/SkillPackageHeader"
           },
@@ -331,6 +388,7 @@
                 "ping": "tools.read",
                 "resources/list": "assets.read",
                 "resources/read": "assets.read",
+                "server/discover": "tools.read",
                 "tools/list": "tools.read",
                 "tools/call": "tools.execute"
               }
@@ -22987,7 +23045,11 @@
             "type": "string",
             "enum": [
               "initialize",
+              "notifications/initialized",
               "ping",
+              "resources/list",
+              "resources/read",
+              "server/discover",
               "tools/list",
               "tools/call"
             ]
@@ -23029,6 +23091,11 @@
           },
           "message": {
             "type": "string"
+          },
+          "data": {
+            "description": "Protocol-defined structured error data, including requested/supported versions for -32022.",
+            "type": "object",
+            "additionalProperties": true
           }
         },
         "additionalProperties": false

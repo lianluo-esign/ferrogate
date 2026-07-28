@@ -11,6 +11,7 @@ use crate::{
         ADMIN_AUTH, AUTH_TEST_CLIENT_2, CLIENT_AUTH, JSON_CONTENT, OBSERVER_AUTH,
         SELF_HOSTED_MTLS_HEADER, SELF_HOSTED_SYMMETRIC_AEAD_HEADER, SUPPORT_SKILL_HEADER,
     },
+    http::http_request_addr,
     local::{AuthHarness, LocalHarness},
     mocks::spawn_mock_third_party_auth_server,
 };
@@ -4502,6 +4503,273 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+
+    // #570: initialize is the legacy negotiation path. Asking it for the
+    // candidate version must downgrade to the direct legacy predecessor rather
+    // than silently treating initialize as modern discovery.
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":5700,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"legacy-downgrade","version":"1.0.0"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["protocolVersion"], "2025-11-25");
+            Ok(())
+        },
+    )?;
+
+    const MCP_CANDIDATE_VERSION: &str = "MCP-Protocol-Version: 2026-07-28";
+    const MCP_DISCOVER_METHOD: &str = "Mcp-Method: server/discover";
+    const MCP_TOOLS_LIST_METHOD: &str = "Mcp-Method: tools/list";
+    const MCP_TOOLS_CALL_METHOD: &str = "Mcp-Method: tools/call";
+    const MCP_HTTP_SEARCH_BASE64_NAME: &str = "Mcp-Name: =?base64?aHR0cC1zZWFyY2g=?=";
+    const MCP_CLIENT_IDENTIFIER: &str = "high-cardinality-client-570";
+
+    // Candidate requests are stateless and self-describing. Discovery omits
+    // optional clientInfo deliberately and must not mint a transport session.
+    let discover = http_request_addr(
+        &case.gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            MCP_DISCOVER_METHOD,
+        ],
+        r#"{"jsonrpc":"2.0","id":5701,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+    )?;
+    assert_eq!(
+        discover.status, 200,
+        "server/discover failed: {}",
+        discover.raw
+    );
+    let discover_body: serde_json::Value = serde_json::from_str(&discover.body)
+        .with_context(|| format!("server/discover returned invalid JSON: {}", discover.raw))?;
+    assert_eq!(discover_body["result"]["resultType"], "complete");
+    assert_eq!(
+        discover_body["result"]["supportedVersions"],
+        serde_json::json!(["2026-07-28", "2025-11-25", "2025-06-18"])
+    );
+    assert_eq!(
+        discover_body["result"]["capabilities"]["tools"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        discover_body["result"]["capabilities"]["resources"],
+        serde_json::json!({})
+    );
+    assert_eq!(discover_body["result"]["ttlMs"], 3_600_000);
+    assert_eq!(discover_body["result"]["cacheScope"], "public");
+    assert_eq!(
+        discover_body["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "ferrogate"
+    );
+    assert!(
+        discover_body["result"]
+            .as_object()
+            .is_some_and(|result| !result.contains_key("serverInfo")),
+        "serverInfo must live under result._meta for candidate discovery: {discover_body}"
+    );
+    assert!(
+        !discover
+            .raw
+            .to_ascii_lowercase()
+            .contains("\r\nmcp-session-id:"),
+        "candidate ingress must not mint or echo an MCP session: {}",
+        discover.raw
+    );
+
+    // Optional clientInfo may be present, but it must not become a metric label
+    // or audit detail. The later header-free legacy requests also prove no
+    // modern state was retained from discovery or this call.
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            MCP_TOOLS_LIST_METHOD,
+        ],
+        r#"{"jsonrpc":"2.0","id":5702,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"high-cardinality-client-570","version":"1.0.0"}}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["resultType"], "complete");
+            assert_mcp_tool_present(&body, "http-search", "Search the harness MCP upstream")?;
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            MCP_TOOLS_CALL_METHOD,
+            MCP_HTTP_SEARCH_BASE64_NAME,
+        ],
+        r#"{"jsonrpc":"2.0","id":5703,"method":"tools/call","params":{"name":"http-search","arguments":{"query":"ferrogate-modern"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["resultType"], "complete");
+            assert_eq!(body["result"]["content"][0]["text"], "ferrogate-result");
+            Ok(())
+        },
+    )?;
+
+    // Every modern request must carry its own protocol metadata and routing
+    // headers. These assertions fail if any one of those requirements becomes
+    // advisory or if transport failures lose their typed JSON-RPC mapping.
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT, MCP_TOOLS_LIST_METHOD],
+        r#"{"jsonrpc":"2.0","id":5704,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], -32020);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT, MCP_CANDIDATE_VERSION],
+        r#"{"jsonrpc":"2.0","id":5705,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], -32020);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            MCP_TOOLS_CALL_METHOD,
+        ],
+        r#"{"jsonrpc":"2.0","id":5706,"method":"tools/call","params":{"name":"http-search","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], -32020);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            MCP_TOOLS_LIST_METHOD,
+        ],
+        r#"{"jsonrpc":"2.0","id":5707,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], -32020);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            MCP_TOOLS_CALL_METHOD,
+            "Mcp-Name: wrong-tool",
+        ],
+        r#"{"jsonrpc":"2.0","id":5708,"method":"tools/call","params":{"name":"http-search","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], -32020);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "MCP-Protocol-Version: 2099-01-01",
+            MCP_TOOLS_LIST_METHOD,
+        ],
+        r#"{"jsonrpc":"2.0","id":5709,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], -32022);
+            assert_eq!(body["error"]["data"]["requested"], "2099-01-01");
+            assert_eq!(
+                body["error"]["data"]["supported"],
+                serde_json::json!(["2026-07-28", "2025-11-25", "2025-06-18"])
+            );
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            "Mcp-Method: roots/list",
+        ],
+        r#"{"jsonrpc":"2.0","id":5710,"method":"roots/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], -32601);
+            Ok(())
+        },
+    )?;
+
+    case.expect_text("GET", "/metrics", &[ADMIN_AUTH], "", 200, |body| {
+        assert!(body.contains("ferrogate_mcp_requests_total"));
+        assert!(
+            !body.contains(MCP_CLIENT_IDENTIFIER),
+            "clientInfo name leaked into metric labels"
+        );
+        Ok(())
+    })?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/audit-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let events = body["data"].as_array().expect("audit-events data array");
+            for (action, outcome) in [
+                ("mcp.protocol_negotiated", "success"),
+                ("mcp.protocol_downgraded", "fallback"),
+                ("mcp.protocol_rejected", "rejected"),
+            ] {
+                assert!(
+                    events.iter().any(|event| {
+                        event["action"] == action
+                            && event["outcome"] == outcome
+                            && event["actor_api_key_id"] == "client"
+                    }),
+                    "missing attributable {action}/{outcome} MCP audit event: {body}"
+                );
+            }
+            assert!(
+                !body.to_string().contains(MCP_CLIENT_IDENTIFIER),
+                "clientInfo name leaked into MCP audit evidence: {body}"
+            );
+            Ok(())
+        },
+    )?;
+
     case.expect_mcp_json(
         "POST",
         "/v1/mcp",

@@ -4,19 +4,32 @@
 // Created: 2026-07-24
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-//! MCP protocol revisions, version negotiation, and the 2026-07-28
-//! `Mcp-Method` / `Mcp-Name` Streamable-HTTP routing headers (issue #277).
+//! MCP protocol revisions, version negotiation, and Streamable-HTTP routing
+//! headers.
+//!
+//! The modern ingress contract is pinned to official modelcontextprotocol
+//! commit `71e306956a4959c9655e5036be215d41986596e6`, rather than the obsolete
+//! 2026-07-28-RC tag. The final release is not published, so this is a candidate
+//! contract under validation rather than a final-conformance claim.
 
-/// MCP protocol revision FerroGate prefers to negotiate: 2026-07-28, the
-/// gateway-friendly "stateless core" revision that adds the `Mcp-Method` /
-/// `Mcp-Name` Streamable-HTTP routing headers (issue #277).
+/// Modern MCP candidate revision accepted by FerroGate's stateless ingress.
+/// This revision adds the `Mcp-Method` / `Mcp-Name` Streamable-HTTP routing
+/// headers (issues #277/#570); it is never negotiated through `initialize`.
 pub const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
-/// Previous stable revision FerroGate falls back to when a peer does not speak
-/// 2026-07-28.
+/// Direct legacy predecessor. This is the newest revision an `initialize`
+/// handshake may negotiate; modern 2026-07-28 is not initialize-based.
+pub const MCP_LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
+/// Older stable revision retained for existing FerroGate clients.
 pub const MCP_PROTOCOL_VERSION_FALLBACK: &str = "2025-06-18";
 /// Protocol versions FerroGate can speak, newest first.
-pub const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
-    &[MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION_FALLBACK];
+pub const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] = &[
+    MCP_PROTOCOL_VERSION,
+    MCP_LEGACY_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_FALLBACK,
+];
+
+/// Streamable-HTTP header carrying the per-request protocol revision.
+pub const MCP_PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
 
 /// Streamable-HTTP routing header carrying the JSON-RPC method (2026-07-28).
 /// Lets gateways/load-balancers route, scope-gate, rate-limit, and meter per
@@ -31,16 +44,16 @@ pub fn is_supported_protocol_version(version: &str) -> bool {
     SUPPORTED_MCP_PROTOCOL_VERSIONS.contains(&version)
 }
 
-/// Server-side version negotiation for the `/v1/mcp` ingress: given the
-/// `protocolVersion` a client requested in `initialize`, pick the version
-/// FerroGate will actually speak. An exactly-supported request is honoured;
-/// anything else (omitted, unknown, or newer) negotiates down to the newest
-/// version FerroGate speaks so an unrecognised client still gets a usable
-/// protocol rather than a hard failure.
+/// Legacy server-side negotiation for an `initialize` request.
+///
+/// `2026-07-28` removed the initialize handshake, so it must never be echoed by
+/// this function. Exact supported legacy revisions are honoured; omitted,
+/// unknown, or modern values choose the direct legacy predecessor.
 pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
     match requested {
+        Some(version) if version == MCP_LEGACY_PROTOCOL_VERSION => MCP_LEGACY_PROTOCOL_VERSION,
         Some(version) if version == MCP_PROTOCOL_VERSION_FALLBACK => MCP_PROTOCOL_VERSION_FALLBACK,
-        _ => MCP_PROTOCOL_VERSION,
+        _ => MCP_LEGACY_PROTOCOL_VERSION,
     }
 }
 
@@ -51,6 +64,7 @@ pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
 pub fn resolve_negotiated_version(server_version: Option<&str>) -> &'static str {
     match server_version {
         Some(version) if version == MCP_PROTOCOL_VERSION => MCP_PROTOCOL_VERSION,
+        Some(version) if version == MCP_LEGACY_PROTOCOL_VERSION => MCP_LEGACY_PROTOCOL_VERSION,
         _ => MCP_PROTOCOL_VERSION_FALLBACK,
     }
 }
@@ -77,10 +91,10 @@ impl std::fmt::Display for RoutingHeaderMismatch {
 }
 
 /// Verify the optional `Mcp-Method` / `Mcp-Name` routing headers against the
-/// parsed JSON-RPC body. The headers are optional — a pre-2026-07-28 client
-/// omits them — but when present they MUST agree with the body, else the
-/// request is rejected. `body_name` is the `tools/call` target name (`None`
-/// for methods that carry no name).
+/// parsed JSON-RPC body. This low-level verifier accepts absent headers for
+/// legacy callers; the modern ingress layer requires them. When present they
+/// MUST agree with the body. `body_name` is the tool/prompt name or resource
+/// URI (`None` for methods that carry no name).
 pub fn verify_routing_headers(
     header_method: Option<&str>,
     header_name: Option<&str>,

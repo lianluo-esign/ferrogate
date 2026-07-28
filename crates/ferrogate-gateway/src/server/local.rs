@@ -75,8 +75,8 @@ use super::dispatch::dispatch_provider_catalog_request;
 use super::managed_action_guardrail::{
     evaluate_managed_action_guardrail_async, payload_text, ManagedActionGuardrailRequest,
 };
-use super::mcp_rpc;
 use super::rbac::{config_catalog_scope, write_config_scope_denied};
+use super::{mcp_ingress, mcp_rpc};
 use super::{FerroGateway, ProxyContext};
 
 const PROVIDER_CATALOG_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -2977,18 +2977,6 @@ impl FerroGateway {
             .await;
         }
 
-        // 2026-07-28 routing headers (issue #277). Read before the body so the
-        // per-operation metric and (below) the fail-closed body/header
-        // consistency check can key on them without trusting the body.
-        let header_method = headers
-            .get(ferrogate_mcp::MCP_METHOD_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let header_name = headers
-            .get(ferrogate_mcp::MCP_NAME_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-
         let body =
             match read_request_body(session, self.state.current().limits().tool_body_max_bytes())
                 .await?
@@ -3025,8 +3013,17 @@ impl FerroGateway {
             return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
         }
 
+        // #570: era selection and validation are pure functions of this
+        // request. Modern capabilities are never inferred from initialize,
+        // discover, or any other earlier request.
+        let ingress_mode = mcp_ingress::ingress_mode(&headers, &rpc);
+        let ingress_validation = mcp_ingress::validate_ingress(&headers, &rpc);
         let required_scope = match mcp_rpc::required_scope(&rpc.method) {
             Ok(scope) => scope,
+            // A modern unknown method still needs attributable auth before its
+            // protocol-defined 404. Use the read-only MCP discovery scope; no
+            // handler or governed action runs on this branch.
+            Err(_) if ingress_mode == mcp_ingress::McpIngressMode::Modern => "tools.read",
             Err(error) => {
                 tracing::error!(method = %rpc.method, error = %error, "MCP auth contract is incomplete");
                 return write_json_error(
@@ -3053,42 +3050,80 @@ impl FerroGateway {
                 .await;
             }
         };
-        // Fail closed (issue #277): if a Streamable-HTTP client advertised a
-        // routing header, it MUST agree with the JSON-RPC body. Otherwise a
-        // caller could be scope-gated / rate-limited / metered as one operation
-        // while the body executes another. Audited with the authenticated
-        // tenant so the mismatch is attributable.
-        let body_name = (rpc.method == "tools/call")
-            .then(|| rpc.params.get("name").and_then(serde_json::Value::as_str))
-            .flatten();
-        if let Err(mismatch) = ferrogate_mcp::verify_routing_headers(
-            header_method.as_deref(),
-            header_name.as_deref(),
-            &rpc.method,
-            body_name,
-        ) {
+        let ingress = match ingress_validation {
+            Ok(ingress) => ingress,
+            Err(error) if ingress_mode == mcp_ingress::McpIngressMode::Legacy => {
+                // Preserve the legacy #277 contract. The modern candidate owns
+                // -32020/HTTP 400; changing old initialize-era failures would
+                // be an unrelated compatibility break.
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp.routing_header_mismatch",
+                    "mcp",
+                    "rejected",
+                    error.to_string(),
+                ));
+                let response = mcp_rpc::error(
+                    rpc.id,
+                    -32600,
+                    format!("MCP routing header mismatch: {error}"),
+                );
+                return write_json_response(session, StatusCode::OK, &response, &ctx.request_id)
+                    .await;
+            }
+            Err(error) => {
+                // Attributable evidence uses authenticated tenant/key fields,
+                // while the detail deliberately excludes clientInfo and client
+                // capability content. No client identifier becomes a metric
+                // label either.
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp.protocol_rejected",
+                    "mcp",
+                    "rejected",
+                    format!("method={} {error}", rpc.method),
+                ));
+                let response =
+                    mcp_rpc::error_with_data(rpc.id, error.code(), error.message(), error.data());
+                return write_json_response(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    &response,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        if ingress.mode == mcp_ingress::McpIngressMode::Modern
+            && !mcp_ingress::is_supported_modern_method(&rpc.method)
+        {
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                 ctx,
                 &auth,
-                "mcp.routing_header_mismatch",
+                "mcp.protocol_rejected",
                 "mcp",
                 "rejected",
-                mismatch.to_string(),
+                format!(
+                    "protocol={} method={} is not implemented",
+                    ferrogate_mcp::MCP_PROTOCOL_VERSION,
+                    rpc.method
+                ),
             ));
             let response = mcp_rpc::error(
                 rpc.id,
-                -32600,
-                format!("MCP routing header mismatch: {mismatch}"),
+                -32601,
+                format!("MCP method {} is not supported", rpc.method),
             );
-            return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
+            return write_json_response(session, StatusCode::NOT_FOUND, &response, &ctx.request_id)
+                .await;
         }
 
-        // Header-based per-tool Prometheus metric (issue #277): prefer the
-        // routing headers, falling back to the JSON-RPC body for pre-2026-07-28
-        // clients that omit them.
-        let metric_method = header_method.as_deref().unwrap_or(rpc.method.as_str());
-        let metric_name = header_name.as_deref().or(body_name).unwrap_or_default();
-        state.record_mcp_method_request(metric_method, metric_name);
+        // Existing bounded operation/tool labels remain; clientInfo and other
+        // per-client metadata never enter Prometheus labels.
+        state.record_mcp_method_request(&ingress.metric_method, &ingress.metric_name);
 
         let skill_context = match resolve_visible_skill_context(&state, &auth, &headers) {
             Ok(context) => context,
@@ -3111,7 +3146,7 @@ impl FerroGateway {
         let original_bearer = headers
             .get(MCP_ORIGINAL_BEARER_HEADER)
             .and_then(|value| value.to_str().ok());
-        let response = mcp_rpc::handle_request(
+        let mut response = mcp_rpc::handle_request(
             self,
             &state,
             ctx,
@@ -3121,6 +3156,9 @@ impl FerroGateway {
             rpc,
         )
         .await;
+        if ingress.mode == mcp_ingress::McpIngressMode::Modern {
+            response.complete_modern_result();
+        }
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
     }
 
