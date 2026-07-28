@@ -162,7 +162,8 @@ through the admin API but the runtime only ever read the tenant scope.
   mode. Modern discover/list/call requests alternate between instances. Rust
   independently checks that instance sequence, the observed headers and
   request metadata, absence of modern session state, 2025-11-25 legacy
-  initialize, discovered tool, and completed tool result. The command is opt-in
+  initialize, private cache metadata on `tools/list`, discovered tool, and
+  completed tool result. The command is opt-in
   and is not part of `ci` because
   a clean run installs an external npm artifact; merely compiling or listing
   the command is not conformance evidence.

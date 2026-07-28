@@ -7,11 +7,8 @@
 //! Unit tests for the sibling module; kept out of the business-logic file.
 
 use super::*;
-use crate::protocol::McpClientNegotiation;
 use crate::test_support::test_config;
 use serde_json::json;
-use std::io::BufReader;
-use std::process::Stdio;
 
 #[test]
 fn manager_status_and_tools_skip_busy_sessions() {
@@ -50,18 +47,15 @@ fn manager_status_and_tools_skip_busy_sessions() {
 #[test]
 fn timeout_cleanup_kills_stdio_child_and_marks_session_degraded() {
     let manager = McpManager::default();
-    let mut child = std::process::Command::new("sleep")
-        .arg("60")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let child = Arc::new(Mutex::new(child));
+    let mut config = test_config("local");
+    config.transport = McpTransport::Stdio;
+    config.url = None;
+    config.command = Some("sleep".into());
+    config.args = vec!["60".into()];
+    let client = StdioMcpClient::new(&config).unwrap();
+    let child = Arc::clone(&client.child);
     let session = Arc::new(Mutex::new(McpSession {
-        config: test_config("local"),
+        config,
         tools: vec![McpTool {
             name: "local-search".into(),
             server_name: "local".into(),
@@ -71,13 +65,7 @@ fn timeout_cleanup_kills_stdio_child_and_marks_session_degraded() {
             auto_execute: false,
             approval_policy: ApprovalPolicy::Never,
         }],
-        client: Some(McpClient::Stdio(StdioMcpClient {
-            child: Arc::clone(&child),
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 1,
-            negotiation: McpClientNegotiation::Pending,
-        })),
+        client: Some(McpClient::Stdio(client)),
         connected: true,
         last_error: None,
         reconnect_attempts: 0,
@@ -107,6 +95,56 @@ fn timeout_cleanup_kills_stdio_child_and_marks_session_degraded() {
         .last_error
         .as_deref()
         .is_some_and(|error| error.contains("timed out after 1 seconds")));
+}
+
+#[test]
+fn manager_health_check_keeps_modern_stdio_healthy_without_ping() {
+    let dir = tempfile::tempdir().unwrap();
+    let capture = dir.path().join("manager-health.requests");
+    let script = r#"
+capture=$1
+shift
+for response in "$@"; do
+    IFS= read -r request || exit 1
+    printf '%s\n' "$request" >> "$capture"
+    printf '%s\n' "$response"
+done
+"#;
+    let mut config = test_config("modern-health");
+    config.transport = McpTransport::Stdio;
+    config.url = None;
+    config.command = Some("sh".into());
+    config.args = vec![
+        "-c".into(),
+        script.into(),
+        "ferrogate-manager-modern-health".into(),
+        capture.to_string_lossy().into_owned(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#.into(),
+        r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[],"ttlMs":5000,"cacheScope":"private"}}"#.into(),
+        r#"{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#.into(),
+    ];
+
+    let manager = McpManager::from_configs(&[config]);
+    assert!(manager.statuses()[0].connected);
+    manager.health_check_and_reconnect();
+    assert!(manager.statuses()[0].connected);
+    drop(manager);
+
+    let methods: Vec<String> = std::fs::read_to_string(capture)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"]
+                .as_str()
+                .unwrap()
+                .into()
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        ["server/discover", "tools/list", "server/discover"]
+    );
+    assert!(!methods.iter().any(|method| method == "ping"));
 }
 
 fn wait_for_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {

@@ -91,11 +91,10 @@ impl std::fmt::Display for McpIngressValidationError {
 /// stateless, so no previous initialize/discover request participates.
 pub(super) fn ingress_mode(headers: &HeaderMap, rpc: &McpJsonRpcRequest) -> McpIngressMode {
     if rpc.method == "initialize" {
-        return if body_has_complete_modern_envelope(rpc) {
-            McpIngressMode::Modern
-        } else {
-            McpIngressMode::Legacy
-        };
+        // The pinned dual-era contract selects legacy semantics from the
+        // opening method itself. Modern-looking metadata cannot turn an
+        // `initialize` request into a modern request.
+        return McpIngressMode::Legacy;
     }
     if rpc.method == "server/discover" || body_uses_modern_metadata(rpc) {
         return McpIngressMode::Modern;
@@ -214,12 +213,7 @@ pub(super) fn validate_ingress(
 pub(super) fn is_supported_modern_method(method: &str) -> bool {
     matches!(
         method,
-        "server/discover"
-            | "ping"
-            | "resources/list"
-            | "resources/read"
-            | "tools/list"
-            | "tools/call"
+        "server/discover" | "resources/list" | "resources/read" | "tools/list" | "tools/call"
     )
 }
 
@@ -231,25 +225,6 @@ fn body_uses_modern_metadata(rpc: &McpJsonRpcRequest) -> bool {
             metadata.contains_key(PROTOCOL_VERSION_META)
                 || metadata.contains_key(CLIENT_CAPABILITIES_META)
                 || metadata.contains_key(CLIENT_INFO_META)
-        })
-}
-
-fn body_has_complete_modern_envelope(rpc: &McpJsonRpcRequest) -> bool {
-    rpc.params
-        .get("_meta")
-        .and_then(Value::as_object)
-        .is_some_and(|metadata| {
-            metadata.get(PROTOCOL_VERSION_META).and_then(Value::as_str)
-                == Some(ferrogate_mcp::MCP_PROTOCOL_VERSION)
-                && metadata
-                    .get(CLIENT_CAPABILITIES_META)
-                    .is_some_and(Value::is_object)
-                && metadata.get(CLIENT_INFO_META).is_none_or(|client_info| {
-                    client_info.as_object().is_some_and(|client_info| {
-                        client_info.get("name").is_some_and(Value::is_string)
-                            && client_info.get("version").is_some_and(Value::is_string)
-                    })
-                })
         })
 }
 

@@ -460,13 +460,13 @@ impl McpSession {
             let healthy = self
                 .client
                 .as_mut()
-                .map(|client| client.ping().is_ok())
+                .map(|client| client.health_check().is_ok())
                 .unwrap_or(false);
             if healthy {
                 return;
             }
             self.connected = false;
-            self.last_error = Some("MCP health ping failed".into());
+            self.last_error = Some("MCP health check failed".into());
         }
         self.try_reconnect();
     }
@@ -529,10 +529,10 @@ impl McpClient {
         }
     }
 
-    fn ping(&mut self) -> AnyResult<()> {
+    fn health_check(&mut self) -> AnyResult<()> {
         match self {
-            Self::Http(client) => client.ping(),
-            Self::Stdio(client) => client.ping(),
+            Self::Http(client) => client.health_check(),
+            Self::Stdio(client) => client.health_check(),
         }
     }
 

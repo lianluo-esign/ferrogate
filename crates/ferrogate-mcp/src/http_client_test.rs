@@ -307,7 +307,9 @@ fn modern_http_wire_is_stateless_and_carries_headers_meta_and_identity() {
         json_response_with_session(
             r#"{"jsonrpc":"2.0","id":3,"result":{"content":[],"isError":false}}"#,
         ),
-        json_response_with_session(r#"{"jsonrpc":"2.0","id":4,"result":{}}"#),
+        json_response_with_session(
+            r#"{"jsonrpc":"2.0","id":4,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#,
+        ),
     ];
     let mut protocol = None;
     let requests = capture_http_exchange(replies, |endpoint| {
@@ -325,7 +327,7 @@ fn modern_http_wire_is_stateless_and_carries_headers_meta_and_identity() {
                 &identity,
             )
             .unwrap();
-        client.ping().unwrap();
+        client.health_check().unwrap();
         protocol = client.negotiated_protocol();
     });
 
@@ -333,11 +335,12 @@ fn modern_http_wire_is_stateless_and_carries_headers_meta_and_identity() {
     assert!(!requests
         .iter()
         .any(|request| request.contains("initialize")));
-    for (request, method) in
-        requests
-            .iter()
-            .zip(["server/discover", "tools/list", "tools/call", "ping"])
-    {
+    for (request, method) in requests.iter().zip([
+        "server/discover",
+        "tools/list",
+        "tools/call",
+        "server/discover",
+    ]) {
         assert_eq!(
             header_value(request, "MCP-Protocol-Version"),
             Some("2026-07-28")
@@ -371,6 +374,9 @@ fn modern_http_wire_is_stateless_and_carries_headers_meta_and_identity() {
         protocol.unwrap().mode,
         crate::protocol::McpProtocolMode::Modern
     );
+    assert!(!requests
+        .iter()
+        .any(|request| { request_json(request)["method"] == "ping" }));
 }
 
 #[test]

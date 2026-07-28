@@ -59,7 +59,7 @@ fn http_downgrade_requires_an_eligible_status_without_a_modern_error() {
             Some(expected)
         );
     }
-    for code in [-32020, -32021, -32022, -32601] {
+    for code in [-32020, -32021, -32022] {
         let modern = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -67,6 +67,15 @@ fn http_downgrade_requires_an_eligible_status_without_a_modern_error() {
         });
         assert_eq!(http_legacy_downgrade_reason(400, Some(&modern)), None);
     }
+    let method_not_found = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": -32601, "message": "method not found"}
+    });
+    assert_eq!(
+        http_legacy_downgrade_reason(400, Some(&method_not_found)),
+        Some(McpProtocolDowngradeReason::Http400UnrecognizedResponse)
+    );
     let malformed = serde_json::json!({"error": {"code": -32022}});
     assert_eq!(
         http_legacy_downgrade_reason(400, Some(&malformed)),

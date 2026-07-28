@@ -46,7 +46,6 @@ pub const MCP_NAME_HEADER: &str = "mcp-name";
 const MODERN_ERROR_HEADER_MISMATCH: i64 = -32020;
 const MODERN_ERROR_MISSING_CLIENT_CAPABILITY: i64 = -32021;
 const MODERN_ERROR_UNSUPPORTED_VERSION: i64 = -32022;
-const JSONRPC_ERROR_METHOD_NOT_FOUND: i64 = -32601;
 
 /// The MCP protocol era selected for one upstream process or HTTP endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -67,6 +66,9 @@ pub enum McpProtocolDowngradeReason {
     Http404UnrecognizedResponse,
     Http405UnrecognizedResponse,
     StdioMethodNotFound,
+    StdioUnrecognizedError,
+    StdioProbeTimeout,
+    StdioProbeProcessExit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,13 +227,8 @@ pub(crate) fn is_recognized_modern_error(response: &Value) -> bool {
             MODERN_ERROR_HEADER_MISMATCH
                 | MODERN_ERROR_MISSING_CLIENT_CAPABILITY
                 | MODERN_ERROR_UNSUPPORTED_VERSION
-                | JSONRPC_ERROR_METHOD_NOT_FOUND
         )
     )
-}
-
-pub(crate) fn is_stdio_legacy_signal(response: &Value) -> bool {
-    jsonrpc_error_code(response) == Some(JSONRPC_ERROR_METHOD_NOT_FOUND)
 }
 
 pub(crate) fn http_legacy_downgrade_reason(

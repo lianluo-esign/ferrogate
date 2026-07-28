@@ -175,7 +175,23 @@ impl HttpMcpClient {
         parse_call_result(&response).map_err(|error| error.to_string())
     }
 
-    pub(crate) fn ping(&mut self) -> AnyResult<()> {
+    pub(crate) fn health_check(&mut self) -> AnyResult<()> {
+        if self.negotiation.is_modern() {
+            let id = self.next_jsonrpc_id();
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "server/discover",
+                "params": modern_discover_params()
+            });
+            let response =
+                self.post_rpc(&body, &McpDispatchHeaders::empty(), "server/discover", None)?;
+            if !discover_supports_current_version(&response) {
+                bail!("MCP modern health discovery did not advertise the negotiated version");
+            }
+            return Ok(());
+        }
+
         let id = self.next_jsonrpc_id();
         let params = self.request_params(json!({}))?;
         let body = json!({"jsonrpc": "2.0", "id": id, "method": "ping", "params": params});

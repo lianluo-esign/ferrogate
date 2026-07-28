@@ -27,9 +27,10 @@ work belongs in [`roadmap.md`](roadmap.md).
   SSE, stdio, `tools/list`, namespaced tools, deny-by-default execution
   allowlists, health checks, reconnects, and governed tool execution.
   Streamable HTTP and stdio probe the pinned 2026-07-28 candidate first, use
-  stateless per-request metadata when supported, and fall back only on
-  definitive legacy signals to initialize-based 2025-11-25/2025-06-18 peers.
-- **Native MCP JSON-RPC ingress** at `POST /v1/mcp` for `initialize`, `ping`,
+  stateless per-request metadata when supported, and fall back on non-modern
+  errors or bounded stdio silence to initialize-based 2025-11-25/2025-06-18
+  peers. Modern health checks use `server/discover`; `ping` is legacy-only.
+- **Native MCP JSON-RPC ingress** at `POST /v1/mcp` for legacy `initialize` / `ping`,
   `tools/list`, `tools/call`, and `resources/list`/`resources/read` over the
   hosted-asset registry. It also implements stateless `server/discover` and
   per-request validation for the MCP 2026-07-28 candidate pinned at official
@@ -38,6 +39,8 @@ work belongs in [`roadmap.md`](roadmap.md).
   `ferrogate-test mcp-candidate-client-official` path pins the official
   TypeScript client that was generated from that exact artifact and alternates
   its stateless modern requests across two gateway instances. Candidate
+  cacheable results carry a short `ttlMs` and authorization-private
+  `cacheScope`. Candidate
   body-schema failures use `-32602`; Streamable-HTTP header failures use
   `-32020`. Execution evidence and final-spec conformance remain separate from
   the command's implementation and must not be inferred from compilation.

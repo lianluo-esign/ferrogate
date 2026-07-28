@@ -22,16 +22,18 @@
 - **MCP gateway**：通过 `ferrogate-mcp` 支持 streamable HTTP、SSE、stdio、
   `tools/list`、命名空间工具、默认拒绝的执行 allowlist、健康检查、重连和受治理
   的工具执行。Streamable HTTP 和 stdio 会先探测固定的 2026-07-28 候选规范，
-  成功后使用无状态逐请求元数据；只有明确的旧版信号才会回退到基于 `initialize`
-  的 2025-11-25/2025-06-18。
-- **原生 MCP JSON-RPC 入口**：`POST /v1/mcp` 支持 `initialize`、`ping`、
+  成功后使用无状态逐请求元数据；非现代错误或 stdio 有界静默会回退到基于
+  `initialize` 的 2025-11-25/2025-06-18。现代健康检查使用
+  `server/discover`，`ping` 仅属于 legacy。
+- **原生 MCP JSON-RPC 入口**：`POST /v1/mcp` 支持 legacy `initialize`/`ping`、
   `tools/list`、`tools/call`，以及基于托管资产注册表的
   `resources/list`/`resources/read`。入口还实现了基于官方 commit
   `71e306956a4959c9655e5036be215d41986596e6` 固定的 MCP 2026-07-28 候选规范：
   无状态 `server/discover` 和逐请求校验。入口和出站客户端切片已有仓库内聚焦
   对端覆盖；可选命令 `ferrogate-test mcp-candidate-client-official` 固定使用由该
   候选规范生成的官方 TypeScript client，并让无状态现代请求交替经过两个网关
-  实例。候选请求体 schema 错误返回 `-32602`，
+  实例。候选 cacheable result 带短 `ttlMs` 和授权私有的 `cacheScope`。
+  候选请求体 schema 错误返回 `-32602`，
   Streamable-HTTP header 错误返回 `-32020`。命令已实现不等于已执行通过，最终
   规范一致性也仍需独立验证。
 - **托管资产闭环**：`/v1/assets/*` 上的版本化 publish/pull/delete 带租户

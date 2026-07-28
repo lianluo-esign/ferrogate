@@ -44,6 +44,12 @@ const ASSET_TOO_LARGE_CODE: i64 = -32004;
 /// `-32002` (the bucket is healthy; the gateway is out of memory budget).
 const GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE: i64 = -32005;
 
+/// Candidate cacheable results are authorization-dependent and can change on
+/// config reload or asset mutation. Keep the hint short and private: clients
+/// may avoid immediate polling, while shared intermediaries must never reuse a
+/// tenant/key-specific result across authorization contexts.
+const PRIVATE_CACHE_TTL_MS: u64 = 5_000;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct McpJsonRpcRequest {
     #[serde(default)]
@@ -81,13 +87,21 @@ impl McpJsonRpcResponse {
     /// Modern MCP results require an explicit result discriminator. Legacy
     /// responses retain their historical shape, so the ingress layer calls
     /// this only after a request has been validated as modern.
-    pub(super) fn complete_modern_result(&mut self) {
+    pub(super) fn complete_modern_result(&mut self, method: &str) {
         let Some(Value::Object(result)) = self.result.as_mut() else {
             return;
         };
         result
             .entry("resultType")
             .or_insert_with(|| Value::String("complete".to_string()));
+        if matches!(method, "tools/list" | "resources/list" | "resources/read") {
+            result
+                .entry("ttlMs")
+                .or_insert_with(|| Value::from(PRIVATE_CACHE_TTL_MS));
+            result
+                .entry("cacheScope")
+                .or_insert_with(|| Value::String("private".to_string()));
+        }
     }
 
     /// Whether this response is still holding an aggregate-budget charge for
@@ -174,6 +188,8 @@ pub(super) async fn handle_request(
             ));
             result(rpc.id, discover_result())
         }
+        // `ping` exists only on initialize-based legacy revisions. Modern
+        // ingress rejects it before dispatch because 2026-07-28 removed it.
         "ping" => result(rpc.id, json!({})),
         "resources/list" => resources_list(state, ctx, auth, rpc.id).await,
         "resources/read" => resources_read(state, ctx, auth, rpc.id, &rpc.params).await,

@@ -3153,6 +3153,7 @@ impl FerroGateway {
         let original_bearer = headers
             .get(MCP_ORIGINAL_BEARER_HEADER)
             .and_then(|value| value.to_str().ok());
+        let rpc_method = rpc.method.clone();
         let mut response = mcp_rpc::handle_request(
             self,
             &state,
@@ -3164,7 +3165,7 @@ impl FerroGateway {
         )
         .await;
         if ingress.mode == mcp_ingress::McpIngressMode::Modern {
-            response.complete_modern_result();
+            response.complete_modern_result(&rpc_method);
         }
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
     }

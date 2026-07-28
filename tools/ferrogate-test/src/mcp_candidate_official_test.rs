@@ -31,11 +31,20 @@ fn modern_request(gateway_instance: usize, method: &str, name: Option<&str>) -> 
         params["name"] = json!(name);
         params["arguments"] = json!({"query": "official"});
     }
+    let response = match method {
+        "tools/list" => json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"resultType": "complete", "tools": [], "ttlMs": 5_000, "cacheScope": "private"}
+        }),
+        _ => json!({"jsonrpc": "2.0", "id": 1, "result": {"resultType": "complete"}}),
+    };
     json!({
         "gatewayInstance": gateway_instance,
         "httpMethod": "POST",
         "headers": headers,
-        "body": {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        "body": {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        "response": response
     })
 }
 
@@ -148,4 +157,32 @@ fn official_evidence_requires_the_full_modern_and_legacy_wire_contract() {
         .unwrap_err()
         .to_string()
         .contains("wire sequence"));
+
+    let mut missing_ttl = valid_evidence();
+    missing_ttl.modern.wire[1].response.as_mut().unwrap()["result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ttlMs");
+    assert!(validate_evidence(&missing_ttl)
+        .unwrap_err()
+        .to_string()
+        .contains("ttlMs"));
+
+    let mut missing_scope = valid_evidence();
+    missing_scope.modern.wire[1].response.as_mut().unwrap()["result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cacheScope");
+    assert!(validate_evidence(&missing_scope)
+        .unwrap_err()
+        .to_string()
+        .contains("cacheScope"));
+
+    let mut public_scope = valid_evidence();
+    public_scope.modern.wire[1].response.as_mut().unwrap()["result"]["cacheScope"] =
+        json!("public");
+    assert!(validate_evidence(&public_scope)
+        .unwrap_err()
+        .to_string()
+        .contains("cacheScope"));
 }

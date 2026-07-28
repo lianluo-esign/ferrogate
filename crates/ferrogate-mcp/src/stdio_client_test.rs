@@ -44,6 +44,44 @@ fn captured_requests(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
+const RESTARTING_LEGACY_PEER: &str = r#"
+capture=$1
+marker=$2
+mode=$3
+if mkdir "$marker" 2>/dev/null; then
+    IFS= read -r request || exit 1
+    printf '%s\n' "$request" >> "$capture"
+    if [ "$mode" = "silent" ]; then
+        IFS= read -r ignored || exit 0
+    fi
+    exit 0
+fi
+IFS= read -r request || exit 1
+printf '%s\n' "$request" >> "$capture"
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25"}}'
+"#;
+
+fn restarting_peer_config(
+    capture: &std::path::Path,
+    marker: &std::path::Path,
+    mode: &str,
+) -> McpServerConfig {
+    let mut config = test_config("restarting-stdio-peer");
+    config.transport = crate::config::McpTransport::Stdio;
+    config.url = None;
+    config.command = Some("sh".into());
+    config.args = vec![
+        "-c".into(),
+        RESTARTING_LEGACY_PEER.into(),
+        "ferrogate-mcp-restarting-peer".into(),
+        capture.to_string_lossy().into_owned(),
+        marker.to_string_lossy().into_owned(),
+        mode.into(),
+    ];
+    config.timeout_ms = 50;
+    config
+}
+
 #[test]
 fn modern_stdio_wire_probes_then_carries_per_request_meta() {
     let dir = tempfile::tempdir().unwrap();
@@ -52,7 +90,7 @@ fn modern_stdio_wire_probes_then_carries_per_request_meta() {
         r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#,
         r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#,
         r#"{"jsonrpc":"2.0","id":3,"result":{"content":[],"isError":false}}"#,
-        r#"{"jsonrpc":"2.0","id":4,"result":{}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#,
     ];
     let mut client = StdioMcpClient::new(&peer_config(&capture, &responses)).unwrap();
 
@@ -61,7 +99,7 @@ fn modern_stdio_wire_probes_then_carries_per_request_meta() {
     client
         .call_tool("search", serde_json::json!({"q": "x"}))
         .unwrap();
-    client.ping().unwrap();
+    client.health_check().unwrap();
     let protocol = client.negotiated_protocol().unwrap();
     drop(client);
 
@@ -72,7 +110,12 @@ fn modern_stdio_wire_probes_then_carries_per_request_meta() {
             .iter()
             .map(|request| request["method"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["server/discover", "tools/list", "tools/call", "ping"]
+        [
+            "server/discover",
+            "tools/list",
+            "tools/call",
+            "server/discover"
+        ]
     );
     assert!(!requests
         .iter()
@@ -98,6 +141,7 @@ fn modern_stdio_wire_probes_then_carries_per_request_meta() {
     assert_eq!(protocol.mode, crate::protocol::McpProtocolMode::Modern);
     assert_eq!(protocol.version, "2026-07-28");
     assert_eq!(protocol.downgrade_reason, None);
+    assert!(!requests.iter().any(|request| request["method"] == "ping"));
 }
 
 #[test]
@@ -146,4 +190,71 @@ fn stdio_recognized_modern_error_does_not_initialize() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["method"], "server/discover");
     assert!(error.contains("JSON-RPC error code -32022"), "{error}");
+}
+
+#[test]
+fn stdio_invalid_params_probe_error_falls_back_to_legacy_initialize() {
+    let dir = tempfile::tempdir().unwrap();
+    let capture = dir.path().join("invalid-params.requests");
+    let responses = [
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"initialize first"}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25"}}"#,
+    ];
+    let mut client = StdioMcpClient::new(&peer_config(&capture, &responses)).unwrap();
+
+    client.negotiate().unwrap();
+    let protocol = client.negotiated_protocol().unwrap();
+    drop(client);
+
+    let requests = captured_requests(&capture);
+    assert_eq!(requests[0]["method"], "server/discover");
+    assert_eq!(requests[1]["method"], "initialize");
+    assert_eq!(
+        protocol.downgrade_reason,
+        Some(crate::protocol::McpProtocolDowngradeReason::StdioUnrecognizedError)
+    );
+}
+
+#[test]
+fn stdio_silent_probe_times_out_restarts_and_initializes_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let capture = dir.path().join("silent.requests");
+    let marker = dir.path().join("silent-first-process");
+    let mut client =
+        StdioMcpClient::new(&restarting_peer_config(&capture, &marker, "silent")).unwrap();
+
+    client.negotiate().unwrap();
+    let protocol = client.negotiated_protocol().unwrap();
+    drop(client);
+
+    let requests = captured_requests(&capture);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["method"], "server/discover");
+    assert_eq!(requests[1]["method"], "initialize");
+    assert_eq!(
+        protocol.downgrade_reason,
+        Some(crate::protocol::McpProtocolDowngradeReason::StdioProbeTimeout)
+    );
+}
+
+#[test]
+fn stdio_probe_process_exit_restarts_and_initializes_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let capture = dir.path().join("exit.requests");
+    let marker = dir.path().join("exit-first-process");
+    let mut client =
+        StdioMcpClient::new(&restarting_peer_config(&capture, &marker, "exit")).unwrap();
+
+    client.negotiate().unwrap();
+    let protocol = client.negotiated_protocol().unwrap();
+    drop(client);
+
+    let requests = captured_requests(&capture);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["method"], "server/discover");
+    assert_eq!(requests[1]["method"], "initialize");
+    assert_eq!(
+        protocol.downgrade_reason,
+        Some(crate::protocol::McpProtocolDowngradeReason::StdioProbeProcessExit)
+    );
 }

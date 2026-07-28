@@ -297,6 +297,7 @@ struct ObservedRequest {
     http_method: String,
     headers: BTreeMap<String, String>,
     body: Option<Value>,
+    response: Option<Value>,
 }
 
 fn validate_evidence(evidence: &OpponentEvidence) -> Result<()> {
@@ -448,6 +449,21 @@ fn validate_modern_wire(wire: &[ObservedRequest]) -> Result<()> {
             ensure!(
                 !request.headers.contains_key("mcp-name"),
                 "{method} carried an inapplicable Mcp-Name header"
+            );
+        }
+        if method == "tools/list" {
+            let result = request
+                .response
+                .as_ref()
+                .and_then(|response| response.get("result"))
+                .with_context(|| "tools/list evidence omitted its JSON-RPC result")?;
+            ensure!(
+                result.get("ttlMs").and_then(Value::as_u64) == Some(5_000),
+                "tools/list result omitted the bounded candidate ttlMs"
+            );
+            ensure!(
+                result.get("cacheScope").and_then(Value::as_str) == Some("private"),
+                "tools/list result omitted its authorization-private cacheScope"
             );
         }
     }

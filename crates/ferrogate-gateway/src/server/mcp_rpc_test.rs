@@ -216,8 +216,9 @@ fn a_resources_read_response_holds_its_charge_until_the_response_is_dropped() {
         size_bytes: OBJECT_BYTES,
         ..seeded_asset("tenant-1", "cli_tool", "deploy", "1.0.0", b"")
     };
-    let response =
+    let mut response =
         asset_resource_read_result(Some(json!(1)), &asset, BufferedObject::new(body, permit));
+    response.complete_modern_result("resources/read");
 
     assert!(
         response.holds_a_buffer_charge(),
@@ -230,6 +231,8 @@ fn a_resources_read_response_holds_its_charge_until_the_response_is_dropped() {
          JSON, and is about to be serialized and written"
     );
     let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(value["result"]["ttlMs"], PRIVATE_CACHE_TTL_MS);
+    assert_eq!(value["result"]["cacheScope"], "private");
     assert_eq!(
         value["result"]["contents"][0]["text"]
             .as_str()
@@ -429,13 +432,32 @@ fn unsupported_protocol_error_serializes_official_retry_data() {
 #[test]
 fn modern_successes_gain_the_required_result_type_without_changing_errors() {
     let mut success = result(Some(json!(1)), json!({"tools": []}));
-    success.complete_modern_result();
+    success.complete_modern_result("tools/list");
     let value = serde_json::to_value(success).unwrap();
     assert_eq!(value["result"]["resultType"], "complete");
+    assert_eq!(value["result"]["ttlMs"], PRIVATE_CACHE_TTL_MS);
+    assert_eq!(value["result"]["cacheScope"], "private");
 
     let mut response = error(Some(json!(1)), -32601, "missing");
-    response.complete_modern_result();
+    response.complete_modern_result("resources/read");
     let value = serde_json::to_value(response).unwrap();
     assert!(value.get("result").is_none());
     assert_eq!(value["error"]["code"], -32601);
+}
+
+#[test]
+fn modern_cache_metadata_is_limited_to_cacheable_results() {
+    for method in ["tools/list", "resources/list", "resources/read"] {
+        let mut response = result(Some(json!(1)), json!({}));
+        response.complete_modern_result(method);
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["result"]["ttlMs"], PRIVATE_CACHE_TTL_MS, "{method}");
+        assert_eq!(value["result"]["cacheScope"], "private", "{method}");
+    }
+
+    let mut call = result(Some(json!(1)), json!({"content": []}));
+    call.complete_modern_result("tools/call");
+    let value = serde_json::to_value(call).unwrap();
+    assert!(value["result"].get("ttlMs").is_none());
+    assert!(value["result"].get("cacheScope").is_none());
 }

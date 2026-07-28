@@ -55,10 +55,10 @@ fn modern_requests_are_self_describing_and_never_depend_on_prior_requests() {
 }
 
 #[test]
-fn initialize_is_modern_only_with_a_complete_current_request_envelope() {
+fn initialize_always_selects_legacy_even_with_a_complete_modern_envelope() {
     let modern = rpc("initialize", modern_params(json!({})));
     let validated = validate_ingress(&modern_headers("initialize", None), &modern).unwrap();
-    assert_eq!(validated.mode, McpIngressMode::Modern);
+    assert_eq!(validated.mode, McpIngressMode::Legacy);
 
     let plain_legacy = rpc(
         "initialize",
@@ -80,7 +80,7 @@ fn initialize_is_modern_only_with_a_complete_current_request_envelope() {
     assert_eq!(
         ingress_mode(&modern_headers("initialize", None), &incomplete),
         McpIngressMode::Legacy,
-        "an initialize request must not enter modern validation from partial metadata"
+        "initialize selects legacy from its method, regardless of metadata"
     );
 
     let malformed_client_info = rpc(
@@ -96,8 +96,14 @@ fn initialize_is_modern_only_with_a_complete_current_request_envelope() {
     assert_eq!(
         ingress_mode(&modern_headers("initialize", None), &malformed_client_info),
         McpIngressMode::Legacy,
-        "malformed optional clientInfo must not classify initialize as modern"
+        "initialize must not enter modern validation from clientInfo"
     );
+}
+
+#[test]
+fn ping_is_legacy_only_in_the_pinned_candidate_revision() {
+    assert!(!is_supported_modern_method("ping"));
+    assert!(is_supported_modern_method("server/discover"));
 }
 
 #[test]

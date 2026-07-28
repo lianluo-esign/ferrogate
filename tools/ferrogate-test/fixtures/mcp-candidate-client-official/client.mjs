@@ -32,8 +32,24 @@ const drive = async (mode, label, endpoints) => {
         const gatewayInstance = typeof body?.method === 'string'
             ? rpcOrdinal++ % endpoints.length
             : 0;
-        wire.push({ gatewayInstance, httpMethod: observedRequest.method, headers, body });
-        return fetch(new Request(endpoints[gatewayInstance], observedRequest));
+        const response = await fetch(new Request(endpoints[gatewayInstance], observedRequest));
+        let responseBody = null;
+        const responseText = await response.clone().text();
+        if (responseText.length > 0) {
+            try {
+                responseBody = JSON.parse(responseText);
+            } catch {
+                responseBody = null;
+            }
+        }
+        wire.push({
+            gatewayInstance,
+            httpMethod: observedRequest.method,
+            headers,
+            body,
+            response: responseBody
+        });
+        return response;
     };
 
     const client = new Client(

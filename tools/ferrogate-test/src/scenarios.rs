@@ -4523,6 +4523,7 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     const MCP_DISCOVER_METHOD: &str = "Mcp-Method: server/discover";
     const MCP_TOOLS_LIST_METHOD: &str = "Mcp-Method: tools/list";
     const MCP_TOOLS_CALL_METHOD: &str = "Mcp-Method: tools/call";
+    const MCP_RESOURCES_LIST_METHOD: &str = "Mcp-Method: resources/list";
     const MCP_HTTP_SEARCH_BASE64_NAME: &str = "Mcp-Name: =?base64?aHR0cC1zZWFyY2g=?=";
     const MCP_CLIENT_IDENTIFIER: &str = "high-cardinality-client-570";
 
@@ -4597,7 +4598,28 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert_eq!(body["result"]["resultType"], "complete");
+            assert_eq!(body["result"]["ttlMs"], 5_000);
+            assert_eq!(body["result"]["cacheScope"], "private");
             assert_mcp_tool_present(&body, "http-search", "Search the harness MCP upstream")?;
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            MCP_RESOURCES_LIST_METHOD,
+        ],
+        r#"{"jsonrpc":"2.0","id":"5702-resources","method":"resources/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["resultType"], "complete");
+            assert_eq!(body["result"]["ttlMs"], 5_000);
+            assert_eq!(body["result"]["cacheScope"], "private");
+            assert!(body["result"]["resources"].is_array());
             Ok(())
         },
     )?;
@@ -4754,12 +4776,31 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             CLIENT_AUTH,
             JSON_CONTENT,
             MCP_CANDIDATE_VERSION,
-            "Mcp-Method: initialize",
+            "Mcp-Method: ping",
         ],
-        r#"{"jsonrpc":"2.0","id":5711,"method":"initialize","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        r#"{"jsonrpc":"2.0","id":5712,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
         404,
         |body| {
             assert_eq!(body["error"]["code"], -32601);
+            Ok(())
+        },
+    )?;
+    // `initialize` selects legacy semantics by method, even when a caller
+    // attaches a complete modern envelope and candidate routing headers.
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            "Mcp-Method: initialize",
+        ],
+        r#"{"jsonrpc":"2.0","id":5711,"method":"initialize","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["protocolVersion"], "2025-11-25");
+            assert!(body["result"].get("resultType").is_none());
             Ok(())
         },
     )?;
