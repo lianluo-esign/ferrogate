@@ -236,15 +236,28 @@ impl Config {
             return Ok(());
         }
         if parse_r2_endpoint(endpoint).is_none() {
-            let signed_host = parse_endpoint(endpoint)
-                .map(|parts| parts.signing_host())
-                .unwrap_or_else(|_| endpoint.to_string());
+            let (display_endpoint, signed_host) = parse_endpoint(endpoint)
+                .map(|parts| {
+                    // Userinfo may contain a password. It is still retained in
+                    // the shared parse so the runtime and validator agree on
+                    // the malformed value, but diagnostics must not echo it.
+                    match parts.authority.rsplit_once('@') {
+                        Some((_, host)) => {
+                            let safe_host =
+                                format!("<redacted-userinfo>@{host}{}", parts.path_prefix);
+                            (format!("{}://{safe_host}", parts.scheme), safe_host)
+                        }
+                        None => (endpoint.to_string(), parts.signing_host()),
+                    }
+                })
+                .unwrap_or_else(|_| (endpoint.to_string(), endpoint.to_string()));
             bail!(
-                "field asset_bucket.endpoint: {endpoint} looks like a Cloudflare R2 endpoint but \
-                 is not of the form https://<account_id>.r2.cloudflarestorage.com (optionally with \
-                 an .eu./.fedramp. jurisdiction label); the account id must be a single DNS label \
-                 and the endpoint must carry no port and no path suffix. The signer would sign \
-                 `host: {signed_host}`, which R2 rejects"
+                "field asset_bucket.endpoint: {display_endpoint} looks like a Cloudflare R2 \
+                 endpoint but is not of the form \
+                 https://<account_id>.r2.cloudflarestorage.com (optionally with an \
+                 .eu./.fedramp. jurisdiction label); the account id must be a single DNS label and \
+                 the endpoint must carry no userinfo, port, path, query, or fragment. The signer \
+                 would sign `host: {signed_host}`, which R2 rejects"
             );
         }
         match bucket.region.as_deref() {

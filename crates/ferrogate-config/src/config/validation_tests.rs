@@ -623,15 +623,25 @@ fn workers_static_assets_backend_with_an_r2_endpoint_skips_the_r2_rules() {
 /// rejects would have signed something else (issue #485).
 #[test]
 fn r2_config_validation_matches_the_runtime_signed_host() {
-    use super::asset_endpoint::{parse_endpoint, R2_ENDPOINT_SUFFIX};
+    use super::asset_endpoint::{parse_endpoint, parse_r2_endpoint};
 
     for (endpoint, accepted) in [
         ("https://abc123def456.r2.cloudflarestorage.com", true),
         ("https://abc123def456.r2.cloudflarestorage.com/", true),
         ("https://ABC123DEF456.R2.CloudflareStorage.com", true),
+        ("HTTPS://ABC123DEF456.R2.CloudflareStorage.com", true),
         ("https://abc123def456.eu.r2.cloudflarestorage.com", true),
         ("https://abc123def456.r2.cloudflarestorage.com/x", false),
         ("https://abc123def456.r2.cloudflarestorage.com:8443", false),
+        ("https://abc123def456.r2.cloudflarestorage.com?x=1", false),
+        (
+            "https://abc123def456.r2.cloudflarestorage.com#fragment",
+            false,
+        ),
+        (
+            "https://user:pass@abc123def456.r2.cloudflarestorage.com",
+            false,
+        ),
         ("https://abc.def.r2.cloudflarestorage.com", false),
         ("https://.r2.cloudflarestorage.com", false),
     ] {
@@ -646,25 +656,32 @@ fn r2_config_validation_matches_the_runtime_signed_host() {
             accepted,
             "{endpoint}: config validation disagrees with the table"
         );
-        // Whatever the verdict, it must match what the signer would sign: the
-        // accepted set is exactly the endpoints whose signed host is a bare
-        // `<label>[.eu|.fedramp].r2.cloudflarestorage.com`.
+        // Whatever the verdict, it must match what the production R2 parser
+        // says about the literal host the signer would send. Do not restate
+        // the R2 account/jurisdiction grammar in this oracle.
         let signed_host = parse_endpoint(endpoint).unwrap().signing_host();
-        let signs_bare_r2_host = signed_host
-            .strip_suffix(R2_ENDPOINT_SUFFIX)
-            .and_then(|prefix| prefix.strip_suffix('.'))
-            .is_some_and(|account| {
-                let account = account
-                    .strip_suffix(".eu")
-                    .or_else(|| account.strip_suffix(".fedramp"))
-                    .unwrap_or(account);
-                !account.is_empty() && !account.contains('.')
-            });
+        let signs_bare_r2_host = parse_r2_endpoint(&format!("https://{signed_host}")).is_some();
         assert_eq!(
             accepted, signs_bare_r2_host,
             "{endpoint}: validation verdict disagrees with the signed host {signed_host}"
         );
     }
+}
+
+#[test]
+fn r2_userinfo_is_rejected_without_echoing_the_password() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint =
+        Some("https://operator:super-secret@abc123def456.r2.cloudflarestorage.com".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("Cloudflare R2 endpoint"), "{error}");
+    assert!(error.contains("<redacted-userinfo>"), "{error}");
+    assert!(!error.contains("super-secret"), "{error}");
 }
 
 #[test]

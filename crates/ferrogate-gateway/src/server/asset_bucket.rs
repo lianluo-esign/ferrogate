@@ -2983,6 +2983,12 @@ mod tests {
                 "abc123def456.r2.cloudflarestorage.com",
             ),
             (
+                "HTTPS://ABC123DEF456.R2.CloudflareStorage.com",
+                true,
+                true,
+                "abc123def456.r2.cloudflarestorage.com",
+            ),
+            (
                 "https://abc123def456.eu.r2.cloudflarestorage.com",
                 true,
                 true,
@@ -3006,6 +3012,24 @@ mod tests {
                 true,
                 false,
                 "abc123def456.r2.cloudflarestorage.com:8443",
+            ),
+            (
+                "https://abc123def456.r2.cloudflarestorage.com?x=1",
+                true,
+                false,
+                "abc123def456.r2.cloudflarestorage.com?x=1",
+            ),
+            (
+                "https://abc123def456.r2.cloudflarestorage.com#fragment",
+                true,
+                false,
+                "abc123def456.r2.cloudflarestorage.com#fragment",
+            ),
+            (
+                "https://user:pass@abc123def456.r2.cloudflarestorage.com",
+                true,
+                false,
+                "user:pass@abc123def456.r2.cloudflarestorage.com",
             ),
             (
                 "https://.r2.cloudflarestorage.com",
@@ -3057,42 +3081,16 @@ mod tests {
                 *well_formed,
                 "{endpoint}: the strict R2 guard disagrees with the table"
             );
-            match parsed {
-                // Accepted => the signed host IS the reassembled R2 host.
-                Some(r2) => {
-                    let reassembled = match r2.jurisdiction {
-                        Some(jurisdiction) => {
-                            format!("{}.{jurisdiction}.{R2_ENDPOINT_SUFFIX}", r2.account_id)
-                        }
-                        None => format!("{}.{R2_ENDPOINT_SUFFIX}", r2.account_id),
-                    };
-                    assert_eq!(
-                        host, reassembled,
-                        "{endpoint}: guard accepted an endpoint whose signed host is not the \
-                         bare R2 host it parsed"
-                    );
-                }
-                // Rejected while detected as R2 => the signed host is not a
-                // bare R2 account host, which is exactly why it was rejected.
-                None if *targets_r2 => {
-                    let bare_r2_host = host
-                        .strip_suffix(R2_ENDPOINT_SUFFIX)
-                        .and_then(|prefix| prefix.strip_suffix('.'))
-                        .is_some_and(|account| {
-                            let account = account
-                                .strip_suffix(".eu")
-                                .or_else(|| account.strip_suffix(".fedramp"))
-                                .unwrap_or(account);
-                            !account.is_empty() && !account.contains('.')
-                        });
-                    assert!(
-                        !bare_r2_host,
-                        "{endpoint}: guard rejected an endpoint the signer would have signed \
-                         correctly ({host})"
-                    );
-                }
-                None => {}
-            }
+            // Ask the production parser whether the literal signed host is a
+            // valid R2 host. Restating the account/jurisdiction grammar here
+            // created a third policy implementation that could drift in lock
+            // step with the test while production remained wrong.
+            let signed_host_is_valid_r2 = parse_r2_endpoint(&format!("https://{host}"));
+            assert_eq!(
+                parsed.is_some(),
+                signed_host_is_valid_r2.is_some(),
+                "{endpoint}: validation verdict disagrees with the signed host {host}"
+            );
         }
     }
 
@@ -3104,6 +3102,7 @@ mod tests {
         for endpoint in [
             "https://abc123def456.r2.cloudflarestorage.com",
             "https://ABC123DEF456.R2.CloudflareStorage.com",
+            "HTTPS://ABC123DEF456.R2.CloudflareStorage.com",
             "https://project.supabase.co/storage/v1/s3",
             "http://127.0.0.1:9999",
         ] {

@@ -54,17 +54,21 @@ pub struct R2Endpoint {
 /// value the guard accepts is by construction the value the signer sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointParts {
-    /// `http` only for an explicit `http://` endpoint (local mocks); `https`
-    /// otherwise, matching `bedrock.rs::extract_host`'s convention.
+    /// `http` only for an explicit, case-insensitive `http://` endpoint (local
+    /// mocks); `https` otherwise, matching `bedrock.rs::extract_host`'s
+    /// convention.
     pub scheme: &'static str,
-    /// `host[:port]`, ASCII-lowercased. DNS hostnames are case-insensitive, so
-    /// normalizing here (rather than in each caller) is what makes the R2
-    /// detector case-insensitive *and* guarantees the signer signs the same
-    /// spelling the guard inspected.
+    /// `[userinfo@]host[:port]`, ASCII-lowercased. Userinfo is retained because
+    /// it is part of the malformed value the runtime would sign; [`Self::host_name`]
+    /// excludes it when detecting R2 so validation can reject the endpoint.
+    /// DNS hostnames are case-insensitive, so normalizing here (rather than in
+    /// each caller) makes the detector case-insensitive *and* guarantees the
+    /// signer signs the same spelling the guard inspected.
     pub authority: String,
-    /// Any path prefix the endpoint carries (`/storage/v1/s3` for Supabase
-    /// Storage), or `""`. Case is preserved -- URL paths are case-sensitive.
-    /// A trailing `/` is trimmed, exactly as the signer trims it.
+    /// Any path, query, or fragment suffix the endpoint carries
+    /// (`/storage/v1/s3` for Supabase Storage), or `""`. Case is preserved --
+    /// URL suffixes are case-sensitive. A trailing `/` is trimmed, exactly as
+    /// the signer trims it.
     pub path_prefix: String,
 }
 
@@ -80,17 +84,22 @@ impl EndpointParts {
 
     /// The bare DNS host: [`Self::authority`] with any `:port` removed.
     pub fn host_name(&self) -> &str {
-        if self.authority.starts_with('[') {
+        // Userinfo is not a host. Keep it in `authority` because that is what
+        // the runtime would currently sign, but inspect the actual host so an
+        // R2-shaped endpoint is detected and rejected instead of bypassing the
+        // R2 load-time guard.
+        let authority = self
+            .authority
+            .rsplit_once('@')
+            .map_or(self.authority.as_str(), |(_, host)| host);
+        if authority.starts_with('[') {
             // IPv6 literal: `[::1]:8080` -> `[::1]`.
-            return match self.authority.find(']') {
-                Some(end) => &self.authority[..=end],
-                None => &self.authority,
+            return match authority.find(']') {
+                Some(end) => &authority[..=end],
+                None => authority,
             };
         }
-        self.authority
-            .split(':')
-            .next()
-            .unwrap_or(self.authority.as_str())
+        authority.split(':').next().unwrap_or(authority)
     }
 }
 
@@ -99,12 +108,25 @@ impl EndpointParts {
 /// [`EndpointParts`].
 pub fn parse_endpoint(endpoint: &str) -> anyhow::Result<EndpointParts> {
     let raw = endpoint.trim();
-    let (scheme, rest) = match raw.strip_prefix("http://") {
-        Some(rest) => ("http", rest),
-        None => ("https", raw.strip_prefix("https://").unwrap_or(raw)),
+    let (scheme, rest) = if raw
+        .get(.."http://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+    {
+        ("http", &raw["http://".len()..])
+    } else if raw
+        .get(.."https://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
+        ("https", &raw["https://".len()..])
+    } else {
+        ("https", raw)
     };
     let rest = rest.trim_end_matches('/');
-    let (authority, path_prefix) = match rest.find('/') {
+    // `?` and `#` terminate the authority just as `/` does. Keeping either in
+    // the authority made an R2 hostname invisible to the detector while the
+    // runtime still signed the entire malformed value.
+    let (authority, path_prefix) = match rest.find(|character| matches!(character, '/' | '?' | '#'))
+    {
         Some(index) => (&rest[..index], &rest[index..]),
         None => (rest, ""),
     };
@@ -136,7 +158,8 @@ pub fn endpoint_targets_r2(endpoint: &str) -> bool {
 /// `https://<account_id>.r2.cloudflarestorage.com` (optionally with a
 /// `.eu.` / `.fedramp.` jurisdiction label). Returns `None` when the host is
 /// not R2 *or* when the signer would not sign a bare R2 host for it: a
-/// malformed (empty / multi-label) account id, a `:port`, or a path suffix.
+/// malformed (empty / multi-label) account id, userinfo, a `:port`, or a URL
+/// suffix.
 /// The account id must be a single DNS label (no dots), matching R2's
 /// 32-hex-char account id.
 ///
@@ -155,7 +178,7 @@ pub fn parse_r2_endpoint(endpoint: &str) -> Option<R2Endpoint> {
     }
     let host = parts.host_name();
     if host.len() != parts.authority.len() {
-        return None; // an explicit `:port`
+        return None; // userinfo or an explicit `:port`
     }
     // `<...>.r2.cloudflarestorage.com` -> `<...>` (with its trailing dot).
     let prefix = host.strip_suffix(R2_ENDPOINT_SUFFIX)?.strip_suffix('.')?; // reject the bare suffix domain (empty account)

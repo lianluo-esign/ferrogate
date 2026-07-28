@@ -36,6 +36,49 @@ fn state_with_budget(max_gateway_buffer_bytes: u64) -> AppState {
     })
 }
 
+/// The runtime half of `AssetBucketConfig::builds_s3_client()` (#485).
+///
+/// Validation tests pin that disabled S3 sections skip S3-only rules. This
+/// pins the converse at the actual runtime accessor: even when every
+/// credential is present, disabling the section prevents construction of the
+/// object-store client. Removing the runtime predicate makes the second
+/// assertion fail instead of leaving only config-side coverage green.
+#[test]
+fn only_an_enabled_s3_section_builds_the_runtime_bucket_client() {
+    const SECRET_ENV: &str = "FERROGATE_TEST_ASSET_BUCKET_SELECTION_SECRET";
+    std::env::set_var(SECRET_ENV, "test-secret-access-key");
+
+    let bucket_config = |enabled| ferrogate_config::AssetBucketConfig {
+        enabled,
+        endpoint: Some("http://127.0.0.1:9000".into()),
+        bucket: Some("ferrogate-assets".into()),
+        region: Some("us-east-1".into()),
+        access_key_id: Some("AKIAEXAMPLE".into()),
+        secret_access_key_env: Some(SECRET_ENV.into()),
+        ..ferrogate_config::AssetBucketConfig::default()
+    };
+
+    let enabled = AppState::new(Config {
+        asset_bucket: bucket_config(true),
+        ..Config::default()
+    });
+    assert!(
+        enabled.asset_bucket_client().is_some(),
+        "an enabled, fully configured S3 section must build the runtime client"
+    );
+
+    let disabled = AppState::new(Config {
+        asset_bucket: bucket_config(false),
+        ..Config::default()
+    });
+    assert!(
+        disabled.asset_bucket_client().is_none(),
+        "a disabled S3 section must not build a runtime client even when every credential exists"
+    );
+
+    std::env::remove_var(SECRET_ENV);
+}
+
 fn bucket_backed_asset(tenant: &str, name: &str, size_bytes: u64) -> StoredAsset {
     StoredAsset {
         id: stored_asset_id(tenant, "cli_tool", name, "1.0.0"),

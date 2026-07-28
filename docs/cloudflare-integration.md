@@ -179,8 +179,12 @@ Three CF options for serving FerroGate-hosted static assets/sites.
     suffix. The runtime signer folds anything past the host into the signed
     `host` header, so `https://<acct>.r2.cloudflarestorage.com/anything` would
     sign a host R2 cannot serve; the guard rejects it at load time and names
-    the host it would have signed (issue #485). Host casing is normalized, so
-    `HTTPS://ACCT.R2.CloudflareStorage.com` is accepted and signed lowercase.
+    the host it would have signed (issue #485). URL scheme matching and host
+    casing are both case-insensitive, so
+    `HTTPS://ACCT.R2.CloudflareStorage.com` is accepted and signed as
+    `https://acct.r2.cloudflarestorage.com`. Query or fragment suffixes and
+    userinfo are detected as non-bare R2 endpoints and rejected at load time;
+    they cannot bypass the R2-specific rules.
   - `region = "auto"` is a **FerroGate** requirement, not strictly an R2 one:
     Cloudflare's S3-compatibility docs also accept a blank region and
     `us-east-1` as aliases for `auto`. FerroGate pins the canonical value
