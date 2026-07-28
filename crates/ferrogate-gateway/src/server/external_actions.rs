@@ -324,9 +324,10 @@ impl GatewayExternalActionAuthorizerService {
     /// project-scoped managed-action policy could therefore not be evaluated.
     ///
     /// It carries the same canonical deny decision and `withheld` disposition
-    /// as a guardrail block, because for a consumer of the timeline this *is* a
-    /// guardrail-seam block; the reason is in the message rather than in a new
-    /// decision code, so #304's canonical reason vocabulary stays closed.
+    /// as a guardrail block, but records the existing `error:block:enforced`
+    /// reason. No detector ran, so claiming a `fail` verdict would turn missing
+    /// attribution into a fabricated guardrail finding. `Error` is already the
+    /// #304 closed-vocabulary value for a fail-closed guardrail seam.
     #[allow(clippy::too_many_arguments)]
     fn record_managed_action_refusal(
         state: &AppState,
@@ -340,7 +341,7 @@ impl GatewayExternalActionAuthorizerService {
     ) {
         let decision =
             ferrogate_runtime::ActionDecision::from(ferrogate_runtime::GuardrailOutcome {
-                verdict: ferrogate_runtime::GuardrailVerdict::Fail,
+                verdict: ferrogate_runtime::GuardrailVerdict::Error,
                 action: ferrogate_runtime::GuardrailTriggeredAction::Block,
                 enforcement: ferrogate_runtime::GuardrailEnforcement::Enforced,
             });

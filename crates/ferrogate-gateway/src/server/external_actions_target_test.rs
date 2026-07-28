@@ -333,6 +333,120 @@ fn unix_authorizer_parent_swap_cannot_redirect_socket() {
     assert!(!original_parent.join("authorizer.sock").exists());
 }
 
+#[test]
+fn unresolved_project_guardrail_refusal_records_an_error_not_a_detector_failure() {
+    let shared = shared_state_with_project_guard(
+        ferrogate_guardrails::PolicyMode::Enforce,
+        ferrogate_guardrails::DetectorStage::Request,
+    );
+    let response = GatewayExternalActionAuthorizerService::new(shared.clone())
+        .authorize_transport_request(mcp_request("clean"));
+
+    assert!(!response.response.accepted, "{response:?}");
+    let timeline = shared
+        .current()
+        .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+        .expect("the attribution refusal must be auditable");
+    let blocked = timeline
+        .agent_events
+        .iter()
+        .find(|event| event.kind == "guardrail.blocked")
+        .expect("the fail-closed guardrail seam records one blocked event");
+    assert_eq!(blocked.decision.as_deref(), Some("deny"));
+    assert_eq!(
+        blocked.decision_reason.as_deref(),
+        Some("guardrail:error:block:enforced"),
+        "unresolved attribution is an evaluation error, not a detector verdict"
+    );
+    assert_eq!(blocked.output_disposition.as_deref(), Some("withheld"));
+}
+
+#[test]
+fn unresolved_project_does_not_enforce_shadow_or_response_only_policies() {
+    for (mode, stage, label) in [
+        (
+            ferrogate_guardrails::PolicyMode::Shadow,
+            ferrogate_guardrails::DetectorStage::Request,
+            "shadow",
+        ),
+        (
+            ferrogate_guardrails::PolicyMode::Enforce,
+            ferrogate_guardrails::DetectorStage::Response,
+            "response-only",
+        ),
+    ] {
+        let shared = shared_state_with_project_guard(mode, stage);
+        let response = GatewayExternalActionAuthorizerService::new(shared)
+            .authorize_transport_request(mcp_request("clean"));
+        assert!(
+            response.response.accepted,
+            "an unresolved project must not turn a {label} policy into a request-stage refusal: {response:?}"
+        );
+        assert_eq!(
+            response.response.decision,
+            Some(ferrogate_runtime::ExternalActionDecision::Allowed),
+            "{label} policy"
+        );
+    }
+}
+
+fn shared_state_with_project_guard(
+    mode: ferrogate_guardrails::PolicyMode,
+    stage: ferrogate_guardrails::DetectorStage,
+) -> SharedAppState {
+    let shared = shared_state_with_mcp_grant("project-guard-policy");
+    grant_permission(&shared.current());
+    let policy = ferrogate_guardrails::PolicyRevision {
+        policy_id: "project-guard".into(),
+        revision: 1,
+        name: "project guard".into(),
+        description: None,
+        enforced: true,
+        scope: ferrogate_guardrails::PolicyScopeSelector {
+            organization_ids: vec!["tenant-1".into()],
+            project_ids: vec!["project-1".into()],
+            managed_action: Some(ferrogate_guardrails::ManagedActionSelector {
+                classes: vec![ferrogate_guardrails::ManagedActionClass::Mcp],
+                targets: Vec::new(),
+            }),
+            ..ferrogate_guardrails::PolicyScopeSelector::default()
+        },
+        checks: vec![ferrogate_guardrails::CheckBinding {
+            id: "keyword".into(),
+            enabled: true,
+            stage,
+            sources: ferrogate_guardrails::all_content_sources(),
+            detector: ferrogate_guardrails::DetectorDefinition::local(
+                vec!["blocked-marker".into()],
+                Vec::new(),
+                None,
+            ),
+            fallback_detector: None,
+        }],
+        aggregation: ferrogate_guardrails::PolicyAggregation::All,
+        execution: ferrogate_guardrails::PolicyExecution::Sequential,
+        mode,
+        streaming: ferrogate_guardrails::PolicyStreamingMode::BufferAndEnforce,
+        on_pass: vec![ferrogate_guardrails::PolicyAction::allow()],
+        on_fail: vec![ferrogate_guardrails::PolicyAction::block(
+            "project_guard_blocked",
+            "managed action blocked by project guard",
+        )],
+        on_error: vec![ferrogate_guardrails::PolicyAction::block(
+            "project_guard_unavailable",
+            "managed action project guard unavailable",
+        )],
+        deadline_ms: 2_000,
+        created_at_unix: 1,
+        created_by: "test-admin".into(),
+    };
+    shared.create_guardrail_policy_revision(policy).unwrap();
+    shared
+        .activate_guardrail_policy_revision("project-guard", 1, "test-admin", 1, false)
+        .unwrap();
+    shared
+}
+
 fn shared_state_with_mcp_grant(revision: &str) -> SharedAppState {
     let mut config = Config::default();
     config.agent_runtime.enabled = true;
