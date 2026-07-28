@@ -5,7 +5,7 @@
 # Created: 2026-07-27
 # description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 #
-# High-confidence secret scan over every tracked file (#525).
+# High-confidence secret scan over every tracked authored file (#525).
 #
 # Extracted from scripts/security-check.sh, which hard-coded `rg` (ripgrep).
 # ripgrep is not part of any baseline install, so on a box without it the scan
@@ -33,9 +33,9 @@
 #
 # Known engine differences, both handled here rather than left implicit:
 #   * Files git calls binary are skipped outright by `git grep -I`, while rg
-#     prints "binary file matches" without the line. Neither line-scans them,
-#     so the coverage report below names them out loud (#487 keeps source files
-#     out of that set; see scripts/check-binary-source-files.py).
+#     can print "binary file matches" without the line. This script rejects an
+#     unreviewed binary before either engine runs, so engine choice cannot
+#     change the verdict. A reviewed exception is content-pinned and stale-checked.
 #   * `git grep` ignores a tracked path missing from the worktree and still
 #     exits 0, where rg fails loudly. The readability guard below closes that.
 #   * rg emits matches in nondeterministic (parallel) order; git grep follows
@@ -46,6 +46,17 @@ root_dir=""
 list_files_only=0
 list_allowlist_only=0
 scanning_this_repo=1
+
+print_help() {
+  printf '%s\n' \
+    'High-confidence secret scan over tracked authored files.' \
+    '' \
+    'Usage:' \
+    '  scripts/check-secret-scan.sh' \
+    '  scripts/check-secret-scan.sh --root DIR' \
+    '  scripts/check-secret-scan.sh --list-files' \
+    '  scripts/check-secret-scan.sh --list-allowlist'
+}
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -67,7 +78,9 @@ while [[ "$#" -gt 0 ]]; do
       shift
       ;;
     -h | --help)
-      sed -n '8,31p' "${BASH_SOURCE[0]}"
+      # Keep help available even on the stripped PATH whose failure behaviour
+      # this gate exists to diagnose.
+      print_help
       exit 0
       ;;
     *)
@@ -117,6 +130,15 @@ allowlist_hits=()
 for _ in "${secret_scan_allowlist[@]}"; do allowlist_hits+=(0); done
 allowlist_drift=()
 
+# Binary files cannot be line-scanned. A genuinely necessary binary therefore
+# needs an explicit, owned, content-pinned decision rather than a path-only hole:
+# "<path>\t<sha256>\t<owner>\t<reason>". Entries that do not match a current
+# binary are stale and fail. Empty on purpose: every tracked file currently
+# admitted to the secret scan is text to git.
+reviewed_binary_scan_files=()
+reviewed_binary_scan_hits=()
+for _ in "${reviewed_binary_scan_files[@]}"; do reviewed_binary_scan_hits+=(0); done
+
 if [[ "$list_allowlist_only" -eq 1 ]]; then
   printf '%s\n' "${secret_scan_allowlist[@]}"
   exit 0
@@ -130,18 +152,22 @@ if command -v rg >/dev/null 2>&1; then
 elif command -v git >/dev/null 2>&1; then
   secret_scan_engine="git-grep"
 else
-  echo "secret scan cannot run: neither 'rg' (ripgrep) nor 'git' (for the 'git grep -I' fallback) is on PATH" >&2
+  echo "secret scan did NOT run: ripgrep not found on PATH and git grep fallback unavailable" >&2
   echo "a gate that cannot run must fail loudly instead of skipping itself (#525)" >&2
   exit 1
 fi
 
-if ! command -v git >/dev/null 2>&1; then
-  echo "secret scan cannot run: missing required tool: git (the tracked-file list comes from 'git ls-files')" >&2
+missing_runtime_tools=()
+for required_tool in git mktemp sed sort comm rm; do
+  command -v "$required_tool" >/dev/null 2>&1 || missing_runtime_tools+=("$required_tool")
+done
+if [[ "${#missing_runtime_tools[@]}" -ne 0 ]]; then
+  echo "secret scan did NOT run: missing required tool(s) on PATH: ${missing_runtime_tools[*]}" >&2
   exit 1
 fi
 
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-  echo "secret scan cannot run: $root_dir is not a git checkout" >&2
+  echo "secret scan did NOT run: $root_dir is not a git checkout" >&2
   exit 1
 fi
 
@@ -156,13 +182,18 @@ if [[ "$scanning_this_repo" -eq 1 ]]; then
   elif command -v shasum >/dev/null 2>&1; then
     secret_scan_digest_cmd=(shasum -a 256)
   else
-    echo "secret scan cannot run: the allowlist pins each reviewed line by SHA-256 and neither 'sha256sum' nor 'shasum' is on PATH" >&2
+    echo "secret scan did NOT run: neither sha256sum nor shasum found on PATH" >&2
     echo "a gate that cannot verify its own exemptions must fail loudly instead of granting them (#525, #566)" >&2
     exit 1
   fi
 fi
 
 # --- file list ----------------------------------------------------------
+# Cargo.lock is generated dependency inventory rather than authored source. Its
+# integrity and advisory surfaces are checked by `cargo metadata --locked`, the
+# protobuf floor, cargo-audit, cargo-deny and release attestation gates. Exclude
+# only the root lockfile so dependency strings cannot masquerade as application
+# credentials while nested authored lock fixtures remain covered.
 mapfile -d '' tracked_secret_scan_files < <(git ls-files -z -- ':!:Cargo.lock')
 if [[ "${#tracked_secret_scan_files[@]}" -eq 0 ]]; then
   echo "secret scan found no tracked files" >&2
@@ -186,25 +217,94 @@ if [[ "${#unreadable_scan_files[@]}" -ne 0 ]]; then
   exit 1
 fi
 
-# Files git classifies as binary are not line-scanned by either engine. Name
-# them instead of letting the coverage hole go unmentioned (#344, #487).
+# Files git classifies as binary are not line-scanned by either engine. Empty
+# files are text with no lines, not binary, so compare only non-empty files.
 binary_scan_files=()
-mapfile -t scannable_scan_files < <(
-  git --literal-pathspecs grep -I -l -e '' -- "${tracked_secret_scan_files[@]}" || true
+nonempty_scan_files=()
+for scan_path in "${tracked_secret_scan_files[@]}"; do
+  [[ -s "$scan_path" ]] && nonempty_scan_files+=("$scan_path")
+done
+mapfile -t git_text_scan_files < <(
+  git --literal-pathspecs grep -I -l -e '' -- "${nonempty_scan_files[@]}" || true
 )
-if [[ "${#scannable_scan_files[@]}" -ne "${#tracked_secret_scan_files[@]}" ]]; then
+if [[ "${#git_text_scan_files[@]}" -ne "${#nonempty_scan_files[@]}" ]]; then
   mapfile -t binary_scan_files < <(
     comm -23 \
-      <(printf '%s\n' "${tracked_secret_scan_files[@]}" | LC_ALL=C sort) \
-      <(printf '%s\n' "${scannable_scan_files[@]}" | LC_ALL=C sort)
+      <(printf '%s\n' "${nonempty_scan_files[@]}" | LC_ALL=C sort) \
+      <(printf '%s\n' "${git_text_scan_files[@]}" | LC_ALL=C sort)
   )
 fi
 
+secret_scan_file_digest() {
+  local rendered
+  rendered="$("${secret_scan_digest_cmd[@]}" -- "$1")" || return 1
+  printf '%s' "${rendered%% *}"
+}
+
+binary_scan_failures=()
+reviewed_binary_paths=()
+for binary_path in "${binary_scan_files[@]}"; do
+  binary_reviewed=0
+  if [[ "$scanning_this_repo" -eq 1 ]]; then
+    binary_index=0
+    for entry in "${reviewed_binary_scan_files[@]}"; do
+      IFS=$'\t' read -r entry_path entry_digest entry_owner entry_reason <<<"$entry"
+      if [[ "$binary_path" == "$entry_path" ]]; then
+        # The path is current even when its content or metadata has drifted;
+        # report that defect once rather than also mislabelling it stale.
+        reviewed_binary_scan_hits[binary_index]=1
+        actual_digest="$(secret_scan_file_digest "$binary_path")"
+        if [[ "$entry_digest" =~ ^[0-9a-f]{64}$ && -n "$entry_owner" &&
+          "${#entry_reason}" -ge 20 && "$actual_digest" == "$entry_digest" ]]; then
+          reviewed_binary_paths+=("$binary_path")
+          binary_reviewed=1
+        else
+          binary_scan_failures+=("$binary_path: reviewed binary entry is malformed or its SHA-256 changed")
+          binary_reviewed=1
+        fi
+      fi
+      binary_index=$((binary_index + 1))
+    done
+  fi
+  if [[ "$binary_reviewed" -eq 0 ]]; then
+    binary_scan_failures+=("$binary_path: binary to git and not present in reviewed_binary_scan_files")
+  fi
+done
+
+if [[ "$scanning_this_repo" -eq 1 ]]; then
+  binary_index=0
+  for entry in "${reviewed_binary_scan_files[@]}"; do
+    if [[ "${reviewed_binary_scan_hits[binary_index]}" -eq 0 ]]; then
+      entry_path="${entry%%$'\t'*}"
+      binary_scan_failures+=("$entry_path: stale reviewed_binary_scan_files entry")
+    fi
+    binary_index=$((binary_index + 1))
+  done
+fi
+
+if [[ "${#binary_scan_failures[@]}" -ne 0 ]]; then
+  echo "secret scan did NOT run: ${#binary_scan_failures[@]} binary coverage failure(s)" >&2
+  printf '  %s\n' "${binary_scan_failures[@]}" >&2
+  echo "fix the file, or add a SHA-256-pinned entry with an owner and reason after explicit review" >&2
+  exit 1
+fi
+
+# Reviewed binaries are deliberately outside both engine invocations. This is
+# what makes the rg and git-grep verdict identical for the binary case.
+scannable_scan_files=()
+for scan_path in "${tracked_secret_scan_files[@]}"; do
+  scan_path_is_reviewed_binary=0
+  for binary_path in "${reviewed_binary_paths[@]}"; do
+    [[ "$scan_path" == "$binary_path" ]] && scan_path_is_reviewed_binary=1
+  done
+  [[ "$scan_path_is_reviewed_binary" -eq 0 ]] && scannable_scan_files+=("$scan_path")
+done
+
 echo "==> high-confidence secret scan (engine: $secret_scan_engine)"
 echo "secret scan coverage: ${#scannable_scan_files[@]}/${#tracked_secret_scan_files[@]} tracked files are line-scannable"
-if [[ "${#binary_scan_files[@]}" -ne 0 ]]; then
-  echo "secret scan skips ${#binary_scan_files[@]} tracked file(s) git classifies as binary:" >&2
-  printf '  %s\n' "${binary_scan_files[@]:0:20}" >&2
+if [[ "${#reviewed_binary_paths[@]}" -ne 0 ]]; then
+  echo "secret scan reviewed binary exception(s): ${#reviewed_binary_paths[@]}" >&2
+  printf '  %s\n' "${reviewed_binary_paths[@]}" >&2
 fi
 
 # --- scan ---------------------------------------------------------------
@@ -236,11 +336,11 @@ run_secret_scan_engine() {
   set +e
   case "$secret_scan_engine" in
     rg)
-      rg "${rg_common[@]}" -e "$pattern" -- "${tracked_secret_scan_files[@]}" >"$match_file"
+      rg "${rg_common[@]}" -e "$pattern" -- "${scannable_scan_files[@]}" >"$match_file"
       status=$?
       ;;
     git-grep)
-      git "${git_grep_common[@]}" -e "$pattern" -- "${tracked_secret_scan_files[@]}" >"$match_file"
+      git "${git_grep_common[@]}" -e "$pattern" -- "${scannable_scan_files[@]}" >"$match_file"
       status=$?
       ;;
   esac

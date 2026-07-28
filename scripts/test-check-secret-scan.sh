@@ -18,17 +18,39 @@
 # is assembled at runtime, so this file does not trip the scan it tests.
 set -uo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[[ "$script_dir" == "${BASH_SOURCE[0]}" ]] && script_dir="."
+cd "$script_dir/.."
+root="$PWD"
 script="${root}/scripts/check-secret-scan.sh"
 security_check="${root}/scripts/security-check.sh"
 
 bash_bin="$(command -v bash)"
 
+missing_self_test_tools=()
+for required_tool in git mktemp rm mkdir ln head tr grep sed tail sort comm diff cut cp chmod wc sha256sum; do
+  command -v "$required_tool" >/dev/null 2>&1 || missing_self_test_tools+=("$required_tool")
+done
+if [[ "${#missing_self_test_tools[@]}" -ne 0 ]]; then
+  printf 'secret-scan self-test did NOT run: missing required tool(s) on PATH: %s\n' \
+    "${missing_self_test_tools[*]}" >&2
+  exit 1
+fi
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 failures=0
-pass() { printf 'ok   - %s\n' "$1"; }
+passes=0
+skips=0
+pass() {
+  passes=$((passes + 1))
+  printf 'ok   - %s\n' "$1"
+}
+skip() {
+  skips=$((skips + 1))
+  printf 'skip - %s\n' "$1"
+}
 fail() {
   printf 'FAIL - %s\n' "$1" >&2
   [[ "$#" -ge 2 ]] && printf '       %s\n' "$2" >&2
@@ -133,8 +155,6 @@ mkdir -p "$clean_repo"
 # 1. Missing-tool behaviour: the reason this issue exists.
 # ---------------------------------------------------------------------------
 no_search_path="$(make_shim_path "$work/bin-no-search" "${base_tools[@]}")"
-out="$("$script" --root "$corpus" 2>&1)"
-status=$?
 neither_out="$(PATH="$no_search_path" "$bash_bin" "$script" --root "$corpus" 2>&1)"
 neither_status=$?
 
@@ -144,16 +164,12 @@ else
   fail "no search tool on PATH: exits non-zero" "got status 0, output: $neither_out"
 fi
 
-if [[ "$neither_out" == *"'rg'"* ]]; then
-  pass "no search tool on PATH: message names rg"
+missing_scanner_line="secret scan did NOT run: ripgrep not found on PATH and git grep fallback unavailable"
+if printf '%s\n' "$neither_out" | grep -qxF "$missing_scanner_line"; then
+  pass "no search tool on PATH: exact did-NOT-run message names both engines"
 else
-  fail "no search tool on PATH: message names rg" "output: $neither_out"
-fi
-
-if [[ "$neither_out" == *"'git'"* || "$neither_out" == *"git grep"* ]]; then
-  pass "no search tool on PATH: message names git / git grep"
-else
-  fail "no search tool on PATH: message names git / git grep" "output: $neither_out"
+  fail "no search tool on PATH: exact did-NOT-run message names both engines" \
+    "expected exact line: $missing_scanner_line; output: $neither_out"
 fi
 
 # The script must not pretend it found something when it could not look.
@@ -174,7 +190,30 @@ if command -v rg >/dev/null 2>&1; then
     fail "git absent but rg present: exits non-zero naming git" "status $no_git_status, output: $no_git_out"
   fi
 else
-  printf 'skip - rg-without-git assertion (rg is not installed here)\n'
+  skip "rg-without-git assertion (rg is not installed here)"
+fi
+
+# A required helper missing after engine selection is also a named refusal.
+missing_comm_path="$(make_shim_path "$work/bin-no-comm" bash mktemp sed sort rm sha256sum git)"
+missing_comm_out="$(PATH="$missing_comm_path" "$bash_bin" "$script" --root "$clean_repo" 2>&1)"
+missing_comm_status=$?
+missing_comm_line="secret scan did NOT run: missing required tool(s) on PATH: comm"
+if [[ "$missing_comm_status" -ne 0 ]] &&
+  printf '%s\n' "$missing_comm_out" | grep -qxF "$missing_comm_line"; then
+  pass "missing runtime helper: exact did-NOT-run message names comm"
+else
+  fail "missing runtime helper: exact did-NOT-run message names comm" \
+    "status $missing_comm_status, expected exact line: $missing_comm_line; output: $missing_comm_out"
+fi
+
+# --help must not depend on sed or any other external helper whose absence the
+# preflight is meant to diagnose.
+help_out="$(PATH=/nonexistent "$bash_bin" "$script" --help 2>&1)"
+help_status=$?
+if [[ "$help_status" -eq 0 && "$help_out" == *"Usage:"* ]]; then
+  pass "--help works on a stripped PATH"
+else
+  fail "--help works on a stripped PATH" "status $help_status, output: $help_out"
 fi
 
 # security-check.sh itself must name a missing tool instead of dying mid-way.
@@ -185,7 +224,7 @@ if [[ "$stripped_status" -ne 0 ]]; then
 else
   fail "security-check.sh with an empty PATH: exits non-zero" "output: $stripped_out"
 fi
-for tool in cargo python3 git; do
+for tool in cargo python3 git bash mktemp sed sort comm rm tr wc; do
   if [[ "$stripped_out" == *"missing required tool"*"$tool"* ]]; then
     pass "security-check.sh with an empty PATH: message names $tool"
   else
@@ -227,7 +266,54 @@ if command -v rg >/dev/null 2>&1; then
     fail "ripgrep present: rg engine selected and clean repo passes" "status $rg_clean_status, output: $rg_clean_out"
   fi
 else
-  printf 'skip - ripgrep engine assertions (rg is not installed here)\n'
+  skip "ripgrep engine assertions (rg is not installed here)"
+fi
+
+# A tracked binary is a coverage failure before either engine runs. This closes
+# the only known verdict divergence: rg may report "binary file matches" while
+# `git grep -I` silently omits the same file.
+binary_repo="$work/binary"
+mkdir -p "$binary_repo"
+(
+  cd "$binary_repo"
+  git init -q .
+  git config user.email scan@test.invalid
+  git config user.name 'scan test'
+  printf 'plain text\n' >text.rs
+  : >empty.rs
+  printf 'before\000after\n' >binary.rs
+  git add -A
+  git commit -qm binary
+) >/dev/null
+
+binary_fallback_out="$(PATH="$git_only_path" "$bash_bin" "$script" --root "$binary_repo" 2>&1)"
+binary_fallback_status=$?
+if [[ "$binary_fallback_status" -ne 0 && "$binary_fallback_out" == *"binary coverage failure"* &&
+  "$binary_fallback_out" == *"binary.rs"* ]]; then
+  pass "git-grep fallback: tracked binary file fails before the scan"
+else
+  fail "git-grep fallback: tracked binary file fails before the scan" \
+    "status $binary_fallback_status, output: $binary_fallback_out"
+fi
+if [[ "$binary_fallback_out" != *"empty.rs: binary"* && "$binary_fallback_out" != *"secret scan passed"* ]]; then
+  pass "binary guard: an empty text file is not misclassified and no pass is reported"
+else
+  fail "binary guard: an empty text file is not misclassified and no pass is reported" \
+    "output: $binary_fallback_out"
+fi
+
+if command -v rg >/dev/null 2>&1; then
+  binary_rg_out="$("$bash_bin" "$script" --root "$binary_repo" 2>&1)"
+  binary_rg_status=$?
+  if [[ "$binary_rg_status" -ne 0 && "$binary_rg_out" == *"binary coverage failure"* &&
+    "$binary_rg_out" == *"binary.rs"* ]]; then
+    pass "rg: tracked binary file has the same failing verdict"
+  else
+    fail "rg: tracked binary file has the same failing verdict" \
+      "status $binary_rg_status, output: $binary_rg_out"
+  fi
+else
+  skip "rg binary-verdict assertion (rg is not installed here)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -308,7 +394,7 @@ if command -v rg >/dev/null 2>&1; then
       "$(diff "$work/rg.script" "$work/gg.script" | cut -c1-200 | head -10)"
   fi
 else
-  printf 'skip - script-level engine equivalence (rg is not installed here)\n'
+  skip "script-level engine equivalence (rg is not installed here)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -344,7 +430,7 @@ if command -v rg >/dev/null 2>&1; then
     fi
   done
 else
-  printf 'skip - engine equivalence diff (rg is not installed here)\n'
+  skip "engine equivalence diff (rg is not installed here)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -401,22 +487,32 @@ fi
 # sentence. So the assertion could never notice the scan SHRINKING -- which,
 # for a secret scan, is the only failure that matters. Coverage IS the product.
 #
-# Assert the reported count against the tree instead of against a literal: a
-# hard-coded 1492 rots on the next commit, and a substring of the sentence
-# asserts that the sentence exists.
+# Assert the reported count against an independently derived Git list instead
+# of against a literal or the script's own --list-files output. A mutation that
+# narrows the product list therefore cannot narrow the expected count with it.
 reported_scanned="$(printf '%s' "$self_out" | grep -oE '[0-9]+ tracked files are line-scannable' | grep -oE '^[0-9]+' | head -1)"
-tracked_total="$(git -C "$root" ls-files | wc -l | tr -d ' ')"
+expected_scanned="$(git -C "$root" ls-files -- ':!:Cargo.lock' | wc -l | tr -d ' ')"
 if [[ -z "$reported_scanned" ]]; then
   fail "scan reports its coverage instead of staying silent" "$self_out"
-elif [[ "$reported_scanned" -lt $(( tracked_total * 9 / 10 )) ]]; then
-  # A scan that silently stops covering a tenth of the tree is the regression
-  # this file exists to catch. The floor is deliberately a ratio, not a
-  # literal, so it survives the tree growing.
-  fail "the scan covers at least 90% of tracked files" \
-    "reported ${reported_scanned} of ${tracked_total} tracked files"
+elif [[ "$reported_scanned" -ne "$expected_scanned" ]]; then
+  fail "the scan covers every independently enumerated authored file" \
+    "reported ${reported_scanned}; git independently enumerated ${expected_scanned} excluding only root Cargo.lock"
 else
-  pass "scan reports its coverage and covers ${reported_scanned}/${tracked_total} tracked files"
+  pass "scan reports exact coverage of all ${expected_scanned} authored files"
 fi
+
+for coverage_anchor in \
+  admin-console/src/pages/assets.tsx \
+  crates/ferrogate-gateway/src/lib.rs \
+  scripts/security-check.sh \
+  workers/agent-gateway/src/index.ts; do
+  if grep -qxF "$coverage_anchor" <<<"$scan_list"; then
+    pass "scan coverage includes top-level anchor: $coverage_anchor"
+  else
+    fail "scan coverage includes top-level anchor: $coverage_anchor" \
+      "the scan list silently dropped an owned top-level surface"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 7. The reviewed-exception allowlist (#566).
@@ -585,11 +681,9 @@ else
   fail "allowlist: no digest tool on PATH never reports a pass" "output: $no_digest_out"
 fi
 
-# Unused status from the very first probe; keep shellcheck and readers honest.
-: "$out" "$status"
-
 if [[ "$failures" -ne 0 ]]; then
-  printf '\n%d assertion(s) failed\n' "$failures" >&2
+  printf '\nsecret-scan assertions failed: %d passed, %d failed, %d skipped\n' \
+    "$passes" "$failures" "$skips" >&2
   exit 1
 fi
-printf '\nall secret-scan assertions passed\n'
+printf '\nsecret-scan assertions passed: %d passed, %d skipped\n' "$passes" "$skips"

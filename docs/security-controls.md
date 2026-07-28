@@ -284,11 +284,24 @@ The secret scan lives in
 ripgrep and falls back to `git grep -I`, which ships wherever the repository
 does; if neither is available it exits non-zero naming both tools rather than
 skipping (#525 — the scan previously hard-coded `rg` and died on any box
-without it, so the gate looked green while never running). It also reports how
-many tracked files are line-scannable, because a NUL byte makes both engines
-skip a file silently (#344, #487). `scripts/test-check-secret-scan.sh` drives
-the script with each tool shadowed out of `PATH` and diffs both engines over a
-planted-credential corpus.
+without it, so the gate looked green while never running). Before either engine
+runs, the gate rejects tracked files that git classifies as binary; this keeps
+ripgrep's `binary file matches` behaviour from diverging from `git grep -I`'s
+silent omission. A necessary binary exception must name an owner and reason and
+pin the exact file by SHA-256; a stale or changed entry fails. The scan reports
+its admitted-file count, and the self-test compares that count with an
+independent `git ls-files` enumeration plus anchors in `admin-console/`,
+`crates/`, `scripts/`, and `workers/`.
+
+The root `Cargo.lock` is the one file intentionally outside that enumeration:
+it is generated dependency inventory covered by `cargo metadata --locked`, the
+protobuf advisory floor, cargo-audit, cargo-deny, and release-attestation digest
+checks rather than by the authored-source credential patterns. Nested lockfile
+fixtures remain in scope. `scripts/test-check-secret-scan.sh` drives the script
+with each tool shadowed out of `PATH`. When ripgrep is installed it also diffs
+both engines over a planted-credential corpus; CI installs ripgrep explicitly,
+while a box without it reports the skipped equivalence assertions in the
+self-test's final pass/skip counts.
 
 A handful of test fixtures legitimately match — a synthetic token a leak test
 asserts never leaves the Worker, for instance. Those are reviewed exceptions in

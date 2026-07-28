@@ -23,11 +23,11 @@ require_supply_chain_tools="${FERROGATE_SECURITY_REQUIRE_TOOLS:-0}"
 # cargo deny / cargo audit stay optional and keep their own explicit skip
 # notices, gated by FERROGATE_SECURITY_REQUIRE_TOOLS.
 missing_tools=()
-for required_tool in cargo python3 git; do
+for required_tool in cargo python3 git bash mktemp sed sort comm rm tr wc; do
   command -v "$required_tool" >/dev/null 2>&1 || missing_tools+=("$required_tool")
 done
 if [[ "${#missing_tools[@]}" -ne 0 ]]; then
-  echo "security check cannot run: missing required tool(s): ${missing_tools[*]}" >&2
+  echo "security check did NOT run: missing required tool(s) on PATH: ${missing_tools[*]}" >&2
   echo "a gate that cannot run must fail loudly instead of skipping itself (#525)" >&2
   exit 1
 fi
