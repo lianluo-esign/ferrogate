@@ -135,3 +135,13 @@ fn help_summary_lists_every_group_verb() {
     assert!(summary.contains("context use"));
     assert_eq!(summary.lines().count(), 5);
 }
+
+#[test]
+fn positional_query_segments_are_explicit_metadata() {
+    let ordinary = VerbDescriptor::read("get", "Show", "getThing");
+    assert_eq!(ordinary.positional_query_segments(), 0);
+
+    let positional =
+        VerbDescriptor::mutating("set", "Set", "putThing").with_positional_query_segments(1);
+    assert_eq!(positional.positional_query_segments(), 1);
+}

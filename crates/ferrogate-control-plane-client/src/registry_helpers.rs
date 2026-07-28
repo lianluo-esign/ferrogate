@@ -96,7 +96,7 @@ pub fn first_segment<'a>(input: &'a ResourceInput, resource: &str) -> CliResult<
         .ok_or_else(|| CliError::usage(format!("this {resource} verb requires a target id")))
 }
 
-/// Reject an item verb that was given no target id (#361 review finding 1).
+/// Reject a target verb that was not given its complete key.
 ///
 /// `item_path(&[])` loops zero times and returns the BARE COLLECTION path, and
 /// the clap positional `segments: Vec<String>` carries no arity requirement, so
@@ -109,26 +109,35 @@ pub fn first_segment<'a>(input: &'a ResourceInput, resource: &str) -> CliResult<
 /// * `ferrogate ctl projects delete` issued a collection-level
 ///   `DELETE /admin/v1/projects`, with no client-side guard whatsoever.
 ///
-/// Action verbs never had this hole -- they resolve their target through
-/// [`first_segment`], which errors on an absent id. This is the same guard for
-/// the item CRUD verbs, so both paths refuse identically.
+/// Single-key CRUD uses one segment; composite resources state the complete
+/// count through [`build_crud_with_item_segments`]. Action verbs may call this
+/// directly when their target is not a single id.
 ///
 /// `list` is deliberately NOT guarded: an empty segment list IS the top-level
 /// collection read, and a non-empty one is a nested list (e.g. tenant-role
 /// bindings under a tenant). `create` addresses the collection by definition.
-fn require_item_segments<'a>(
+pub(crate) fn require_target_segments<'a>(
     api: &ResourceApi,
     verb: &str,
     segments: &'a [&'a str],
+    required: usize,
 ) -> CliResult<&'a [&'a str]> {
-    if segments
-        .first()
-        .is_none_or(|segment| segment.trim().is_empty())
+    assert!(required > 0, "target verbs require at least one segment");
+    if segments.len() < required
+        || segments
+            .iter()
+            .take(required)
+            .any(|segment| segment.trim().is_empty())
     {
+        let requirement = if required == 1 {
+            "a target id".to_string()
+        } else {
+            format!("{required} non-empty target segments")
+        };
         return Err(CliError::usage(format!(
-            "verb '{verb}' requires a target id: it addresses one item under {}, \
-             and without an id it would address the whole collection",
-            api.collection_path()
+            "verb '{verb}' requires {requirement} under {}; received {} segment(s)",
+            api.collection_path(),
+            segments.len()
         )));
     }
     Ok(segments)
@@ -140,20 +149,42 @@ fn require_item_segments<'a>(
 /// registry has already validated the verb against the family descriptor, so
 /// this arm only fires for a family that declared a verb it did not wire.
 pub fn build_crud(api: &ResourceApi, verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
+    build_crud_with_item_segments(api, verb, input, 1)
+}
+
+/// Map uniform CRUD verbs while requiring the complete item key for item
+/// operations. Composite-key resources use this instead of silently accepting
+/// the first segment as a complete key.
+pub fn build_crud_with_item_segments(
+    api: &ResourceApi,
+    verb: &str,
+    input: &ResourceInput,
+    required_item_segments: usize,
+) -> CliResult<RequestSpec> {
     let segments = input.segment_refs();
     match verb {
         "list" => api.read(&segments, &input.list),
-        "get" => api.get(require_item_segments(api, verb, &segments)?),
+        "get" => api.get(require_target_segments(
+            api,
+            verb,
+            &segments,
+            required_item_segments,
+        )?),
         "create" => api.create(input.require_body(verb)?),
         "replace" => api.replace(
-            require_item_segments(api, verb, &segments)?,
+            require_target_segments(api, verb, &segments, required_item_segments)?,
             input.require_body(verb)?,
         ),
         "update" => api.update(
-            require_item_segments(api, verb, &segments)?,
+            require_target_segments(api, verb, &segments, required_item_segments)?,
             input.require_body(verb)?,
         ),
-        "delete" => api.delete(require_item_segments(api, verb, &segments)?),
+        "delete" => api.delete(require_target_segments(
+            api,
+            verb,
+            &segments,
+            required_item_segments,
+        )?),
         other => Err(CliError::usage(format!(
             "verb '{other}' is not a standard CRUD verb for {}",
             api.collection_path()

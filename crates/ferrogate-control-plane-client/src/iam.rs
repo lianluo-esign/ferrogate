@@ -26,7 +26,8 @@
 use crate::command::{CommandGroup, GroupDescriptor, VerbDescriptor};
 use crate::error::CliResult;
 use crate::registry_helpers::{
-    build_crud, build_item_action, build_item_delete, first_segment, ResourceInput,
+    build_crud, build_item_action, build_item_delete, first_segment, require_target_segments,
+    ResourceInput,
 };
 use crate::resource::ResourceApi;
 use crate::transport::RequestSpec;
@@ -228,8 +229,13 @@ pub fn build_tenant_roles(verb: &str, input: &ResourceInput) -> CliResult<Reques
             first_segment(input, "tenant-role")?;
             TENANT_ROLES.read(&segments, &input.list)
         }
-        "bind" => TENANT_ROLES.action(&segments, Some(input.require_body(verb)?)),
-        "unbind" => TENANT_ROLES.delete(&segments),
+        "bind" => TENANT_ROLES.action(
+            require_target_segments(&TENANT_ROLES, verb, &segments, 1)?,
+            Some(input.require_body(verb)?),
+        ),
+        "unbind" => {
+            TENANT_ROLES.delete(require_target_segments(&TENANT_ROLES, verb, &segments, 2)?)
+        }
         other => build_crud(&TENANT_ROLES, other, input),
     }
 }

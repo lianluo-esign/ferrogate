@@ -84,6 +84,16 @@ pub struct VerbDescriptor {
     pub operation_id: Option<String>,
     /// Whether the verb changes state — the render gate's input (issue #505).
     pub effect: VerbEffect,
+    /// Required query values supplied as positional CLI segments after the
+    /// operation's OpenAPI path parameters.
+    ///
+    /// Most required query parameters use [`crate::resource::ListParams`]. A
+    /// small number are intentionally positional because they identify the
+    /// target of a mutation (currently `asset-channels set <...> <version>`).
+    /// Keeping that exception in verb metadata lets registry-wide tooling
+    /// derive the complete positional arity from the OpenAPI path plus this
+    /// explicit delta, instead of guessing what a permissive builder accepts.
+    positional_query_segments: usize,
 }
 
 impl VerbDescriptor {
@@ -104,6 +114,7 @@ impl VerbDescriptor {
             about: about.into(),
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Read,
+            positional_query_segments: 0,
         }
     }
 
@@ -120,6 +131,7 @@ impl VerbDescriptor {
             about: about.into(),
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Mutating,
+            positional_query_segments: 0,
         }
     }
 
@@ -130,7 +142,20 @@ impl VerbDescriptor {
             about: about.into(),
             operation_id: None,
             effect: VerbEffect::Local,
+            positional_query_segments: 0,
         }
+    }
+
+    /// Declare required query values that the CLI accepts as positional
+    /// segments after the operation's path parameters.
+    pub fn with_positional_query_segments(mut self, count: usize) -> VerbDescriptor {
+        self.positional_query_segments = count;
+        self
+    }
+
+    /// Number of required query values supplied positionally by this verb.
+    pub fn positional_query_segments(&self) -> usize {
+        self.positional_query_segments
     }
 
     /// Whether this verb changes Control-Plane state.

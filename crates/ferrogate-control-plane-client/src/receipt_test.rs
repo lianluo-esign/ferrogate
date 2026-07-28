@@ -48,10 +48,12 @@ use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
 use crate::dispatch::build_request;
 use crate::output::{render_output, OutputFormat};
 use crate::registry_helpers::ResourceInput;
+use crate::resource::ListParams;
 use crate::transport::{PreparedRequest, RawResponse};
 use crate::{register_resource_families, Registry};
 use http::Method;
-use std::sync::Mutex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 fn test_context() -> EffectiveContext {
@@ -250,66 +252,159 @@ fn full_registry() -> Registry {
     registry
 }
 
-/// The most id segments the prober will offer a family builder before it
-/// declares a verb unconstructable.
-///
-/// This is a bound on the SEARCH, not a claim about the registry: the search
-/// stops at the first arity a builder accepts, so a four-segment verb is found
-/// at four and an eight-segment one would be found at eight. The constant
-/// exists only so that an unconstructable verb terminates instead of looping.
-/// [`every_registered_verb_is_constructable_by_the_prober`] asserts the
-/// deepest verb the registry actually holds sits strictly below this number,
-/// so the ceiling cannot quietly become the thing that decides an answer —
-/// which is exactly what the old ceiling of three did.
-const MAX_PROBE_SEGMENTS: usize = 8;
+#[derive(Debug)]
+struct ProbeContract {
+    path_segments: usize,
+    required_query: Vec<String>,
+}
 
-/// Build a request for `group verb` with the FEWEST id segments its own family
-/// builder accepts, and report the segments handed over.
+/// Required request inputs keyed by OpenAPI operation id.
 ///
-/// The arity is read off the builder — the only thing in the crate that knows
-/// a verb's addressing shape — by offering it 0, 1, 2, … segments and stopping
-/// at the first shape it accepts. Every builder rejects an under-addressed verb
-/// with a usage error (`require_item_segments`, `first_segment`, or an explicit
-/// slice pattern), so "the shortest list the builder does not reject" *is* the
-/// verb's required arity, and a builder that grew a fifth required segment
-/// yesterday is followed today without anyone editing this file.
-///
-/// **Why not a table, and why not descending.** `VerbDescriptor` carries no
-/// declared arity to read, and adding one would touch every family in the
-/// crate. The previous shape
-/// — try 3, then 2, then 1, then 0, take the first that builds — was wrong in
-/// two ways at once. It capped the search at three, so `asset-channels set`,
-/// which already required four segments when the sweeps were added, made those
-/// new sweeps born red: they never successfully covered the full registry.
-/// And by descending it took the LONGEST arity a builder tolerates, which for
-/// the many builders that match `[a, b, ..]` means a request carrying junk
-/// trailing segments rather than the request the verb actually issues.
-///
-/// # Errors
-/// Returns a message naming `group verb` when no arity up to
-/// [`MAX_PROBE_SEGMENTS`] builds. Callers must treat that as a failure, never
-/// as a verb to skip: [`probe_spec`] is the panicking form every sweep uses.
-fn try_probe_spec(group: &str, verb: &str) -> Result<(RequestSpec, Vec<String>), String> {
-    let mut attempts: Vec<String> = Vec::new();
-    for arity in 0..=MAX_PROBE_SEGMENTS {
-        let segments: Vec<String> = (0..arity).map(|index| format!("probe-{index}")).collect();
-        let input = ResourceInput::new()
-            .with_segments(segments.clone())
-            .with_body(serde_json::json!({"probe": true}));
-        match build_request(group, verb, &input) {
-            Ok(spec) => return Ok((spec, segments)),
-            Err(error) => attempts.push(format!("  {arity} segment(s): {error}")),
+/// Path arity comes from the enforced contract's path template, not from what
+/// a builder happens to accept. Required query values are also populated so a
+/// probe represents a contract-valid request. A positional query value is an
+/// explicit [`VerbDescriptor::positional_query_segments`] exception layered on
+/// top of this contract (currently `asset-channels set`'s version).
+fn probe_contracts() -> &'static BTreeMap<String, ProbeContract> {
+    static CONTRACTS: OnceLock<BTreeMap<String, ProbeContract>> = OnceLock::new();
+    CONTRACTS.get_or_init(|| {
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+                .expect("the OpenAPI contract parses");
+        let paths = document["paths"]
+            .as_object()
+            .expect("the OpenAPI contract has paths");
+        let component_parameters = document["components"]["parameters"]
+            .as_object()
+            .expect("the OpenAPI contract has component parameters");
+        let mut contracts = BTreeMap::new();
+        for (path, path_item) in paths {
+            for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
+                let Some(operation) = path_item.get(method) else {
+                    continue;
+                };
+                let Some(operation_id) = operation["operationId"].as_str() else {
+                    continue;
+                };
+                let mut required_query = BTreeSet::new();
+                for raw_parameter in path_item["parameters"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(operation["parameters"].as_array().into_iter().flatten())
+                {
+                    let parameter = if let Some(reference) = raw_parameter["$ref"].as_str() {
+                        let name = reference.rsplit('/').next().unwrap_or_default();
+                        component_parameters.get(name).unwrap_or_else(|| {
+                            panic!("{operation_id} references unknown parameter {reference}")
+                        })
+                    } else {
+                        raw_parameter
+                    };
+                    if parameter["in"] == "query" && parameter["required"] == true {
+                        required_query.insert(
+                            parameter["name"]
+                                .as_str()
+                                .unwrap_or_else(|| {
+                                    panic!("{operation_id} has an unnamed required query parameter")
+                                })
+                                .to_string(),
+                        );
+                    }
+                }
+                let replaced = contracts.insert(
+                    operation_id.to_string(),
+                    ProbeContract {
+                        path_segments: path.matches('{').count(),
+                        required_query: required_query.into_iter().collect(),
+                    },
+                );
+                assert!(
+                    replaced.is_none(),
+                    "OpenAPI operation id '{operation_id}' is duplicated"
+                );
+            }
         }
-    }
-    Err(format!(
-        "registered verb '{group} {verb}' could not be probed: no id-segment list of 0..={} \
-         segments builds a request for it. This is a FAILURE, not a verb to skip — a verb the \
-         prober cannot construct is a verb every whole-registry sweep in this file silently stops \
-         checking. Either the builder's addressing shape is wrong, or it needs more segments than \
-         the prober offers (raise MAX_PROBE_SEGMENTS). Attempts:\n{}",
-        MAX_PROBE_SEGMENTS,
-        attempts.join("\n")
+        contracts
+    })
+}
+
+fn registry_verb_count(registry: &Registry) -> usize {
+    registry
+        .groups()
+        .iter()
+        .map(|group| group.verbs.len())
+        .sum()
+}
+
+fn registry_mutating_verb_count(registry: &Registry) -> usize {
+    registry
+        .groups()
+        .iter()
+        .flat_map(|group| &group.verbs)
+        .filter(|verb| verb.is_mutating())
+        .count()
+}
+
+fn probe_input(
+    operation_id: &str,
+    positional_query_segments: usize,
+) -> Result<(ResourceInput, Vec<String>), String> {
+    let contract = probe_contracts()
+        .get(operation_id)
+        .ok_or_else(|| format!("OpenAPI contract has no operation '{operation_id}'"))?;
+    let arity = contract.path_segments + positional_query_segments;
+    let segments: Vec<String> = (0..arity).map(|index| format!("probe-{index}")).collect();
+    let list = contract
+        .required_query
+        .iter()
+        .fold(ListParams::new(), |list, parameter| {
+            list.with_filter(parameter, format!("probe-{parameter}"))
+        });
+    Ok((
+        ResourceInput::new()
+            .with_segments(segments.clone())
+            .with_body(serde_json::json!({"probe": true}))
+            .with_list(list),
+        segments,
     ))
+}
+
+/// Build `group verb` at the exact positional arity its OpenAPI path and verb
+/// metadata require. A permissive builder cannot move this probe onto a longer
+/// shape, and an under-guarded builder cannot move it onto a shorter one.
+fn try_probe_spec(group: &str, verb: &str) -> Result<(RequestSpec, Vec<String>), String> {
+    let registry = full_registry();
+    let descriptor = registry
+        .resolve(group, verb)
+        .map_err(|error| format!("registered verb '{group} {verb}' is unavailable: {error}"))?;
+    let operation_id = descriptor
+        .operation_id
+        .as_deref()
+        .ok_or_else(|| format!("registered verb '{group} {verb}' has no OpenAPI operation id"))?;
+    let (input, segments) = probe_input(operation_id, descriptor.positional_query_segments())
+        .map_err(|error| format!("registered verb '{group} {verb}' cannot be probed: {error}"))?;
+    let spec = build_request(group, verb, &input).map_err(|error| {
+        format!(
+            "registered verb '{group} {verb}' rejects its contract-required {} positional \
+             segment(s): {error}",
+            segments.len()
+        )
+    })?;
+    let contract = &probe_contracts()[operation_id];
+    let missing_query: Vec<&str> = contract
+        .required_query
+        .iter()
+        .map(String::as_str)
+        .filter(|required| !spec.query.iter().any(|(name, _)| name == required))
+        .collect();
+    if !missing_query.is_empty() {
+        return Err(format!(
+            "registered verb '{group} {verb}' omits required OpenAPI query parameter(s): {}",
+            missing_query.join(", ")
+        ));
+    }
+    Ok((spec, segments))
 }
 
 /// [`try_probe_spec`], panicking with the verb's name.
@@ -322,33 +417,46 @@ fn probe_spec(group: &str, verb: &str) -> (RequestSpec, Vec<String>) {
     try_probe_spec(group, verb).unwrap_or_else(|failure| panic!("{failure}"))
 }
 
-/// Every verb in the registry can be turned into a request by the prober, and
-/// the prober's ceiling is not what decided that.
-///
-/// The three whole-registry sweeps below each probe every verb, so any verb the
-/// prober cannot construct takes all three of them down. Their first descending
-/// implementation was added after a four-segment verb already existed and was
-/// therefore born red; it stopped at the first builder usage error without
-/// naming the failure as lost coverage. This guard says exactly that, names
-/// every offending verb in one run rather than the first, and reds if the
-/// ceiling ever becomes binding.
-///
-/// Catches, by construction: lowering `MAX_PROBE_SEGMENTS` to 3 (the pre-fix
-/// value) reds this test naming `asset-channels set`; adding a verb whose
-/// builder cannot be satisfied by positional segments reds it naming that verb.
+/// Every verb builds at exactly the arity declared by the OpenAPI path plus its
+/// explicit positional-query metadata. Every addressed verb also rejects one
+/// segment fewer, so an under-guarded live builder is named rather than trusted
+/// as the source of its own requirement.
 #[test]
 fn every_registered_verb_is_constructable_by_the_prober() {
     let registry = full_registry();
     let mut unconstructable: Vec<String> = Vec::new();
-    let mut deepest: (usize, String) = (0, "<none>".to_string());
     let mut probed = 0usize;
     for group in registry.groups() {
         for verb in &group.verbs {
             match try_probe_spec(&group.name, &verb.name) {
                 Ok((_, segments)) => {
                     probed += 1;
-                    if segments.len() > deepest.0 {
-                        deepest = (segments.len(), format!("{} {}", group.name, verb.name));
+                    if !segments.is_empty() {
+                        let operation_id = verb.operation_id.as_deref().unwrap_or_else(|| {
+                            panic!("'{} {}' has no OpenAPI operation id", group.name, verb.name)
+                        });
+                        let (short_input, _) =
+                            probe_input(operation_id, verb.positional_query_segments())
+                                .unwrap_or_else(|error| {
+                                    panic!(
+                                        "'{} {}' has no probe contract: {error}",
+                                        group.name, verb.name
+                                    )
+                                });
+                        let short_input = ResourceInput::new()
+                            .with_segments(segments[..segments.len() - 1].to_vec())
+                            .with_body(serde_json::json!({"probe": true}))
+                            .with_list(short_input.list);
+                        if build_request(&group.name, &verb.name, &short_input).is_ok() {
+                            unconstructable.push(format!(
+                                "registered verb '{} {}' accepts {} positional segment(s), one \
+                                 fewer than its contract requires ({})",
+                                group.name,
+                                verb.name,
+                                segments.len() - 1,
+                                segments.len()
+                            ));
+                        }
                     }
                 }
                 Err(failure) => unconstructable.push(failure),
@@ -362,52 +470,26 @@ fn every_registered_verb_is_constructable_by_the_prober() {
         unconstructable.len(),
         unconstructable.join("\n\n")
     );
-    assert!(
-        probed > 200,
-        "expected the full registry to expose 200+ verbs, saw {probed}"
-    );
-    // Headroom, not decoration: if the deepest verb ever sits AT the ceiling,
-    // the next verb one segment deeper is invisible again, and the sweeps go
-    // dark exactly the way they did in #569.
-    assert!(
-        deepest.0 < MAX_PROBE_SEGMENTS,
-        "the deepest registered verb ('{}') needs {} segments and MAX_PROBE_SEGMENTS is {}; the \
-         search ceiling is now the thing deciding what gets checked — raise it",
-        deepest.1,
-        deepest.0,
-        MAX_PROBE_SEGMENTS
+    assert_eq!(
+        probed,
+        registry_verb_count(&registry),
+        "every registered verb must be probed exactly once"
     );
 }
 
-/// A verb the prober cannot construct fails **by name**, and says the failure
-/// is a coverage failure.
+/// A verb the prober cannot construct fails **by name**.
 ///
-/// Pins the `Err` arm of [`try_probe_spec`] and the panic in [`probe_spec`] —
-/// the arm that decides whether a future four-segment verb is a red naming
-/// itself or a silence. `asset-channels` is a real family whose builder
-/// rejects any verb it does not know at every arity, so this exercises the
-/// genuine exhaustion path without a stub registry.
-///
-/// Catches: returning `Ok` with a bogus spec on exhaustion, dropping the group
-/// or verb from the message, and (via the second half) any future call site
-/// that swallows the failure instead of raising it.
+/// This exercises the registry-resolution failure and the panicking wrapper.
+/// Whole-registry call sites add the same identity to their own fallible steps,
+/// so no first failure aborts a sweep as an unnamed `.expect`.
 #[test]
 fn a_verb_the_prober_cannot_construct_fails_by_name() {
     let failure = try_probe_spec("asset-channels", "promote-everything")
-        .expect_err("no arity can satisfy a verb the family does not implement");
+        .expect_err("an unregistered verb cannot be probed");
     assert!(
         failure.contains("asset-channels promote-everything"),
         "the failure must name the verb that could not be built, not just the builder's usage \
          string: {failure}"
-    );
-    assert!(
-        failure.contains("FAILURE, not a verb to skip"),
-        "the failure must say a verb the prober cannot construct is a failure, because treating \
-         it as a skip is the defect: {failure}"
-    );
-    assert!(
-        failure.contains(&format!("{MAX_PROBE_SEGMENTS} segment(s):")),
-        "the failure must show that the search really reached the ceiling: {failure}"
     );
 
     let panicked = std::panic::catch_unwind(|| probe_spec("asset-channels", "promote-everything"));
@@ -420,6 +502,35 @@ fn a_verb_the_prober_cannot_construct_fails_by_name() {
     assert!(
         message.contains("asset-channels promote-everything"),
         "the panic every sweep would raise must name the verb: {message}"
+    );
+}
+
+/// The prober uses the contract's required arity, not a constant and not a
+/// longer shape a permissive builder happens to tolerate.
+#[test]
+fn prober_distinguishes_required_arity_from_tolerated_extra_segments() {
+    for (group, verb, required) in [
+        ("projects", "list", 0),
+        ("projects", "get", 1),
+        ("quota-policies", "get", 2),
+        ("assets", "get", 3),
+        ("asset-channels", "set", 4),
+    ] {
+        let (_, segments) = probe_spec(group, verb);
+        assert_eq!(
+            segments.len(),
+            required,
+            "'{group} {verb}' must be probed at its contract-required arity"
+        );
+    }
+
+    // `projects get` currently accepts trailing segments, but that tolerance is
+    // deliberately not asserted as a contract. Whether it is permissive or is
+    // tightened later, the probe remains at the one segment OpenAPI requires.
+    assert_eq!(
+        probe_spec("projects", "get").1.len(),
+        1,
+        "builder tolerance must not redefine required arity"
     );
 }
 
@@ -442,14 +553,17 @@ fn a_verb_the_prober_cannot_construct_fails_by_name() {
 /// runtime question is held by
 /// `transport_test::reqwest_transport_writes_the_identity_onto_the_socket`.
 ///
-/// The crate has had a dedicated CI slice since its original name in #360. The
-/// ascending `0..=MAX_PROBE_SEGMENTS` implementation landed in `77c921e` before
-/// this documentation and replaced every descending/`expect("probe request")`
-/// call. Evidence for the full claim is therefore deliberately composite:
-/// registry sweep, construction guard, and the independent reqwest wire test.
+/// The crate has had a dedicated workflow slice since #360, but the composing
+/// workflow is release-published only. The receipt/effect sweeps were created
+/// on 2026-07-27 after the four-segment asset verb and were therefore born red;
+/// they were not a four-day regression, nor was their crate absent from the
+/// workflow matrix. Evidence for the full claim is deliberately composite:
+/// exact contract-shaped registry sweep, construction guard, and the
+/// independent reqwest wire test.
 #[test]
 fn every_registered_verb_prepares_the_action_identity_for_transport() {
     let registry = full_registry();
+    let expected = registry_verb_count(&registry);
     let context = test_context();
     let identity = ClientActionIdentity::fixture();
     let mut checked = 0usize;
@@ -457,7 +571,12 @@ fn every_registered_verb_prepares_the_action_identity_for_transport() {
         for verb in &group.verbs {
             let (spec, _) = probe_spec(&group.name, &verb.name);
             let prepared = crate::transport::prepare_request(&spec, &context, None, &identity)
-                .expect("prepare the request the verb would issue");
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "'{} {}' failed while preparing the request: {error}",
+                        group.name, verb.name
+                    )
+                });
             for header in [
                 crate::action_identity::ACTION_ID_HEADER,
                 crate::action_identity::CLIENT_FINGERPRINT_HEADER,
@@ -484,12 +603,9 @@ fn every_registered_verb_prepares_the_action_identity_for_transport() {
             checked += 1;
         }
     }
-    // A floor, not a census: it exists so an empty or half-registered registry
-    // cannot make the loop above vacuous. The exact mutating count is pinned by
-    // `every_mutating_verb_produces_a_well_formed_receipt`, and total >= that.
-    assert!(
-        checked > 100,
-        "expected the full registry, saw only {checked} verbs"
+    assert_eq!(
+        checked, expected,
+        "every registered verb must reach request preparation exactly once"
     );
 }
 
@@ -1026,6 +1142,8 @@ fn the_only_way_to_mint_a_client_sent_at_is_from_a_parsed_server_token() {
 #[test]
 fn declared_verb_effect_matches_the_method_the_builder_emits() {
     let registry = full_registry();
+    let expected = registry_verb_count(&registry);
+    let expected_mutating = registry_mutating_verb_count(&registry);
     let mut checked = 0usize;
     let mut mutating = 0usize;
     for group in registry.groups() {
@@ -1069,15 +1187,13 @@ fn declared_verb_effect_matches_the_method_the_builder_emits() {
             );
         }
     }
-    // Guard against the test silently covering nothing if the registry ever
-    // stops being populated.
-    assert!(
-        checked > 200,
-        "expected the full registry to expose 200+ verbs, saw {checked}"
+    assert_eq!(
+        checked, expected,
+        "every registered verb must reach the method/effect assertion exactly once"
     );
-    assert!(
-        mutating > 90,
-        "expected 90+ mutating verbs across the registry, saw {mutating}"
+    assert_eq!(
+        mutating, expected_mutating,
+        "every registered mutating verb must reach the method/effect assertion exactly once"
     );
 }
 
@@ -1103,7 +1219,13 @@ fn every_mutating_verb_is_gated_to_a_receipt() {
                         group.name,
                         verb.name
                     );
-                    assert_eq!(renderer.verb().name, verb.name);
+                    assert_eq!(
+                        renderer.verb().name,
+                        verb.name,
+                        "'{} {}' receipt renderer points at another verb",
+                        group.name,
+                        verb.name
+                    );
                 }
                 RenderGate::Bare(renderer) => {
                     assert!(
@@ -1113,7 +1235,13 @@ fn every_mutating_verb_is_gated_to_a_receipt() {
                         group.name,
                         verb.name
                     );
-                    assert_eq!(renderer.verb().name, verb.name);
+                    assert_eq!(
+                        renderer.verb().name,
+                        verb.name,
+                        "'{} {}' bare renderer points at another verb",
+                        group.name,
+                        verb.name
+                    );
                 }
             }
         }
@@ -1124,31 +1252,25 @@ fn every_mutating_verb_is_gated_to_a_receipt() {
 /// receipt it produces is well formed (no silent nulls, canonical fingerprint,
 /// stated absence reasons).
 ///
-/// The one `continue` in the loop is the sweep's only way to lose a verb, so it
-/// is guarded: a read verb has no receipt to check and is skipped, but a verb
-/// **declared mutating** that opened a bare gate would otherwise drop out of
-/// this sweep without a word, and `produced > 90` is far too slack a floor to
-/// notice one missing verb. That case now reds naming the verb.
-/// [`every_mutating_verb_is_gated_to_a_receipt`] holds the same disagreement
-/// from the other side; this assertion exists so the *sweep's own* coverage
-/// cannot shrink silently.
+/// Read verbs are excluded by their declared effect. The final equality is a
+/// census of the same registry, not a slack floor, so no mutating verb can
+/// disappear from the sweep without changing the result.
 #[test]
 fn every_mutating_verb_produces_a_well_formed_receipt() {
     let registry = full_registry();
+    let expected = registry_mutating_verb_count(&registry);
     let context = test_context();
     let mut produced = 0usize;
     for group in registry.groups() {
         for verb in &group.verbs {
-            let RenderGate::Receipt(renderer) = verb.render_gate() else {
-                assert!(
-                    !verb.is_mutating(),
-                    "'{} {}' is declared mutating but opened a BARE render gate, so this sweep \
-                     would have skipped it silently — a mutating verb whose receipt nothing \
-                     checks is exactly the hole this sweep exists to close",
-                    group.name,
-                    verb.name
-                );
+            if !verb.is_mutating() {
                 continue;
+            }
+            let RenderGate::Receipt(renderer) = verb.render_gate() else {
+                unreachable!(
+                    "'{} {}' is mutating but did not produce a receipt render gate",
+                    group.name, verb.name
+                )
             };
             let (spec, segments) = probe_spec(&group.name, &verb.name);
             let plan = MutationPlan::new(
@@ -1160,11 +1282,19 @@ fn every_mutating_verb_produces_a_well_formed_receipt() {
                 &ClientActionIdentity::fixture(),
                 true,
             )
-            .expect("plan the mutation");
+            .unwrap_or_else(|error| {
+                panic!(
+                    "'{} {}' failed while planning its receipt: {error}",
+                    group.name, verb.name
+                )
+            });
             let output = plan.dry_run();
-            let receipt = output
-                .receipt()
-                .expect("a mutating verb's output is always a receipt");
+            let receipt = output.receipt().unwrap_or_else(|| {
+                panic!(
+                    "'{} {}' produced no mutation receipt",
+                    group.name, verb.name
+                )
+            });
             let problems = receipt.validate();
             assert!(
                 problems.is_empty(),
@@ -1172,15 +1302,24 @@ fn every_mutating_verb_produces_a_well_formed_receipt() {
                 group.name,
                 verb.name
             );
-            assert!(receipt.dry_run, "dry_run must be echoed as true");
+            assert!(
+                receipt.dry_run,
+                "'{} {}' must echo dry_run as true",
+                group.name, verb.name
+            );
             assert!(
                 output.body().is_none(),
-                "a receipt output must never expose a bare body"
+                "'{} {}' receipt output must never expose a bare body",
+                group.name,
+                verb.name
             );
             produced += 1;
         }
     }
-    assert!(produced > 90, "expected 90+ mutating verbs, saw {produced}");
+    assert_eq!(
+        produced, expected,
+        "every registered mutating verb must produce one receipt"
+    );
 }
 
 /// A dry run issues **no** state-changing request. Asserted on the transport.

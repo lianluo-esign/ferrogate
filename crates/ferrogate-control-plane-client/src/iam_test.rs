@@ -225,6 +225,24 @@ fn tenant_role_list_requires_a_tenant() {
 }
 
 #[test]
+fn tenant_role_mutations_reject_incomplete_targets() {
+    let bind = build_tenant_roles(
+        "bind",
+        &ResourceInput::new().with_body(serde_json::json!({"role_id": "admin"})),
+    )
+    .expect_err("bind requires the tenant path segment");
+    assert_eq!(bind.exit_class(), ExitClass::Usage);
+    assert!(bind.to_string().contains("requires a target id"));
+
+    for segments in [vec![], vec!["t_1"]] {
+        let error = build_tenant_roles("unbind", &ResourceInput::new().with_segments(segments))
+            .expect_err("unbind requires both tenant and role path segments");
+        assert_eq!(error.exit_class(), ExitClass::Usage);
+        assert!(error.to_string().contains("requires 2"));
+    }
+}
+
+#[test]
 fn create_virtual_key_secret_is_returned_once_then_redacted_from_reads() {
     // create returns the one-time secret material.
     let spec = build_virtual_keys(

@@ -19,7 +19,9 @@
 
 use crate::command::{CommandGroup, GroupDescriptor, VerbDescriptor};
 use crate::error::CliResult;
-use crate::registry_helpers::{build_crud, first_segment, ResourceInput};
+use crate::registry_helpers::{
+    build_crud, build_crud_with_item_segments, first_segment, ResourceInput,
+};
 use crate::resource::ResourceApi;
 use crate::transport::RequestSpec;
 use crate::Registry;
@@ -203,7 +205,7 @@ impl CommandGroup for QuotaPoliciesGroup {
 /// `delete` address the two-segment `scope_type/scope_id` key carried in
 /// `input.segments`.
 pub fn build_quota_policies(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
-    build_crud(&QUOTA_POLICIES, verb, input)
+    build_crud_with_item_segments(&QUOTA_POLICIES, verb, input, 2)
 }
 
 /// Standard list/get/create/replace/update/delete verb metadata for a resource

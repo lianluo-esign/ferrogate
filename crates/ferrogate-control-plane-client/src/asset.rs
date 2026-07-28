@@ -258,7 +258,8 @@ impl CommandGroup for AssetChannelsGroup {
             "Manage asset release channels and promotion",
             vec![
                 VerbDescriptor::read("list", "List an asset's channels", "listAssetChannels"),
-                VerbDescriptor::mutating("set", "Point a channel at a version", "putAssetChannel"),
+                VerbDescriptor::mutating("set", "Point a channel at a version", "putAssetChannel")
+                    .with_positional_query_segments(1),
                 VerbDescriptor::mutating("delete", "Delete a channel", "deleteAssetChannel"),
             ],
         )

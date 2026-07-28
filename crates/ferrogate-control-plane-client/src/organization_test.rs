@@ -193,6 +193,28 @@ fn quota_policy_get_addresses_the_composite_scope_key() {
 }
 
 #[test]
+fn quota_policy_item_verbs_require_the_complete_composite_key() {
+    for verb in ["get", "delete"] {
+        let error = build_quota_policies(verb, &ResourceInput::new().with_segments(["tenant"]))
+            .expect_err("scope_type without scope_id is not a quota-policy key");
+        assert_eq!(error.exit_class(), ExitClass::Usage, "{verb}: {error}");
+        assert!(error.to_string().contains("requires 2"), "{verb}: {error}");
+    }
+
+    for verb in ["replace", "update"] {
+        let error = build_quota_policies(
+            verb,
+            &ResourceInput::new()
+                .with_segments(["tenant"])
+                .with_body(serde_json::json!({"limit": 10})),
+        )
+        .expect_err("a body cannot make an incomplete quota-policy key valid");
+        assert_eq!(error.exit_class(), ExitClass::Usage, "{verb}: {error}");
+        assert!(error.to_string().contains("requires 2"), "{verb}: {error}");
+    }
+}
+
+#[test]
 fn resolved_defaults_builds_the_nested_read() {
     let input = ResourceInput::new().with_segments(["t_1"]);
     let spec = build_tenant_accounts("resolved-defaults", &input).unwrap();
