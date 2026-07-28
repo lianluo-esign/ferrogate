@@ -25,6 +25,9 @@
 //!   details name the specific transition, not one generic "asset changed".
 //! * **A failure never appears as published** — an inline push refused at the
 //!   byte ceiling leaves NO registry row and does NOT move the quota.
+//! * **A withheld publish is not a clean publish** — a threshold-deferred push
+//!   answers exactly 202 with `pending_scan`, stays absent from GET/list, while
+//!   a clean positive control answers exactly 200 and remains downloadable.
 //! * **Permanent delete is not yank** — a yank keeps the row, the bytes and the
 //!   quota and is reversible; a delete removes all three. A delete blocked by a
 //!   live channel answers 409 `asset_version_referenced` naming the remedy,
@@ -84,15 +87,32 @@ pub(crate) fn run_asset_registry_api(args: &LocalArgs) -> Result<()> {
         );
     }
 
-    let gateway_addr = free_addr()?;
-    let dir = tempfile::tempdir()?;
-    let config_path = dir.path().join("asset-registry.yaml");
-    fs::write(&config_path, scenario_config(&gateway_addr))?;
-    let _gateway = GatewayGuard::start(&args.ferrogate_bin, &config_path, &gateway_addr)?;
+    {
+        let gateway_addr = free_addr()?;
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("asset-registry.yaml");
+        fs::write(&config_path, scenario_config(&gateway_addr))?;
+        let _gateway = GatewayGuard::start(&args.ferrogate_bin, &config_path, &gateway_addr)?;
 
+        provision_registry(&gateway_addr)?;
+        verify_every_type_is_a_registry_row(&gateway_addr)?;
+        verify_manifest_agrees_with_the_registry(&gateway_addr)?;
+        verify_a_refused_push_is_never_published(&gateway_addr)?;
+        verify_yank_is_not_delete(&gateway_addr)?;
+        verify_quota_is_authoritative_over_the_whole_registry(&gateway_addr)?;
+        verify_every_mutation_has_its_own_audit_record(&gateway_addr)?;
+    }
+
+    verify_withheld_push_is_distinct_on_the_wire(&args.ferrogate_bin)?;
+
+    println!("asset-registry-api scenario passed");
+    Ok(())
+}
+
+fn provision_registry(addr: &str) -> Result<()> {
     expect_created(
         http_request_addr(
-            &gateway_addr,
+            addr,
             "POST",
             "/admin/v1/plans",
             &[ADMIN_AUTH, JSON_CONTENT],
@@ -104,7 +124,7 @@ pub(crate) fn run_asset_registry_api(args: &LocalArgs) -> Result<()> {
     )?;
     expect_created(
         http_request_addr(
-            &gateway_addr,
+            addr,
             "POST",
             "/admin/v1/tenant-accounts",
             &[ADMIN_AUTH, JSON_CONTENT],
@@ -113,17 +133,105 @@ pub(crate) fn run_asset_registry_api(args: &LocalArgs) -> Result<()> {
             ),
         )?,
         "create hosting tenant",
+    )
+}
+
+/// The real endpoint contract for #528. A two-byte payload is forced above the
+/// async-scan threshold while a one-byte positive control still scans inline.
+/// The exact status assertions make changing either publish terminal to the
+/// other's status observable instead of merely accepting any successful 2xx.
+fn verify_withheld_push_is_distinct_on_the_wire(binary: &Path) -> Result<()> {
+    let gateway_addr = free_addr()?;
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("asset-registry-withheld.yaml");
+    fs::write(&config_path, scenario_config(&gateway_addr))?;
+    let _gateway =
+        GatewayGuard::start_with_async_scan_threshold(binary, &config_path, &gateway_addr, 1)?;
+    provision_registry(&gateway_addr)?;
+
+    let withheld_path = "/v1/assets/cli_tool/withheld-wire-probe/1.0.0";
+    let withheld = http_request_addr_bytes(
+        &gateway_addr,
+        "PUT",
+        withheld_path,
+        &[CLIENT_AUTH, "Content-Type: application/octet-stream"],
+        b"xx",
+    )?;
+    check(
+        withheld.status == 202,
+        &format!(
+            "a pending_scan push must answer exactly 202 Accepted, got {}",
+            withheld.raw
+        ),
+    )?;
+    let withheld_body = json(&withheld)?;
+    check(
+        withheld_body["asset"]["visibility"] == "pending_scan",
+        &format!(
+            "the 202 body must report asset.visibility=pending_scan: {}",
+            withheld.body
+        ),
     )?;
 
-    verify_every_type_is_a_registry_row(&gateway_addr)?;
-    verify_manifest_agrees_with_the_registry(&gateway_addr)?;
-    verify_a_refused_push_is_never_published(&gateway_addr)?;
-    verify_yank_is_not_delete(&gateway_addr)?;
-    verify_quota_is_authoritative_over_the_whole_registry(&gateway_addr)?;
-    verify_every_mutation_has_its_own_audit_record(&gateway_addr)?;
+    let withheld_get = get(&gateway_addr, withheld_path)?;
+    check(
+        withheld_get.status == 404,
+        &format!(
+            "a pending_scan asset must be withheld from immediate GET-by-id, got {}",
+            withheld_get.raw
+        ),
+    )?;
+    let rows_before_control = list(&gateway_addr)?;
+    check(
+        !rows_before_control
+            .iter()
+            .any(|row| row["name"] == "withheld-wire-probe"),
+        "a pending_scan asset must be absent from the normal registry list",
+    )?;
 
-    println!("asset-registry-api scenario passed");
-    Ok(())
+    let visible_path = "/v1/assets/cli_tool/visible-wire-control/1.0.0";
+    let visible = http_request_addr_bytes(
+        &gateway_addr,
+        "PUT",
+        visible_path,
+        &[CLIENT_AUTH, "Content-Type: application/octet-stream"],
+        b"v",
+    )?;
+    check(
+        visible.status == 200,
+        &format!(
+            "a clean inline push must answer exactly 200 OK, got {}",
+            visible.raw
+        ),
+    )?;
+    let visible_body = json(&visible)?;
+    check(
+        visible_body["asset"]["visibility"] == "visible",
+        &format!(
+            "the 200 positive control must report asset.visibility=visible: {}",
+            visible.body
+        ),
+    )?;
+
+    let rows = list(&gateway_addr)?;
+    check(
+        rows.iter()
+            .any(|row| row["name"] == "visible-wire-control" && row["visibility"] == "visible"),
+        "the clean positive control must appear as visible in the normal registry list",
+    )?;
+    check(
+        !rows.iter().any(|row| row["name"] == "withheld-wire-probe"),
+        "the clean control must not make the pending_scan row appear in the normal list",
+    )?;
+
+    let visible_get = get(&gateway_addr, visible_path)?;
+    check(
+        visible_get.status == 200 && visible_get.body == "v",
+        &format!(
+            "the clean positive control must remain downloadable with its exact bytes, got {}",
+            visible_get.raw
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -851,7 +959,33 @@ struct GatewayGuard {
 
 impl GatewayGuard {
     fn start(binary: &Path, config_path: &Path, gateway_addr: &str) -> Result<Self> {
-        let child = Command::new(binary)
+        Self::start_process(binary, config_path, gateway_addr, None)
+    }
+
+    fn start_with_async_scan_threshold(
+        binary: &Path,
+        config_path: &Path,
+        gateway_addr: &str,
+        threshold_bytes: usize,
+    ) -> Result<Self> {
+        Self::start_process(binary, config_path, gateway_addr, Some(threshold_bytes))
+    }
+
+    fn start_process(
+        binary: &Path,
+        config_path: &Path,
+        gateway_addr: &str,
+        async_scan_threshold_bytes: Option<usize>,
+    ) -> Result<Self> {
+        let mut command = Command::new(binary);
+        command.env_remove("FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES");
+        if let Some(threshold_bytes) = async_scan_threshold_bytes {
+            command.env(
+                "FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES",
+                threshold_bytes.to_string(),
+            );
+        }
+        let child = command
             .args(["run", "--config"])
             .arg(config_path)
             .stdin(Stdio::null())

@@ -28,6 +28,57 @@ use ferrogate_control_plane_client::action_identity::{
     ACTION_ID_HEADER, CLIENT_CLOCK_HEADER, CLIENT_FINGERPRINT_HEADER,
 };
 
+/// The withheld warning belongs to `assets push`, not to the JSON helper also
+/// used by list/delete and every plans command. The production push writer is
+/// driven with in-memory streams so deleting the 202 branch, changing its
+/// terminal, or sending the warning to stdout makes this assertion red.
+#[test]
+fn only_a_202_asset_push_emits_the_withheld_warning() {
+    for status in [200, 201] {
+        let response = RawHttpResponse {
+            status,
+            body: br#"{"asset":{"visibility":"visible"}}"#.to_vec(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        write_asset_push_response(&response, &mut stdout, &mut stderr)
+            .expect("an ordinary successful push prints its response");
+        let mut expected_stdout = response.body.clone();
+        expected_stdout.push(b'\n');
+        assert_eq!(
+            stdout, expected_stdout,
+            "the success body must remain machine-readable on stdout with one trailing newline"
+        );
+        assert!(
+            stderr.is_empty(),
+            "status {status} is not withheld and must not emit the 202 warning: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    let response = RawHttpResponse {
+        status: 202,
+        body: br#"{"asset":{"visibility":"pending_scan"}}"#.to_vec(),
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    write_asset_push_response(&response, &mut stdout, &mut stderr)
+        .expect("a withheld push is still a successful write");
+
+    let mut expected_stdout = response.body.clone();
+    expected_stdout.push(b'\n');
+    assert_eq!(
+        stdout, expected_stdout,
+        "the withheld response body must stay on stdout without warning text"
+    );
+    let warning = String::from_utf8(stderr).expect("the warning is UTF-8");
+    assert!(
+        warning.contains("asset is WITHHELD pending screening")
+            && warning.contains("not downloadable until promoted"),
+        "the 202 warning must state the actual asset consequence: {warning:?}"
+    );
+}
+
 /// Pins: `render_header_block` emitting every header
 /// `ClientActionIdentity::headers` returns, in `Name: value\r\n` form.
 ///

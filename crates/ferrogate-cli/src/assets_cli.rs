@@ -92,7 +92,7 @@ fn execute_push(args: AssetsPushArgs) -> AnyResult<()> {
         &content,
         &identity,
     )?;
-    print_json_or_raise(&response, "push")
+    print_asset_push_response(&response)
 }
 
 fn execute_pull(args: AssetsIdentityArgs) -> AnyResult<()> {
@@ -195,20 +195,42 @@ pub(crate) fn print_json_or_raise(response: &RawHttpResponse, action: &str) -> A
             String::from_utf8_lossy(&response.body)
         );
     }
-    // #528: 202 is the gateway's "stored, but WITHHELD" terminal -- the asset
-    // screened `pending_scan`/`quarantined` and no read surface will return it
-    // until it is promoted. The body says so in `asset.visibility`, but stdout
-    // here is a JSON pipe, so the human-facing warning goes to stderr rather
-    // than letting a silent success scroll past. It is NOT an error: the write
-    // committed and the version is claimed, so exiting non-zero would invite a
-    // retry against an immutable version that now exists.
-    if response.status == 202 {
-        eprintln!(
-            "warning: {action} was ACCEPTED but the asset is WITHHELD pending screening; \
-             it is not downloadable until promoted (see asset.visibility below)"
+    println!("{}", String::from_utf8_lossy(&response.body));
+    Ok(())
+}
+
+fn print_asset_push_response(response: &RawHttpResponse) -> AnyResult<()> {
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    write_asset_push_response(response, &mut stdout.lock(), &mut stderr.lock())
+}
+
+fn write_asset_push_response(
+    response: &RawHttpResponse,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> AnyResult<()> {
+    if !(200..300).contains(&response.status) {
+        bail!(
+            "push failed: status={} body={}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
         );
     }
-    println!("{}", String::from_utf8_lossy(&response.body));
+    // #528: 202 is the asset push's "stored, but WITHHELD" terminal. Keep the
+    // warning on this command-specific writer: the shared JSON printer is also
+    // used by asset list/delete and every plans command, where this statement
+    // would be false if one of those operations ever gained a 202 terminal.
+    if response.status == 202 {
+        writeln!(
+            stderr,
+            "warning: push was ACCEPTED but the asset is WITHHELD pending screening; \
+             it is not downloadable until promoted (see asset.visibility below)"
+        )
+        .context("failed to write withheld asset warning")?;
+    }
+    writeln!(stdout, "{}", String::from_utf8_lossy(&response.body))
+        .context("failed to write asset push response")?;
     Ok(())
 }
 
