@@ -22,7 +22,8 @@ use ferrogate_storage::{
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::{FerroGateway, ProxyContext};
-use crate::auth::{authorize_tenant_scope, enforce_tenant_filter, AuthContext};
+use crate::auth::{authorize_tenant_scope, enforce_tenant_filter, AuthContext, AuthError};
+use crate::state::AppState;
 use crate::{
     auth::authenticate,
     responses::{write_json_error, write_json_error_and_close, write_json_response, AdminList},
@@ -301,6 +302,19 @@ impl FerroGateway {
         if let Err(error) = authorize_tenant_scope(&auth, &schedule.tenant_id) {
             return write_auth_error(session, ctx, error).await;
         }
+        if let Err(error) =
+            require_agent_schedule_tenancy(&state, &schedule, existing.as_ref()).await
+        {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "agent_schedule.upsert",
+                &schedule.schedule_id,
+                "rejected",
+                format!("{}: {}", error.code, error.message),
+            ));
+            return write_auth_error(session, ctx, error).await;
+        }
 
         let schedule_id = schedule.schedule_id.clone();
         match state.admin_upsert_agent_schedule(schedule.clone()).await {
@@ -472,6 +486,80 @@ impl FerroGateway {
                 Ok(None)
             }
         }
+    }
+}
+
+/// Resolve the durable hierarchy before a schedule can be stored. A schedule
+/// that is new, moves to another tenancy scope, or remains enabled is an
+/// attach-time capability and must pass the shared lifecycle gate. The sole
+/// containment carve-out is a same-scope update whose resulting row is
+/// disabled, so an operator can still pause a schedule after suspending its
+/// tenant/workspace without being allowed to create, repoint, or re-enable it.
+async fn require_agent_schedule_tenancy(
+    state: &AppState,
+    schedule: &StoredAgentSchedule,
+    existing: Option<&StoredAgentSchedule>,
+) -> Result<(), AuthError> {
+    match state.get_tenant_account(&schedule.tenant_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err(AuthError {
+                status: StatusCode::NOT_FOUND,
+                code: "tenant_not_found",
+                message: format!("tenant account {} was not found", schedule.tenant_id),
+            });
+        }
+        Err(error) => return Err(agent_schedule_storage_error(error)),
+    }
+
+    let scope = match state.resolve_workspace_scope(&schedule.workspace_id).await {
+        Ok(Some(scope)) => scope,
+        Ok(None) => {
+            return Err(AuthError {
+                status: StatusCode::NOT_FOUND,
+                code: "workspace_not_found",
+                message: format!("workspace {} was not found", schedule.workspace_id),
+            });
+        }
+        Err(error) => return Err(agent_schedule_storage_error(error)),
+    };
+    if scope.tenant_id != schedule.tenant_id {
+        return Err(AuthError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_agent_schedule",
+            message: format!(
+                "workspace {} belongs to tenant {}, not {}",
+                schedule.workspace_id, scope.tenant_id, schedule.tenant_id
+            ),
+        });
+    }
+
+    let is_same_scope_disabled_update = existing.is_some_and(|existing| {
+        !schedule.enabled
+            && existing.tenant_id == schedule.tenant_id
+            && existing.workspace_id == schedule.workspace_id
+    });
+    if is_same_scope_disabled_update {
+        return Ok(());
+    }
+
+    state
+        .require_usable_tenancy(
+            ferrogate_storage::LifecycleSeam::Attach,
+            ferrogate_storage::TenancyRefs::new(
+                Some(&scope.tenant_id),
+                Some(&scope.project_id),
+                Some(&scope.workspace_id),
+            ),
+        )
+        .await
+}
+
+fn agent_schedule_storage_error(error: anyhow::Error) -> AuthError {
+    AuthError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "storage_unavailable",
+        message: error.to_string(),
     }
 }
 

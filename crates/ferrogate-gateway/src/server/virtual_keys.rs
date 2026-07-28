@@ -938,6 +938,32 @@ impl FerroGateway {
                     )
                     .await;
                 }
+                let supplied_id = payload.id.filter(|id| !id.trim().is_empty());
+                if let Some(id) = supplied_id.as_deref() {
+                    match state.get_project(id).await {
+                        Ok(Some(_)) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::CONFLICT,
+                                "project_already_exists",
+                                format!("project {id} already exists"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 if state
                     .get_tenant_account(&tenant_id)
                     .await
@@ -1000,10 +1026,7 @@ impl FerroGateway {
                     }
                 };
                 let now = now_unix_seconds();
-                let id = payload
-                    .id
-                    .filter(|id| !id.trim().is_empty())
-                    .unwrap_or_else(|| next_hierarchy_id("project"));
+                let id = supplied_id.unwrap_or_else(|| next_hierarchy_id("project"));
                 let status = match canonical_lifecycle_status(payload.status) {
                     Ok(status) => status,
                     Err(message) => {
@@ -1568,6 +1591,32 @@ impl FerroGateway {
                     )
                     .await;
                 }
+                let supplied_id = payload.id.filter(|id| !id.trim().is_empty());
+                if let Some(id) = supplied_id.as_deref() {
+                    match state.get_workspace(id).await {
+                        Ok(Some(_)) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::CONFLICT,
+                                "workspace_already_exists",
+                                format!("workspace {id} already exists"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 // #514 attach-time seam: no new workspace under a suspended
                 // project, nor under an active project whose TENANT is
                 // suspended -- the chain is checked whole, shallowest first.
@@ -1618,10 +1667,7 @@ impl FerroGateway {
                     }
                 };
                 let now = now_unix_seconds();
-                let id = payload
-                    .id
-                    .filter(|id| !id.trim().is_empty())
-                    .unwrap_or_else(|| next_hierarchy_id("workspace"));
+                let id = supplied_id.unwrap_or_else(|| next_hierarchy_id("workspace"));
                 let status = match canonical_lifecycle_status(payload.status) {
                     Ok(status) => status,
                     Err(message) => {
@@ -2312,6 +2358,32 @@ impl FerroGateway {
             )
             .await;
         }
+        let supplied_id = payload.id.filter(|id| !id.trim().is_empty());
+        if let Some(id) = supplied_id.as_deref() {
+            match state.get_virtual_api_key(id).await {
+                Ok(Some(_)) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "virtual_key_already_exists",
+                        format!("virtual key {id} already exists"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "storage_unavailable",
+                        error.to_string(),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            }
+        }
         // #514 attach-time seam, the exact hole the live probe walked through:
         // "mint a NEW virtual key under the suspended chain -> 201 + live
         // secret". The whole resolved chain is checked, so suspending at ANY
@@ -2337,10 +2409,7 @@ impl FerroGateway {
             .await;
         }
 
-        let id = payload
-            .id
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| next_hierarchy_id("vk"));
+        let id = supplied_id.unwrap_or_else(|| next_hierarchy_id("vk"));
         let secret = match ferrogate_auth_service::generate_virtual_api_key_secret() {
             Ok(secret) => secret,
             Err(error) => {

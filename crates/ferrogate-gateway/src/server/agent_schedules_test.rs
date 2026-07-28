@@ -6,6 +6,8 @@
 // schedule conversion (#251), kept out of the handler body.
 
 use super::*;
+use ferrogate_config::Config;
+use ferrogate_storage::{StoredProject, StoredTenantAccount, StoredWorkspace};
 
 fn interval_mutation() -> AdminAgentScheduleMutation {
     AdminAgentScheduleMutation {
@@ -24,6 +26,59 @@ fn interval_mutation() -> AdminAgentScheduleMutation {
         catchup_policy: None,
         jitter_secs: None,
     }
+}
+
+fn tenant(id: &str, status: &str) -> StoredTenantAccount {
+    StoredTenantAccount {
+        id: id.into(),
+        name: id.into(),
+        slug: id.into(),
+        status: status.into(),
+        plan_id: "free".into(),
+        created_at_unix: 0,
+        updated_at_unix: 0,
+    }
+}
+
+fn project(id: &str, tenant_id: &str) -> StoredProject {
+    StoredProject {
+        id: id.into(),
+        tenant_id: tenant_id.into(),
+        name: id.into(),
+        slug: id.into(),
+        status: "active".into(),
+        created_at_unix: 0,
+        updated_at_unix: 0,
+    }
+}
+
+fn workspace(id: &str, project_id: &str, tenant_id: &str) -> StoredWorkspace {
+    StoredWorkspace {
+        id: id.into(),
+        project_id: project_id.into(),
+        tenant_id: tenant_id.into(),
+        name: id.into(),
+        slug: id.into(),
+        environment: "production".into(),
+        status: "active".into(),
+        created_at_unix: 0,
+        updated_at_unix: 0,
+    }
+}
+
+async fn seed_scope(state: &AppState, tenant_id: &str, project_id: &str, workspace_id: &str) {
+    state
+        .upsert_tenant_account(tenant(tenant_id, "active"))
+        .await
+        .expect("seed tenant");
+    state
+        .upsert_project(project(project_id, tenant_id))
+        .await
+        .expect("seed project");
+    state
+        .upsert_workspace(workspace(workspace_id, project_id, tenant_id))
+        .await
+        .expect("seed workspace");
 }
 
 #[test]
@@ -146,4 +201,110 @@ fn query_param_extracts_named_value() {
     );
     assert_eq!(query_param(Some("tenant=acme"), "missing"), None);
     assert_eq!(query_param(None, "tenant"), None);
+}
+
+#[tokio::test]
+async fn schedule_create_requires_a_real_active_tenancy_chain() {
+    let state = AppState::new(Config::default());
+    let schedule = agent_schedule_from_mutation(None, interval_mutation(), None, 1_000)
+        .expect("valid schedule shape");
+
+    let missing = require_agent_schedule_tenancy(&state, &schedule, None)
+        .await
+        .expect_err("orphan schedule must fail");
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.code, "tenant_not_found");
+
+    state
+        .upsert_tenant_account(tenant("tenant-a", "active"))
+        .await
+        .expect("seed tenant");
+    let missing = require_agent_schedule_tenancy(&state, &schedule, None)
+        .await
+        .expect_err("missing workspace must fail");
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.code, "workspace_not_found");
+
+    seed_scope(&state, "tenant-a", "project-a", "ws-a").await;
+    require_agent_schedule_tenancy(&state, &schedule, None)
+        .await
+        .expect("active durable chain accepts schedule");
+
+    for status in ["disabled", "suspended", "deleted"] {
+        state
+            .upsert_tenant_account(tenant("tenant-a", status))
+            .await
+            .expect("change tenant lifecycle");
+        let inactive = require_agent_schedule_tenancy(&state, &schedule, None)
+            .await
+            .expect_err("inactive tenant must refuse create");
+        assert_eq!(inactive.status, StatusCode::FORBIDDEN, "for {status}");
+        assert_eq!(inactive.code, "inactive_tenancy_reference", "for {status}");
+    }
+
+    state
+        .upsert_tenant_account(tenant("tenant-a", "active"))
+        .await
+        .expect("reactivate tenant");
+    for status in ["disabled", "suspended", "deleted"] {
+        let mut inactive_workspace = workspace("ws-a", "project-a", "tenant-a");
+        inactive_workspace.status = status.into();
+        state
+            .upsert_workspace(inactive_workspace)
+            .await
+            .expect("change workspace lifecycle");
+        let inactive = require_agent_schedule_tenancy(&state, &schedule, None)
+            .await
+            .expect_err("inactive workspace must refuse create");
+        assert_eq!(inactive.status, StatusCode::FORBIDDEN, "for {status}");
+        assert_eq!(inactive.code, "inactive_tenancy_reference", "for {status}");
+    }
+}
+
+#[tokio::test]
+async fn schedule_repoint_is_gated_but_same_scope_pause_remains_available() {
+    let state = AppState::new(Config::default());
+    seed_scope(&state, "tenant-a", "project-a", "ws-a").await;
+    seed_scope(&state, "tenant-b", "project-b", "ws-b").await;
+    let existing = agent_schedule_from_mutation(None, interval_mutation(), None, 1_000)
+        .expect("seed schedule");
+
+    state
+        .upsert_tenant_account(tenant("tenant-a", "suspended"))
+        .await
+        .expect("suspend original tenant");
+    let mut paused = existing.clone();
+    paused.enabled = false;
+    require_agent_schedule_tenancy(&state, &paused, Some(&existing))
+        .await
+        .expect("same-scope pause is containment, not an attach");
+
+    state
+        .upsert_tenant_account(tenant("tenant-b", "suspended"))
+        .await
+        .expect("suspend destination tenant");
+    let mut repointed = paused;
+    repointed.tenant_id = "tenant-b".into();
+    repointed.workspace_id = "ws-b".into();
+    let inactive = require_agent_schedule_tenancy(&state, &repointed, Some(&existing))
+        .await
+        .expect_err("disabled schedule cannot be repointed into inactive tenancy");
+    assert_eq!(inactive.status, StatusCode::FORBIDDEN);
+    assert_eq!(inactive.code, "inactive_tenancy_reference");
+}
+
+#[tokio::test]
+async fn schedule_rejects_a_workspace_owned_by_another_tenant() {
+    let state = AppState::new(Config::default());
+    seed_scope(&state, "tenant-a", "project-a", "ws-a").await;
+    seed_scope(&state, "tenant-b", "project-b", "ws-b").await;
+    let mut schedule = agent_schedule_from_mutation(None, interval_mutation(), None, 1_000)
+        .expect("valid schedule shape");
+    schedule.workspace_id = "ws-b".into();
+
+    let mismatch = require_agent_schedule_tenancy(&state, &schedule, None)
+        .await
+        .expect_err("cross-tenant workspace must fail");
+    assert_eq!(mismatch.status, StatusCode::BAD_REQUEST);
+    assert_eq!(mismatch.code, "invalid_agent_schedule");
 }

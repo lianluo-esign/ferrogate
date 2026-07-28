@@ -2461,6 +2461,25 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         201,
         |_| Ok(()),
     )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/workspaces",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-workspace-2","project_id":"project_gateway","name":"Lifecycle workspace 2","slug":"lifecycle-workspace-2"}"#,
+        201,
+        |_| Ok(()),
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-schedules",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-schedule","tenant_id":"org_demo","workspace_id":"lifecycle-workspace","name":"Lifecycle schedule","spec_kind":"interval","interval_secs":3600,"target_kind":"self_hosted_dispatch","target":{}}"#,
+        201,
+        |body| {
+            assert_eq!(body["agent_schedule"]["enabled"], true);
+            Ok(())
+        },
+    )?;
 
     let mut live_secret = String::new();
     case.expect_json(
@@ -2504,6 +2523,37 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         201,
         |_| Ok(()),
     )?;
+
+    for (path, body, code) in [
+        (
+            "/admin/v1/projects",
+            r#"{"id":"project_gateway","tenant_id":"org_demo","name":"Replacement project","slug":"replacement-project"}"#,
+            "project_already_exists",
+        ),
+        (
+            "/admin/v1/workspaces",
+            r#"{"id":"lifecycle-workspace","project_id":"project_gateway","name":"Replacement workspace","slug":"replacement-workspace"}"#,
+            "workspace_already_exists",
+        ),
+        (
+            "/admin/v1/virtual-keys",
+            r#"{"id":"lifecycle-live","name":"Replacement key","workspace_id":"lifecycle-workspace-2","scopes":["models.read"]}"#,
+            "virtual_key_already_exists",
+        ),
+    ] {
+        case.expect_json(
+            "POST",
+            path,
+            &[ADMIN_AUTH, JSON_CONTENT],
+            body,
+            409,
+            |body| {
+                assert_eq!(body["error"]["code"], code);
+                assert!(!body.to_string().contains("fg_"));
+                Ok(())
+            },
+        )?;
+    }
 
     let live_auth = format!("Authorization: Bearer {live_secret}");
     let project_only_auth = "Authorization: Bearer lifecycle-project-only-secret";
@@ -2592,6 +2642,50 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     )?;
     case.expect_json(
         "POST",
+        "/admin/v1/agent-schedules",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-blocked-schedule","tenant_id":"org_demo","workspace_id":"lifecycle-workspace","name":"Blocked","spec_kind":"interval","interval_secs":3600,"target_kind":"self_hosted_dispatch","target":{}}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "PATCH",
+        "/admin/v1/agent-schedules/lifecycle-schedule",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"enabled":false}"#,
+        200,
+        |body| {
+            assert_eq!(body["agent_schedule"]["enabled"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "PUT",
+        "/admin/v1/agent-schedules/lifecycle-schedule",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"workspace_id":"lifecycle-workspace-2","enabled":false}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "PATCH",
+        "/admin/v1/agent-schedules/lifecycle-schedule",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"enabled":true}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
         "/admin/v1/virtual-keys/lifecycle-live/rotate",
         &[ADMIN_AUTH],
         "",
@@ -2644,6 +2738,17 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         200,
         |body| {
             assert_eq!(body["key"]["enabled"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "PATCH",
+        "/admin/v1/agent-schedules/lifecycle-schedule",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"enabled":true}"#,
+        200,
+        |body| {
+            assert_eq!(body["agent_schedule"]["enabled"], true);
             Ok(())
         },
     )?;

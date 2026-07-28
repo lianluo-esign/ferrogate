@@ -25,6 +25,7 @@ const ADMIN: [&str; 2] = [
 ];
 
 const TENANT: &str = "sched-tenant";
+const PROJECT: &str = "sched-project";
 const WORKSPACE: &str = "sched-ws";
 const SCHEDULE_ID: &str = "sched-e2e";
 const WORKER_FINGERPRINT: &str = "sha256:sched-worker";
@@ -152,7 +153,44 @@ fn scheduled_dispatch_fires_is_leased_acked_and_never_double_fires() {
     let mut gateway = start_gateway(&config_path);
     wait_for_gateway(&gateway_addr);
 
-    // 1. Create a short-interval self-hosted-dispatch schedule.
+    // 1. Bootstrap the durable tenancy chain the schedule binds to. Schedule
+    // creation resolves this chain instead of accepting orphan scope strings.
+    for (path, body) in [
+        (
+            "/admin/v1/tenant-accounts",
+            serde_json::json!({
+                "id": TENANT,
+                "name": "Scheduler tenant",
+                "slug": TENANT
+            }),
+        ),
+        (
+            "/admin/v1/projects",
+            serde_json::json!({
+                "id": PROJECT,
+                "tenant_id": TENANT,
+                "name": "Scheduler project",
+                "slug": PROJECT
+            }),
+        ),
+        (
+            "/admin/v1/workspaces",
+            serde_json::json!({
+                "id": WORKSPACE,
+                "project_id": PROJECT,
+                "name": "Scheduler workspace",
+                "slug": WORKSPACE
+            }),
+        ),
+    ] {
+        let response = http_request(&gateway_addr, "POST", path, &ADMIN, &body.to_string());
+        assert!(
+            response.contains("HTTP/1.1 201"),
+            "schedule hierarchy setup should succeed: {response}"
+        );
+    }
+
+    // 2. Create a short-interval self-hosted-dispatch schedule.
     let create = http_request(
         &gateway_addr,
         "POST",
@@ -175,7 +213,7 @@ fn scheduled_dispatch_fires_is_leased_acked_and_never_double_fires() {
         "schedule creation should succeed: {create}"
     );
 
-    // 2. Register a self-hosted worker in the schedule's tenant/workspace whose
+    // 3. Register a self-hosted worker in the schedule's tenant/workspace whose
     //    default framework (native-harness) + capabilities (shell) match the
     //    schedule's dispatch, so it can lease the scheduled run.
     let register = http_request(
@@ -187,7 +225,7 @@ fn scheduled_dispatch_fires_is_leased_acked_and_never_double_fires() {
             "tenant": {
                 "organization_id": TENANT,
                 "team_id": null,
-                "project_id": "sched-project",
+                "project_id": PROJECT,
                 "workspace_id": WORKSPACE,
                 "user_id": null,
                 "api_key_id": "admin"
@@ -210,7 +248,7 @@ fn scheduled_dispatch_fires_is_leased_acked_and_never_double_fires() {
         .unwrap()
         .to_string();
 
-    // 3. Wait for the always-on tick loop to fire the schedule.
+    // 4. Wait for the always-on tick loop to fire the schedule.
     let started = Instant::now();
     let mut fires = Vec::new();
     while started.elapsed() < Duration::from_secs(10) {
