@@ -1763,6 +1763,40 @@ fn suspended_tenant_blocks_console_and_scim_credentials() {
 }
 
 #[test]
+fn admin_me_enforces_session_tenant_lifecycle_and_allows_recovery() {
+    let console = console();
+    let registered = body_json(&register(
+        &console,
+        "admin-me-lifecycle@acme.test",
+        "correct-horse-514me",
+    ));
+    let tenant_id = registered["tenant"]["id"].as_str().unwrap().to_string();
+    let access_token = registered["access_token"].as_str().unwrap().to_string();
+
+    let active = handle_admin_me(&console, &access_token);
+    assert_eq!(active.status, 200);
+    assert_eq!(body_json(&active)["memberships"][0]["id"], tenant_id);
+
+    set_tenant_status(&console, &tenant_id, "suspended");
+    let suspended = handle_admin_me(&console, &access_token);
+    assert_lifecycle_response(&suspended, 403, "tenancy_suspended");
+
+    set_tenant_status(&console, &tenant_id, "active");
+    assert_eq!(
+        handle_admin_me(&console, &access_token).status,
+        200,
+        "reactivation must restore the same persisted session"
+    );
+
+    set_tenant_status(&console, &tenant_id, "disabled");
+    assert_eq!(
+        handle_admin_me(&console, &access_token).status,
+        200,
+        "disabled remains reachable through the Recovery seam"
+    );
+}
+
+#[test]
 fn disabled_tenant_keeps_console_recovery_but_cannot_mint_or_use_scim_tokens() {
     let console = console();
     let registered = body_json(&register(

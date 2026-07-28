@@ -701,14 +701,13 @@ pub(crate) fn handle_admin_logout(
 }
 
 pub(crate) fn handle_admin_me(console: &AdminConsoleState, token: &str) -> HttpResponse {
-    let claims = match decode_access_token(console, token) {
-        Ok(claims) => claims,
-        Err(_) => return unauthorized("invalid or expired access token"),
-    };
-    let user = match block_on_sync_bridge(console.repositories.get_admin_user_by_id(&claims.sub)) {
-        Ok(Some(user)) => user,
-        Ok(None) => return unauthorized("account no longer exists"),
-        Err(error) => return storage_error(&error),
+    // `/me` rehydrates a persisted console session, so it must pass through
+    // the same stamped-tenant membership and Recovery lifecycle gate as every
+    // other session-JWT endpoint. Decoding the token directly here previously
+    // let a suspended tenant keep a live console session through this route.
+    let (user, _session_membership) = match current_admin_session(console, token) {
+        Ok(session) => session,
+        Err(response) => return response,
     };
     let memberships = match block_on_sync_bridge(
         console
