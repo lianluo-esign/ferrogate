@@ -8,6 +8,7 @@
 
 use super::*;
 use ferrogate_config::{ApiKey, Config, Model, Provider};
+use ferrogate_providers::ModelCapability;
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -63,7 +64,7 @@ fn messages_plan_config() -> Config {
             fallbacks: Vec::new(),
             visible_organization_ids: Vec::new(),
             visible_project_ids: Vec::new(),
-            capabilities: vec!["chat".into(), "streaming".into()],
+            capabilities: vec![ModelCapability::Chat, ModelCapability::Streaming],
             context_window: Some(8192),
             input_price_per_1m: None,
             output_price_per_1m: None,
@@ -130,9 +131,9 @@ fn request_plan_translates_anthropic_body_and_normalizes_chat_guardrail_envelope
 
     assert_eq!(plan.request.model, "claude-logical");
     assert!(plan.request.stream);
-    assert_eq!(plan.routes.len(), 1);
-    assert_eq!(plan.routes[0].provider, "openai");
-    assert_eq!(plan.routes[0].provider_model, "gpt-test");
+    assert_eq!(plan.routing.eligible_routes.len(), 1);
+    assert_eq!(plan.routing.eligible_routes[0].provider, "openai");
+    assert_eq!(plan.routing.eligible_routes[0].provider_model, "gpt-test");
 
     // Anthropic system + user turn are translated into an OpenAI chat body.
     assert_eq!(plan.chat_body["messages"][0]["role"], "system");

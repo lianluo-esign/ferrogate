@@ -91,6 +91,8 @@ fn rejects_model_with_unknown_fallback_provider() {
     model.fallbacks = vec![ModelFallback {
         provider: "missing".into(),
         provider_model: "gpt-4.1-mini".into(),
+        capabilities: vec![],
+        context_window: None,
         input_price_per_1m: None,
         output_price_per_1m: None,
         priority: Some(10),
@@ -113,6 +115,8 @@ fn rejects_canary_with_unknown_provider() {
     model.canary = Some(CanaryRoute {
         provider: "missing".into(),
         provider_model: "gpt-4o".into(),
+        capabilities: vec![],
+        context_window: None,
         percent: 10,
         input_price_per_1m: None,
         output_price_per_1m: None,
@@ -134,6 +138,8 @@ fn rejects_canary_percent_above_one_hundred() {
     model.canary = Some(CanaryRoute {
         provider: "openai".into(),
         provider_model: "gpt-4o".into(),
+        capabilities: vec![],
+        context_window: None,
         percent: 150,
         input_price_per_1m: None,
         output_price_per_1m: None,
@@ -155,6 +161,8 @@ fn accepts_valid_canary_and_shadow_targets() {
     model.canary = Some(CanaryRoute {
         provider: "openai".into(),
         provider_model: "gpt-4o".into(),
+        capabilities: vec![],
+        context_window: None,
         percent: 10,
         input_price_per_1m: None,
         output_price_per_1m: None,
@@ -802,6 +810,8 @@ fn rejects_model_fallback_with_zero_weight() {
     model.fallbacks = vec![ModelFallback {
         provider: "openai".into(),
         provider_model: "gpt-4.1-mini".into(),
+        capabilities: vec![],
+        context_window: None,
         input_price_per_1m: None,
         output_price_per_1m: None,
         priority: Some(10),
@@ -827,6 +837,8 @@ fn accepts_model_lowest_cost_strategy_with_prices() {
     model.fallbacks = vec![ModelFallback {
         provider: "openai".into(),
         provider_model: "gpt-4.1-mini".into(),
+        capabilities: vec![],
+        context_window: None,
         input_price_per_1m: Some(0.5),
         output_price_per_1m: Some(1.0),
         priority: Some(10),
@@ -914,6 +926,8 @@ fn rejects_fallback_route_without_prices_when_billing_service_enabled() {
     model.fallbacks.push(ModelFallback {
         provider: "openai".into(),
         provider_model: "gpt-4o".into(),
+        capabilities: vec![],
+        context_window: None,
         input_price_per_1m: None,
         output_price_per_1m: None,
         priority: Some(0),

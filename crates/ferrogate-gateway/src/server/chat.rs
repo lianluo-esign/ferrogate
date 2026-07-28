@@ -45,12 +45,16 @@ use ferrogate_providers::{
 };
 use ferrogate_storage::StoredRequestLog;
 
+use crate::model_routing::{
+    ModelEndpointKind, ModelRouteRequirements, ModelRoutingAuditContext, ModelRoutingDecision,
+};
+
 use super::{
     body::read_request_body,
     dispatch::{
         dispatch_provider_request, dispatch_provider_streaming_request, provider_endpoint_origin,
     },
-    governed_decision::{GovernedDecision, GovernedWorkflowContext},
+    governed_decision::{GovernedDecision, GovernedModelRoutingContext, GovernedWorkflowContext},
     responses_stream::{ResponsesStreamNormalizer, ResponsesStreamProviderKind},
     FerroGateway, ProxyContext,
 };
@@ -217,9 +221,25 @@ impl FerroGateway {
             request,
             body_json,
             estimated_usage,
-            routes,
+            routing,
             guardrail_envelope,
         } = request_plan;
+        let routing_tenant = auth.tenant_context();
+        state.record_model_routing_decision(
+            ModelRoutingAuditContext {
+                request_id: &ctx.request_id,
+                trace_id: ctx.trace_id.as_deref(),
+                agent_run_id: Some(&agent_run_id),
+                workflow_id: workflow_id.as_deref(),
+                workflow_version,
+                workflow_node_id: workflow_node_id.as_deref(),
+                actor_api_key_id: auth.api_key_id.as_deref(),
+                tenant: &routing_tenant,
+                logical_model: &request.model,
+            },
+            &routing,
+        );
+        let routes = routing.eligible_routes;
         let route_count = routes.len();
         let dispatch_timeout = state.provider_dispatch_timeout();
         let max_dispatch_retries = state.provider_dispatch_max_retries();
@@ -2112,6 +2132,22 @@ impl FerroGateway {
         decision: GovernedDecision,
     ) -> PingoraResult<()> {
         let status = decision.status();
+        if let Some(routing) = &decision.model_routing {
+            self.state.current().record_model_routing_decision(
+                ModelRoutingAuditContext {
+                    request_id: &ctx.request_id,
+                    trace_id: ctx.trace_id.as_deref(),
+                    agent_run_id: Some(&routing.agent_run_id),
+                    workflow_id: routing.workflow_id.as_deref(),
+                    workflow_version: routing.workflow_version,
+                    workflow_node_id: routing.workflow_node_id.as_deref(),
+                    actor_api_key_id: routing.actor_api_key_id.as_deref(),
+                    tenant: &decision.tenant,
+                    logical_model: decision.logical_model.as_deref().unwrap_or_default(),
+                },
+                &routing.decision,
+            );
+        }
         match &decision.workflow {
             // Workflow denials carry the run/workflow attribution the workflow
             // audit trail depends on, so they keep the richer log row they had
@@ -2196,7 +2232,7 @@ pub(super) struct AiRequestPlan {
     request: ChatCompletionRequest,
     body_json: serde_json::Value,
     estimated_usage: BillingTokenUsage,
-    routes: Vec<ModelRoute>,
+    routing: ModelRoutingDecision,
     guardrail_envelope: GuardrailEnvelope,
 }
 
@@ -2630,7 +2666,27 @@ fn decide_ai_plan(
             .closing());
         }
     };
-    build_ai_request_plan(state, ingress, &body, endpoint).map_err(GovernedDecision::from)
+    let plan =
+        build_ai_request_plan(state, ingress, &body, endpoint).map_err(GovernedDecision::from)?;
+    if let Some((status, code, message)) = plan.routing.rejection(&plan.request.model) {
+        let decision = GovernedDecision::deny(
+            status,
+            code,
+            message,
+            plan.auth.tenant_context(),
+            Some(plan.request.model.clone()),
+        )
+        .with_model_routing(GovernedModelRoutingContext {
+            decision: plan.routing.clone(),
+            agent_run_id: plan.agent_run_id.clone(),
+            workflow_id: plan.workflow_id.clone(),
+            workflow_version: plan.workflow_version,
+            workflow_node_id: plan.workflow_node_id.clone(),
+            actor_api_key_id: plan.auth.api_key_id.clone(),
+        });
+        return Err(decision);
+    }
+    Ok(plan)
 }
 
 /// Steps 31-32: workflow policy (13 denial codes) and the workflow provider
@@ -2680,8 +2736,12 @@ async fn decide_ai_workflow_admission(
     )
     .await
     .map_err(deny)?;
-    apply_workflow_provider_constraint(constraint.as_ref(), &plan.request.model, &mut plan.routes)
-        .map_err(deny)
+    apply_workflow_provider_constraint(
+        constraint.as_ref(),
+        &plan.request.model,
+        &mut plan.routing.eligible_routes,
+    )
+    .map_err(deny)
 }
 
 async fn build_ai_ingress_plan(
@@ -2934,8 +2994,29 @@ fn build_ai_request_plan(
     }
 
     let estimated_usage = estimate_chat_completion_usage(&body_json, &request.model);
-    let mut routes =
-        state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
+    let gateway_tools_injected = endpoint == AiEndpoint::ChatCompletions
+        && !state
+            .tools_for(
+                &auth.tenant_context(),
+                auth.api_key_id.as_deref(),
+                Some(endpoint.route()),
+            )
+            .is_empty();
+    let requirements = ModelRouteRequirements::from_request(
+        match endpoint {
+            AiEndpoint::ChatCompletions => ModelEndpointKind::ChatCompletions,
+            AiEndpoint::Responses => ModelEndpointKind::Responses,
+        },
+        &body_json,
+        request.stream,
+        gateway_tools_injected,
+    );
+    let mut routing = state.candidate_model_routes(
+        &model,
+        &requirements,
+        Some(&estimated_usage),
+        &auth.region_allowlist,
+    );
     // Canary rollout (issue #276): when the caller's sticky key falls in the
     // canary bucket, promote the configured canary route to the front of the
     // candidate list so it is evaluated exactly like the primary (fully
@@ -2947,24 +3028,12 @@ fn build_ai_request_plan(
         &request.model,
         &rollout_sticky_key(&auth, &request.model),
         &auth.region_allowlist,
-        &mut routes,
+        &mut routing,
     );
     // Fail closed (issue #173): a region-constrained tenant with zero
     // surviving candidates is rejected with a specific, logged reason
     // rather than silently falling through to whatever routes remained
     // (there are none) or an opaque downstream failure.
-    if routes.is_empty() && !auth.region_allowlist.is_empty() {
-        return Err(reject_ai_request(AiRequestRejection {
-            tenant: auth.tenant_context(),
-            logical_model: Some(request.model.clone()),
-            status: StatusCode::FORBIDDEN,
-            code: "region_not_allowed",
-            message: format!(
-                "no candidate route for model {} satisfies this tenant's region allowlist",
-                request.model
-            ),
-        }));
-    }
     let guardrail_envelope = normalize_guardrail_request(endpoint.guardrail_protocol(), &body_json);
     Ok(AiRequestPlan {
         auth,
@@ -2977,7 +3046,7 @@ fn build_ai_request_plan(
         request,
         body_json,
         estimated_usage,
-        routes,
+        routing,
         guardrail_envelope,
     })
 }
@@ -3749,6 +3818,7 @@ mod provider_attempt_tests;
 mod tests {
     use super::*;
     use ferrogate_config::{ApiKey, Config, GatewayConfigProfile, Model, Provider};
+    use ferrogate_providers::ModelCapability;
     use std::time::Duration;
 
     // Round-12 audit regression: a streaming /v1/responses request to a
@@ -3924,9 +3994,9 @@ mod tests {
         );
         assert_eq!(plan.request.model, "fast-chat");
         assert!(plan.request.stream);
-        assert_eq!(plan.routes.len(), 1);
-        assert_eq!(plan.routes[0].provider, "openai");
-        assert_eq!(plan.routes[0].provider_model, "gpt-test");
+        assert_eq!(plan.routing.eligible_routes.len(), 1);
+        assert_eq!(plan.routing.eligible_routes[0].provider, "openai");
+        assert_eq!(plan.routing.eligible_routes[0].provider_model, "gpt-test");
         assert!(plan.estimated_usage.total_tokens > 0);
         assert!(plan.guardrail_envelope.flattened_text().contains("hello"));
     }
@@ -4004,7 +4074,7 @@ mod tests {
                 fallbacks: Vec::new(),
                 visible_organization_ids: Vec::new(),
                 visible_project_ids: vec!["project_gateway".into()],
-                capabilities: vec!["chat".into(), "streaming".into()],
+                capabilities: vec![ModelCapability::Chat, ModelCapability::Streaming],
                 context_window: Some(8192),
                 input_price_per_1m: None,
                 output_price_per_1m: None,

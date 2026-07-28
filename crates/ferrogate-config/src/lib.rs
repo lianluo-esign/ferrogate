@@ -123,6 +123,7 @@ pub use config::{
     X402SweeperConfig,
 };
 pub use diagnostic::CaddyfileDiagnostic;
+pub use ferrogate_providers::ModelCapability;
 pub use loader::{is_caddyfile_path, load_caddyfile};
 pub use types::{
     GatewayApiKey, GatewayConfig, GatewayHeader, GatewayLog, GatewayModel, GatewayProvider,

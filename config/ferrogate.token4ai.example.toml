@@ -75,6 +75,9 @@ api_key_env = "TOKEN4AI_API_KEY"
 # base_url = "https://api.deepseek.com/v1"
 # api_key_env = "DEEPSEEK_API_KEY"
 
+# Closed physical-route vocabulary: chat, streaming, vision, images,
+# embeddings, tools, structured_output. Unknown names fail configuration
+# loading; each fallback/canary declares its own capabilities and context.
 [[models]]
 name = "gpt-5.5"
 provider = "token4ai"

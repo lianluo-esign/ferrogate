@@ -5,7 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use super::*;
-use ferrogate_providers::RoutingStrategy;
+use ferrogate_providers::{ModelCapability, RoutingStrategy};
 use ferrogate_storage::StorageProviderKind;
 
 #[test]
@@ -219,6 +219,129 @@ fn credential_sources_cover_every_storage_provider() {
                 provider.as_str()
             );
         }
+    }
+}
+
+#[test]
+fn physical_route_capabilities_are_typed_on_primary_fallback_and_canary() {
+    let raw = r#"
+[[providers]]
+name = "primary"
+kind = "openai"
+base_url = "https://primary.example/v1"
+
+[[providers]]
+name = "fallback"
+kind = "openai"
+base_url = "https://fallback.example/v1"
+
+[[providers]]
+name = "canary"
+kind = "openai"
+base_url = "https://canary.example/v1"
+
+[[models]]
+name = "logical"
+provider = "primary"
+provider_model = "primary-model"
+capabilities = ["chat", "streaming", "vision", "images", "embeddings", "tools", "structured_output"]
+context_window = 131072
+
+[[models.fallbacks]]
+provider = "fallback"
+provider_model = "fallback-model"
+capabilities = ["tools", "structured_output"]
+context_window = 65536
+
+[models.canary]
+provider = "canary"
+provider_model = "canary-model"
+capabilities = ["streaming", "vision"]
+context_window = 32768
+percent = 10
+"#;
+
+    let config = Config::from_toml_str(raw).expect("the closed capability vocabulary is valid");
+    let model = &config.models[0];
+    assert_eq!(
+        model.capabilities,
+        [
+            ModelCapability::Chat,
+            ModelCapability::Streaming,
+            ModelCapability::Vision,
+            ModelCapability::Images,
+            ModelCapability::Embeddings,
+            ModelCapability::Tools,
+            ModelCapability::StructuredOutput,
+        ]
+    );
+    assert_eq!(model.context_window, Some(131072));
+    assert_eq!(
+        model.fallbacks[0].capabilities,
+        [ModelCapability::Tools, ModelCapability::StructuredOutput]
+    );
+    assert_eq!(model.fallbacks[0].context_window, Some(65536));
+    let canary = model.canary.as_ref().expect("canary parsed");
+    assert_eq!(
+        canary.capabilities,
+        [ModelCapability::Streaming, ModelCapability::Vision]
+    );
+    assert_eq!(canary.context_window, Some(32768));
+
+    let encoded = toml::to_string(&config).expect("config serializes");
+    let decoded = Config::from_toml_str(&encoded).expect("serialized config parses");
+    assert_eq!(decoded.models[0].capabilities, model.capabilities);
+    assert_eq!(
+        decoded.models[0].fallbacks[0].capabilities,
+        model.fallbacks[0].capabilities
+    );
+    assert_eq!(
+        decoded.models[0].canary.as_ref().unwrap().capabilities,
+        canary.capabilities
+    );
+}
+
+#[test]
+fn unknown_physical_route_capabilities_fail_deserialization_at_every_route_level() {
+    let templates = [
+        r#"
+[[models]]
+name = "logical"
+provider = "primary"
+provider_model = "model"
+capabilities = ["unknown_feature"]
+"#,
+        r#"
+[[models]]
+name = "logical"
+provider = "primary"
+provider_model = "model"
+[[models.fallbacks]]
+provider = "fallback"
+provider_model = "model"
+capabilities = ["unknown_feature"]
+"#,
+        r#"
+[[models]]
+name = "logical"
+provider = "primary"
+provider_model = "model"
+[models.canary]
+provider = "canary"
+provider_model = "model"
+capabilities = ["unknown_feature"]
+percent = 10
+"#,
+    ];
+
+    for raw in templates {
+        let error = Config::from_toml_str(raw).expect_err("unknown capability must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown variant `unknown_feature`"),
+            "unexpected parse error: {error:#}"
+        );
     }
 }
 
@@ -1011,7 +1134,10 @@ fn parses_caddyfile_ai_gateway_into_valid_runtime_config() {
         Some("FerroGate Local")
     );
     assert_eq!(config.models.len(), 1);
-    assert_eq!(config.models[0].capabilities, ["chat", "streaming"]);
+    assert_eq!(
+        config.models[0].capabilities,
+        [ModelCapability::Chat, ModelCapability::Streaming]
+    );
     assert_eq!(config.models[0].context_window, Some(128000));
     assert_eq!(config.models[0].input_price_per_1m, Some(0.15));
     assert_eq!(config.models[0].output_price_per_1m, Some(0.60));

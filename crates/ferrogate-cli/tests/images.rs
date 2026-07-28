@@ -50,6 +50,7 @@ base_url = "{base_url}"
 name = "art"
 provider = "openai"
 provider_model = "gpt-image-1"
+capabilities = ["images"]
 input_price_per_1m = 0.0
 output_price_per_1m = 40000.0
 
@@ -240,6 +241,7 @@ base_url = "http://127.0.0.1:9/v1"
 name = "claude-art"
 provider = "anthropic"
 provider_model = "claude-3-5-sonnet-latest"
+capabilities = ["images"]
 
 [[api_keys]]
 id = "anthropic-key"

@@ -41,6 +41,7 @@ gcp_access_token_env = "FERROGATE_TEST_VERTEX_ACCESS_TOKEN"
 name = "vertex-chat"
 provider = "vertex"
 provider_model = "gemini-1.5-pro"
+context_window = 8192
 
 [[api_keys]]
 id = "vertex-client"

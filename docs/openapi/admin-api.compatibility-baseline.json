@@ -14230,6 +14230,18 @@
         },
         "additionalProperties": false
       },
+      "ModelCapability": {
+        "type": "string",
+        "enum": [
+          "chat",
+          "streaming",
+          "vision",
+          "images",
+          "embeddings",
+          "tools",
+          "structured_output"
+        ]
+      },
       "Model": {
         "type": "object",
         "required": [
@@ -14259,6 +14271,16 @@
               "$ref": "#/components/schemas/ModelFallback"
             }
           },
+          "canary": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CanaryRoute"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "visible_organization_ids": {
             "type": "array",
             "items": {
@@ -14274,7 +14296,7 @@
           "capabilities": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ModelCapability"
             }
           },
           "context_window": {
@@ -14316,6 +14338,19 @@
           "provider_model": {
             "type": "string"
           },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelCapability"
+            }
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
           "input_price_per_1m": {
             "type": [
               "number",
@@ -14341,6 +14376,57 @@
               "null"
             ],
             "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CanaryRoute": {
+        "type": "object",
+        "required": [
+          "provider",
+          "provider_model",
+          "enabled"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "provider_model": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelCapability"
+            }
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "default": 0
+          },
+          "input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "enabled": {
             "type": "boolean"

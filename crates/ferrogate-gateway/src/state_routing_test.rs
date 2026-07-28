@@ -5,6 +5,8 @@
 // description: Unit tests for routing state, kept outside business logic.
 
 use super::*;
+use crate::model_routing::ModelRouteExclusionReason;
+use ferrogate_providers::ModelCapability;
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -211,6 +213,8 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
                 ferrogate_config::ModelFallback {
                     provider: "backup-a".into(),
                     provider_model: "gpt-4.1-mini".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(2.0),
                     output_price_per_1m: Some(2.0),
                     priority: Some(10),
@@ -220,6 +224,8 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
                 ferrogate_config::ModelFallback {
                     provider: "backup-b".into(),
                     provider_model: "gpt-4.1".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(1.0),
                     output_price_per_1m: Some(1.0),
                     priority: Some(10),
@@ -243,17 +249,35 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
     let resolved = state.resolve_model("fast-chat").unwrap();
 
     let first = state
-        .candidate_model_routes(&resolved, None, &HashSet::new())
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &HashSet::new(),
+        )
+        .eligible_routes
         .into_iter()
         .map(|route| route.provider)
         .collect::<Vec<_>>();
     let second = state
-        .candidate_model_routes(&resolved, None, &HashSet::new())
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &HashSet::new(),
+        )
+        .eligible_routes
         .into_iter()
         .map(|route| route.provider)
         .collect::<Vec<_>>();
     let third = state
-        .candidate_model_routes(&resolved, None, &HashSet::new())
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &HashSet::new(),
+        )
+        .eligible_routes
         .into_iter()
         .map(|route| route.provider)
         .collect::<Vec<_>>();
@@ -329,6 +353,8 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
                 ferrogate_config::ModelFallback {
                     provider: "us-fallback".into(),
                     provider_model: "gpt-4.1-mini".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(1.0),
                     output_price_per_1m: Some(1.0),
                     priority: Some(10),
@@ -338,6 +364,8 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
                 ferrogate_config::ModelFallback {
                     provider: "no-region-fallback".into(),
                     provider_model: "gpt-4.1".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(0.5),
                     output_price_per_1m: Some(0.5),
                     priority: Some(20),
@@ -365,7 +393,14 @@ fn candidate_model_routes_is_unrestricted_with_an_empty_region_allowlist() {
     let state = AppState::new(config);
     let resolved = state.resolve_model("fast-chat").unwrap();
 
-    let routes = state.candidate_model_routes(&resolved, None, &HashSet::new());
+    let routes = state
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &HashSet::new(),
+        )
+        .eligible_routes;
     assert_eq!(routes.len(), 3, "no region_allowlist means no filtering");
 }
 
@@ -377,7 +412,14 @@ fn candidate_model_routes_filters_by_region_for_priority_strategy() {
     let resolved = state.resolve_model("fast-chat").unwrap();
 
     let region_allowlist = HashSet::from(["eu-west-1".to_string()]);
-    let routes = state.candidate_model_routes(&resolved, None, &region_allowlist);
+    let routes = state
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &region_allowlist,
+        )
+        .eligible_routes;
     let providers: Vec<_> = routes.iter().map(|route| route.provider.as_str()).collect();
     assert_eq!(
         providers,
@@ -398,7 +440,14 @@ fn candidate_model_routes_region_filter_applies_to_lowest_cost_strategy_too() {
     // first under LowestCost -- it must still be excluded by the
     // region filter, proving the filter isn't strategy-specific.
     let region_allowlist = HashSet::from(["eu-west-1".to_string()]);
-    let routes = state.candidate_model_routes(&resolved, None, &region_allowlist);
+    let routes = state
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &region_allowlist,
+        )
+        .eligible_routes;
     let providers: Vec<_> = routes.iter().map(|route| route.provider.as_str()).collect();
     assert_eq!(providers, ["eu-primary"]);
 }
@@ -411,7 +460,14 @@ fn candidate_model_routes_fails_closed_when_no_route_satisfies_the_region_allowl
     let resolved = state.resolve_model("fast-chat").unwrap();
 
     let region_allowlist = HashSet::from(["ap-southeast-1".to_string()]);
-    let routes = state.candidate_model_routes(&resolved, None, &region_allowlist);
+    let routes = state
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &region_allowlist,
+        )
+        .eligible_routes;
     assert!(
         routes.is_empty(),
         "no configured provider is in ap-southeast-1, so the candidate list must be empty, \
@@ -486,6 +542,8 @@ fn orders_lowest_cost_routes_by_estimated_price() {
                 ferrogate_config::ModelFallback {
                     provider: "backup-a".into(),
                     provider_model: "gpt-4.1-mini".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(2.0),
                     output_price_per_1m: Some(2.0),
                     priority: Some(10),
@@ -495,6 +553,8 @@ fn orders_lowest_cost_routes_by_estimated_price() {
                 ferrogate_config::ModelFallback {
                     provider: "backup-b".into(),
                     provider_model: "gpt-4.1".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(1.0),
                     output_price_per_1m: Some(1.0),
                     priority: Some(10),
@@ -519,7 +579,13 @@ fn orders_lowest_cost_routes_by_estimated_price() {
     let usage = BillingTokenUsage::new(1_000, 2_000, 3_000);
 
     let providers = state
-        .candidate_model_routes(&resolved, Some(&usage), &HashSet::new())
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            Some(&usage),
+            &HashSet::new(),
+        )
+        .eligible_routes
         .into_iter()
         .map(|route| route.provider)
         .collect::<Vec<_>>();
@@ -540,7 +606,13 @@ fn orders_lowest_latency_routes_by_observed_provider_latency() {
     let resolved = state.resolve_model("fast-chat").unwrap();
 
     let providers = state
-        .candidate_model_routes(&resolved, None, &HashSet::new())
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &HashSet::new(),
+        )
+        .eligible_routes
         .into_iter()
         .map(|route| route.provider)
         .collect::<Vec<_>>();
@@ -563,7 +635,13 @@ fn latency_routing_avoids_unhealthy_observed_provider() {
     let resolved = state.resolve_model("fast-chat").unwrap();
 
     let providers = state
-        .candidate_model_routes(&resolved, None, &HashSet::new())
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            None,
+            &HashSet::new(),
+        )
+        .eligible_routes
         .into_iter()
         .map(|route| route.provider)
         .collect::<Vec<_>>();
@@ -613,7 +691,13 @@ fn balanced_routing_combines_cost_latency_and_failures() {
     let usage = BillingTokenUsage::new(1_000, 1_000, 2_000);
 
     let providers = state
-        .candidate_model_routes(&resolved, Some(&usage), &HashSet::new())
+        .candidate_model_routes(
+            &resolved,
+            &ModelRouteRequirements::default(),
+            Some(&usage),
+            &HashSet::new(),
+        )
+        .eligible_routes
         .into_iter()
         .map(|route| route.provider)
         .collect::<Vec<_>>();
@@ -834,6 +918,39 @@ fn api_key_token_reservation_counts_against_budget_until_released() {
         .is_some());
 }
 
+#[test]
+fn lowest_cost_orders_only_routes_that_satisfy_typed_requirements() {
+    let mut config =
+        routing_strategy_test_config(RoutingStrategy::LowestCost, Some(0.01), Some(0.01));
+    config.models[0].capabilities = vec![ModelCapability::Chat];
+    config.models[0].fallbacks[0].capabilities =
+        vec![ModelCapability::Chat, ModelCapability::Tools];
+    config.models[0].fallbacks[1].capabilities = vec![ModelCapability::Chat];
+    let state = AppState::new(config);
+    let resolved = state.resolve_model("fast-chat").unwrap();
+    let mut requirements = ModelRouteRequirements::default();
+    requirements.require(ModelCapability::Tools);
+
+    let decision = state.candidate_model_routes(
+        &resolved,
+        &requirements,
+        Some(&BillingTokenUsage::new(10, 10, 20)),
+        &HashSet::new(),
+    );
+
+    assert_eq!(decision.selection_reason.code(), "lowest_cost");
+    assert_eq!(decision.eligible_routes.len(), 1);
+    assert_eq!(decision.eligible_routes[0].provider, "backup-a");
+    assert_eq!(decision.exclusions.len(), 2);
+    assert_eq!(decision.exclusions[0].candidate.provider, "primary");
+    assert_eq!(
+        decision.exclusions[0].reason,
+        ModelRouteExclusionReason::MissingCapability(ModelCapability::Tools)
+    );
+    assert_eq!(decision.exclusions[1].candidate.provider, "backup-b");
+    assert_eq!(decision.exclusions[1].reason.code(), "missing_capability");
+}
+
 fn routing_strategy_test_config(
     routing_strategy: RoutingStrategy,
     primary_input_price: Option<f64>,
@@ -856,6 +973,8 @@ fn routing_strategy_test_config(
                 ferrogate_config::ModelFallback {
                     provider: "backup-a".into(),
                     provider_model: "gpt-4.1-mini".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(2.0),
                     output_price_per_1m: Some(2.0),
                     priority: Some(10),
@@ -865,6 +984,8 @@ fn routing_strategy_test_config(
                 ferrogate_config::ModelFallback {
                     provider: "backup-b".into(),
                     provider_model: "gpt-4.1".into(),
+                    capabilities: vec![],
+                    context_window: None,
                     input_price_per_1m: Some(1.0),
                     output_price_per_1m: Some(1.0),
                     priority: Some(10),

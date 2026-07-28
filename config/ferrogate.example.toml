@@ -268,14 +268,33 @@ kind = "grok"
 base_url = "https://api.x.ai/v1"
 api_key_env = "GROK_API_KEY"
 
+# Physical-route capabilities use a closed vocabulary: chat, streaming,
+# vision, images, embeddings, tools, structured_output. Declare only features
+# this exact provider/model pair supports. Fallback and canary routes declare
+# their own values; they do not inherit the primary declaration.
 [[models]]
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
-capabilities = ["chat", "streaming", "tools"]
+capabilities = ["chat", "streaming", "vision", "tools", "structured_output"]
 context_window = 128000
 input_price_per_1m = 0.15
 output_price_per_1m = 0.60
+
+# [[models.fallbacks]]
+# provider = "anthropic"
+# provider_model = "claude-3-5-haiku-latest"
+# capabilities = ["chat", "streaming", "tools", "structured_output"]
+# context_window = 200000
+# priority = 10
+# weight = 1
+#
+# [models.canary]
+# provider = "anthropic"
+# provider_model = "claude-3-5-sonnet-latest"
+# capabilities = ["chat", "streaming", "vision", "tools"]
+# context_window = 200000
+# percent = 5
 
 [[models]]
 name = "best-reasoning"

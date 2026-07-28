@@ -8,6 +8,7 @@
 
 use super::*;
 use ferrogate_config::{ApiKey, Config, Model, Provider};
+use ferrogate_providers::ModelCapability;
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -105,7 +106,7 @@ fn images_plan_config() -> Config {
             fallbacks: Vec::new(),
             visible_organization_ids: Vec::new(),
             visible_project_ids: Vec::new(),
-            capabilities: vec!["images".into()],
+            capabilities: vec![ModelCapability::Images],
             context_window: None,
             input_price_per_1m: None,
             output_price_per_1m: None,
@@ -198,7 +199,7 @@ fn request_plan_accepts_a_valid_prompt_and_normalizes_a_guardrail_envelope() {
     let plan = build_images_request_plan(&state, &auth, body).unwrap();
 
     assert_eq!(plan.request.model, "art");
-    assert_eq!(plan.routes.len(), 1);
+    assert_eq!(plan.routing.eligible_routes.len(), 1);
     assert_eq!(plan.estimated_usage.total_tokens, 2);
     assert_eq!(plan.guardrail_envelope.segments.len(), 1);
     assert_eq!(

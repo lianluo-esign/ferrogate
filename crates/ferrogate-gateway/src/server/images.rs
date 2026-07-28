@@ -38,10 +38,12 @@ use ferrogate_billing::{ProviderAttempt, TokenUsage as BillingTokenUsage};
 use ferrogate_core::TenantContext;
 use ferrogate_guardrails::{normalize_request as normalize_guardrail_request, GuardrailProtocol};
 use ferrogate_policy::PolicyDecision;
-use ferrogate_providers::{
-    AdapterError, ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest,
-};
+use ferrogate_providers::{AdapterError, ModelRegistryError, ProviderHeader, ProviderHttpRequest};
 use ferrogate_storage::StoredRequestLog;
+
+use crate::model_routing::{
+    ModelEndpointKind, ModelRouteRequirements, ModelRoutingAuditContext, ModelRoutingDecision,
+};
 
 use super::{
     body::read_request_body,
@@ -176,9 +178,29 @@ impl FerroGateway {
             request,
             body_json,
             estimated_usage,
-            routes,
+            routing,
             guardrail_envelope,
         } = plan;
+        state.record_model_routing_decision(
+            ModelRoutingAuditContext {
+                request_id: &ctx.request_id,
+                trace_id: ctx.trace_id.as_deref(),
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: auth.api_key_id.as_deref(),
+                tenant: &tenant,
+                logical_model: &request.model,
+            },
+            &routing,
+        );
+        if let Some((status, code, message)) = routing.rejection(&request.model) {
+            self.record_images_error_log(ctx, tenant, Some(&request.model), None, status, code);
+            write_json_error(session, status, code, message, &ctx.request_id).await?;
+            return Ok(());
+        }
+        let routes = routing.eligible_routes;
 
         let request_started_at_unix = now_unix_seconds();
         let route_count = routes.len();
@@ -901,7 +923,7 @@ struct ImagesRequestPlan {
     request: ImagesRequest,
     body_json: serde_json::Value,
     estimated_usage: BillingTokenUsage,
-    routes: Vec<ModelRoute>,
+    routing: ModelRoutingDecision,
     guardrail_envelope: ferrogate_guardrails::GuardrailEnvelope,
 }
 
@@ -1011,29 +1033,24 @@ fn build_images_request_plan(
     }
 
     let estimated_usage = estimate_images_usage(&body_json);
-    let routes =
-        state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
+    let requirements =
+        ModelRouteRequirements::from_request(ModelEndpointKind::Images, &body_json, false, false);
+    let routing = state.candidate_model_routes(
+        &model,
+        &requirements,
+        Some(&estimated_usage),
+        &auth.region_allowlist,
+    );
     // Fail closed (mirrors chat.rs's #173 region behavior): a region-constrained
     // tenant with zero surviving candidates is rejected with a specific reason
     // rather than silently returning "no route" downstream.
-    if routes.is_empty() && !auth.region_allowlist.is_empty() {
-        return Err(ImagesRejection {
-            logical_model: Some(request.model.clone()),
-            status: StatusCode::FORBIDDEN,
-            code: "region_not_allowed",
-            message: format!(
-                "no candidate route for model {} satisfies this tenant's region allowlist",
-                request.model
-            ),
-        });
-    }
     let guardrail_envelope = normalize_guardrail_request(GuardrailProtocol::Images, &body_json);
 
     Ok(ImagesRequestPlan {
         request,
         body_json,
         estimated_usage,
-        routes,
+        routing,
         guardrail_envelope,
     })
 }

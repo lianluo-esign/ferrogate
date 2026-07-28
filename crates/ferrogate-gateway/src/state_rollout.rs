@@ -27,7 +27,7 @@ impl AppState {
         logical_model: &str,
         sticky_key: &str,
         region_allowlist: &HashSet<String>,
-        routes: &mut Vec<ModelRoute>,
+        decision: &mut ModelRoutingDecision,
     ) {
         let Some(model) = self
             .config
@@ -59,16 +59,6 @@ impl AppState {
             return;
         };
         let region = provider.region.clone();
-        // Region enforcement parity (issue #173): a region-restricted tenant
-        // may only reach a canary hosted in an allowed region; otherwise skip
-        // the canary (fail closed) and let the primary route serve.
-        if !region_allowlist.is_empty()
-            && !region
-                .as_deref()
-                .is_some_and(|region| region_allowlist.contains(region))
-        {
-            return;
-        }
         let route = ModelRoute::with_routing(
             canary.provider.clone(),
             canary.provider_model.clone(),
@@ -77,14 +67,26 @@ impl AppState {
             0,
             1,
         )
+        .with_capabilities_and_context(canary.capabilities.clone(), canary.context_window)
         .with_region(region);
+        // Canary candidates cross the same capability/context/region filter as
+        // primary and fallback routes before they can lead. `consider` also
+        // appends bounded typed exclusion evidence on refusal (#582).
+        if !decision.consider(route.clone(), region_allowlist) {
+            return;
+        }
+        let inserted = decision
+            .eligible_routes
+            .pop()
+            .expect("an eligible canary was appended by consider");
         // Dedup, then lead with the canary while keeping every other route as
         // a fallback behind it.
-        routes.retain(|existing| {
+        decision.eligible_routes.retain(|existing| {
             !(existing.provider == route.provider
                 && existing.provider_model == route.provider_model)
         });
-        routes.insert(0, route);
+        decision.eligible_routes.insert(0, inserted);
+        decision.selection_reason = ModelRouteSelectionReason::CanaryBucket;
     }
 
     /// Admit one shadow-mirror dispatch against the per-model budget (issue

@@ -5,6 +5,7 @@
 
 use super::*;
 use ferrogate_config::{ApiKey, Config, Model, Provider};
+use ferrogate_providers::ModelCapability;
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -120,7 +121,7 @@ fn embeddings_plan_config() -> Config {
             fallbacks: Vec::new(),
             visible_organization_ids: Vec::new(),
             visible_project_ids: Vec::new(),
-            capabilities: vec!["embeddings".into()],
+            capabilities: vec![ModelCapability::Embeddings],
             context_window: None,
             input_price_per_1m: None,
             output_price_per_1m: None,
@@ -237,7 +238,7 @@ fn request_plan_accepts_a_valid_string_input_and_normalizes_a_guardrail_envelope
     let plan = build_embeddings_request_plan(&state, &auth, body).unwrap();
 
     assert_eq!(plan.request.model, "fast-embed");
-    assert_eq!(plan.routes.len(), 1);
+    assert_eq!(plan.routing.eligible_routes.len(), 1);
     assert_eq!(plan.guardrail_envelope.segments.len(), 1);
     assert_eq!(plan.guardrail_envelope.segments[0].text, "embed this");
     assert_eq!(

@@ -14,7 +14,7 @@ use ferrogate_guardrails::{all_content_sources, ContentSource};
 pub use ferrogate_mcp::{
     McpAuthType, McpHeaderConfig, McpOauthConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
-use ferrogate_providers::RoutingStrategy;
+use ferrogate_providers::{ModelCapability, RoutingStrategy};
 use ferrogate_storage::{PostgresTlsMode, StorageProviderKind};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1507,7 +1507,7 @@ pub struct Model {
     #[serde(default)]
     pub visible_project_ids: Vec<String>,
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<ModelCapability>,
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
@@ -1527,6 +1527,13 @@ pub struct CanaryRoute {
     pub provider: String,
     /// Actual model name sent to the canary provider.
     pub provider_model: String,
+    /// Capabilities of this physical canary route. These do not inherit from
+    /// the primary route because the provider/model pair may differ.
+    #[serde(default)]
+    pub capabilities: Vec<ModelCapability>,
+    /// Context limit of this physical canary route.
+    #[serde(default)]
+    pub context_window: Option<u32>,
     /// Percentage of traffic (0-100) routed to the canary. `0` disables the
     /// split (no canary traffic); `100` sends all traffic to the canary
     /// (canary becomes primary).
@@ -1563,6 +1570,13 @@ pub struct ShadowRoute {
 pub struct ModelFallback {
     pub provider: String,
     pub provider_model: String,
+    /// Capabilities of this physical fallback route. An empty legacy
+    /// declaration serves only requests with no explicit feature requirement.
+    #[serde(default)]
+    pub capabilities: Vec<ModelCapability>,
+    /// Context limit of this physical fallback route.
+    #[serde(default)]
+    pub context_window: Option<u32>,
     #[serde(default)]
     pub input_price_per_1m: Option<f64>,
     #[serde(default)]

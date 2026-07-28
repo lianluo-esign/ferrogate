@@ -489,14 +489,28 @@ impl AppState {
     pub(crate) fn candidate_model_routes(
         &self,
         model: &ResolvedModelRoute,
+        requirements: &ModelRouteRequirements,
         estimated_usage: Option<&BillingTokenUsage>,
         region_allowlist: &HashSet<String>,
-    ) -> Vec<ModelRoute> {
+    ) -> ModelRoutingDecision {
+        // Eligibility is decided before any strategy reads price, health, or
+        // rotation state. An incompatible cheap/healthy route therefore cannot
+        // influence ordering and is never allowed to reach dispatch (#582).
+        let mut decision = ModelRoutingDecision::new(requirements.clone(), model.routing_strategy);
+        let primary_eligible = decision.consider(model.primary.clone(), region_allowlist);
+        for fallback in &model.fallbacks {
+            decision.consider(fallback.clone(), region_allowlist);
+        }
+        let mut eligible = std::mem::take(&mut decision.eligible_routes);
         let mut routes = match model.routing_strategy {
             RoutingStrategy::Priority => {
-                let mut routes = vec![model.primary.clone()];
+                let mut routes = if primary_eligible {
+                    vec![eligible.remove(0)]
+                } else {
+                    Vec::new()
+                };
                 let mut cursor = self.model_route_counter.fetch_add(1, Ordering::Relaxed);
-                let mut fallbacks = model.fallbacks.as_slice();
+                let mut fallbacks = eligible.as_slice();
                 while let Some((priority, group_end)) = fallback_priority_group(fallbacks) {
                     let group = &fallbacks[..group_end];
                     let start = weighted_start_index(group, cursor);
@@ -509,8 +523,7 @@ impl AppState {
                 routes
             }
             RoutingStrategy::LowestCost => {
-                let mut routes = vec![model.primary.clone()];
-                routes.extend(model.fallbacks.iter().cloned());
+                let mut routes = eligible;
                 routes.sort_by(|left, right| {
                     route_estimated_cost(left, estimated_usage)
                         .partial_cmp(&route_estimated_cost(right, estimated_usage))
@@ -523,32 +536,18 @@ impl AppState {
                 routes
             }
             RoutingStrategy::LowestLatency => {
-                let mut routes = vec![model.primary.clone()];
-                routes.extend(model.fallbacks.iter().cloned());
+                let mut routes = eligible;
                 self.sort_routes_by_latency(&mut routes);
                 routes
             }
             RoutingStrategy::Balanced => {
-                let mut routes = vec![model.primary.clone()];
-                routes.extend(model.fallbacks.iter().cloned());
+                let mut routes = eligible;
                 self.sort_routes_by_balanced_score(&mut routes);
                 routes
             }
         };
-        // Region enforcement (issue #173), applied uniformly after
-        // strategy-specific ordering rather than duplicated per arm:
-        // sort order is independent of region eligibility. Empty
-        // allowlist means unrestricted; non-empty fails closed on routes
-        // with no declared region, not just a mismatched one.
-        if !region_allowlist.is_empty() {
-            routes.retain(|route| {
-                route
-                    .region
-                    .as_deref()
-                    .is_some_and(|region| region_allowlist.contains(region))
-            });
-        }
-        routes
+        decision.eligible_routes.append(&mut routes);
+        decision
     }
 
     fn sort_routes_by_latency(&self, routes: &mut [ModelRoute]) {

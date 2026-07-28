@@ -1,11 +1,20 @@
 import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
+export type ModelCapability =
+  | "chat"
+  | "streaming"
+  | "vision"
+  | "images"
+  | "embeddings"
+  | "tools"
+  | "structured_output";
+
 export interface AdminModel extends Record<string, unknown> {
   name: string;
   provider: string;
   provider_model: string;
   routing_strategy: string;
-  capabilities: string[];
+  capabilities: ModelCapability[];
   context_window: number | null;
   input_price_per_1m: number | null;
   output_price_per_1m: number | null;

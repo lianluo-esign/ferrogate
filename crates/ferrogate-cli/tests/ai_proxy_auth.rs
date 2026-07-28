@@ -372,6 +372,7 @@ base_url = "http://{provider_addr}/v1"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+context_window = 8192
 
 [[api_keys]]
 id = "budget_limited"
@@ -431,6 +432,7 @@ base_url = "http://{provider_addr}/v1"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+context_window = 8192
 
 [[api_keys]]
 id = "budget_limited"

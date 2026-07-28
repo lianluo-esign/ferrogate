@@ -2759,7 +2759,14 @@ impl FerroGateway {
             )
             .await;
         }
-        let routes = state.candidate_model_routes(&model, None, &auth.region_allowlist);
+        let routes = state
+            .candidate_model_routes(
+                &model,
+                &crate::model_routing::ModelRouteRequirements::default(),
+                None,
+                &auth.region_allowlist,
+            )
+            .eligible_routes;
         if !routes
             .iter()
             .any(|route| auth.can_use_provider(&route.provider))

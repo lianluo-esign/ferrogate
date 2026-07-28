@@ -61,10 +61,13 @@ use ferrogate_guardrails::{
 };
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::{
-    anthropic_messages, ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest,
-    SecretValue,
+    anthropic_messages, ModelRegistryError, ProviderHeader, ProviderHttpRequest, SecretValue,
 };
 use ferrogate_storage::StoredRequestLog;
+
+use crate::model_routing::{
+    ModelEndpointKind, ModelRouteRequirements, ModelRoutingAuditContext, ModelRoutingDecision,
+};
 
 use super::{
     body::read_request_body,
@@ -207,10 +210,31 @@ impl FerroGateway {
             request,
             chat_body,
             estimated_usage,
-            routes,
+            routing,
             guardrail_envelope,
         } = plan;
         let stream = request.stream;
+        state.record_model_routing_decision(
+            ModelRoutingAuditContext {
+                request_id: &ctx.request_id,
+                trace_id: ctx.trace_id.as_deref(),
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: auth.api_key_id.as_deref(),
+                tenant: &tenant,
+                logical_model: &request.model,
+            },
+            &routing,
+        );
+        if let Some((status, code, message)) = routing.rejection(&request.model) {
+            self.record_messages_error_log(ctx, tenant, Some(&request.model), None, status, code);
+            return self
+                .write_messages_error(session, ctx, stream, status, code, message)
+                .await;
+        }
+        let routes = routing.eligible_routes;
 
         let request_started_at_unix = now_unix_seconds();
         let route_count = routes.len();
@@ -1466,7 +1490,7 @@ struct MessagesRequestPlan {
     request: AnthropicMessagesRequest,
     chat_body: serde_json::Value,
     estimated_usage: BillingTokenUsage,
-    routes: Vec<ModelRoute>,
+    routing: ModelRoutingDecision,
     guardrail_envelope: GuardrailEnvelope,
 }
 
@@ -1583,20 +1607,25 @@ fn build_messages_request_plan(
     }
 
     let estimated_usage = estimate_messages_usage(&chat_body, &request.model);
-    let routes =
-        state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
-    if routes.is_empty() && !auth.region_allowlist.is_empty() {
-        return Err(MessagesRejection {
-            logical_model: Some(request.model.clone()),
-            stream,
-            status: StatusCode::FORBIDDEN,
-            code: "region_not_allowed",
-            message: format!(
-                "no candidate route for model {} satisfies this tenant's region allowlist",
-                request.model
-            ),
-        });
-    }
+    let gateway_tools_injected = !state
+        .tools_for(
+            &auth.tenant_context(),
+            auth.api_key_id.as_deref(),
+            Some(MESSAGES_ROUTE),
+        )
+        .is_empty();
+    let requirements = ModelRouteRequirements::from_request(
+        ModelEndpointKind::AnthropicMessages,
+        &chat_body,
+        stream,
+        gateway_tools_injected,
+    );
+    let routing = state.candidate_model_routes(
+        &model,
+        &requirements,
+        Some(&estimated_usage),
+        &auth.region_allowlist,
+    );
     let guardrail_envelope =
         normalize_guardrail_request(GuardrailProtocol::ChatCompletions, &chat_body);
 
@@ -1604,7 +1633,7 @@ fn build_messages_request_plan(
         request,
         chat_body,
         estimated_usage,
-        routes,
+        routing,
         guardrail_envelope,
     })
 }

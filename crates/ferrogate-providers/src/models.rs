@@ -4,7 +4,7 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,62 @@ pub enum RoutingStrategy {
     Balanced,
 }
 
+/// Closed vocabulary for capabilities declared by one physical model route.
+///
+/// These names describe request features FerroGate dispatches today. They are
+/// deliberately provider-neutral: adapters remain responsible for translating
+/// the request into each provider's wire shape.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    Chat,
+    Streaming,
+    Vision,
+    Images,
+    Embeddings,
+    Tools,
+    StructuredOutput,
+}
+
+impl ModelCapability {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Streaming => "streaming",
+            Self::Vision => "vision",
+            Self::Images => "images",
+            Self::Embeddings => "embeddings",
+            Self::Tools => "tools",
+            Self::StructuredOutput => "structured_output",
+        }
+    }
+}
+
+impl fmt::Display for ModelCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ModelCapability {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "chat" => Ok(Self::Chat),
+            "streaming" => Ok(Self::Streaming),
+            "vision" => Ok(Self::Vision),
+            "images" => Ok(Self::Images),
+            "embeddings" => Ok(Self::Embeddings),
+            "tools" => Ok(Self::Tools),
+            "structured_output" => Ok(Self::StructuredOutput),
+            _ => Err(format!(
+                "unknown model capability {value:?}; expected one of chat, streaming, vision, images, embeddings, tools, structured_output"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRoute {
     pub provider: String,
@@ -26,6 +82,14 @@ pub struct ModelRoute {
     pub output_price_per_1m: Option<f64>,
     pub priority: u32,
     pub weight: u32,
+    /// Request features this physical provider/model pair can accept. Empty is
+    /// retained for legacy capability-neutral requests, but never satisfies an
+    /// explicit request requirement.
+    pub capabilities: Vec<ModelCapability>,
+    /// Declared maximum context tokens for this physical route. `None` is
+    /// retained for legacy requests without an explicit output-token bound,
+    /// but never satisfies an explicit context requirement.
+    pub context_window: Option<u32>,
     /// The provider's declared physical region (issue #173), e.g.
     /// "eu-west-1" -- `None` when the provider config doesn't declare one.
     /// A tenant with a non-empty region allowlist can only route to
@@ -54,8 +118,20 @@ impl ModelRoute {
             output_price_per_1m,
             priority,
             weight,
+            capabilities: Vec::new(),
+            context_window: None,
             region: None,
         }
+    }
+
+    pub fn with_capabilities_and_context(
+        mut self,
+        capabilities: Vec<ModelCapability>,
+        context_window: Option<u32>,
+    ) -> Self {
+        self.capabilities = capabilities;
+        self.context_window = context_window;
+        self
     }
 
     pub fn with_region(mut self, region: Option<String>) -> Self {
@@ -69,7 +145,7 @@ pub struct ModelRegistryEntry {
     pub name: String,
     pub primary: ModelRoute,
     pub fallbacks: Vec<ModelRoute>,
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<ModelCapability>,
     pub context_window: Option<u32>,
     pub input_price_per_1m: Option<f64>,
     pub output_price_per_1m: Option<f64>,

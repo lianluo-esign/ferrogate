@@ -358,6 +358,10 @@ mod messages_stream;
 /// Usage metering export: the exporter and the status it reports.
 mod metering;
 
+/// Typed physical-model requirement filtering and request-correlated routing
+/// evidence (issue #582).
+mod model_routing;
+
 /// The gateway's own HTTP response vocabulary -- error envelopes, the admin
 /// list/pagination shapes, and the JSON bodies the handlers return.
 mod responses;

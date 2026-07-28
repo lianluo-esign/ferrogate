@@ -79,4 +79,4 @@ api_key_env = "OPENAI_API_KEY"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools", "structured_output"]

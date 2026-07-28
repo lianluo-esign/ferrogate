@@ -45,6 +45,8 @@ use ferrogate_core::TenantContext;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 
+use crate::model_routing::ModelRoutingDecision;
+
 /// Bumped whenever the canonical shape changes. Fixtures declare the schema
 /// they were written against so a shape change is a loud, reviewable failure
 /// rather than a silent re-interpretation of a golden file.
@@ -231,6 +233,20 @@ pub(crate) struct GovernedDecision {
     /// oversized body; nothing else on the admission path does.
     pub(crate) close_connection: bool,
     pub(crate) workflow: Option<GovernedWorkflowContext>,
+    /// Non-canonical delivery context for a routing rejection. The typed
+    /// decision is persisted by the normal audit sink at delivery time; only
+    /// its ordered audit action names enter the canonical record.
+    pub(crate) model_routing: Option<GovernedModelRoutingContext>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GovernedModelRoutingContext {
+    pub(crate) decision: ModelRoutingDecision,
+    pub(crate) agent_run_id: String,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_version: Option<u32>,
+    pub(crate) workflow_node_id: Option<String>,
+    pub(crate) actor_api_key_id: Option<String>,
 }
 
 impl GovernedDecision {
@@ -248,6 +264,7 @@ impl GovernedDecision {
             logical_model,
             close_connection: false,
             workflow: None,
+            model_routing: None,
         }
     }
 
@@ -258,6 +275,12 @@ impl GovernedDecision {
 
     pub(crate) fn with_workflow(mut self, workflow: GovernedWorkflowContext) -> Self {
         self.workflow = Some(workflow);
+        self
+    }
+
+    pub(crate) fn with_model_routing(mut self, routing: GovernedModelRoutingContext) -> Self {
+        self.record.audit_events = routing.decision.audit_event_actions();
+        self.model_routing = Some(routing);
         self
     }
 

@@ -44,11 +44,13 @@ base_url = "{base_url}"
 name = "fast-embed"
 provider = "openai"
 provider_model = "text-embedding-3-small"
+capabilities = ["embeddings"]
 
 [[models]]
 name = "fallback-embed"
 provider = "openai"
 provider_model = "text-embedding-3-large"
+capabilities = ["embeddings"]
 
 [[api_keys]]
 id = "embed"

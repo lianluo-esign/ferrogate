@@ -5474,6 +5474,8 @@ export interface components {
             /** @enum {string} */
             health_reason: "disabled" | "circuit_open" | "observed_failure_rate" | "no_observations" | "healthy_observations";
         };
+        /** @enum {string} */
+        ModelCapability: "chat" | "streaming" | "vision" | "images" | "embeddings" | "tools" | "structured_output";
         Model: {
             name: string;
             provider: string;
@@ -5481,9 +5483,10 @@ export interface components {
             /** @default priority */
             routing_strategy: string;
             fallbacks: components["schemas"]["ModelFallback"][];
+            canary?: components["schemas"]["CanaryRoute"] | null;
             visible_organization_ids?: string[];
             visible_project_ids?: string[];
-            capabilities?: string[];
+            capabilities?: components["schemas"]["ModelCapability"][];
             context_window?: number | null;
             input_price_per_1m?: number | null;
             output_price_per_1m?: number | null;
@@ -5492,10 +5495,23 @@ export interface components {
         ModelFallback: {
             provider: string;
             provider_model: string;
+            capabilities?: components["schemas"]["ModelCapability"][];
+            context_window?: number | null;
             input_price_per_1m?: number | null;
             output_price_per_1m?: number | null;
             priority?: number | null;
             weight?: number | null;
+            enabled: boolean;
+        };
+        CanaryRoute: {
+            provider: string;
+            provider_model: string;
+            capabilities?: components["schemas"]["ModelCapability"][];
+            context_window?: number | null;
+            /** @default 0 */
+            percent: number;
+            input_price_per_1m?: number | null;
+            output_price_per_1m?: number | null;
             enabled: boolean;
         };
         AdminApiKey: {
@@ -6218,7 +6234,7 @@ export interface components {
             jsonrpc: string;
             id?: unknown;
             /** @enum {string} */
-            method: "initialize" | "ping" | "tools/list" | "tools/call";
+            method: "initialize" | "notifications/initialized" | "ping" | "resources/list" | "resources/read" | "server/discover" | "tools/list" | "tools/call";
             /** @default {} */
             params: Record<string, never>;
         } & {
@@ -6234,6 +6250,10 @@ export interface components {
         McpJsonRpcError: {
             code: number;
             message: string;
+            /** @description Protocol-defined structured error data, including requested/supported versions for -32022. */
+            data?: {
+                [key: string]: unknown;
+            };
         };
         ToolExecutionRequest: {
             /** @description Namespaced tool name, for MCP using serverName-toolName. */
@@ -9016,6 +9036,7 @@ export interface components {
         /** @description API key mutation response. */
         AdminApiKeyMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9025,6 +9046,7 @@ export interface components {
         /** @description Policy mutation response. */
         AdminPolicyMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9034,6 +9056,7 @@ export interface components {
         /** @description Gateway config mutation response. */
         AdminGatewayConfigMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9043,6 +9066,7 @@ export interface components {
         /** @description Agent workflow mutation response. */
         AdminAgentWorkflowMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9052,6 +9076,7 @@ export interface components {
         /** @description MCP server mutation response. */
         AdminMcpServerMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9061,6 +9086,7 @@ export interface components {
         /** @description MCP server status response. */
         AdminMcpServerStatusOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9070,6 +9096,7 @@ export interface components {
         /** @description API key delete response. */
         DeleteApiKeyOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9079,6 +9106,7 @@ export interface components {
         /** @description Policy delete response. */
         DeletePolicyOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9088,6 +9116,7 @@ export interface components {
         /** @description Gateway config delete response. */
         DeleteGatewayConfigOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9097,6 +9126,7 @@ export interface components {
         /** @description Agent workflow delete response. */
         DeleteAgentWorkflowOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9106,6 +9136,7 @@ export interface components {
         /** @description MCP server delete response. */
         DeleteMcpServerResponse: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9115,6 +9146,7 @@ export interface components {
         /** @description Invalid request payload or candidate config. */
         BadRequest: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9124,6 +9156,7 @@ export interface components {
         /** @description Missing or invalid bearer token when API keys are configured. */
         Unauthorized: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9133,6 +9166,7 @@ export interface components {
         /** @description Bearer token lacks the required scope or is disallowed by tenant/provider/model constraints. */
         Forbidden: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9142,6 +9176,7 @@ export interface components {
         /** @description Requested API key or policy was not found. */
         NotFound: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9151,6 +9186,7 @@ export interface components {
         /** @description Runtime rejected the candidate process-local reload. */
         Conflict: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9160,6 +9196,7 @@ export interface components {
         /** @description Request body exceeded the endpoint limit. */
         PayloadTooLarge: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9169,6 +9206,7 @@ export interface components {
         /** @description Identity provider, credential storage, secret resolution, or encryption key is unavailable. */
         ServiceUnavailable: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9178,6 +9216,7 @@ export interface components {
         /** @description Prompt template mutation response. */
         AdminPromptTemplateMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9187,6 +9226,7 @@ export interface components {
         /** @description Prompt template archive response. */
         DeletePromptTemplateOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9196,6 +9236,7 @@ export interface components {
         /** @description Skill package mutation response. */
         AdminSkillPackageMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9205,6 +9246,7 @@ export interface components {
         /** @description Agent upstream mutation response. */
         AdminAgentUpstreamMutationOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9214,6 +9256,7 @@ export interface components {
         /** @description Skill package delete response. */
         DeleteSkillPackageResponse: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9223,6 +9266,7 @@ export interface components {
         /** @description Agent upstream delete response. */
         DeleteAgentUpstreamResponse: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9232,6 +9276,7 @@ export interface components {
         /** @description The fixed route exists but does not support this HTTP method. */
         MethodNotAllowed: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9241,6 +9286,7 @@ export interface components {
         /** @description Asset reference, variant, channel target, checksum, or JSON control body is invalid. */
         AssetBadRequest: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9250,6 +9296,7 @@ export interface components {
         /** @description The requested asset, version, variant, channel, or uploaded object does not exist. */
         AssetNotFound: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9259,6 +9306,7 @@ export interface components {
         /** @description The operation conflicts with immutable version state or the selected transfer mode. */
         AssetConflict: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9268,6 +9316,7 @@ export interface components {
         /** @description The inline body, control body, or declared object exceeds its configured limit. */
         AssetPayloadTooLarge: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9277,6 +9326,7 @@ export interface components {
         /** @description Uploaded bytes failed checksum, size, content, signature, or malware validation and are not published. */
         AssetUnprocessableEntity: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9286,6 +9336,7 @@ export interface components {
         /** @description Asset storage is unavailable or a commit outcome cannot be proven. asset_bucket_unavailable covers final-key generation or object-write failure and preserves staging plus any final candidate. asset_commit_outcome_unknown means the atomic metadata create may already be durable; retry with the same upload_id and do not delete staging or final objects. */
         AssetServiceUnavailable: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9295,6 +9346,7 @@ export interface components {
         /** @description The resolved asset download exceeds the effective egress byte budget or download request rate. */
         AssetTooManyRequests: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9304,6 +9356,7 @@ export interface components {
         /** @description Stored asset bytes failed their recorded SHA-256 integrity check. */
         AssetInternalServerError: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9313,6 +9366,7 @@ export interface components {
         /** @description Project delete response. */
         DeleteProjectOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9322,6 +9376,7 @@ export interface components {
         /** @description Workspace delete response. */
         DeleteWorkspaceOk: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9331,6 +9386,7 @@ export interface components {
         /** @description Too many requests. */
         TooManyRequests: {
             headers: {
+                "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                 [name: string]: unknown;
             };
             content: {
@@ -9430,7 +9486,7 @@ export interface components {
         };
     };
     headers: {
-        /** @description Short-lived, server-issued time token (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. A client that receives one echoes it byte-for-byte on the next request of the same action, under x-ferrogate-time-token, and reports it as the authoritative client_sent_at; unknown segments are tolerated and preserved, so a server may add fields. NOT ISSUED BY ANY FERROGATE DEPLOYMENT TODAY: this declares the shape a server-side issuer must produce, and no operation references it yet, so every CLI receipt currently reports client_sent_at as null with the absence code no_server_issued_time_token. Bind every token to the action id that requested it and keep the ttl to seconds -- a long-lived token lets an attacker pre-fetch and replay one to backdate an action. */
+        /** @description Short-lived, server-issued time token (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. When a request presents x-ferrogate-action-id, FerroGate signs this response header at the downstream response boundary. A client echoes it byte-for-byte on the next request of the same action and reports issued_at as the authoritative client_sent_at. The server validates the HMAC signature, action binding and TTL against its own receive clock; the client clock remains unverified and is never the authority. Tokens last seconds, not minutes, to bound pre-fetch and replay. */
         ClientTimeTokenResponseHeader: string;
     };
     pathItems: never;
@@ -9460,6 +9516,7 @@ export interface operations {
             /** @description Gateway health response. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9491,6 +9548,7 @@ export interface operations {
             /** @description Gateway is ready to serve traffic with a loaded state revision. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9500,6 +9558,7 @@ export interface operations {
             /** @description Gateway is not ready to serve traffic. */
             503: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9529,6 +9588,7 @@ export interface operations {
             /** @description Admin dashboard HTML. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9551,6 +9611,12 @@ export interface operations {
                 "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
                 /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
                 "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+                /** @description Required for modern candidate requests and must match params._meta.io.modelcontextprotocol/protocolVersion; legacy initialize-based requests retain their revision-specific behavior. */
+                "MCP-Protocol-Version"?: string;
+                /** @description Required for modern candidate requests and must match the JSON-RPC method. */
+                "Mcp-Method"?: string;
+                /** @description Required for modern tools/call, resources/read, and prompts/get requests; Base64 sentinel values are decoded before body comparison. */
+                "Mcp-Name"?: string;
                 /** @description Optional skill package id that must be visible to the authenticated API key. When set, tool/MCP execution is allowed only if the package declares the requested capability, and audit evidence is linked to the package. */
                 "x-ferrogate-skill-package"?: components["parameters"]["SkillPackageHeader"];
                 /** @description Optional skill package version. Requires x-ferrogate-skill-package and must match the registered package version. */
@@ -9568,6 +9634,17 @@ export interface operations {
             /** @description MCP JSON-RPC response. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpJsonRpcResponse"];
+                };
+            };
+            /** @description Modern MCP metadata/header mismatch or unsupported protocol version. */
+            400: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9576,6 +9653,16 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            /** @description Unknown modern MCP JSON-RPC method. */
+            404: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpJsonRpcResponse"];
+                };
+            };
         };
     };
     authorizeMcpIdentity: {
@@ -9603,6 +9690,7 @@ export interface operations {
             /** @description Authorization URL and one-time state. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9640,6 +9728,7 @@ export interface operations {
             /** @description MCP identity metadata. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9675,6 +9764,7 @@ export interface operations {
             /** @description Revoked MCP identity metadata. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9712,6 +9802,7 @@ export interface operations {
             /** @description Connected MCP identity metadata. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9750,6 +9841,7 @@ export interface operations {
             /** @description Agent run completed immediately through the default bounded harness. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9759,6 +9851,7 @@ export interface operations {
             /** @description Agent run stopped before completion due to configured bounds. */
             202: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9800,6 +9893,7 @@ export interface operations {
             /** @description Duplicate submission: the ORIGINAL run_id is returned and no second run is started. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9809,6 +9903,7 @@ export interface operations {
             /** @description Job accepted; the durable run_id can be observed and collected. */
             202: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9851,6 +9946,7 @@ export interface operations {
             /** @description Agent job status. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9893,6 +9989,7 @@ export interface operations {
             /** @description One page of agent-run timeline events for the job. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9932,6 +10029,7 @@ export interface operations {
             /** @description Terminal job result. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -9971,6 +10069,7 @@ export interface operations {
             /** @description Job is terminal. `cancelled` is false when it was already terminal (cancel is idempotent). */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10016,6 +10115,7 @@ export interface operations {
             /** @description Tool execution response. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10052,6 +10152,7 @@ export interface operations {
             /** @description Control-plane overview. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10085,6 +10186,7 @@ export interface operations {
             /** @description Gateway status. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10122,6 +10224,7 @@ export interface operations {
             /** @description Self-hosted worker registration record. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10157,6 +10260,7 @@ export interface operations {
             /** @description Gateway status. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10195,6 +10299,7 @@ export interface operations {
             /** @description Provider list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10228,6 +10333,7 @@ export interface operations {
             /** @description Provider health list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10264,6 +10370,7 @@ export interface operations {
             /** @description Provider model catalog list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10304,6 +10411,7 @@ export interface operations {
             /** @description Recorded self-hosted worker heartbeat and updated worker projection. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10346,6 +10454,7 @@ export interface operations {
             /** @description Self-hosted worker telemetry event stream page. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10386,6 +10495,7 @@ export interface operations {
             /** @description Recorded self-hosted worker telemetry event and updated worker projection. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10422,6 +10532,7 @@ export interface operations {
             /** @description Managed worker runtime contract list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10455,6 +10566,7 @@ export interface operations {
             /** @description Framework adapter runtime contract list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10488,6 +10600,7 @@ export interface operations {
             /** @description Self-hosted worker runtime contract list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10525,6 +10638,7 @@ export interface operations {
             /** @description Registered self-hosted worker. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10561,6 +10675,7 @@ export interface operations {
             /** @description Storage-backed self-hosted worker record. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10599,6 +10714,7 @@ export interface operations {
             /** @description Paginated self-hosted worker records backed by storage evidence. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10632,6 +10748,7 @@ export interface operations {
             /** @description Observability exporter status list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10665,6 +10782,7 @@ export interface operations {
             /** @description Extension list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10698,6 +10816,7 @@ export interface operations {
             /** @description Plugin list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10735,6 +10854,7 @@ export interface operations {
             /** @description Plugin created. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10773,6 +10893,7 @@ export interface operations {
             /** @description Plugin status. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10810,6 +10931,7 @@ export interface operations {
             /** @description Plugin deleted. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10852,6 +10974,7 @@ export interface operations {
             /** @description Plugin updated. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10891,6 +11014,7 @@ export interface operations {
             /** @description Plugin tool list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10925,6 +11049,7 @@ export interface operations {
             /** @description Tool list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10958,6 +11083,7 @@ export interface operations {
             /** @description Tool approval list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -10994,6 +11120,7 @@ export interface operations {
             /** @description Tool approval record. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11031,6 +11158,7 @@ export interface operations {
             /** @description Approved tool approval record. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11070,6 +11198,7 @@ export interface operations {
             /** @description Denied tool approval record. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11109,6 +11238,7 @@ export interface operations {
             /** @description Expired tool approval record. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11145,6 +11275,7 @@ export interface operations {
             /** @description MCP server status list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11328,6 +11459,7 @@ export interface operations {
             /** @description Tool session audit timeline. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11366,6 +11498,7 @@ export interface operations {
             /** @description Model list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11399,6 +11532,7 @@ export interface operations {
             /** @description API key list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11578,6 +11712,7 @@ export interface operations {
             /** @description Tenant reference list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11611,6 +11746,7 @@ export interface operations {
             /** @description Policy list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11794,6 +11930,7 @@ export interface operations {
             /** @description Paginated request log list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11831,6 +11968,7 @@ export interface operations {
             /** @description Paginated agent run summary list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11867,6 +12005,7 @@ export interface operations {
             /** @description Agent run timeline. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11904,6 +12043,7 @@ export interface operations {
             /** @description Self-hosted worker reported run timeline. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11947,6 +12087,7 @@ export interface operations {
             /** @description Newline-delimited JSON request-log export records. Prompt and response bodies are included only when body recording was explicitly enabled and configured secrets have been redacted. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -11984,6 +12125,7 @@ export interface operations {
             /** @description Paginated token metering event list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12017,6 +12159,7 @@ export interface operations {
             /** @description Recent metering export status list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12050,6 +12193,7 @@ export interface operations {
             /** @description Usage aggregate list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12087,6 +12231,7 @@ export interface operations {
             /** @description Paginated audit event list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12139,6 +12284,7 @@ export interface operations {
             /** @description Paginated Guardrail evaluation evidence. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12150,6 +12296,7 @@ export interface operations {
             /** @description Guardrail evidence storage unavailable. */
             500: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12185,6 +12332,7 @@ export interface operations {
             /** @description Unified investigation timeline. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12198,6 +12346,7 @@ export interface operations {
             /** @description Investigation evidence storage unavailable. */
             500: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12229,6 +12378,7 @@ export interface operations {
             /** @description Validation result. Invalid candidate config returns valid=false rather than a 4xx. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12264,6 +12414,7 @@ export interface operations {
             /** @description Reload result. Rejected candidates return committed=false rather than a 4xx. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12299,6 +12450,7 @@ export interface operations {
             /** @description Drain status. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12332,6 +12484,7 @@ export interface operations {
             /** @description Updated drain status. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12367,6 +12520,7 @@ export interface operations {
             /** @description Prometheus text exposition. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12404,6 +12558,7 @@ export interface operations {
             /** @description Paginated token metering event list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12437,6 +12592,7 @@ export interface operations {
             /** @description Gateway config profile list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12616,6 +12772,7 @@ export interface operations {
             /** @description Agent workflow policy list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12798,6 +12955,7 @@ export interface operations {
             /** @description Agent schedule list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12835,6 +12993,7 @@ export interface operations {
             /** @description Agent schedule created. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12872,6 +13031,7 @@ export interface operations {
             /** @description Agent schedule. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12912,6 +13072,7 @@ export interface operations {
             /** @description Agent schedule replaced. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12950,6 +13111,7 @@ export interface operations {
             /** @description Agent schedule deleted. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -12990,6 +13152,7 @@ export interface operations {
             /** @description Agent schedule updated. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13028,6 +13191,7 @@ export interface operations {
             /** @description Manual fire recorded. */
             202: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13064,6 +13228,7 @@ export interface operations {
             /** @description Agent schedule fire history. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13098,6 +13263,7 @@ export interface operations {
             /** @description Prompt template list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13284,6 +13450,7 @@ export interface operations {
             /** @description Rendered OpenAI-compatible chat or Responses request body. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13321,6 +13488,7 @@ export interface operations {
             /** @description Visible skill packages. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13356,6 +13524,7 @@ export interface operations {
             /** @description Visible skill package. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13390,6 +13559,7 @@ export interface operations {
             /** @description Registered agent upstreams. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13566,6 +13736,7 @@ export interface operations {
             /** @description Visible agent upstreams. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13599,6 +13770,7 @@ export interface operations {
             /** @description Registered skill packages. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13779,6 +13951,7 @@ export interface operations {
             /** @description Paginated managed worker session list backed by storage records. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13818,6 +13991,7 @@ export interface operations {
             /** @description Recorded self-hosted worker artifact metadata and updated worker projection. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13860,6 +14034,7 @@ export interface operations {
             /** @description Recorded self-hosted worker checkpoint metadata and updated worker projection. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13896,6 +14071,7 @@ export interface operations {
             /** @description Guardrail policy revision list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13933,6 +14109,7 @@ export interface operations {
             /** @description Draft revision created. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -13971,6 +14148,7 @@ export interface operations {
             /** @description Guardrail policy revision list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14007,6 +14185,7 @@ export interface operations {
             /** @description Guardrail policy revision history. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14047,6 +14226,7 @@ export interface operations {
             /** @description Draft revision created. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14086,6 +14266,7 @@ export interface operations {
             /** @description Exact policy revision. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14123,6 +14304,7 @@ export interface operations {
             /** @description Revision archived and runtime reloaded. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14163,6 +14345,7 @@ export interface operations {
             /** @description Revision activated. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14205,6 +14388,7 @@ export interface operations {
             /** @description Revision rolled back. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14247,6 +14431,7 @@ export interface operations {
             /** @description Sanitized dry-run plan. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14289,6 +14474,7 @@ export interface operations {
             /** @description Rotated self-hosted worker identity fingerprint and returned the updated worker projection. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14325,6 +14511,7 @@ export interface operations {
             /** @description Serve the Admin dashboard alias. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14358,6 +14545,7 @@ export interface operations {
             /** @description Serve the Admin dashboard alias. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14391,6 +14579,7 @@ export interface operations {
             /** @description List enabled models. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14428,6 +14617,7 @@ export interface operations {
             /** @description Create an OpenAI-compatible chat completion. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14468,6 +14658,7 @@ export interface operations {
             /** @description Create an OpenAI-compatible response. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14508,6 +14699,7 @@ export interface operations {
             /** @description Create OpenAI-compatible embeddings for one or more inputs. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14550,6 +14742,7 @@ export interface operations {
             /** @description Create an Anthropic-native Messages completion (streaming or non-streaming). */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14592,6 +14785,7 @@ export interface operations {
             /** @description Generate images from a text prompt (OpenAI-compatible; billed per generated image). */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14606,6 +14800,7 @@ export interface operations {
             /** @description The resolved model's provider family does not support image generation. */
             422: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14639,6 +14834,7 @@ export interface operations {
             /** @description List tools visible to the authenticated tenant. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14678,6 +14874,7 @@ export interface operations {
             /** @description Execute an extension tool. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14716,6 +14913,7 @@ export interface operations {
             /** @description Execute a function through the fail-closed egress broker. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14758,6 +14956,7 @@ export interface operations {
             /** @description Invoke a configured agent upstream. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14798,6 +14997,7 @@ export interface operations {
             /** @description Self-hosted worker heartbeat transport. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14836,6 +15036,7 @@ export interface operations {
             /** @description Self-hosted worker events transport. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14874,6 +15075,7 @@ export interface operations {
             /** @description Self-hosted worker artifacts transport. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14912,6 +15114,7 @@ export interface operations {
             /** @description Self-hosted worker checkpoints transport. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14950,6 +15153,7 @@ export interface operations {
             /** @description Self-hosted worker runs/poll transport. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -14988,6 +15192,7 @@ export interface operations {
             /** @description Self-hosted worker runs/ack transport. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15027,6 +15232,7 @@ export interface operations {
             /** @description List tenant accounts. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15071,6 +15277,7 @@ export interface operations {
             /** @description Create a tenant account. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15107,6 +15314,7 @@ export interface operations {
             /** @description Get a tenant account. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15146,6 +15354,7 @@ export interface operations {
             /** @description Replace a tenant account. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15186,6 +15395,7 @@ export interface operations {
             /** @description Update a tenant account. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15222,6 +15432,7 @@ export interface operations {
             /** @description Read effective plan and quota defaults. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15261,6 +15472,7 @@ export interface operations {
             /** @description Assign a subscription plan to a tenant. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15303,6 +15515,7 @@ export interface operations {
             /** @description List projects. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15347,6 +15560,7 @@ export interface operations {
             /** @description Create a project. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15383,6 +15597,7 @@ export interface operations {
             /** @description Get a project. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15423,6 +15638,7 @@ export interface operations {
             /** @description Replace a project. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15494,6 +15710,7 @@ export interface operations {
             /** @description Update a project. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15538,6 +15755,7 @@ export interface operations {
             /** @description List workspaces. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15582,6 +15800,7 @@ export interface operations {
             /** @description Create a workspace. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15618,6 +15837,7 @@ export interface operations {
             /** @description Get a workspace. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15658,6 +15878,7 @@ export interface operations {
             /** @description Replace a workspace. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15729,6 +15950,7 @@ export interface operations {
             /** @description Update a workspace. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15764,6 +15986,7 @@ export interface operations {
             /** @description List durable virtual API keys. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15805,6 +16028,7 @@ export interface operations {
             /** @description Create a durable virtual API key. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15841,6 +16065,7 @@ export interface operations {
             /** @description Get a virtual API key. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15876,6 +16101,7 @@ export interface operations {
             /** @description Revoke a virtual API key. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15911,6 +16137,7 @@ export interface operations {
             /** @description List quota policies. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15952,6 +16179,7 @@ export interface operations {
             /** @description Create a quota policy. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -15989,6 +16217,7 @@ export interface operations {
             /** @description Get a scoped quota policy. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16029,6 +16258,7 @@ export interface operations {
             /** @description Replace a scoped quota policy. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16066,6 +16296,7 @@ export interface operations {
             /** @description Delete a scoped quota policy. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16108,6 +16339,7 @@ export interface operations {
             /** @description Update a scoped quota policy. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16142,6 +16374,7 @@ export interface operations {
             /** @description List subscription plans. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16183,6 +16416,7 @@ export interface operations {
             /** @description Create a subscription plan. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16219,6 +16453,7 @@ export interface operations {
             /** @description Get a subscription plan. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16258,6 +16493,7 @@ export interface operations {
             /** @description Replace a subscription plan. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16298,6 +16534,7 @@ export interface operations {
             /** @description Update a subscription plan. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16332,6 +16569,7 @@ export interface operations {
             /** @description List tenant wallets. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16373,6 +16611,7 @@ export interface operations {
             /** @description Create a tenant wallet. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16409,6 +16648,7 @@ export interface operations {
             /** @description Get a tenant wallet. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16448,6 +16688,7 @@ export interface operations {
             /** @description Update wallet recharge settings. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16488,6 +16729,7 @@ export interface operations {
             /** @description Atomically adjust wallet credits. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16528,6 +16770,7 @@ export interface operations {
             /** @description Charge a payment method and credit a wallet. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16564,6 +16807,7 @@ export interface operations {
             /** @description List wallet ledger entries. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16599,6 +16843,7 @@ export interface operations {
             /** @description List tenant payment methods. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16640,6 +16885,7 @@ export interface operations {
             /** @description Create a tenant payment method. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16676,6 +16922,7 @@ export interface operations {
             /** @description Delete a payment method. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16711,6 +16958,7 @@ export interface operations {
             /** @description List tenant assets. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16758,6 +17006,7 @@ export interface operations {
             /** @description List withheld (pending_scan/quarantined) assets for operators. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16803,6 +17052,7 @@ export interface operations {
             /** @description List tenant assets by type. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16875,6 +17125,7 @@ export interface operations {
                     "x-ferrogate-asset-yanked"?: "true";
                     /** @description RFC 7234 warning emitted when serving a yanked version. */
                     Warning?: string;
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16904,6 +17155,7 @@ export interface operations {
                     Warning?: string;
                     /** @description Inclusive range and complete representation size. */
                     "Content-Range"?: string;
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -16931,6 +17183,7 @@ export interface operations {
                     "x-ferrogate-asset-yanked"?: "true";
                     /** @description RFC 7234 warning emitted when serving a yanked version. */
                     Warning?: string;
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16963,6 +17216,7 @@ export interface operations {
                     "x-ferrogate-asset-yanked"?: "true";
                     /** @description RFC 7234 warning emitted when serving a yanked version. */
                     Warning?: string;
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -17028,6 +17282,7 @@ export interface operations {
             /** @description Published asset metadata including authoritative size and SHA-256. The push screened clean: asset.visibility is visible and the asset is serving now. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17037,6 +17292,7 @@ export interface operations {
             /** @description Stored but WITHHELD (#528). The version is durably claimed and immutable, yet the screening verdict was not clean: asset.visibility is pending_scan (a deferred or out-of-band scan has not completed) or quarantined, so the asset is absent from every list, manifest, resolution, and download surface until it is promoted via POST /v1/assets/{asset_type}/{name}/{version}/visibility. Do not report a successful publication on this status; branch on it, or read asset.visibility. */
             202: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17086,6 +17342,7 @@ export interface operations {
             /** @description Deleted asset identity. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17127,6 +17384,7 @@ export interface operations {
             /** @description List DB-backed permission actions. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17171,6 +17429,7 @@ export interface operations {
             /** @description Create a DB-backed permission action. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17207,6 +17466,7 @@ export interface operations {
             /** @description Get a permission action. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17243,6 +17503,7 @@ export interface operations {
             /** @description Delete a permission action. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17278,6 +17539,7 @@ export interface operations {
             /** @description List DB-backed roles. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17319,6 +17581,7 @@ export interface operations {
             /** @description Create a role from permission action keys. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17355,6 +17618,7 @@ export interface operations {
             /** @description Get a DB-backed role. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17391,6 +17655,7 @@ export interface operations {
             /** @description Delete a DB-backed role. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17428,6 +17693,7 @@ export interface operations {
             /** @description List role bindings for a tenant. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17471,6 +17737,7 @@ export interface operations {
             /** @description Bind a DB-backed role to a tenant. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17508,6 +17775,7 @@ export interface operations {
             /** @description Remove a tenant role binding. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17543,6 +17811,7 @@ export interface operations {
             /** @description Read usage and cost report rows. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17580,6 +17849,7 @@ export interface operations {
             /** @description List dead-lettered billing outbox records. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17617,6 +17887,7 @@ export interface operations {
             /** @description Replay a dead-lettered billing outbox record. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17654,6 +17925,7 @@ export interface operations {
             /** @description Rotate a virtual API key. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17691,6 +17963,7 @@ export interface operations {
             /** @description Enable a virtual API key. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17728,6 +18001,7 @@ export interface operations {
             /** @description Disable a virtual API key. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17765,6 +18039,7 @@ export interface operations {
             /** @description Revoke a virtual API key. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17806,6 +18081,7 @@ export interface operations {
             /** @description Agent upstream response. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17848,6 +18124,7 @@ export interface operations {
             /** @description Streaming agent upstream response. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -17882,6 +18159,7 @@ export interface operations {
             /** @description Site domain binding list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17920,6 +18198,7 @@ export interface operations {
             /** @description Existing proven binding for the hostname updated (re-bound within the same tenant). Still serving; the ACME order set is unchanged. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17929,6 +18208,7 @@ export interface operations {
             /** @description Site domain bound and serving: a newly created binding whose ownership was already proven, so the hostname is in the ACME order set and serves immediately. */
             201: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17938,6 +18218,7 @@ export interface operations {
             /** @description Binding recorded but NOT serving. Ownership is unproven, so the gateway deliberately keeps the hostname out of the ACME order set (no certificate is ordered) and it will not answer traffic until POST /admin/v1/site-domains/{hostname}/verify succeeds. Clients must branch on this: it is a 2xx that does not mean the domain is live. Read `site_domain.serving` / `verification.state` rather than inferring from the status code. */
             202: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -17978,6 +18259,7 @@ export interface operations {
             /** @description Site domain binding. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18015,6 +18297,7 @@ export interface operations {
             /** @description Site domain unbound. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18055,6 +18338,7 @@ export interface operations {
             /** @description Ownership verified; the hostname now serves. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18092,6 +18376,7 @@ export interface operations {
             /** @description Authoritative storage usage, quota, and transfer constraints. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18132,6 +18417,7 @@ export interface operations {
             /** @description Typed asset registry manifest. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18173,6 +18459,7 @@ export interface operations {
             /** @description Asset channel list. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18218,6 +18505,7 @@ export interface operations {
             /** @description Durably stored channel pointer. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18262,6 +18550,7 @@ export interface operations {
             /** @description Deleted channel identity. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18305,6 +18594,7 @@ export interface operations {
             /** @description Updated variant summaries. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18348,6 +18638,7 @@ export interface operations {
             /** @description Updated variant summaries. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18398,6 +18689,7 @@ export interface operations {
             /** @description The asset was promoted to its terminal visibility. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18448,6 +18740,7 @@ export interface operations {
             /** @description Presigned direct-upload intent bound to one unique staging upload. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18498,6 +18791,7 @@ export interface operations {
             /** @description Verified committed asset metadata. The commit screened clean: asset.visibility is visible and the asset is serving now. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18507,6 +18801,7 @@ export interface operations {
             /** @description Verified and stored, but WITHHELD (#528). The bytes are durable and the version is immutable, yet asset.visibility is pending_scan or quarantined, so the asset is absent from every list, manifest, resolution, and download surface until promoted via POST /v1/assets/{asset_type}/{name}/{version}/visibility. This is the ordinary terminal for a large object under a configured async scan threshold or an out-of-process scanner that never saw the streamed bytes. Do not report a successful publication on this status; branch on it, or read asset.visibility. */
             202: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18559,6 +18854,7 @@ export interface operations {
             /** @description The recorded release outcome for this upload intent. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18603,6 +18899,7 @@ export interface operations {
             /** @description Presigned direct-download metadata. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18644,6 +18941,7 @@ export interface operations {
             /** @description Paginated observed unattributed virtual-API-key activity rows. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18683,6 +18981,7 @@ export interface operations {
             /** @description Paginated durable per-agent cost-burn rows for the period, biggest accumulated total first. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18717,6 +19016,7 @@ export interface operations {
             /** @description The declarations visible to the caller. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18759,6 +19059,7 @@ export interface operations {
             /** @description The effective policy, its revision, and the inheritance chain. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18798,6 +19099,7 @@ export interface operations {
             /** @description The dry-run decision and the policy that produced it. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18812,6 +19114,7 @@ export interface operations {
             /** @description The declared policy in force failed structural validation, so no decision was produced. */
             500: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18850,6 +19153,7 @@ export interface operations {
             /** @description One bounded page of the tenant's attempts. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -18892,6 +19196,7 @@ export interface operations {
             /** @description The attempt with its linked reservation and settlement. */
             200: {
                 headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {

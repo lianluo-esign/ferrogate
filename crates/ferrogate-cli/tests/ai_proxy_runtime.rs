@@ -1770,6 +1770,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
+context_window = 8192
 cache_enabled = true
 
 [[api_keys]]
@@ -2725,6 +2726,7 @@ name = "claude-chat"
 provider = "anthropic"
 provider_model = "claude-3-5-sonnet-latest"
 capabilities = ["chat", "streaming"]
+context_window = 8192
 
 [[api_keys]]
 id = "key_dev"
@@ -4549,6 +4551,7 @@ name = "claude-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat", "streaming"]
+context_window = 8192
 
 [[api_keys]]
 id = "key_dev"
@@ -4749,6 +4752,7 @@ name = "claude-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat", "streaming"]
+context_window = 8192
 
 [[api_keys]]
 id = "key_dev"
@@ -4870,6 +4874,7 @@ name = "flash-chat"
 provider = "gemini"
 provider_model = "gemini-2.5-flash"
 capabilities = ["chat"]
+context_window = 8192
 
 [[api_keys]]
 id = "key_dev"

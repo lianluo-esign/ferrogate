@@ -528,7 +528,16 @@ impl<'a> Parser<'a> {
                 };
                 let args = self.consume_line_args();
                 match directive.as_str() {
-                    "capabilities" => model.capabilities = args,
+                    "capabilities" => {
+                        model.capabilities = args
+                            .iter()
+                            .map(|value| {
+                                value.parse().map_err(|reason| {
+                                    self.unsupported(&token, directive.clone(), reason)
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
                     "context_window" => {
                         model.context_window = args.first().and_then(|value| value.parse().ok());
                     }

@@ -5,6 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use super::parse_caddyfile;
+use ferrogate_providers::ModelCapability;
 
 #[test]
 fn parses_initial_ferrogate_caddyfile_subset() {
@@ -47,6 +48,28 @@ fn parses_initial_ferrogate_caddyfile_subset() {
         .routes
         .iter()
         .any(|route| route.static_response.is_some()));
+}
+
+#[test]
+fn rejects_unknown_model_capability_in_caddyfile() {
+    let error = parse_caddyfile(
+        r#"
+:8080 {
+    ai_gateway {
+        model fast-chat -> openai:gpt-4o-mini {
+            capabilities chat telepathy
+        }
+    }
+}
+"#,
+        "Ferrogate/Caddyfile",
+    )
+    .unwrap_err();
+
+    assert_eq!(error.directive, "capabilities");
+    let rendered = error.to_string();
+    assert!(rendered.contains("unknown model capability \"telepathy\""));
+    assert!(rendered.contains("structured_output"));
 }
 
 #[test]
@@ -99,7 +122,10 @@ fn parses_ai_gateway_provider_model_and_api_key_blocks() {
     assert_eq!(config.models[0].name, "fast-chat");
     assert_eq!(config.models[0].provider, "openai");
     assert_eq!(config.models[0].provider_model, "gpt-4o-mini");
-    assert_eq!(config.models[0].capabilities, ["chat", "streaming"]);
+    assert_eq!(
+        config.models[0].capabilities,
+        [ModelCapability::Chat, ModelCapability::Streaming]
+    );
     assert_eq!(config.models[0].context_window, Some(128000));
     assert_eq!(config.api_keys.len(), 1);
     assert_eq!(config.api_keys[0].id, "key_dev");

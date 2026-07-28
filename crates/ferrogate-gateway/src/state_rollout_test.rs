@@ -7,7 +7,9 @@
 
 use super::*;
 
+use crate::model_routing::ModelRouteExclusionReason;
 use ferrogate_config::{CanaryRoute, Model, Provider};
+use ferrogate_providers::ModelCapability;
 
 fn provider(name: &str, region: Option<&str>, enabled: bool) -> Provider {
     Provider {
@@ -53,6 +55,8 @@ fn canary_route(percent: u8, enabled: bool) -> CanaryRoute {
     CanaryRoute {
         provider: "canary".into(),
         provider_model: "gpt-4o".into(),
+        capabilities: vec![],
+        context_window: None,
         percent,
         input_price_per_1m: Some(2.0),
         output_price_per_1m: Some(2.0),
@@ -76,9 +80,14 @@ fn state_with(
     AppState::new(config)
 }
 
-fn candidate_routes(state: &AppState) -> Vec<ModelRoute> {
+fn candidate_routes(state: &AppState) -> ModelRoutingDecision {
     let resolved = state.resolve_model("fast-chat").unwrap();
-    state.candidate_model_routes(&resolved, None, &HashSet::new())
+    state.candidate_model_routes(
+        &resolved,
+        &ModelRouteRequirements::default(),
+        None,
+        &HashSet::new(),
+    )
 }
 
 #[test]
@@ -105,6 +114,42 @@ fn canary_at_full_percent_leads_and_keeps_primary_as_fallback() {
     assert_eq!(providers, ["canary", "primary"]);
     // Canary carries its own price (used for governance/billing parity).
     assert_eq!(routes[0].input_price_per_1m, Some(2.0));
+}
+
+#[test]
+fn incompatible_canary_is_excluded_before_it_can_lead() {
+    let mut model = model_with_canary(Some(canary_route(100, true)));
+    model.capabilities = vec![ModelCapability::Chat, ModelCapability::Tools];
+    let state = AppState::new(Config {
+        providers: vec![
+            provider("primary", None, true),
+            provider("canary", None, true),
+        ],
+        models: vec![model],
+        ..Config::default()
+    });
+    let resolved = state.resolve_model("fast-chat").unwrap();
+    let mut requirements = ModelRouteRequirements::default();
+    requirements.require(ModelCapability::Tools);
+    let mut decision =
+        state.candidate_model_routes(&resolved, &requirements, None, &HashSet::new());
+
+    state.apply_canary_route(
+        "fast-chat",
+        "always-selected",
+        &HashSet::new(),
+        &mut decision,
+    );
+
+    assert_eq!(decision.eligible_routes.len(), 1);
+    assert_eq!(decision.eligible_routes[0].provider, "primary");
+    assert_eq!(decision.exclusions.len(), 1);
+    assert_eq!(decision.exclusions[0].candidate.provider, "canary");
+    assert_eq!(
+        decision.exclusions[0].reason,
+        ModelRouteExclusionReason::MissingCapability(ModelCapability::Tools)
+    );
+    assert_eq!(decision.selection_reason.code(), "priority_order");
 }
 
 #[test]
@@ -187,10 +232,11 @@ fn canary_respects_region_allowlist_fail_closed() {
     let mut allowlist = HashSet::new();
     allowlist.insert("us-east-1".to_string());
     let mut routes =
-        vec![
-            ModelRoute::with_routing("primary", "gpt-4o-mini", Some(1.0), Some(1.0), 0, 1)
-                .with_region(Some("us-east-1".into())),
-        ];
+        ModelRoutingDecision::new(ModelRouteRequirements::default(), RoutingStrategy::Priority);
+    routes.eligible_routes.push(
+        ModelRoute::with_routing("primary", "gpt-4o-mini", Some(1.0), Some(1.0), 0, 1)
+            .with_region(Some("us-east-1".into())),
+    );
     state.apply_canary_route("fast-chat", "any-key", &allowlist, &mut routes);
     let providers = routes
         .iter()
@@ -209,10 +255,11 @@ fn canary_allowed_when_region_matches_allowlist() {
     let mut allowlist = HashSet::new();
     allowlist.insert("us-east-1".to_string());
     let mut routes =
-        vec![
-            ModelRoute::with_routing("primary", "gpt-4o-mini", Some(1.0), Some(1.0), 0, 1)
-                .with_region(Some("us-east-1".into())),
-        ];
+        ModelRoutingDecision::new(ModelRouteRequirements::default(), RoutingStrategy::Priority);
+    routes.eligible_routes.push(
+        ModelRoute::with_routing("primary", "gpt-4o-mini", Some(1.0), Some(1.0), 0, 1)
+            .with_region(Some("us-east-1".into())),
+    );
     state.apply_canary_route("fast-chat", "any-key", &allowlist, &mut routes);
     assert_eq!(routes[0].provider, "canary");
     assert_eq!(routes[0].region.as_deref(), Some("us-east-1"));

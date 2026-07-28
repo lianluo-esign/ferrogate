@@ -113,7 +113,7 @@ pub struct GatewayModel {
     pub name: String,
     pub provider: String,
     pub provider_model: String,
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<ferrogate_providers::ModelCapability>,
     pub context_window: Option<u32>,
     pub input_price_per_1m: Option<String>,
     pub output_price_per_1m: Option<String>,

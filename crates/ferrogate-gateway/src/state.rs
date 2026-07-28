@@ -29,6 +29,9 @@ use crate::extensions::{
     ToolExecutionResponse,
 };
 use crate::metering::{MeteringExportStatus, MeteringExporter};
+use crate::model_routing::{
+    ModelRouteRequirements, ModelRouteSelectionReason, ModelRoutingDecision,
+};
 use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
     ProviderAttempt, TokenUsage as BillingTokenUsage,
@@ -6771,6 +6774,8 @@ fn model_registry_entry(
     entry.enabled = model.enabled;
     entry.primary.input_price_per_1m = model.input_price_per_1m;
     entry.primary.output_price_per_1m = model.output_price_per_1m;
+    entry.primary.capabilities = model.capabilities.clone();
+    entry.primary.context_window = model.context_window;
     entry.primary.region = provider_region(provider_regions, &model.provider);
     entry.fallbacks = model
         .fallbacks
@@ -6785,6 +6790,7 @@ fn model_registry_entry(
                 fallback.priority.unwrap_or(100),
                 fallback.weight.unwrap_or(1),
             )
+            .with_capabilities_and_context(fallback.capabilities.clone(), fallback.context_window)
             .with_region(provider_region(provider_regions, &fallback.provider))
         })
         .collect();
