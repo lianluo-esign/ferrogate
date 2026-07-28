@@ -205,6 +205,26 @@ fn suspending_a_tenant_stops_its_keys_and_blocks_new_credentials() {
         .as_str()
         .expect("create must return the plaintext secret")
         .to_string();
+    let disabled_key = body_json(&admin(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/virtual-keys",
+        r#"{"id":"vk-disabled-before-suspension","name":"Disabled key","workspace_id":"ws-susp","scopes":["models.read"]}"#,
+    ));
+    let disabled_key_id = disabled_key["key"]["id"]
+        .as_str()
+        .expect("disabled key id")
+        .to_string();
+    let disabled = admin(
+        &gateway_addr,
+        "POST",
+        &format!("/admin/v1/virtual-keys/{disabled_key_id}/disable"),
+        "",
+    );
+    assert!(
+        status_line(&disabled).contains("200"),
+        "the enable regression needs a disabled control key: {disabled}"
+    );
 
     // --- Baseline: everything works while the tenant is active -------------
     let models = as_key(&gateway_addr, &secret, "GET", "/v1/models", "");
@@ -333,6 +353,23 @@ fn suspending_a_tenant_stops_its_keys_and_blocks_new_credentials() {
         "a refused rotation must not leak a secret: {rotated}"
     );
 
+    // 9. Enabling activates a credential just as surely as minting one. The
+    //    write must be refused and the stored key must remain disabled.
+    let enabled = admin(
+        &gateway_addr,
+        "POST",
+        &format!("/admin/v1/virtual-keys/{disabled_key_id}/enable"),
+        "",
+    );
+    assert_suspended_rejection(&enabled, "inactive_tenancy_reference");
+    let still_disabled = body_json(&admin(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/virtual-keys/{disabled_key_id}"),
+        "",
+    ));
+    assert_eq!(still_disabled["key"]["enabled"], false);
+
     // --- Reactivate: suspension is reversible, and un-suspending is itself
     // --- never blocked (the operator key carries no organization_id).
     set_tenant_status(&gateway_addr, "active");
@@ -362,6 +399,16 @@ fn suspending_a_tenant_stops_its_keys_and_blocks_new_credentials() {
     assert!(
         status_line(&project_only).contains("200"),
         "a project-only key must work again once its tenant is reactivated: {project_only}"
+    );
+    let enabled = admin(
+        &gateway_addr,
+        "POST",
+        &format!("/admin/v1/virtual-keys/{disabled_key_id}/enable"),
+        "",
+    );
+    assert!(
+        status_line(&enabled).contains("200"),
+        "the same key must be enableable after reactivation: {enabled}"
     );
 
     let _ = gateway.kill();

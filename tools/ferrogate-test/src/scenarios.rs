@@ -2423,6 +2423,227 @@ fn assert_api_key_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         },
     )?;
 
+    assert_lifecycle_tenancy_enforcement(case)?;
+
+    Ok(())
+}
+
+/// #514 request-time and attach-time lifecycle enforcement through a real
+/// gateway process. A native credential below names only `project_gateway`,
+/// so its refusal also proves the resolver walks to the tenant instead of
+/// trusting only ids present on the credential.
+fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
+    case.expect_json(
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"org_demo","name":"Lifecycle tenant","slug":"lifecycle-tenant"}"#,
+        201,
+        |_| Ok(()),
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/projects",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"project_gateway","tenant_id":"org_demo","name":"Lifecycle project","slug":"lifecycle-project"}"#,
+        201,
+        |_| Ok(()),
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/workspaces",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-workspace","project_id":"project_gateway","name":"Lifecycle workspace","slug":"lifecycle-workspace"}"#,
+        201,
+        |_| Ok(()),
+    )?;
+
+    let mut live_secret = String::new();
+    case.expect_json(
+        "POST",
+        "/admin/v1/virtual-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-live","name":"Lifecycle live key","workspace_id":"lifecycle-workspace","scopes":["models.read"]}"#,
+        201,
+        |body| {
+            live_secret = body["secret"]
+                .as_str()
+                .expect("virtual-key create must return a one-time secret")
+                .to_string();
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/virtual-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-disabled","name":"Lifecycle disabled key","workspace_id":"lifecycle-workspace","scopes":["models.read"]}"#,
+        201,
+        |_| Ok(()),
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/virtual-keys/lifecycle-disabled/disable",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["enabled"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/api-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-project-only","name":"Lifecycle project-only key","key":"lifecycle-project-only-secret","project_id":"project_gateway","scopes":["models.read"]}"#,
+        201,
+        |_| Ok(()),
+    )?;
+
+    let live_auth = format!("Authorization: Bearer {live_secret}");
+    let project_only_auth = "Authorization: Bearer lifecycle-project-only-secret";
+    for auth in [CLIENT_AUTH, live_auth.as_str(), project_only_auth] {
+        case.expect_json("GET", "/v1/models", &[auth], "", 200, |_| Ok(()))?;
+    }
+
+    // A typo must be rejected at the write, while the canonical value below
+    // must actually take effect. This catches the old "unknown means active"
+    // behavior instead of merely asserting parser text.
+    case.expect_json(
+        "PUT",
+        "/admin/v1/tenant-accounts/org_demo",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"status":"suspend"}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_tenant");
+            Ok(())
+        },
+    )?;
+    case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |_| Ok(()))?;
+    case.expect_json(
+        "PUT",
+        "/admin/v1/tenant-accounts/org_demo",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"status":"suspended"}"#,
+        200,
+        |body| {
+            assert_eq!(body["tenant"]["status"], "suspended");
+            Ok(())
+        },
+    )?;
+
+    for auth in [CLIENT_AUTH, live_auth.as_str(), project_only_auth] {
+        case.expect_json("GET", "/v1/models", &[auth], "", 403, |body| {
+            assert_eq!(body["error"]["code"], "tenancy_suspended");
+            Ok(())
+        })?;
+    }
+
+    case.expect_json(
+        "POST",
+        "/admin/v1/projects",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-blocked-project","tenant_id":"org_demo","name":"Blocked","slug":"lifecycle-blocked-project"}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/workspaces",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-blocked-workspace","project_id":"project_gateway","name":"Blocked","slug":"lifecycle-blocked-workspace"}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/api-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-blocked-native","name":"Blocked","key":"lifecycle-blocked-secret","project_id":"project_gateway"}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/virtual-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-blocked-virtual","name":"Blocked","workspace_id":"lifecycle-workspace","scopes":["models.read"]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            assert!(!body.to_string().contains("fg_"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/virtual-keys/lifecycle-live/rotate",
+        &[ADMIN_AUTH],
+        "",
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            assert!(!body.to_string().contains("fg_"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/virtual-keys/lifecycle-disabled/enable",
+        &[ADMIN_AUTH],
+        "",
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/virtual-keys/lifecycle-disabled",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["enabled"], false);
+            Ok(())
+        },
+    )?;
+
+    case.expect_json(
+        "PUT",
+        "/admin/v1/tenant-accounts/org_demo",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"status":"active"}"#,
+        200,
+        |_| Ok(()),
+    )?;
+    for auth in [CLIENT_AUTH, live_auth.as_str(), project_only_auth] {
+        case.expect_json("GET", "/v1/models", &[auth], "", 200, |_| Ok(()))?;
+    }
+    case.expect_json(
+        "POST",
+        "/admin/v1/virtual-keys/lifecycle-disabled/enable",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["enabled"], true);
+            Ok(())
+        },
+    )?;
+
     Ok(())
 }
 

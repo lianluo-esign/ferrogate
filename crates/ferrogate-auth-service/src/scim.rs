@@ -8,7 +8,9 @@
 //! deprovisioning semantics (issues #161/#232).
 
 use ferrogate_core::{TenantContext, WorkspaceScope};
-use ferrogate_storage::{StoredAdminUser, StoredAdminUserMembership, StoredApiKey};
+use ferrogate_storage::{
+    LifecycleSeam, StoredAdminUser, StoredAdminUserMembership, StoredApiKey, TenancyRefs,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -22,8 +24,8 @@ use crate::api_key::{
     StorageApiKeyAuthenticator,
 };
 use crate::http::{
-    forbidden, internal_error, not_found, storage_error, unauthorized, unprocessable, HttpRequest,
-    HttpResponse,
+    forbidden, internal_error, lifecycle_error, not_found, storage_error, unauthorized,
+    unprocessable, HttpRequest, HttpResponse,
 };
 use crate::membership_role::MembershipRole;
 use crate::util::{
@@ -82,6 +84,19 @@ pub(crate) fn handle_admin_scim_token_create(
         Ok(None) => return internal_error("no workspace found for this tenant"),
         Err(error) => return storage_error(&error),
     };
+    // A disabled tenancy may keep an admin-console recovery session, but that
+    // carve-out must not mint a new long-lived provisioning credential. Check
+    // the complete workspace chain before generating secret material.
+    if let Err(error) = block_on_sync_bridge(console.repositories.require_usable_tenancy(
+        LifecycleSeam::Attach,
+        TenancyRefs::new(
+            Some(&workspace.tenant_id),
+            Some(&workspace.project_id),
+            Some(&workspace.id),
+        ),
+    )) {
+        return lifecycle_error(&error);
+    }
     let secret = match generate_virtual_api_key_secret() {
         Ok(secret) => secret,
         Err(error) => return internal_error(&error.to_string()),
@@ -146,10 +161,19 @@ pub(crate) fn resolve_scim_tenant(
     {
         return Err(forbidden("token is not scoped for SCIM provisioning"));
     }
-    decision
-        .tenant
-        .organization_id
-        .ok_or_else(|| internal_error("SCIM token has no tenant scope"))
+    let Some(tenant_id) = decision.tenant.organization_id.as_deref() else {
+        return Err(internal_error("SCIM token has no tenant scope"));
+    };
+    block_on_sync_bridge(console.repositories.require_usable_tenancy(
+        LifecycleSeam::Request,
+        TenancyRefs::new(
+            Some(tenant_id),
+            decision.tenant.project_id.as_deref(),
+            decision.tenant.workspace_id.as_deref(),
+        ),
+    ))
+    .map_err(|error| lifecycle_error(&error))?;
+    Ok(tenant_id.to_string())
 }
 
 #[derive(Debug, Clone, Deserialize)]

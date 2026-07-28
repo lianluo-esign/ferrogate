@@ -2626,6 +2626,39 @@ impl FerroGateway {
             )
             .await;
         }
+        // Re-enabling a disabled key activates an existing credential. It is
+        // therefore an attach-time operation, unlike disabling (which must
+        // remain available while operators contain or recover an account).
+        if enabled {
+            if let Err(error) = state
+                .require_usable_tenancy(
+                    ferrogate_storage::LifecycleSeam::Attach,
+                    ferrogate_storage::TenancyRefs::new(
+                        Some(&key.tenant_id),
+                        Some(&key.project_id),
+                        Some(&key.workspace_id),
+                    ),
+                )
+                .await
+            {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "virtual_key.enable",
+                    id,
+                    "rejected",
+                    error.message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
         key.enabled = enabled;
         key.updated_at_unix = now_unix_seconds() as u64;
 

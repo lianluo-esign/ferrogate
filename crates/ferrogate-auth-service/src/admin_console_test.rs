@@ -1697,6 +1697,115 @@ fn resolve_scim_tenant_rejects_missing_and_wrong_scope_tokens() {
     assert!(resolve_scim_tenant(&console, &wrong_scope).is_err());
 }
 
+fn set_tenant_status(console: &AdminConsoleState, tenant_id: &str, status: &str) {
+    let mut tenant = block_on_sync_bridge(console.repositories.get_tenant_account(tenant_id))
+        .unwrap()
+        .expect("registered tenant must exist");
+    tenant.status = status.to_string();
+    block_on_sync_bridge(console.repositories.upsert_tenant_account(tenant)).unwrap();
+}
+
+fn assert_lifecycle_response(response: &HttpResponse, status: u16, code: &str) {
+    assert_eq!(response.status, status, "{:?}", body_json(response));
+    assert_eq!(body_json(response)["error"]["code"], code);
+}
+
+#[test]
+fn suspended_tenant_blocks_console_and_scim_credentials() {
+    let console = console();
+    let registered = body_json(&register(
+        &console,
+        "suspended-console@acme.test",
+        "correct-horse-514a",
+    ));
+    let tenant_id = registered["tenant"]["id"].as_str().unwrap().to_string();
+    let access_token = registered["access_token"].as_str().unwrap().to_string();
+    let refresh_token = registered["refresh_token"].as_str().unwrap().to_string();
+
+    let minted = handle_admin_scim_token_create(&console, &access_token);
+    assert_eq!(minted.status, 201);
+    let scim_token = body_json(&minted)["token"].as_str().unwrap().to_string();
+    let scim_request = scim_request("GET", "/scim/v2/Users", &scim_token, Vec::new());
+    assert_eq!(
+        resolve_scim_tenant(&console, &scim_request).unwrap(),
+        tenant_id
+    );
+    assert!(current_admin_session(&console, &access_token).is_ok());
+    let keys_before = block_on_sync_bridge(console.repositories.list_api_key_records())
+        .unwrap()
+        .len();
+
+    set_tenant_status(&console, &tenant_id, "suspended");
+
+    let login = handle_admin_login(
+        &console,
+        AdminLoginRequest {
+            email: "suspended-console@acme.test".into(),
+            password: "correct-horse-514a".into(),
+        },
+    );
+    assert_lifecycle_response(&login, 403, "tenancy_suspended");
+    assert!(!body_json(&login).to_string().contains("fg_"));
+    assert_eq!(
+        block_on_sync_bridge(console.repositories.list_api_key_records())
+            .unwrap()
+            .len(),
+        keys_before,
+        "a refused login must not persist a fresh gateway key"
+    );
+
+    let jwt = current_admin_session(&console, &access_token).unwrap_err();
+    assert_lifecycle_response(&jwt, 403, "tenancy_suspended");
+    let refresh = handle_admin_refresh(&console, AdminRefreshRequest { refresh_token });
+    assert_lifecycle_response(&refresh, 403, "tenancy_suspended");
+    let scim = resolve_scim_tenant(&console, &scim_request).unwrap_err();
+    assert_lifecycle_response(&scim, 403, "tenancy_suspended");
+}
+
+#[test]
+fn disabled_tenant_keeps_console_recovery_but_cannot_mint_or_use_scim_tokens() {
+    let console = console();
+    let registered = body_json(&register(
+        &console,
+        "disabled-console@acme.test",
+        "correct-horse-514b",
+    ));
+    let tenant_id = registered["tenant"]["id"].as_str().unwrap().to_string();
+    let access_token = registered["access_token"].as_str().unwrap().to_string();
+    let refresh_token = registered["refresh_token"].as_str().unwrap().to_string();
+    let minted = handle_admin_scim_token_create(&console, &access_token);
+    assert_eq!(minted.status, 201);
+    let scim_token = body_json(&minted)["token"].as_str().unwrap().to_string();
+    let scim_request = scim_request("GET", "/scim/v2/Users", &scim_token, Vec::new());
+
+    set_tenant_status(&console, &tenant_id, "disabled");
+
+    assert!(current_admin_session(&console, &access_token).is_ok());
+    assert_eq!(
+        handle_admin_refresh(&console, AdminRefreshRequest { refresh_token }).status,
+        200,
+        "disabled is a recoverable state for the console session"
+    );
+    assert_eq!(
+        handle_admin_login(
+            &console,
+            AdminLoginRequest {
+                email: "disabled-console@acme.test".into(),
+                password: "correct-horse-514b".into(),
+            },
+        )
+        .status,
+        200,
+        "disabled must not become a one-way door"
+    );
+
+    let existing = resolve_scim_tenant(&console, &scim_request).unwrap_err();
+    assert_lifecycle_response(&existing, 403, "tenancy_disabled");
+    let fresh = handle_admin_scim_token_create(&console, &access_token);
+    assert_lifecycle_response(&fresh, 403, "inactive_tenancy_reference");
+    assert!(!body_json(&fresh).to_string().contains("fg_"));
+}
+
 #[test]
 fn scim_user_create_provisions_a_new_account_with_the_given_role() {
     let console = console();
@@ -2535,6 +2644,65 @@ fn sso_end_to_end_provisions_new_user_and_maps_group_to_role() {
         candidates[0].scopes,
         ["admin.read", "admin.write", "assets.read", "assets.write"],
         "the Engineering->admin mapping must mint the admin tier's scopes"
+    );
+}
+
+#[test]
+fn sso_callback_does_not_mint_a_gateway_key_for_a_suspended_tenant() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "sso-suspended-owner@acme.test",
+        "correct-horse-514s",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let (listener, issuer) = bind_mock_oidc_server();
+    let (key_pem, n) = generate_test_rsa_key();
+    let kid = "suspended-key";
+    let id_token = sign_test_id_token(
+        &key_pem,
+        kid,
+        &issuer,
+        "test-client-id",
+        serde_json::json!({
+            "email": "sso-suspended-user@acme.test",
+            "name": "Suspended SSO User",
+            "groups": ["Engineering"],
+        }),
+    );
+    run_mock_oidc_server(
+        listener,
+        MockOidcRealm {
+            jwks_json: jwks_json_for(&n, kid),
+            id_token,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        },
+        issuer.clone(),
+    );
+
+    let configured =
+        handle_admin_sso_config_set(&console, owner_token, sso_config_request(&issuer));
+    assert_eq!(configured.status, 200);
+    let authorize = handle_sso_authorize(&console, &tenant_id);
+    assert_eq!(authorize.status, 200);
+    let state = body_json(&authorize)["state"].as_str().unwrap().to_string();
+    let keys_before = block_on_sync_bridge(console.repositories.list_api_key_records())
+        .unwrap()
+        .len();
+
+    set_tenant_status(&console, &tenant_id, "suspended");
+
+    let callback = handle_sso_callback(&console, "fake-authorization-code", &state);
+    assert_lifecycle_response(&callback, 403, "tenancy_suspended");
+    assert!(!body_json(&callback).to_string().contains("fg_"));
+    assert_eq!(
+        block_on_sync_bridge(console.repositories.list_api_key_records())
+            .unwrap()
+            .len(),
+        keys_before,
+        "the refused SSO callback must not persist a gateway key"
     );
 }
 
