@@ -40,6 +40,7 @@ use ferrogate_auth_service::{
     RequestLengthError, StorageApiKeyAuthenticator,
 };
 use ferrogate_config::Config;
+use ferrogate_control_plane_client::action_identity::{ACTION_ID_HEADER, TIME_TOKEN_HEADER};
 use ferrogate_gateway::auth::{authenticate_admin_gate, build_auth_service_target, AuthError};
 
 /// Canonical wire/log identity of the standalone FerroGate Control Plane API
@@ -376,6 +377,16 @@ fn route_request(request: &HttpRequest, service: &AdminApiService) -> Routed {
         return Routed::Local(HttpResponse::no_content(204));
     }
     if request.method == "GET" && request.path == "/healthz" {
+        // Ordinary liveness stays local. An attributed health request is the
+        // action-time bootstrap and must reach the gateway that owns the
+        // shared signing authority; answering it here would return 200 without
+        // a token and make every standalone Control Plane CLI call fail before
+        // its actual API request is sent. Forward token-without-action too so
+        // the gateway can return the typed malformed-attribution refusal.
+        if request.header(ACTION_ID_HEADER).is_some() || request.header(TIME_TOKEN_HEADER).is_some()
+        {
+            return Routed::Forward;
+        }
         // This service's own liveness probe; deliberately NOT part of the
         // gateway's OpenAPI contract.
         return Routed::Local(HttpResponse::json(
@@ -430,11 +441,11 @@ fn route_request(request: &HttpRequest, service: &AdminApiService) -> Routed {
     Routed::Forward
 }
 
-/// Relay the authenticated request to the gateway and stream the response
-/// back verbatim (status line, headers, and body untouched, so the
-/// console observes byte-identical behavior to calling the gateway
-/// directly). `Connection: close` bounds the exchange; request bodies are
-/// never logged.
+/// Relay an authenticated API request or safe attributed health challenge to
+/// the gateway and stream the response back verbatim (status line, headers,
+/// and body untouched, so the console observes byte-identical behavior to
+/// calling the gateway directly). `Connection: close` bounds the exchange;
+/// request bodies are never logged.
 fn forward_request<S: Read + Write>(
     stream: &mut S,
     request: &HttpRequest,

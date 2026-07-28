@@ -108,7 +108,9 @@ FerroGate returns a short-lived, HMAC-signed `x-ferrogate-time-token`; the CLI
 accepts it and presents it on the actual API request. If the challenge fails or
 does not return an acceptable token, the API request is refused locally. The
 challenge has no control-plane effect and is the only attributed request allowed
-to omit the token.
+to omit the token. The standalone Control Plane listener answers ordinary
+liveness locally but forwards attributed health challenges to the gateway, so
+both listener topologies use the same deployment keyring and validation path.
 
 The server validates the echoed token's HMAC signature, action-id binding and
 TTL against its own receive clock. An expired token, a bad signature, a token

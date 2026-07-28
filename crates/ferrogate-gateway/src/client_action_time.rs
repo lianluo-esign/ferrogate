@@ -377,7 +377,6 @@ impl ClientActionTimeModule {
             ));
         }
         self.signer.ensure_available()?;
-        self.response_action_id = Some(action_id.to_string());
         match token {
             Some(token) => self.signer.validate(token, action_id, received_at_unix)?,
             None if !allow_missing_token => {
@@ -387,6 +386,10 @@ impl ClientActionTimeModule {
             }
             None => {}
         }
+        // Only a valid echo or the explicit safe challenge may mint the next
+        // token. Setting this before validation lets a rejected effect request
+        // bootstrap from its own 400 response, bypassing the health-only rule.
+        self.response_action_id = Some(action_id.to_string());
         Ok(())
     }
 
