@@ -206,8 +206,10 @@ Two rules the slice holds itself to, both regression-tested:
   *resolved plaintext values* and is reachable from `SecretResolverRegistry`'s
   derived `Debug`, so it hand-writes a `Debug` that prints the bound secret
   *names* (not secret — they are written verbatim in config) and `<redacted>`
-  for the values. Same rule as `VaultConfig` (issue #492), `ResolvedToken` and
-  `HttpRequest.bearer_token`.
+  for the values. `CfSecretCreate`, the write request body, follows the same
+  rule: its `Debug` redacts `value` while retaining the non-secret name,
+  byte-length, scope and comment diagnostics. Same rule as `VaultConfig`
+  (issue #492), `ResolvedToken` and `HttpRequest.bearer_token`.
 - **The Cloudflare API token is held as a reference, never as a value.**
   `CfSecretsStoreConfig::from_env` only *probes* `CLOUDFLARE_API_TOKEN` for
   presence and stores the reference `env://CLOUDFLARE_API_TOKEN` in
@@ -227,8 +229,9 @@ Worker-bound runtime, spell it `env://FERROGATE_CF_SECRET_<NAME>` instead.
 
 ## Test coverage
 
-`crates/ferrogate-secrets/src/cloudflare_test.rs` (no live network; the REST
-API is scripted through `ferrogate-cloudflare`'s `HttpTransport` seam):
+`crates/ferrogate-secrets/src/cloudflare_test.rs` and its private-structure
+sibling `cloudflare_debug_test.rs` (no live network; the REST API is scripted
+through `ferrogate-cloudflare`'s `HttpTransport` seam):
 
 - binding env-var naming convention;
 - value resolution from an injected binding map and from the
@@ -246,9 +249,11 @@ API is scripted through `ferrogate-cloudflare`'s `HttpTransport` seam):
   own distinct values, and the registry refusing an ambiguous ref before any
   REST call;
 - credential redaction: `CfSecretBindings` `Debug` (direct and nested through
-  `SecretResolverRegistry`), `CfSecretsStoreConfig` `Debug` for an inline
-  token, and `from_env` storing `env://CLOUDFLARE_API_TOKEN` with the token
-  value absent from `CloudflareConfig`'s `Debug` *and* its `Serialize` output.
+  `SecretResolverRegistry`), `CfSecretCreate` `Debug` (plaintext and prefix
+  absent while `<redacted>` and non-secret diagnostics remain),
+  `CfSecretsStoreConfig` `Debug` for an inline token, and `from_env` storing
+  `env://CLOUDFLARE_API_TOKEN` with the token value absent from
+  `CloudflareConfig`'s `Debug` *and* its `Serialize` output.
 
 **Not testable locally** (requires a live Cloudflare account): an end-to-end
 Worker binding actually delivering a Secrets Store value into a deployed

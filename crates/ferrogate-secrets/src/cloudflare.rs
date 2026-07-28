@@ -169,6 +169,10 @@ impl std::fmt::Debug for CfSecretCreate<'_> {
     }
 }
 
+#[cfg(test)]
+#[path = "cloudflare_debug_test.rs"]
+mod cloudflare_debug_test;
+
 /// Manages `cf://<store>/<name>` secrets against a Cloudflare Secrets Store
 /// via the shared [`CloudflareClient`] (issue #417) — **write/manage-only**
 /// by decision #423.
