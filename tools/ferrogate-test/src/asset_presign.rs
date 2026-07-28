@@ -48,10 +48,15 @@ use std::{
     net::{TcpListener, TcpStream},
     path::Path,
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
+
+#[path = "asset_buffer_admission.rs"]
+mod asset_buffer_admission;
+
+pub(crate) use asset_buffer_admission::run_asset_buffer_admission;
 
 const ADMIN_AUTH: &str = "Authorization: Bearer presign-e2e-admin-secret";
 const CLIENT_AUTH: &str = "Authorization: Bearer presign-e2e-client-secret";
@@ -609,6 +614,59 @@ struct CapturedRequest {
 struct BucketState {
     objects: HashMap<String, Vec<u8>>,
     requests: Vec<CapturedRequest>,
+    blocked_get_path: Option<String>,
+    get_gate: Option<Arc<BucketGetGate>>,
+}
+
+#[derive(Debug, Default)]
+struct BucketGetGate {
+    state: Mutex<BucketGetGateState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct BucketGetGateState {
+    started: usize,
+    released: bool,
+}
+
+impl BucketGetGate {
+    fn arrive_and_wait(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.started += 1;
+        self.changed.notify_all();
+        while !state.released {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn wait_for_started(&self, expected: usize, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap();
+        while state.started < expected {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                bail!(
+                    "timed out waiting for {expected} bucket GETs; only {} arrived",
+                    state.started
+                );
+            };
+            let (next, result) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if result.timed_out() && state.started < expected {
+                bail!(
+                    "timed out waiting for {expected} bucket GETs; only {} arrived",
+                    state.started
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.released = true;
+        self.changed.notify_all();
+    }
 }
 
 /// A minimal S3-compatible endpoint that independently verifies the SigV4 of
@@ -668,13 +726,22 @@ fn handle_bucket_connection(mut stream: TcpStream, state: Arc<Mutex<BucketState>
             Some(bytes) => write_response(&mut stream, "200 OK", b"", Some(bytes.len())),
             None => write_response(&mut stream, "404 Not Found", b"", None),
         },
-        "GET" => match state.objects.get(path) {
-            Some(bytes) => {
-                let bytes = bytes.clone();
-                write_response(&mut stream, "200 OK", &bytes, None)
+        "GET" => {
+            let bytes = state.objects.get(path).cloned();
+            let get_gate = state
+                .get_gate
+                .as_ref()
+                .filter(|_| state.blocked_get_path.as_deref() == Some(path))
+                .cloned();
+            drop(state);
+            if let Some(gate) = get_gate {
+                gate.arrive_and_wait();
             }
-            None => write_response(&mut stream, "404 Not Found", b"", None),
-        },
+            match bytes {
+                Some(bytes) => write_response(&mut stream, "200 OK", &bytes, None),
+                None => write_response(&mut stream, "404 Not Found", b"", None),
+            }
+        }
         "DELETE" => {
             state.objects.remove(path);
             write_response(&mut stream, "204 No Content", b"", None)

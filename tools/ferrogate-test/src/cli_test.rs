@@ -80,3 +80,12 @@ fn managed_action_project_is_a_deterministic_local_scenario() {
     };
     assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
 }
+
+#[test]
+fn asset_buffer_admission_is_a_deterministic_local_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "asset-buffer-admission"]).unwrap();
+    let Commands::AssetBufferAdmission(args) = cli.command else {
+        panic!("expected asset-buffer-admission command");
+    };
+    assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
+}

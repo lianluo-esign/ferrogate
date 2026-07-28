@@ -51,7 +51,7 @@ mod x402_spend_policy;
 use admin_console_roles::run_admin_console_roles_supabase;
 use agent_jobs::run_agent_jobs_api;
 use api_contract::run_api_contract;
-use asset_presign::run_asset_presign_api;
+use asset_presign::{run_asset_buffer_admission, run_asset_presign_api};
 use asset_registry::run_asset_registry_api;
 use cli_mutation_receipt::run_cli_mutation_receipt;
 use cloudflare_secret::run_cloudflare_secret_api;
@@ -91,6 +91,7 @@ fn main() -> Result<()> {
         function_egress_cloudflare: run_function_egress_cloudflare_api,
         static_site: run_static_site_api,
         asset_presign: run_asset_presign_api,
+        asset_buffer_admission: run_asset_buffer_admission,
         asset_registry: run_asset_registry_api,
         agent_jobs: run_agent_jobs_api,
         managed_action_project: run_managed_action_project,
@@ -137,6 +138,7 @@ fn main() -> Result<()> {
             run_function_egress_cloudflare_api(local)?;
             run_static_site_api(local)?;
             run_asset_presign_api(local)?;
+            run_asset_buffer_admission(local)?;
             run_asset_registry_api(local)?;
             run_agent_jobs_api(local)?;
             run_managed_action_project(local)?;
