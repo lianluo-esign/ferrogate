@@ -57,7 +57,7 @@ mod plans_cli;
 mod reference;
 mod storage;
 
-use anyhow::Result as AnyResult;
+use anyhow::{Context, Result as AnyResult};
 use clap::FromArgMatches;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -206,13 +206,18 @@ pub fn run() -> AnyResult<()> {
                     execute_graceful_upgrade_reload(&args.config, &config)?
                 );
             } else if let Some(admin_url) = args.admin_url.as_deref() {
+                let admin_token = args.admin_token.as_deref().context(
+                    "admin reload requires --admin-token or FERROGATE_ADMIN_TOKEN when --admin-url is set",
+                )?;
+                let identity = assets_cli::mint_action_identity(admin_url, admin_token)?;
                 println!(
                     "{}",
                     execute_admin_reload(
                         admin_url,
-                        args.admin_token.as_deref(),
+                        Some(admin_token),
                         &args.config,
-                        &config
+                        &config,
+                        &identity,
                     )?
                 );
             } else {

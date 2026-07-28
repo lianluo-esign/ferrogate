@@ -122,6 +122,11 @@
                   "$ref": "#/components/schemas/HealthResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           }
         },
@@ -169,10 +174,20 @@
                   "$ref": "#/components/schemas/ReadinessResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "503": {
-            "description": "Gateway is not ready to serve traffic."
+            "description": "Gateway is not ready to serve traffic.",
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
           }
         },
         "x-ferrogate-contract": {
@@ -218,6 +233,11 @@
                 "schema": {
                   "type": "string"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           }
@@ -275,6 +295,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/McpJsonRpcResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -358,6 +383,11 @@
                   "$ref": "#/components/schemas/McpOauthAuthorizeResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -424,6 +454,11 @@
                   "$ref": "#/components/schemas/McpIdentityStatus"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -456,6 +491,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/McpIdentityStatus"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -531,6 +571,11 @@
                   "$ref": "#/components/schemas/McpIdentityStatus"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -596,6 +641,11 @@
                   "$ref": "#/components/schemas/AgentRunCreateResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "202": {
@@ -605,6 +655,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AgentRunCreateResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -688,6 +743,11 @@
                   "$ref": "#/components/schemas/AgentJobSubmitResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "202": {
@@ -697,6 +757,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AgentJobSubmitResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -777,6 +842,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AgentJobStatus"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -870,6 +940,11 @@
                   "$ref": "#/components/schemas/AgentJobEventPage"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -942,6 +1017,11 @@
                   "$ref": "#/components/schemas/AgentJobResult"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -1013,6 +1093,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AgentJobCancelResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1089,6 +1174,11 @@
                   "$ref": "#/components/schemas/ToolExecutionResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -1159,6 +1249,11 @@
                   "$ref": "#/components/schemas/AdminOverview"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -1211,6 +1306,11 @@
                   "$ref": "#/components/schemas/AdminStatus"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -1253,6 +1353,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerRegistrationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1311,6 +1416,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminStatus"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1393,6 +1503,11 @@
                   "$ref": "#/components/schemas/AdminProviderList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -1444,6 +1559,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ProviderHealthList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1507,6 +1627,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminProviderModelCatalogList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1583,6 +1708,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerHeartbeatResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1675,6 +1805,11 @@
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerEventStream"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -1731,6 +1866,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerTelemetryEventResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1793,6 +1933,11 @@
                   "$ref": "#/components/schemas/AdminManagedWorkerRuntimeList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -1844,6 +1989,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminFrameworkAdapterRuntimeList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -1897,6 +2047,11 @@
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerRuntimeList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -1947,6 +2102,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerRegistrationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2005,6 +2165,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2069,6 +2234,11 @@
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerRecordList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -2120,6 +2290,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ObservabilityStatusList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2173,6 +2348,11 @@
                   "$ref": "#/components/schemas/AdminExtensionList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -2225,6 +2405,11 @@
                   "$ref": "#/components/schemas/AdminPluginList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -2267,6 +2452,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPluginMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2329,6 +2519,11 @@
                   "$ref": "#/components/schemas/AdminPlugin"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -2375,6 +2570,11 @@
                   "$ref": "#/components/schemas/AdminPluginMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -2416,6 +2616,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2478,6 +2683,11 @@
                   "$ref": "#/components/schemas/AdminToolList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -2533,6 +2743,11 @@
                   "$ref": "#/components/schemas/AdminToolList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -2584,6 +2799,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ToolApprovalList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2646,6 +2866,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ToolApprovalRecord"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2714,6 +2939,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ToolApprovalRecord"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -2789,6 +3019,11 @@
                   "$ref": "#/components/schemas/ToolApprovalRecord"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -2863,6 +3098,11 @@
                   "$ref": "#/components/schemas/ToolApprovalRecord"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -2923,6 +3163,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/McpServerStatusList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -3184,6 +3429,11 @@
                   "$ref": "#/components/schemas/AuditEventList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -3266,6 +3516,11 @@
                   "$ref": "#/components/schemas/AdminModelList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -3317,6 +3572,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminApiKeyList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -3570,6 +3830,11 @@
                   "$ref": "#/components/schemas/AdminTenantRefList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -3622,6 +3887,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/PolicyRuleList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -3884,6 +4154,11 @@
                   "$ref": "#/components/schemas/RequestLogList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -3943,6 +4218,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AgentRunList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -4005,6 +4285,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AgentRunTimeline"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -4070,6 +4355,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSelfHostedRunTimeline"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -4198,6 +4488,11 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -4258,6 +4553,11 @@
                   "$ref": "#/components/schemas/TokenMeteringEventList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -4312,6 +4612,11 @@
                   "$ref": "#/components/schemas/MeteringExportStatusList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -4363,6 +4668,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/UsageAggregateList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -4423,6 +4733,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AuditEventList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -4603,6 +4918,11 @@
                   "$ref": "#/components/schemas/GuardrailEvaluationList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -4618,6 +4938,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           }
@@ -4688,6 +5013,11 @@
                   "$ref": "#/components/schemas/GuardrailInvestigationTimeline"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -4709,6 +5039,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           }
@@ -4758,6 +5093,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminConfigValidateResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -4814,6 +5154,11 @@
         "responses": {
           "200": {
             "description": "Reload result. Rejected candidates return committed=false rather than a 4xx.",
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -4878,6 +5223,11 @@
                   "$ref": "#/components/schemas/AdminDrainResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -4913,6 +5263,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminDrainResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -4971,6 +5326,11 @@
                 "schema": {
                   "type": "string"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -5032,6 +5392,11 @@
                   "$ref": "#/components/schemas/TokenMeteringEventList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -5084,6 +5449,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminGatewayConfigProfileList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -5338,6 +5708,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminAgentWorkflowList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -5610,6 +5985,11 @@
                   "$ref": "#/components/schemas/AdminAgentScheduleList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -5652,6 +6032,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -5719,6 +6104,11 @@
                   "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -5764,6 +6154,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -5817,6 +6212,11 @@
                   "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -5858,6 +6258,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -5922,6 +6327,11 @@
                   "$ref": "#/components/schemas/AdminAgentScheduleRunNowResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -5985,6 +6395,11 @@
                   "$ref": "#/components/schemas/AdminAgentScheduleFireList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -6039,6 +6454,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPromptTemplateList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -6299,6 +6719,11 @@
                   "$ref": "#/components/schemas/RenderedPromptRequest"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -6371,6 +6796,11 @@
                   "$ref": "#/components/schemas/AgentSkillPackageList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -6441,6 +6871,11 @@
                   "$ref": "#/components/schemas/AgentSkillPackage"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -6504,6 +6939,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminAgentUpstreamList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -6834,6 +7274,11 @@
                   "$ref": "#/components/schemas/AgentUpstreamDiscoveryList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -6894,6 +7339,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSkillPackageList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -7224,6 +7674,11 @@
                   "$ref": "#/components/schemas/AdminManagedWorkerSessionList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -7296,6 +7751,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerArtifactResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -7379,6 +7839,11 @@
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerCheckpointResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -7441,6 +7906,11 @@
                   "$ref": "#/components/schemas/GuardrailPolicyRevisionList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -7485,6 +7955,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/GuardrailPolicyRevisionResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -7554,6 +8029,11 @@
                   "$ref": "#/components/schemas/GuardrailPolicyRevisionList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -7616,6 +8096,11 @@
                   "$ref": "#/components/schemas/GuardrailPolicyRevisionList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -7668,6 +8153,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/GuardrailPolicyRevisionResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -7740,6 +8230,11 @@
                   "$ref": "#/components/schemas/GuardrailPolicyRevisionResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -7779,7 +8274,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Revision archived and runtime reloaded."
+            "description": "Revision archived and runtime reloaded.",
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -7856,6 +8356,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/GuardrailPolicyBindingResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -7935,6 +8440,11 @@
                   "$ref": "#/components/schemas/GuardrailPolicyBindingResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -8012,6 +8522,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/GuardrailPolicyDryRunResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -8097,6 +8612,11 @@
                   "$ref": "#/components/schemas/AdminSelfHostedWorkerRotateResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -8167,6 +8687,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           }
         },
@@ -8215,6 +8740,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           }
         },
@@ -8262,6 +8792,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/OpenAiModelList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -8316,6 +8851,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -8384,6 +8924,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -8451,6 +8996,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -8517,6 +9067,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -8586,6 +9141,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -8605,6 +9165,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           }
@@ -8665,6 +9230,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -8717,6 +9287,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ToolExecutionResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -8785,6 +9360,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -8851,6 +9431,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -8928,6 +9513,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -8992,6 +9582,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9058,6 +9653,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -9122,6 +9722,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9188,6 +9793,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -9252,6 +9862,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9345,6 +9960,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -9406,6 +10026,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminTenantAccountMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9472,6 +10097,11 @@
                   "$ref": "#/components/schemas/AdminTenantAccountMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -9514,6 +10144,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminTenantAccountMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9570,6 +10205,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminTenantAccountMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9646,6 +10286,11 @@
                   "$ref": "#/components/schemas/AdminTenantResolvedDefaults"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -9707,6 +10352,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminTenantAccountMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9814,6 +10464,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -9884,6 +10539,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminProjectMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -9958,6 +10618,11 @@
                   "$ref": "#/components/schemas/AdminProjectMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -9993,6 +10658,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminProjectMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10042,6 +10712,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminProjectMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10174,6 +10849,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -10254,6 +10934,11 @@
                   "$ref": "#/components/schemas/AdminWorkspaceMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -10327,6 +11012,11 @@
                   "$ref": "#/components/schemas/AdminWorkspaceMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -10362,6 +11052,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminWorkspaceMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10411,6 +11106,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminWorkspaceMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10531,6 +11231,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -10563,6 +11268,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminVirtualApiKeyMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10629,6 +11339,11 @@
                   "$ref": "#/components/schemas/AdminVirtualApiKeyMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -10672,6 +11387,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10751,6 +11471,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -10783,6 +11508,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminQuotaPolicyMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10849,6 +11579,11 @@
                   "$ref": "#/components/schemas/AdminQuotaPolicyMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -10899,6 +11634,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminQuotaPolicyMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -10964,6 +11704,11 @@
                   "$ref": "#/components/schemas/AdminQuotaPolicyMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -11028,6 +11773,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11115,6 +11865,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -11147,6 +11902,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPlanMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11213,6 +11973,11 @@
                   "$ref": "#/components/schemas/AdminPlanMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -11255,6 +12020,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPlanMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11311,6 +12081,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPlanMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11403,6 +12178,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -11435,6 +12215,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminWalletMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11501,6 +12286,11 @@
                   "$ref": "#/components/schemas/AdminWalletMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -11543,6 +12333,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminWalletMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11619,6 +12414,11 @@
                   "$ref": "#/components/schemas/AdminWalletMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -11693,6 +12493,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminWalletChargeResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11769,6 +12574,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11848,6 +12658,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -11880,6 +12695,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPaymentMethodMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -11946,6 +12766,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -12025,6 +12850,11 @@
                     "data"
                   ]
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -12140,6 +12970,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -12214,6 +13049,11 @@
                     "data"
                   ]
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -12336,6 +13176,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             },
             "content": {
@@ -12411,6 +13254,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             },
             "content": {
@@ -12480,6 +13326,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -12562,6 +13411,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -12671,6 +13523,11 @@
                   "$ref": "#/components/schemas/AssetMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "202": {
@@ -12680,6 +13537,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssetMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -12873,6 +13735,11 @@
                   "$ref": "#/components/schemas/DeleteResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -13004,6 +13871,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -13065,6 +13937,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPermissionMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13132,6 +14009,11 @@
                   "$ref": "#/components/schemas/AdminPermissionMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "404": {
@@ -13178,6 +14060,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13258,6 +14145,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -13290,6 +14182,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminRoleMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13357,6 +14254,11 @@
                   "$ref": "#/components/schemas/AdminRoleMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "404": {
@@ -13403,6 +14305,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13482,6 +14389,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -13524,6 +14436,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminTenantRoleBinding"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13600,6 +14517,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13687,6 +14609,11 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -13740,6 +14667,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -13791,6 +14723,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminBillingOutboxReplayResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13861,6 +14798,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -13923,6 +14865,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -13987,6 +14934,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -14049,6 +15001,11 @@
                   "type": "object",
                   "additionalProperties": true
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -14134,6 +15091,11 @@
                   "additionalProperties": true
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -14203,7 +15165,12 @@
         },
         "responses": {
           "200": {
-            "description": "Streaming agent upstream response."
+            "description": "Streaming agent upstream response.",
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -14260,6 +15227,11 @@
                   "$ref": "#/components/schemas/AdminSiteDomainList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -14306,6 +15278,11 @@
                   "$ref": "#/components/schemas/AdminSiteDomainResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "200": {
@@ -14316,6 +15293,11 @@
                   "$ref": "#/components/schemas/AdminSiteDomainResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "202": {
@@ -14325,6 +15307,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminSiteDomainResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -14403,6 +15390,11 @@
                   "$ref": "#/components/schemas/AdminSiteDomainResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -14451,6 +15443,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -14530,6 +15527,11 @@
                   "$ref": "#/components/schemas/AdminSiteDomainResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -14603,6 +15605,11 @@
                   "$ref": "#/components/schemas/AssetStorageSummary"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -14661,6 +15668,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssetManifest"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -14746,6 +15758,11 @@
                   "$ref": "#/components/schemas/AssetChannelListResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -14826,6 +15843,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssetChannelMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -14914,6 +15936,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -15009,6 +16036,11 @@
                   "$ref": "#/components/schemas/AssetYankMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -15083,6 +16115,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssetYankMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -15187,6 +16224,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssetVisibilityPromotionResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -15296,6 +16338,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssetPresignUploadIntentResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -15408,6 +16455,11 @@
                   "$ref": "#/components/schemas/AssetMutationResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "202": {
@@ -15417,6 +16469,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssetMutationResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -15535,6 +16592,11 @@
                   "$ref": "#/components/schemas/AssetPresignAbortResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -15643,6 +16705,11 @@
                   "$ref": "#/components/schemas/AssetPresignDownloadResponse"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -15740,6 +16807,11 @@
                   "$ref": "#/components/schemas/AdminObservedAgentActivityList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -15811,6 +16883,11 @@
                   "$ref": "#/components/schemas/AdminAgentCostBurnList"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "401": {
@@ -15866,6 +16943,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/X402DeclaredSpendPolicyList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -15967,6 +17049,11 @@
                   "$ref": "#/components/schemas/X402EffectiveSpendPolicy"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -16036,6 +17123,11 @@
                   "$ref": "#/components/schemas/X402SpendPolicyEvaluation"
                 }
               }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
             }
           },
           "400": {
@@ -16060,6 +17152,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           }
@@ -16139,6 +17236,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPaymentAttemptList"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -16221,6 +17323,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/AdminPaymentAttemptLinks"
                 }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
               }
             }
           },
@@ -16421,7 +17528,7 @@
     },
     "headers": {
       "ClientTimeTokenResponseHeader": {
-        "description": "Short-lived, server-issued time token (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. A client that receives one echoes it byte-for-byte on the next request of the same action, under x-ferrogate-time-token, and reports it as the authoritative client_sent_at; unknown segments are tolerated and preserved, so a server may add fields. NOT ISSUED BY ANY FERROGATE DEPLOYMENT TODAY: this declares the shape a server-side issuer must produce, and no operation references it yet, so every CLI receipt currently reports client_sent_at as null with the absence code no_server_issued_time_token. Bind every token to the action id that requested it and keep the ttl to seconds -- a long-lived token lets an attacker pre-fetch and replay one to backdate an action.",
+        "description": "Short-lived, server-issued time token (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. When a request presents x-ferrogate-action-id, FerroGate signs this response header at the downstream response boundary. A client echoes it byte-for-byte on the next request of the same action and reports issued_at as the authoritative client_sent_at. The server validates the HMAC signature, action binding and TTL against its own receive clock; the client clock remains unverified and is never the authority. Tokens last seconds, not minutes, to bound pre-fetch and replay.",
         "schema": {
           "type": "string"
         }
@@ -16744,6 +17851,11 @@
               "$ref": "#/components/schemas/AdminApiKeyMutationResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AdminPolicyMutationOk": {
@@ -16753,6 +17865,11 @@
             "schema": {
               "$ref": "#/components/schemas/AdminPolicyMutationResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16764,6 +17881,11 @@
               "$ref": "#/components/schemas/AdminGatewayConfigMutationResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AdminAgentWorkflowMutationOk": {
@@ -16773,6 +17895,11 @@
             "schema": {
               "$ref": "#/components/schemas/AdminAgentWorkflowMutationResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16784,6 +17911,11 @@
               "$ref": "#/components/schemas/AdminMcpServerMutationResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AdminMcpServerStatusOk": {
@@ -16793,6 +17925,11 @@
             "schema": {
               "$ref": "#/components/schemas/McpServerStatus"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16804,6 +17941,11 @@
               "$ref": "#/components/schemas/DeleteApiKeyResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "DeletePolicyOk": {
@@ -16813,6 +17955,11 @@
             "schema": {
               "$ref": "#/components/schemas/DeletePolicyResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16824,6 +17971,11 @@
               "$ref": "#/components/schemas/DeleteGatewayConfigResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "DeleteAgentWorkflowOk": {
@@ -16833,6 +17985,11 @@
             "schema": {
               "$ref": "#/components/schemas/DeleteAgentWorkflowResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16844,10 +18001,20 @@
               "$ref": "#/components/schemas/DeleteMcpServerResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "BadRequest": {
         "description": "Invalid request payload or candidate config.",
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
+        },
         "content": {
           "application/json": {
             "schema": {
@@ -16858,6 +18025,11 @@
       },
       "Unauthorized": {
         "description": "Missing or invalid bearer token when API keys are configured.",
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
+        },
         "content": {
           "application/json": {
             "schema": {
@@ -16868,6 +18040,11 @@
       },
       "Forbidden": {
         "description": "Bearer token lacks the required scope or is disallowed by tenant/provider/model constraints.",
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
+        },
         "content": {
           "application/json": {
             "schema": {
@@ -16884,6 +18061,11 @@
               "$ref": "#/components/schemas/ErrorResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "Conflict": {
@@ -16894,10 +18076,20 @@
               "$ref": "#/components/schemas/ErrorResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "PayloadTooLarge": {
         "description": "Request body exceeded the endpoint limit.",
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
+        },
         "content": {
           "application/json": {
             "schema": {
@@ -16914,6 +18106,11 @@
               "$ref": "#/components/schemas/ErrorResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AdminPromptTemplateMutationOk": {
@@ -16923,6 +18120,11 @@
             "schema": {
               "$ref": "#/components/schemas/AdminPromptTemplateMutationResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16934,6 +18136,11 @@
               "$ref": "#/components/schemas/DeletePromptTemplateResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AdminSkillPackageMutationOk": {
@@ -16943,6 +18150,11 @@
             "schema": {
               "$ref": "#/components/schemas/AdminSkillPackageMutationResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16954,6 +18166,11 @@
               "$ref": "#/components/schemas/AdminAgentUpstreamMutationResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "DeleteSkillPackageResponse": {
@@ -16963,6 +18180,11 @@
             "schema": {
               "$ref": "#/components/schemas/DeleteResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16974,6 +18196,11 @@
               "$ref": "#/components/schemas/DeleteResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "MethodNotAllowed": {
@@ -16983,6 +18210,11 @@
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -16994,6 +18226,11 @@
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AssetNotFound": {
@@ -17003,6 +18240,11 @@
             "schema": {
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -17014,6 +18256,11 @@
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AssetPayloadTooLarge": {
@@ -17023,6 +18270,11 @@
             "schema": {
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -17034,6 +18286,11 @@
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AssetServiceUnavailable": {
@@ -17043,6 +18300,11 @@
             "schema": {
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -17054,6 +18316,11 @@
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "AssetInternalServerError": {
@@ -17063,6 +18330,11 @@
             "schema": {
               "$ref": "#/components/schemas/AssetErrorResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       },
@@ -17074,6 +18346,11 @@
               "$ref": "#/components/schemas/DeleteProjectResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "DeleteWorkspaceOk": {
@@ -17084,6 +18361,11 @@
               "$ref": "#/components/schemas/DeleteWorkspaceResponse"
             }
           }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
         }
       },
       "TooManyRequests": {
@@ -17093,6 +18375,11 @@
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
             }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
           }
         }
       }

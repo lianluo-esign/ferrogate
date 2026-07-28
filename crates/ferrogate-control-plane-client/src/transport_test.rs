@@ -1756,102 +1756,45 @@ fn every_operation_declares_the_client_identity_headers() {
     );
 }
 
-/// **Nothing issues a server time token yet**, and this pins that claim to the
-/// contract rather than to a comment — the same shape as
-/// [`tenant_scope_is_not_yet_an_openapi_parameter`].
-///
-/// The piggy-back harvests [`TIME_TOKEN_HEADER`] off a *response*. No operation
-/// declares it as a response header, because no FerroGate deployment issues one:
-/// the issuing endpoint is server-side work issue #548 defers. That is why every
-/// receipt this CLI renders today reports `client_sent_at: null` with
-/// `NO_SERVER_TIME_TOKEN`, and it is stated in `docs/cli-audit-attribution.md`,
-/// in `crate::action_identity`'s module docs, and here.
-///
-/// Catches: the day a response *does* declare it. This test then fails and
-/// forces the "no deployment issues one today" wording to be corrected in all
-/// three places at once, instead of quietly outliving the fact.
-///
-/// The reusable declaration lives at
-/// `components.headers.ClientTimeTokenResponseHeader` so the shape is in the
-/// contract and a server implementing it has something to reference; the
-/// assertion is that nothing references it *yet*.
-///
-/// # Both places a response can declare a header
-///
-/// An earlier cut walked only the inline `responses` objects under each
-/// operation. **883 of this contract's 1106 response entries are `$ref`s into
-/// `components.responses`**, so a server-side issuer that declared the header on
-/// a shared response component — the natural place to put it, since it would
-/// ride every operation at once — left this test green. Both are walked now: the
-/// operation's own entries, and every component the contract defines, whether or
-/// not anything references it. A component nothing references yet is still the
-/// declaration a server implements against.
+/// Every operation accepts an action id and the downstream server hook returns
+/// a token on success and error alike. Follow component response references so
+/// an inline happy path cannot hide a shared error response that lost it.
 #[test]
-fn no_operation_yet_issues_a_server_time_token() {
+fn every_response_declares_the_server_time_token() {
     let spec: serde_json::Value =
         serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
             .expect("the OpenAPI contract parses");
-    assert!(
-        spec["components"]["headers"]
-            .get("ClientTimeTokenResponseHeader")
-            .and_then(|header| header.get("description"))
-            .is_some(),
-        "the response-side shape must be declared as a reusable component, or a server has \
-         nothing to implement against and the absence below says nothing"
-    );
-
-    let mut issuing: Vec<String> = Vec::new();
-    let mut response_entries = 0usize;
-    let mut declares_token = |response: &serde_json::Value, whose: String| {
-        if let Some(headers) = response.get("headers").and_then(|h| h.as_object()) {
-            for name in headers.keys() {
-                if name.eq_ignore_ascii_case(TIME_TOKEN_HEADER) {
-                    issuing.push(whose.clone());
-                }
-            }
-        }
-    };
+    let methods = ["get", "put", "post", "delete", "options", "head", "patch"];
+    let mut response_count = 0usize;
     for (path, item) in spec["paths"].as_object().expect("paths") {
-        let Some(operations) = item.as_object() else {
-            continue;
-        };
-        for (method, operation) in operations {
-            let Some(responses) = operation.get("responses").and_then(|r| r.as_object()) else {
+        for (method, operation) in item.as_object().expect("path item") {
+            if !methods.contains(&method.as_str()) {
                 continue;
-            };
-            for (status, response) in responses {
-                response_entries += 1;
-                declares_token(response, format!("{method} {path} {status}"));
+            }
+            for (status, declared) in operation["responses"].as_object().expect("responses") {
+                response_count += 1;
+                let resolved = match declared.get("$ref").and_then(|value| value.as_str()) {
+                    Some(reference) => {
+                        let name = reference.rsplit('/').next().unwrap();
+                        &spec["components"]["responses"][name]
+                    }
+                    None => declared,
+                };
+                assert!(
+                    resolved["headers"].as_object().is_some_and(|headers| {
+                        headers
+                            .keys()
+                            .any(|name| name.eq_ignore_ascii_case(TIME_TOKEN_HEADER))
+                    }),
+                    "{method} {path} response {status} does not declare \
+                     {TIME_TOKEN_HEADER}: {resolved}"
+                );
             }
         }
     }
-    // The shared components, which most of those entries `$ref` into. Walking
-    // them by definition rather than by reference is deliberate: a component is
-    // a declaration a server implements against whether or not a path item
-    // points at it yet.
-    let shared = spec["components"]["responses"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    for (name, response) in &shared {
-        declares_token(response, format!("components.responses.{name}"));
-    }
-    // Floors on both walks, so neither can be vacuous through a renamed key.
     assert!(
-        response_entries > 500,
-        "expected the whole contract's operation responses, saw only {response_entries}"
-    );
-    assert!(
-        !shared.is_empty(),
-        "components.responses is empty or renamed; most of this contract's responses are $refs \
-         into it, and a walk that misses it is the hole this floor exists to prevent"
-    );
-    assert!(
-        issuing.is_empty(),
-        "the API now issues a '{TIME_TOKEN_HEADER}' on {issuing:?} — correct the \
-         'no deployment issues one today' statement in docs/cli-audit-attribution.md, in \
-         action_identity's module docs and in receipt's, and revisit whether the receipt's \
-         NO_SERVER_TIME_TOKEN wording still reads honestly"
+        response_count > 1_000,
+        "only saw {response_count} responses"
     );
 }
 

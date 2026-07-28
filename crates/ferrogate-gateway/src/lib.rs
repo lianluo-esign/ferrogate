@@ -317,6 +317,9 @@ mod body;
 /// Wallet/budget threshold alerting: the webhook payload and its dispatch.
 mod budget_alerts;
 
+/// Server authority for action-bound time tokens carried by CLI requests.
+mod client_action_time;
+
 /// The built-in MCP tools the gateway serves itself, including `fetch_asset`
 /// and the asset resource descriptors behind it.
 mod builtin_tools;

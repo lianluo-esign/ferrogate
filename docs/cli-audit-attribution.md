@@ -4,7 +4,7 @@ Issue #548. Every request the `ferrogate` CLI issues — **reads included** —
 carries an identifier for the operator action that produced it, a description of
 the client that produced it, and the client's own clock reading. This page is
 the operator-facing half: what is sent, what is optional, what a receipt says,
-and what is **not honored by the server today**.
+and which fields the server treats as authoritative.
 
 The design decisions and their rejected alternatives live in the code, in
 `crates/ferrogate-control-plane-client/src/action_identity.rs`. This page does
@@ -18,7 +18,7 @@ can set.
 | `x-ferrogate-action-id` | client-minted identifier | yes |
 | `x-ferrogate-client-fingerprint` | client-asserted | yes |
 | `x-ferrogate-client-clock-unverified` | client-asserted, **untrusted** | yes |
-| `x-ferrogate-time-token` | **server**-issued, echoed verbatim | only when one is held (see below — never, today) |
+| `x-ferrogate-time-token` | **server**-issued, echoed verbatim | only after an earlier response in the same action supplied one |
 | `x-ferrogate-client-reported-ip` | client-asserted, **opt-in** | only when you set the variable below |
 
 `action_id` is `fgact_` followed by 32 lowercase hex characters, minted once per
@@ -96,16 +96,17 @@ Because both start off, no part of the correlation guarantee rests on them:
 Opting in adds evidence; opting out removes none the server did not already
 hold.
 
-## The timestamp: what a receipt says, and why it says `null`
+## The timestamp: server authority and the first-request `null`
 
 The audit instant is **server-issued or absent**. The CLI never fills it from
 its own clock, and there is no code path from the local clock into that field.
 
-> **NOT ISSUED BY ANY FERROGATE DEPLOYMENT TODAY.** The endpoint that mints a
-> time token is server-side work issue #548 defers, and the contract declares
-> `x-ferrogate-time-token` on zero responses. So on **every** receipt this CLI
-> renders today, `client_sent_at` is `null` with the absence code
-> `no_server_issued_time_token`.
+When a request presents `x-ferrogate-action-id`, FerroGate adds a short-lived,
+HMAC-signed `x-ferrogate-time-token` to the response. The client harvests that
+token and echoes it on the next request of the same action. The server validates
+its HMAC signature, action-id binding and TTL against the server's own receive
+clock. An expired token, a bad signature or a token moved to another action is
+rejected by the server.
 
 That is a stated absence, not a silence, and it is the deliberate outcome: an
 instant read from a skewed or hostile client clock is a *false* record in a
@@ -119,16 +120,13 @@ one field cannot express clock skew — a host running hours behind, a suspended
 VM, a backdated workstation — and the difference between them is the finding an
 auditor needs.
 
-When a server does start issuing tokens, the client will harvest one off any
-response that carries the header and present it on the **next** request of the
-same action (a "piggy-back": no preflight request is ever made, so the extra
-round-trip cost is zero). A token bound to a different action is refused
-unconditionally. Note that a mutating verb is always the first request of its
-action, so a receipt's `client_sent_at` will stay `null` until something makes a
-mutation the second request of an action; the saving lands on multi-request
-reads, which produce no receipt.
+This is a piggy-back, not a preflight: the extra round-trip cost is zero and the
+first request simply has no token to present. A mutating verb is currently the
+first request of its action, so its receipt reports `client_sent_at: null` with
+`no_server_issued_time_token`; the response token can only describe a later
+request in the same action. Multi-request reads use that path today.
 
-> **Known limitation, when that day comes.** The client also refuses a token
+> **Known client-side limitation.** The client also refuses a token
 > that falls outside its declared TTL by more than five minutes, judged against
 > the client's own clock — the one this whole design calls untrusted. The
 > reading is taken once, when the command starts, so a machine whose clock is
@@ -173,14 +171,17 @@ recorded without an `action_id`, exactly as it was before this issue. Attributin
 console actions means minting an identity in the console and is separate work;
 it is not covered by anything on this page.
 
-Two originating requests from the CLI itself are still **outside** both
-chokepoints, and are named here rather than left to be discovered:
+One HTTP path sits outside those two client implementations but carries the
+same identity:
 
 * `ferrogate reload --admin-url …` mutates a running gateway's live config
-  through a third raw-TCP client that lives in the `ferrogate-gateway` crate. It
-  carries no `action_id` today; closing it is follow-up work.
-* `ferrogate storage migrate-to-supabase` talks to PostgreSQL, not HTTP, and
-  carries no header at all.
+  through a third raw-TCP client in the `ferrogate-gateway` crate. The command
+  mints one identity and threads every rendered header through
+  `execute_admin_reload` to that socket write. A bounded loopback test asserts
+  the actual request head.
+
+`ferrogate storage migrate-to-supabase` talks to PostgreSQL, not HTTP, so an
+HTTP attribution header does not apply there.
 
 Inside `ferrogate-cli` the known set is checked: a test
 (`every_outbound_http_call_goes_through_an_attributed_chokepoint`) holds an
@@ -202,8 +203,9 @@ bypass conspicuous rather than pretending to prove all future Rust names.
 | no fourth HTTP client appears in `ferrogate-cli` | `every_outbound_http_call_goes_through_an_attributed_chokepoint` |
 | no local clock reaches the audit instant | two source guards, one per crate |
 | the fingerprint field set | `the_fingerprint_declares_exactly_the_reviewed_field_set` |
-| nothing issues a time token yet | `no_operation_yet_issues_a_server_time_token`, over the contract |
-| `ferrogate reload` and the admin console | **nothing** — stated above, not tested |
+| every API response declares the server time token | `every_response_declares_the_server_time_token`, over the contract |
+| `ferrogate reload` carries one identity | `admin_reload_mints_and_threads_one_action_identity` plus `admin_reload_writes_every_client_action_identity_header_to_the_socket` |
+| the admin console | **nothing** — stated above, not tested |
 
 ## Privacy summary
 

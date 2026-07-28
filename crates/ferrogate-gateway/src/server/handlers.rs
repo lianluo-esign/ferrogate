@@ -15,6 +15,7 @@ use ferrogate_config::{build_target_uri, normalize_host};
 
 use super::route_groups::{RequestParts, RouteGroup};
 use super::{FerroGateway, ProxyContext};
+use crate::client_action_time::ClientActionTimeModule;
 
 impl FerroGateway {
     pub(super) async fn handle_request_filter(
@@ -23,6 +24,21 @@ impl FerroGateway {
         ctx: &mut ProxyContext,
     ) -> PingoraResult<bool> {
         ctx.request_id = self.state.next_request_id();
+        if let Some(error) = session
+            .downstream_modules_ctx
+            .get::<ClientActionTimeModule>()
+            .and_then(ClientActionTimeModule::request_error)
+        {
+            write_json_error(
+                session,
+                error.status(),
+                error.code(),
+                error.to_string(),
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(true);
+        }
         let state = self.state.current();
         let req = session.req_header();
         let trace = super::ingress_trace_context(&req.headers, &ctx.request_id);

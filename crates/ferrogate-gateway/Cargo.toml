@@ -42,6 +42,7 @@ ferrogate-admin = { path = "../ferrogate-admin" }
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-config = { path = "../ferrogate-config" }
+ferrogate-control-plane-client = { path = "../ferrogate-control-plane-client" }
 ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-guardrails = { path = "../ferrogate-guardrails" }
 ferrogate-mcp = { path = "../ferrogate-mcp" }

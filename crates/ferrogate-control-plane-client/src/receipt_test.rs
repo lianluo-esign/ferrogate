@@ -782,7 +782,7 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
     assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
 }
 
-/// **The arm that runs 100% of the time.** A mutation that really was sent, by a
+/// A first-request mutation that really was sent, by a
 /// client holding no server time token, reports `client_sent_at: null` with
 /// [`absence_codes::NO_SERVER_TIME_TOKEN`] — and the local clock does not stand
 /// in for it.
@@ -812,9 +812,8 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
 /// * the `SystemTime::now()` source guard passes, because the mutation adds no
 ///   clock read — it launders one the identity already took.
 ///
-/// And this is not a corner: no deployment issues a time token, and every
-/// mutating verb is the first request of its action, so `(true, None)` is the
-/// arm every real receipt takes. It had zero assertions —
+/// Every current mutating verb is the first request of its action, so the
+/// response token arrives too late to describe that request. This arm had zero assertions —
 /// `git grep NO_SERVER_TIME_TOKEN` returned the constant, the prose, and one
 /// production use.
 ///
@@ -832,11 +831,11 @@ fn an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in() {
     let identity = ClientActionIdentity::fixture();
     assert!(
         identity.server_issued_time().is_none(),
-        "the premise of this test is a client holding no token — the state of every deployment"
+        "the premise of this test is a first request holding no token"
     );
 
-    // No `issuing_time_token`: this transport answers the way every control
-    // plane that exists answers today.
+    // No `issuing_time_token`: the request-under-test has no prior response to
+    // harvest from, regardless of what this response would issue.
     let transport = std::sync::Arc::new(RecordingTransport::with_body(r#"{"id":"proj_1"}"#));
     let client = ControlPlaneClient::new(
         test_context(),

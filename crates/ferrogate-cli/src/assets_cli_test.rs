@@ -370,12 +370,9 @@ fn send_request_writes_the_identity_onto_the_socket() {
 /// tree is subject to the rule.
 ///
 /// **Scope, stated rather than implied:** this scans `crates/ferrogate-cli/src`
-/// and nothing else. `ferrogate reload --admin-url …` mutates a running
-/// gateway's live config through a third raw-TCP client that lives in
-/// `ferrogate_gateway::lifecycle`, and it still goes out unattributed. Giving
-/// that function an identity argument is a `ferrogate-gateway` change and is
-/// follow-up work; it is named in `docs/cli-audit-attribution.md` and in
-/// `action_identity`'s module docs rather than left for a reader to discover.
+/// and nothing else. `ferrogate reload --admin-url …` writes through a raw-TCP
+/// client in `ferrogate_gateway::lifecycle`; the command-arm guard below and
+/// that module's loopback test cover that cross-crate chokepoint.
 #[test]
 fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
     /// Every sanctioned client site, and why each one is allowed.
@@ -511,6 +508,24 @@ fn every_raw_tcp_command_mints_exactly_one_action_identity() {
              invocation, no more and no fewer"
         );
     }
+}
+
+/// `reload --admin-url` originates a request even though the socket lives in
+/// `ferrogate-gateway::lifecycle`: keep its command arm in the attribution
+/// census as one mint, one rendered set, and one threaded set.
+#[test]
+fn admin_reload_mints_and_threads_one_action_identity() {
+    let source = include_str!("lib.rs");
+    let reload_arm = source
+        .split_once("Commands::Reload(args) =>")
+        .and_then(|(_, rest)| rest.split_once("Commands::HashKey(args) =>"))
+        .map(|(arm, _)| arm)
+        .expect("the reload command arm remains between Reload and HashKey");
+    assert_eq!(reload_arm.matches("mint_action_identity(").count(), 1);
+    assert!(
+        reload_arm.contains("&identity,"),
+        "the closed identity type must cross execute_admin_reload's boundary: {reload_arm}"
+    );
 }
 
 /// Pins: the printable-ASCII refusal in `render_header_block`.

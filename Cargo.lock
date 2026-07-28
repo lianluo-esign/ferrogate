@@ -1311,6 +1311,7 @@ dependencies = [
  "ferrogate-billing",
  "ferrogate-cloudflare",
  "ferrogate-config",
+ "ferrogate-control-plane-client",
  "ferrogate-core",
  "ferrogate-guardrails",
  "ferrogate-mcp",

@@ -7,6 +7,7 @@
 use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_config::is_caddyfile_path;
 use ferrogate_config::{config_snapshot_id, Config};
+use ferrogate_control_plane_client::action_identity::ClientActionIdentity;
 use ferrogate_runtime::{ReloadCoordinator, ReloadOutcome};
 use serde_json::Value;
 use std::{
@@ -162,13 +163,14 @@ pub fn execute_admin_reload(
     admin_token: Option<&str>,
     config_path: &Path,
     config: &Config,
+    action_identity: &ClientActionIdentity,
 ) -> AnyResult<String> {
     let token = admin_token.context(
         "admin reload requires --admin-token or FERROGATE_ADMIN_TOKEN when --admin-url is set",
     )?;
     let endpoint = AdminEndpoint::parse(admin_url)?;
     let request_body = admin_reload_request_body(config_path)?;
-    let response = post_admin_json(&endpoint, token, &request_body)?;
+    let response = post_admin_json(&endpoint, token, &request_body, action_identity)?;
     if !(200..300).contains(&response.status) {
         bail!(
             "admin reload failed: status={} body={}",
@@ -360,7 +362,9 @@ fn post_admin_json(
     endpoint: &AdminEndpoint,
     token: &str,
     body: &str,
+    action_identity: &ClientActionIdentity,
 ) -> AnyResult<AdminHttpResponse> {
+    let action_identity_headers = render_action_identity_headers(&action_identity.headers())?;
     let mut stream = TcpStream::connect(endpoint.connect_addr())
         .with_context(|| format!("failed to connect to admin API at {}", endpoint.base_url()))?;
     stream
@@ -368,10 +372,11 @@ fn post_admin_json(
         .context("failed to set admin API read timeout")?;
     write!(
         stream,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nConnection: close\r\n{}Content-Length: {}\r\n\r\n{}",
         endpoint.reload_path(),
         endpoint.host_header(),
         token,
+        action_identity_headers,
         body.len(),
         body
     )
@@ -382,6 +387,29 @@ fn post_admin_json(
         .read_to_string(&mut response)
         .context("failed to read admin reload response")?;
     parse_admin_http_response(&response)
+}
+
+fn render_action_identity_headers(headers: &[(String, String)]) -> AnyResult<String> {
+    let mut rendered = String::new();
+    for (name, value) in headers {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ' || byte == b'\t')
+        {
+            bail!(
+                "refusing to write a client action identity header that could split the admin reload request"
+            );
+        }
+        rendered.push_str(name);
+        rendered.push_str(": ");
+        rendered.push_str(value);
+        rendered.push_str("\r\n");
+    }
+    Ok(rendered)
 }
 
 fn parse_admin_http_response(raw: &str) -> AnyResult<AdminHttpResponse> {
@@ -466,6 +494,10 @@ impl ConfigSummary {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_admin_reload_test.rs"]
+mod lifecycle_admin_reload_test;
 
 #[cfg(test)]
 mod tests {

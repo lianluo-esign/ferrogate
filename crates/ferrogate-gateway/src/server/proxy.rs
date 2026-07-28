@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use http::header;
 use pingora::{
     http::{RequestHeader, ResponseHeader},
+    modules::http::{compression::ResponseCompressionBuilder, HttpModules},
     prelude::HttpPeer,
     proxy::{ProxyHttp, Session},
     Result as PingoraResult,
@@ -15,6 +16,7 @@ use pingora::{
 use tracing::{error, info, warn};
 
 use super::{FerroGateway, ProxyContext};
+use crate::client_action_time::ClientActionTimeModuleBuilder;
 
 /// Invariant (#312): `request_filter` populates `ctx.route`,
 /// `ctx.upstream_endpoint`, and `ctx.target_uri` on every path that returns
@@ -89,6 +91,13 @@ fn apply_upstream_request_filter(
 #[async_trait]
 impl ProxyHttp for FerroGateway {
     type CTX = ProxyContext;
+
+    fn init_downstream_modules(&self, modules: &mut HttpModules) {
+        modules.add_module(ClientActionTimeModuleBuilder::new(
+            self.state.client_action_time_signer(),
+        ));
+        modules.add_module(ResponseCompressionBuilder::enable(0));
+    }
 
     fn new_ctx(&self) -> Self::CTX {
         ProxyContext::default()

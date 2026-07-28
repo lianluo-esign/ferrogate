@@ -138,15 +138,12 @@
 //!
 //! Three things about that field are load-bearing and easy to get wrong:
 //!
-//! * **`client_sent_at` is server-issued or null, and today it is always null.**
-//!   It is never filled from the local clock; a request that presented no token
-//!   reports [`absence_codes::NO_SERVER_TIME_TOKEN`], which is a finding, not a
-//!   silence. And no deployment issues a token yet — the issuing endpoint is
-//!   server-side work #548 defers — so on every receipt this CLI renders today
-//!   the field is `null` with that code. It is stated here, in
-//!   [`crate::action_identity`], and in `docs/cli-audit-attribution.md`, in the
-//!   same spirit as `--tenant`'s "NOT HONORED BY THE SERVER TODAY", so an
-//!   operator reads a documented state rather than guessing at a null.
+//! * **`client_sent_at` is server-issued or null.** It is never filled from the
+//!   local clock; a request that presented no token reports
+//!   [`absence_codes::NO_SERVER_TIME_TOKEN`], which is a finding, not a silence.
+//!   The server piggy-backs a token on the response, so a one-request mutation
+//!   still has none to present; a later request in the same action can carry the
+//!   server-issued instant.
 //! * **`client_clock_unverified_unix` is a different fact.** It is the client's
 //!   own reading, carried beside the server's so an auditor can measure skew.
 //!   The two are never merged, and nothing may order or authorize on the second.
@@ -1917,10 +1914,9 @@ impl<'a> MutationPlan<'a> {
     ///    That is the whole point of the design: the audit instant is the
     ///    server's or it is null.
     ///
-    ///    **This is the arm that runs, in every deployment that exists.** No
-    ///    control plane issues a time token today, and a mutating verb is always
-    ///    the first request of its action anyway, so `(true, None)` is the arm
-    ///    100% of real receipts take — which is exactly why it needs a test of
+    ///    A mutating verb is currently the first request of its action, so
+    ///    `(true, None)` remains the normal receipt arm even though the response
+    ///    now carries a token for any later request. That is why it needs a test of
     ///    its own rather than inheriting confidence from the dry-run arm beside
     ///    it. `an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in`
     ///    is that test, and the mutation it exists to catch is filling this arm

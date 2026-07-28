@@ -190,15 +190,13 @@
 //! tested anyway, because the alternative is discovering the shape only once a
 //! server starts issuing.
 //!
-//! **Nothing issues a time token today.** No FerroGate deployment mints
-//! [`TIME_TOKEN_HEADER`]: the issuing endpoint is server-side work this issue
-//! defers, and the contract declares the header on zero responses (pinned by
-//! `no_operation_yet_issues_a_server_time_token`, the same shape as
-//! `tenant_scope_is_not_yet_an_openapi_parameter`). So in every deployment that
-//! exists, every receipt reports `client_sent_at: null` with
-//! [`crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN`]. Said here, in
-//! `docs/cli-audit-attribution.md`, and on the receipt itself, rather than left
-//! for an operator to infer from a null.
+//! **The server now issues the token on ordinary responses.** A request that
+//! presents [`ACTION_ID_HEADER`] receives a fresh HMAC-signed token at the
+//! downstream response boundary. On the next request of that same action the
+//! server validates signature, action binding and TTL against its own receive
+//! clock. The first request still has no token to present, so a single-request
+//! mutation receipt honestly reports [`crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN`]
+//! rather than laundering the client clock into the server field.
 //!
 //! When no token is held, `client_sent_at` is `null` **with a stated reason**
 //! ([`crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN`]) — not backfilled
@@ -279,18 +277,11 @@
 //! why [`encode_header_value`] escapes CR and LF rather than deleting them:
 //! there is no `http::HeaderValue` between that string and the socket.
 //!
-//! The boundary that remains, named rather than implied. Two originating
-//! requests still go out unattributed, and both are outside this slice:
-//!
-//! * **`ferrogate reload --admin-url …`** mutates a running gateway's live
-//!   config through a *third* hand-rolled raw-TCP client, which lives in
-//!   `ferrogate_gateway::lifecycle` rather than in `ferrogate-cli` — a crate
-//!   this one must not depend on. Closing it means giving that function an
-//!   identity argument too, which is a `ferrogate-gateway` change and is
-//!   follow-up work, not a silence. It is the same command
-//!   [`crate::receipt`]'s own scope section already names as receiptless.
-//! * **`ferrogate storage migrate-to-supabase`** talks to PostgreSQL, not HTTP,
-//!   and carries no header at all.
+//! `ferrogate reload --admin-url …` is the third raw-TCP path. Its top-level
+//! command mints one [`ClientActionIdentity`] and passes the complete rendered
+//! header set through `ferrogate_gateway::lifecycle::execute_admin_reload` to
+//! the socket write. `ferrogate storage migrate-to-supabase` talks to
+//! PostgreSQL rather than HTTP, so no HTTP attribution header applies there.
 //!
 //! `ferrogate admin-api`'s upstream socket is deliberately *not* on that list:
 //! it is a reverse proxy relaying the admin console's request, and minting an

@@ -23,6 +23,7 @@ use crate::approval::{
     ToolApprovalDecisionRequest, ToolApprovalDraft, ToolApprovalRecord,
 };
 use crate::billing_client::BillingReporter;
+use crate::client_action_time::ServerTimeTokenSigner;
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
     ToolExecutionResponse,
@@ -314,6 +315,10 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[derive(Debug, Clone)]
 pub(crate) struct SharedAppState {
     inner: Arc<RwLock<AppState>>,
+    /// Process-lifetime key for short-lived client action time tokens (#548).
+    /// It sits outside the reloadable `AppState` snapshot so a hot config
+    /// reload cannot invalidate tokens already issued by this process.
+    client_action_time_signer: Arc<ServerTimeTokenSigner>,
     reload_coordinator: Arc<Mutex<ferrogate_runtime::ReloadCoordinator>>,
     source_path: Option<Arc<PathBuf>>,
     shared_file_control_plane: Option<Arc<SharedFileControlPlane>>,
@@ -429,6 +434,7 @@ impl SharedAppState {
         };
         let state = Self {
             inner: Arc::new(RwLock::new(app_state)),
+            client_action_time_signer: Arc::new(ServerTimeTokenSigner::generate()?),
             reload_coordinator: Arc::new(Mutex::new(ferrogate_runtime::ReloadCoordinator::new(
                 snapshot,
             ))),
@@ -467,6 +473,10 @@ impl SharedAppState {
             Ok(state) => state.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
+    }
+
+    pub(crate) fn client_action_time_signer(&self) -> Arc<ServerTimeTokenSigner> {
+        Arc::clone(&self.client_action_time_signer)
     }
 
     pub(crate) fn with_acme_renewal_state(

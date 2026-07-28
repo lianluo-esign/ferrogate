@@ -1156,8 +1156,8 @@ fn the_only_local_clock_read_in_the_audit_path_is_the_one_named_for_it() {
 /// find them.
 ///
 /// Pins: `docs/cli-audit-attribution.md` naming [`HOST_LABEL_ENV`] and
-/// [`REPORTED_IP_ENV`], and stating that no deployment issues a time token
-/// today.
+/// [`REPORTED_IP_ENV`], and explaining server issuance without granting the
+/// client clock authority.
 ///
 /// Catches: renaming either constant without updating the documentation, and
 /// deleting the page. Neither variable is a clap flag, so
@@ -1170,9 +1170,8 @@ fn the_only_local_clock_read_in_the_audit_path_is_the_one_named_for_it() {
 /// established shape for a shipped-but-inert capability (`--tenant` carries
 /// "NOT HONORED BY THE SERVER TODAY" in ten places plus an stderr notice). The
 /// contract-side half is
-/// `crate::transport_test::no_operation_yet_issues_a_server_time_token`, which
-/// fails the day a response declares the header — so the doc and the contract
-/// are corrected together or not at all.
+/// `crate::transport_test::every_response_declares_the_server_time_token`,
+/// which holds the shipped response-side contract.
 #[test]
 fn the_opt_in_variables_are_documented_where_an_operator_will_find_them() {
     const PAGE: &str = include_str!("../../../docs/cli-audit-attribution.md");
@@ -1191,11 +1190,8 @@ fn the_opt_in_variables_are_documented_where_an_operator_will_find_them() {
              flag, so the generated cli-reference.md will never mention it either"
         );
     }
-    assert!(
-        PAGE.contains("NOT ISSUED BY ANY FERROGATE DEPLOYMENT TODAY"),
-        "the page must state that nothing issues a time token yet, or an operator reads a null \
-         client_sent_at and has to guess whether it is a bug"
-    );
+    assert!(PAGE.contains("server validates its HMAC signature"));
+    assert!(PAGE.contains("server's own receive clock"));
     assert!(
         PAGE.contains(crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN),
         "the page must name the absence code an operator will actually see on a receipt"
