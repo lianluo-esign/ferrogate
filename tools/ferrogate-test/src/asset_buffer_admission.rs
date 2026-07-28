@@ -866,9 +866,24 @@ fn check_response_status(response: &HttpResponse, expected: u16, what: &str) -> 
         bail!(
             "{what} returned {}, expected {expected}: {}",
             response.status,
-            response.raw
+            bounded_response_diagnostic(response)
         )
     }
+}
+
+fn bounded_response_diagnostic(response: &HttpResponse) -> String {
+    const MAX_INLINE_BODY_BYTES: usize = 1024;
+    if response.body.len() <= MAX_INLINE_BODY_BYTES {
+        return response.raw.clone();
+    }
+    let headers = response
+        .raw
+        .split_once("\r\n\r\n")
+        .map_or(response.raw.as_str(), |(headers, _)| headers);
+    format!(
+        "{headers}\r\n\r\n[{}-byte response body omitted]",
+        response.body.len()
+    )
 }
 
 fn deterministic_bytes(length: usize, base: u8) -> Vec<u8> {
