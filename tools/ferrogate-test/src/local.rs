@@ -341,6 +341,13 @@ impl Drop for BillingHarness {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ProviderSecretBinding<'a> {
+    secret_ref: &'a str,
+    binding_env: &'a str,
+    binding_value: &'a str,
+}
+
 pub(crate) struct LocalHarness {
     _dir: tempfile::TempDir,
     pub(crate) gateway_addr: String,
@@ -364,6 +371,7 @@ impl LocalHarness {
             None,
             false,
             None,
+            None,
         )
     }
 
@@ -380,6 +388,7 @@ impl LocalHarness {
             None,
             true,
             None,
+            None,
         )
     }
 
@@ -394,6 +403,7 @@ impl LocalHarness {
             None,
             Some(auth_addr),
             false,
+            None,
             None,
         )
     }
@@ -410,6 +420,33 @@ impl LocalHarness {
             None,
             false,
             Some(billing_service_addr),
+            None,
+        )
+    }
+
+    /// Start a gateway whose primary provider credential can only resolve from
+    /// one explicit secret-reference binding. Cloudflare REST credentials and
+    /// the ordinary provider-key fallback are removed from the child process,
+    /// so a `cf://` E2E cannot pass through an unrelated credential path.
+    pub(crate) fn start_with_provider_secret_binding(
+        ferrogate_bin: &Path,
+        expected_provider_requests: usize,
+        secret_ref: &str,
+        binding_env: &str,
+        binding_value: &str,
+    ) -> Result<Self> {
+        Self::start_inner(
+            ferrogate_bin,
+            expected_provider_requests,
+            None,
+            None,
+            false,
+            None,
+            Some(ProviderSecretBinding {
+                secret_ref,
+                binding_env,
+                binding_value,
+            }),
         )
     }
 
@@ -420,6 +457,7 @@ impl LocalHarness {
         auth_addr: Option<&str>,
         include_agent: bool,
         billing_service_addr: Option<&str>,
+        provider_secret_binding: Option<ProviderSecretBinding<'_>>,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
@@ -463,13 +501,16 @@ impl LocalHarness {
                 observability: Some(&observability),
                 auth_addr,
                 billing_service_addr,
+                primary_provider_secret_ref: provider_secret_binding
+                    .as_ref()
+                    .map(|binding| binding.secret_ref),
             }),
         )?;
 
-        let gateway = Command::new(ferrogate_bin)
+        let mut command = Command::new(ferrogate_bin);
+        command
             .args(["run", "--config"])
             .arg(&config_path)
-            .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
             .env(
                 "FERROGATE_TEST_AWS_SECRET_ACCESS_KEY",
                 "ferrogate-test-aws-secret",
@@ -494,7 +535,18 @@ impl LocalHarness {
                 } else {
                     Stdio::null()
                 },
-            )
+            );
+        if let Some(binding) = provider_secret_binding {
+            command
+                .env_remove("FERROGATE_PROVIDER_SECRET")
+                .env_remove("CLOUDFLARE_ACCOUNT_ID")
+                .env_remove("CLOUDFLARE_API_TOKEN")
+                .env_remove("CLOUDFLARE_API_BASE_URL")
+                .env(binding.binding_env, binding.binding_value);
+        } else {
+            command.env("FERROGATE_PROVIDER_SECRET", "provider-secret");
+        }
+        let gateway = command
             .spawn()
             .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
 

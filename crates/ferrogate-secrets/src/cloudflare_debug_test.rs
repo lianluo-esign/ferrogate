@@ -8,7 +8,6 @@ use super::CfSecretCreate;
 
 #[test]
 fn cf_secret_create_debug_redacts_plaintext_and_keeps_diagnostics() {
-    const SECRET_PREFIX: &str = "cf-secret-create-debug-leak-canary";
     const SECRET: &str = "cf-secret-create-debug-leak-canary-sensitive-tail";
 
     let request = CfSecretCreate {
@@ -24,10 +23,15 @@ fn cf_secret_create_debug_redacts_plaintext_and_keeps_diagnostics() {
         !rendered.contains(SECRET),
         "CfSecretCreate Debug leaked the complete plaintext: {rendered}"
     );
-    assert!(
-        !rendered.contains(SECRET_PREFIX),
-        "CfSecretCreate Debug leaked the plaintext prefix: {rendered}"
-    );
+    // Check longest first so a 16/8/4-byte leak fails on the assertion that
+    // precisely names its size rather than being caught by the 4-byte subset.
+    for prefix_len in [16, 8, 4] {
+        let prefix = &SECRET[..prefix_len];
+        assert!(
+            !rendered.contains(prefix),
+            "CfSecretCreate Debug leaked the {prefix_len}-byte plaintext prefix: {rendered}"
+        );
+    }
     assert!(
         rendered.contains(r#"value: "<redacted>""#),
         "CfSecretCreate Debug must identify the redacted field: {rendered}"

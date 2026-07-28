@@ -19,6 +19,9 @@ pub(crate) struct LocalGatewayConfig<'a> {
     /// Address of a running `ferrogate billing serve` process. When set, the
     /// gateway reports settled usage to it over REST (issue #131).
     pub(crate) billing_service_addr: Option<&'a str>,
+    /// Optional secret reference for the primary OpenAI provider. When absent,
+    /// the ordinary `FERROGATE_PROVIDER_SECRET` fixture remains in use.
+    pub(crate) primary_provider_secret_ref: Option<&'a str>,
 }
 
 pub(crate) fn local_gateway_config(config: LocalGatewayConfig<'_>) -> String {
@@ -89,6 +92,10 @@ token = "{token}"
     let provider_addr = config.provider_addr;
     let mcp_addr = config.mcp_addr;
     let agent_addr = config.agent_addr;
+    let primary_provider_credential = config
+        .primary_provider_secret_ref
+        .map(|secret_ref| format!("secret_ref = \"{secret_ref}\""))
+        .unwrap_or_else(|| "api_key_env = \"FERROGATE_PROVIDER_SECRET\"".to_string());
     format!(
         r#"
 listen = "{gateway_addr}"
@@ -150,7 +157,7 @@ tenant_allowlist = ["org_demo"]
 name = "openai"
 kind = "openai"
 base_url = "http://{provider_addr}/v1"
-api_key_env = "FERROGATE_PROVIDER_SECRET"
+{primary_provider_credential}
 
 [[providers]]
 name = "backup-openai"

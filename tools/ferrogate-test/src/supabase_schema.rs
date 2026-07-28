@@ -31,6 +31,7 @@ pub(crate) enum LiveSupabaseScenario {
     McpIdentity,
     Compliance,
     TargetCapability,
+    AdminConsoleRoles,
 }
 
 impl LiveSupabaseScenario {
@@ -43,6 +44,7 @@ impl LiveSupabaseScenario {
             Self::McpIdentity => "mcp",
             Self::Compliance => "cmp",
             Self::TargetCapability => "tgt",
+            Self::AdminConsoleRoles => "role",
         }
     }
 }

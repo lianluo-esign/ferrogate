@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 
+mod admin_console_roles;
 mod agent_jobs;
 mod api_contract;
 mod assertions;
@@ -16,6 +17,7 @@ mod cli;
 /// #505: the CLI mutation decision-receipt E2E (dry-run issues nothing; the
 /// receipt's own rollback pointer reverses a guardrail policy revision).
 mod cli_mutation_receipt;
+mod cloudflare_secret;
 mod compliance;
 mod constants;
 mod docker;
@@ -44,11 +46,13 @@ mod x402_paid_egress_chain;
 /// policy (operator config -> effective policy -> runtime decision).
 mod x402_spend_policy;
 
+use admin_console_roles::run_admin_console_roles_supabase;
 use agent_jobs::run_agent_jobs_api;
 use api_contract::run_api_contract;
 use asset_presign::run_asset_presign_api;
 use asset_registry::run_asset_registry_api;
 use cli_mutation_receipt::run_cli_mutation_receipt;
+use cloudflare_secret::run_cloudflare_secret_api;
 use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use function_egress_cloudflare::run_function_egress_cloudflare_api;
@@ -73,6 +77,7 @@ fn main() -> Result<()> {
         admin: run_admin_api,
         auth: run_auth_api,
         gateway: run_gateway_api,
+        cloudflare_secret: run_cloudflare_secret_api,
         api_contract: run_api_contract,
         component_compliance: run_component_compliance,
         component_compliance_supabase: run_component_compliance_supabase,
@@ -93,6 +98,7 @@ fn main() -> Result<()> {
         guardrail_workers_ai_llama_guard: run_workers_ai_llama_guard,
         mcp_identity_supabase: run_mcp_identity_supabase,
         target_capability_supabase: run_target_capability_supabase,
+        admin_console_roles_supabase: run_admin_console_roles_supabase,
         supabase_migration: run_supabase_migration,
         postgres_restart: run_postgres_restart,
         postgres_tls_restart: run_postgres_tls_restart,
@@ -103,6 +109,7 @@ fn main() -> Result<()> {
             run_gateway_external_auth_api(local, auth)?;
             run_gateway_third_party_auth_api(local)?;
             run_gateway_api(local)?;
+            run_cloudflare_secret_api(local)?;
             run_component_compliance(local)?;
             run_workers_ai_llama_guard(local)?;
             if include_docker {
@@ -118,6 +125,7 @@ fn main() -> Result<()> {
             run_gateway_external_auth_api(local, auth)?;
             run_gateway_third_party_auth_api(local)?;
             run_gateway_api(local)?;
+            run_cloudflare_secret_api(local)?;
             run_function_egress_api(local)?;
             run_function_egress_cloudflare_api(local)?;
             run_static_site_api(local)?;
