@@ -34,8 +34,13 @@ work belongs in [`roadmap.md`](roadmap.md).
   hosted-asset registry. It also implements stateless `server/discover` and
   per-request validation for the MCP 2026-07-28 candidate pinned at official
   commit `71e306956a4959c9655e5036be215d41986596e6`. Ingress and outbound-client
-  slices have focused in-repo peer coverage; external official-SDK validation
-  and final-spec conformance remain open.
+  slices have focused in-repo peer coverage, and the opt-in
+  `ferrogate-test mcp-candidate-client-official` path pins the official
+  TypeScript client that was generated from that exact artifact and alternates
+  its stateless modern requests across two gateway instances. Candidate
+  body-schema failures use `-32602`; Streamable-HTTP header failures use
+  `-32020`. Execution evidence and final-spec conformance remain separate from
+  the command's implementation and must not be inferred from compilation.
 - **Hosted asset closed loop** at `/v1/assets/*`: versioned publish/pull/
   delete with tenant quota accounting, artifact-registry semantics (channels
   such as latest/stable/canary, semver resolution, platform/arch variants,

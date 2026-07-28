@@ -32,6 +32,8 @@ pub(crate) enum Commands {
     AuthApi(AuthArgs),
     /// Run gateway API coverage against a real local FerroGate process.
     GatewayApi(LocalArgs),
+    /// Run the pinned official Tier-1 MCP client against candidate and legacy ingress.
+    McpCandidateClientOfficial(LocalArgs),
     /// Prove a cf:// Worker-bound secret reaches a real provider request (#417).
     CloudflareSecretApi(LocalArgs),
     /// Prove fixed runtime routes and methods are enforced by the OpenAPI contract.
@@ -233,6 +235,7 @@ pub(crate) struct Dispatch {
     pub(crate) admin: fn(&LocalArgs) -> Result<()>,
     pub(crate) auth: fn(&AuthArgs) -> Result<()>,
     pub(crate) gateway: fn(&LocalArgs) -> Result<()>,
+    pub(crate) mcp_candidate_client_official: fn(&LocalArgs) -> Result<()>,
     pub(crate) cloudflare_secret: fn(&LocalArgs) -> Result<()>,
     pub(crate) api_contract: fn(&LocalArgs) -> Result<()>,
     pub(crate) component_compliance: fn(&LocalArgs) -> Result<()>,
@@ -272,7 +275,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-buffer-admission, asset-registry-api, agent-jobs-api, managed-action-project, cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, worker-release"
+                "local: admin-api, auth-api, gateway-api, mcp-candidate-client-official (locked official npm opponent), cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-buffer-admission, asset-registry-api, agent-jobs-api, managed-action-project, cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, worker-release"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -287,6 +290,9 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::AdminApi(args) => (dispatch.admin)(&args),
         Commands::AuthApi(args) => (dispatch.auth)(&args),
         Commands::GatewayApi(args) => (dispatch.gateway)(&args),
+        Commands::McpCandidateClientOfficial(args) => {
+            (dispatch.mcp_candidate_client_official)(&args)
+        }
         Commands::CloudflareSecretApi(args) => (dispatch.cloudflare_secret)(&args),
         Commands::ApiContract(args) => (dispatch.api_contract)(&args),
         Commands::ComponentCompliance(args) => (dispatch.component_compliance)(&args),

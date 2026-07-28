@@ -152,11 +152,20 @@ through the admin API but the runtime only ever read the tenant scope.
   Supabase is not a performance target; do not run load, stress, throughput, or
   high-concurrency benchmarks through these commands.
 - **MCP candidate opponent path:** `ferrogate-test gateway-api` owns the local
-  deterministic client-wire contract. The downstream Tier-1 target tracked by
-  #570 is named `ferrogate-test mcp-candidate-client-official`: it must run the
-  pinned official opponent against both modern and legacy transport cases.
-  That command is not implemented or claimed as passing by the current
-  self-mock slice.
+  deterministic client-wire contract. The external Tier-1 target tracked by
+  #570 is `ferrogate-test mcp-candidate-client-official`. It installs
+  `@modelcontextprotocol/client@2.0.0` from a committed npm lockfile, verifies
+  npm integrity plus SDK commit `cc4b41617ce3601b1290d67216ea0b194a3cd9ac`
+  and candidate spec commit
+  `71e306956a4959c9655e5036be215d41986596e6`, then drives two real local
+  FerroGate instances in official SDK `auto` mode and one of them in `legacy`
+  mode. Modern discover/list/call requests alternate between instances. Rust
+  independently checks that instance sequence, the observed headers and
+  request metadata, absence of modern session state, 2025-11-25 legacy
+  initialize, discovered tool, and completed tool result. The command is opt-in
+  and is not part of `ci` because
+  a clean run installs an external npm artifact; merely compiling or listing
+  the command is not conformance evidence.
 
 ### 10. Performance
 

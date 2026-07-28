@@ -55,7 +55,53 @@ fn modern_requests_are_self_describing_and_never_depend_on_prior_requests() {
 }
 
 #[test]
-fn each_required_modern_header_or_metadata_field_fails_with_header_mismatch() {
+fn initialize_is_modern_only_with_a_complete_current_request_envelope() {
+    let modern = rpc("initialize", modern_params(json!({})));
+    let validated = validate_ingress(&modern_headers("initialize", None), &modern).unwrap();
+    assert_eq!(validated.mode, McpIngressMode::Modern);
+
+    let plain_legacy = rpc(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    assert_eq!(
+        ingress_mode(&HeaderMap::new(), &plain_legacy),
+        McpIngressMode::Legacy
+    );
+
+    let incomplete = rpc(
+        "initialize",
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            }
+        }),
+    );
+    assert_eq!(
+        ingress_mode(&modern_headers("initialize", None), &incomplete),
+        McpIngressMode::Legacy,
+        "an initialize request must not enter modern validation from partial metadata"
+    );
+
+    let malformed_client_info = rpc(
+        "initialize",
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {"name": "missing-version"}
+            }
+        }),
+    );
+    assert_eq!(
+        ingress_mode(&modern_headers("initialize", None), &malformed_client_info),
+        McpIngressMode::Legacy,
+        "malformed optional clientInfo must not classify initialize as modern"
+    );
+}
+
+#[test]
+fn missing_modern_headers_fail_with_header_mismatch() {
     let request = rpc(
         "tools/call",
         modern_params(json!({"name": "search", "arguments": {}})),
@@ -72,25 +118,103 @@ fn each_required_modern_header_or_metadata_field_fails_with_header_mismatch() {
         let error = validate_ingress(&headers, &request).unwrap_err();
         assert_eq!(error.code(), -32020, "removing {missing} must red");
     }
+}
 
-    let mut missing_capabilities = request;
+#[test]
+fn malformed_or_missing_modern_body_metadata_fails_with_invalid_params() {
+    let complete = modern_headers("tools/call", Some("search"));
+    let request = || {
+        rpc(
+            "tools/call",
+            modern_params(json!({"name": "search", "arguments": {}})),
+        )
+    };
+
+    let mut missing_capabilities = request();
     missing_capabilities.params["_meta"]
         .as_object_mut()
         .unwrap()
         .remove(CLIENT_CAPABILITIES_META);
-    let error = validate_ingress(&complete, &missing_capabilities).unwrap_err();
-    assert_eq!(error.code(), -32020);
-
-    let mut missing_body_version = rpc(
-        "tools/call",
-        modern_params(json!({"name": "search", "arguments": {}})),
+    assert_eq!(
+        validate_ingress(&complete, &missing_capabilities)
+            .unwrap_err()
+            .code(),
+        -32602
     );
+
+    let mut missing_body_version = request();
     missing_body_version.params["_meta"]
         .as_object_mut()
         .unwrap()
         .remove(PROTOCOL_VERSION_META);
-    let error = validate_ingress(&complete, &missing_body_version).unwrap_err();
-    assert_eq!(error.code(), -32020);
+    assert_eq!(
+        validate_ingress(&complete, &missing_body_version)
+            .unwrap_err()
+            .code(),
+        -32602
+    );
+
+    for metadata in [
+        Value::Null,
+        json!({
+            "io.modelcontextprotocol/protocolVersion": 20260728,
+            "io.modelcontextprotocol/clientCapabilities": {}
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": [],
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": "not-an-object",
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {},
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+                "name": 570,
+                "version": "1.0.0"
+            },
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "ferrogate-test",
+                "version": false
+            },
+        }),
+    ] {
+        let mut malformed = request();
+        malformed.params["_meta"] = metadata;
+        let error = validate_ingress(&complete, &malformed)
+            .expect_err("malformed request metadata must fail");
+        assert_eq!(error.code(), -32602, "error={error}");
+        assert!(error.message().starts_with("Invalid params:"));
+    }
+
+    let mut unsupported_without_capabilities = request();
+    unsupported_without_capabilities.params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": "2099-01-01"
+    });
+    let mut unsupported_headers = complete;
+    unsupported_headers.insert(
+        ferrogate_mcp::MCP_PROTOCOL_VERSION_HEADER,
+        "2099-01-01".parse().unwrap(),
+    );
+    assert_eq!(
+        validate_ingress(&unsupported_headers, &unsupported_without_capabilities)
+            .unwrap_err()
+            .code(),
+        -32602,
+        "body schema validation must precede version support"
+    );
 }
 
 #[test]

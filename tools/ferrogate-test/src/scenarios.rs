@@ -4652,6 +4652,22 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             CLIENT_AUTH,
             JSON_CONTENT,
             MCP_CANDIDATE_VERSION,
+            MCP_TOOLS_LIST_METHOD,
+        ],
+        r#"{"jsonrpc":"2.0","id":"5707-client-info","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":"malformed"}}}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], -32602);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
             MCP_TOOLS_CALL_METHOD,
         ],
         r#"{"jsonrpc":"2.0","id":5706,"method":"tools/call","params":{"name":"http-search","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
@@ -4673,7 +4689,7 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         r#"{"jsonrpc":"2.0","id":5707,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#,
         400,
         |body| {
-            assert_eq!(body["error"]["code"], -32020);
+            assert_eq!(body["error"]["code"], -32602);
             Ok(())
         },
     )?;
@@ -4725,6 +4741,22 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             "Mcp-Method: roots/list",
         ],
         r#"{"jsonrpc":"2.0","id":5710,"method":"roots/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], -32601);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            MCP_CANDIDATE_VERSION,
+            "Mcp-Method: initialize",
+        ],
+        r#"{"jsonrpc":"2.0","id":5711,"method":"initialize","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
         404,
         |body| {
             assert_eq!(body["error"]["code"], -32601);

@@ -27,6 +27,7 @@ mod guardrails;
 mod http;
 mod local;
 mod managed_action_project;
+mod mcp_candidate_official;
 mod mcp_identity;
 mod mocks;
 /// #352: durable x402 payment attempts + their wallet-hold links inside the
@@ -60,6 +61,7 @@ use docker::{run_all_docker_scenarios, run_docker_scenario};
 use function_egress_cloudflare::run_function_egress_cloudflare_api;
 use guardrails::run_guardrail_supabase;
 use managed_action_project::run_managed_action_project;
+use mcp_candidate_official::run_mcp_candidate_client_official;
 use mcp_identity::run_mcp_identity_supabase;
 use scenarios::{
     run_admin_api, run_auth_api, run_function_egress_api, run_gateway_api,
@@ -81,6 +83,7 @@ fn main() -> Result<()> {
         admin: run_admin_api,
         auth: run_auth_api,
         gateway: run_gateway_api,
+        mcp_candidate_client_official: run_mcp_candidate_client_official,
         cloudflare_secret: run_cloudflare_secret_api,
         api_contract: run_api_contract,
         component_compliance: run_component_compliance,

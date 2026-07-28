@@ -89,9 +89,13 @@ These areas are implemented in the current open-source gateway:
   `/v1/mcp` support for 2025-11-25 and 2025-06-18 and JSON-RPC ingress including
   `resources/list`/`resources/read` and the first pinned MCP 2026-07-28
   candidate ingress slice: stateless `server/discover`, per-request metadata,
-  required routing headers, and typed transport errors. The outbound negotiation
-  slice has focused in-repo peer coverage; external official-SDK validation and
-  final-spec conformance remain roadmap work. Existing MCP
+  required routing headers, and typed transport errors (`-32602` for malformed
+  body metadata, `-32020` for header validation). The outbound negotiation
+  slice has focused in-repo peer coverage, and the locked opt-in
+  `mcp-candidate-client-official` command now supplies the official Tier-1 SDK
+  opponent with two-instance stateless request routing. Recording a passing
+  external run and final-spec conformance remain
+  roadmap work. Existing MCP
   execution also includes dispatch isolation, timeout handling, approval gates,
   immutable approval fingerprints, Codex compatibility, and Claude Code
   compatibility.

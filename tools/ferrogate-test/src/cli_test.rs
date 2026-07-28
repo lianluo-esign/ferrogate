@@ -89,3 +89,12 @@ fn asset_buffer_admission_is_a_deterministic_local_scenario() {
     };
     assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
 }
+
+#[test]
+fn official_mcp_candidate_client_is_a_named_external_opponent_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "mcp-candidate-client-official"]).unwrap();
+    let Commands::McpCandidateClientOfficial(args) = cli.command else {
+        panic!("expected mcp-candidate-client-official command");
+    };
+    assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
+}

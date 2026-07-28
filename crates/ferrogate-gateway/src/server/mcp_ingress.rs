@@ -38,6 +38,7 @@ pub(super) struct ValidatedMcpIngress {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum McpIngressValidationError {
+    InvalidParams(String),
     HeaderMismatch(String),
     UnsupportedVersion { requested: String },
 }
@@ -45,6 +46,7 @@ pub(super) enum McpIngressValidationError {
 impl McpIngressValidationError {
     pub(super) fn code(&self) -> i64 {
         match self {
+            Self::InvalidParams(_) => -32602,
             Self::HeaderMismatch(_) => -32020,
             Self::UnsupportedVersion { .. } => -32022,
         }
@@ -52,6 +54,7 @@ impl McpIngressValidationError {
 
     pub(super) fn message(&self) -> String {
         match self {
+            Self::InvalidParams(message) => format!("Invalid params: {message}"),
             Self::HeaderMismatch(message) => format!("Header mismatch: {message}"),
             Self::UnsupportedVersion { .. } => "Unsupported protocol version".to_string(),
         }
@@ -59,7 +62,7 @@ impl McpIngressValidationError {
 
     pub(super) fn data(&self) -> Option<Value> {
         match self {
-            Self::HeaderMismatch(_) => None,
+            Self::InvalidParams(_) | Self::HeaderMismatch(_) => None,
             Self::UnsupportedVersion { requested } => Some(json!({
                 "requested": requested,
                 "supported": ferrogate_mcp::SUPPORTED_MCP_PROTOCOL_VERSIONS,
@@ -71,7 +74,9 @@ impl McpIngressValidationError {
 impl std::fmt::Display for McpIngressValidationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HeaderMismatch(_) => formatter.write_str(&self.message()),
+            Self::InvalidParams(_) | Self::HeaderMismatch(_) => {
+                formatter.write_str(&self.message())
+            }
             Self::UnsupportedVersion { requested } => {
                 write!(
                     formatter,
@@ -86,7 +91,11 @@ impl std::fmt::Display for McpIngressValidationError {
 /// stateless, so no previous initialize/discover request participates.
 pub(super) fn ingress_mode(headers: &HeaderMap, rpc: &McpJsonRpcRequest) -> McpIngressMode {
     if rpc.method == "initialize" {
-        return McpIngressMode::Legacy;
+        return if body_has_complete_modern_envelope(rpc) {
+            McpIngressMode::Modern
+        } else {
+            McpIngressMode::Legacy
+        };
     }
     if rpc.method == "server/discover" || body_uses_modern_metadata(rpc) {
         return McpIngressMode::Modern;
@@ -126,15 +135,35 @@ pub(super) fn validate_ingress(
             .params
             .get("_meta")
             .and_then(Value::as_object)
-            .ok_or_else(|| mismatch("required params._meta object is missing or malformed"))?;
+            .ok_or_else(|| {
+                invalid_params("required params._meta object is missing or malformed")
+            })?;
         let body_protocol = metadata
             .get(PROTOCOL_VERSION_META)
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                mismatch(format!(
+                invalid_params(format!(
                     "required params._meta[{PROTOCOL_VERSION_META:?}] string is missing or malformed"
                 ))
             })?;
+        if !metadata
+            .get(CLIENT_CAPABILITIES_META)
+            .is_some_and(Value::is_object)
+        {
+            return Err(invalid_params(format!(
+                "required params._meta[{CLIENT_CAPABILITIES_META:?}] object is missing or malformed"
+            )));
+        }
+        if metadata.get(CLIENT_INFO_META).is_some_and(|client_info| {
+            client_info.as_object().is_none_or(|client_info| {
+                !client_info.get("name").is_some_and(Value::is_string)
+                    || !client_info.get("version").is_some_and(Value::is_string)
+            })
+        }) {
+            return Err(invalid_params(format!(
+                "optional params._meta[{CLIENT_INFO_META:?}] must be an Implementation object with string name and version when present"
+            )));
+        }
         if header_protocol != body_protocol {
             return Err(mismatch(format!(
                 "MCP-Protocol-Version header value {header_protocol:?} does not match body value {body_protocol:?}"
@@ -144,22 +173,6 @@ pub(super) fn validate_ingress(
             return Err(McpIngressValidationError::UnsupportedVersion {
                 requested: body_protocol.to_string(),
             });
-        }
-        if !metadata
-            .get(CLIENT_CAPABILITIES_META)
-            .is_some_and(Value::is_object)
-        {
-            return Err(mismatch(format!(
-                "required params._meta[{CLIENT_CAPABILITIES_META:?}] object is missing or malformed"
-            )));
-        }
-        if metadata
-            .get(CLIENT_INFO_META)
-            .is_some_and(|client_info| !client_info.is_object())
-        {
-            return Err(mismatch(format!(
-                "optional params._meta[{CLIENT_INFO_META:?}] must be an object when present"
-            )));
         }
         let header_method = header_method
             .ok_or_else(|| mismatch("required Mcp-Method header is missing or malformed"))?;
@@ -218,6 +231,25 @@ fn body_uses_modern_metadata(rpc: &McpJsonRpcRequest) -> bool {
             metadata.contains_key(PROTOCOL_VERSION_META)
                 || metadata.contains_key(CLIENT_CAPABILITIES_META)
                 || metadata.contains_key(CLIENT_INFO_META)
+        })
+}
+
+fn body_has_complete_modern_envelope(rpc: &McpJsonRpcRequest) -> bool {
+    rpc.params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .is_some_and(|metadata| {
+            metadata.get(PROTOCOL_VERSION_META).and_then(Value::as_str)
+                == Some(ferrogate_mcp::MCP_PROTOCOL_VERSION)
+                && metadata
+                    .get(CLIENT_CAPABILITIES_META)
+                    .is_some_and(Value::is_object)
+                && metadata.get(CLIENT_INFO_META).is_none_or(|client_info| {
+                    client_info.as_object().is_some_and(|client_info| {
+                        client_info.get("name").is_some_and(Value::is_string)
+                            && client_info.get("version").is_some_and(Value::is_string)
+                    })
+                })
         })
 }
 
@@ -280,6 +312,10 @@ fn decode_mcp_name(value: &str) -> Result<String, McpIngressValidationError> {
 
 fn mismatch(message: impl Into<String>) -> McpIngressValidationError {
     McpIngressValidationError::HeaderMismatch(message.into())
+}
+
+fn invalid_params(message: impl Into<String>) -> McpIngressValidationError {
+    McpIngressValidationError::InvalidParams(message.into())
 }
 
 #[cfg(test)]

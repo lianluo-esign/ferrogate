@@ -91,7 +91,11 @@ as a defect in its own right.
   2026-07-28 candidate discovery and per-request metadata plus strict fallback
   to initialize-based 2025-11-25/2025-06-18 peers. Native `POST /v1/mcp`
   implements the same pinned candidate ingress contract. External official-SDK
-  interoperability and final-spec conformance are not yet claimed. The runtime
+  interoperability is available as the opt-in locked
+  `ferrogate-test mcp-candidate-client-official` path; a command existing is not
+  a passing result, and final-spec conformance is not claimed. Malformed modern
+  request metadata fails as JSON-RPC `-32602`, while missing/mismatched
+  Streamable-HTTP routing headers fail as `-32020`. The runtime
   also provides explicit `POST /v1/agent-runs`,
   cron/interval agent schedules with an admin CRUD API, governed A2A ingress
   with policy/guardrails/billing on message bodies, governed tool execution,
@@ -609,6 +613,16 @@ cargo fmt --all -- --check
 cargo metadata --locked --format-version=1
 python3 scripts/check-openapi.py
 git diff --check
+```
+
+The external MCP candidate opponent is a separate opt-in gate. It installs the
+exact official TypeScript SDK package from its committed npm lockfile, starts
+two real local FerroGate instances, alternates consecutive stateless modern
+requests across them, and independently checks the SDK-generated modern and
+legacy wire flows:
+
+```bash
+./target/debug/ferrogate-test mcp-candidate-client-official
 ```
 
 ## Documentation
