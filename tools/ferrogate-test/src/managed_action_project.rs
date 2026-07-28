@@ -364,10 +364,23 @@ fn authorize(
             socket.display()
         )
     })?;
-    stream.write_all(serde_json::to_string(&request)?.as_bytes())?;
-    stream.shutdown(Shutdown::Write)?;
+    let io_timeout = Some(Duration::from_secs(5));
+    stream
+        .set_read_timeout(io_timeout)
+        .with_context(|| format!("failed to set authorizer read timeout for run {run_id}"))?;
+    stream
+        .set_write_timeout(io_timeout)
+        .with_context(|| format!("failed to set authorizer write timeout for run {run_id}"))?;
+    stream
+        .write_all(serde_json::to_string(&request)?.as_bytes())
+        .with_context(|| format!("failed to write authorizer request for run {run_id}"))?;
+    stream
+        .shutdown(Shutdown::Write)
+        .with_context(|| format!("failed to finish authorizer request for run {run_id}"))?;
     let mut body = String::new();
-    stream.read_to_string(&mut body)?;
+    stream
+        .read_to_string(&mut body)
+        .with_context(|| format!("timed out reading authorizer response for run {run_id}"))?;
     let response: GatewayExternalActionTransportResponse = serde_json::from_str(&body)
         .with_context(|| format!("invalid managed-action response: {body}"))?;
     ensure!(
