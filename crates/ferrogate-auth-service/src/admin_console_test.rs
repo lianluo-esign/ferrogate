@@ -774,6 +774,17 @@ fn login_revokes_the_callers_prior_console_session_keys() {
         "correct-horse-517f",
         "viewer",
     );
+    let uninvolved_user_id = seed_teammate(
+        &console,
+        &tenant_id,
+        "sweep-member@acme.test",
+        "correct-horse-517f",
+        "member",
+    );
+    login_gateway_key_scopes(&console, "sweep-member@acme.test", "correct-horse-517f");
+    let uninvolved_key_id = live_console_session_keys(&console, &tenant_id, &uninvolved_user_id)[0]
+        .id
+        .clone();
 
     login_gateway_key_scopes(&console, "sweep-viewer@acme.test", "correct-horse-517f");
     assert_eq!(
@@ -803,6 +814,15 @@ fn login_revokes_the_callers_prior_console_session_keys() {
     assert!(
         revoked[0].revoked_at_unix.is_some(),
         "a superseded key must be stamped revoked"
+    );
+    let uninvolved_key =
+        block_on_sync_bridge(console.repositories.get_api_key_record(&uninvolved_key_id))
+            .unwrap()
+            .unwrap();
+    assert!(
+        uninvolved_key.enabled && uninvolved_key.revoked_at_unix.is_none(),
+        "logging in one user must leave an unrelated same-tenant user's key live: \
+         {uninvolved_key:?}"
     );
 }
 
@@ -873,8 +893,35 @@ fn a_pre_517_unattributed_session_key_is_swept_on_the_next_login() {
     operator.name = "CI deploy key".into();
     operator.key_prefix = "fg_operator51".into();
     operator.tenant.api_key_id = Some(operator.id.clone());
+
+    // An unattributed pre-#517 session key in another tenant must not share
+    // tenant A's one-time migration sweep. Without the explicit tenant guard,
+    // the first login in any tenant becomes a platform-wide forced sign-out.
+    let tenant_b_owner = body_json(&register(
+        &console,
+        "legacy-sweep-owner-b@acme.test",
+        "correct-horse-517g",
+    ));
+    let tenant_b_id = tenant_b_owner["tenant"]["id"].as_str().unwrap().to_string();
+    let workspace_b = resolve_default_workspace(&console, &tenant_b_id)
+        .unwrap()
+        .unwrap();
+    let mut tenant_b = TenantContext::default();
+    ferrogate_core::WorkspaceScope::new(&tenant_b_id, &workspace_b.project_id, &workspace_b.id)
+        .apply_to(&mut tenant_b);
+    tenant_b.api_key_id = Some("vk_legacy_517_tenant_b".into());
+    let mut foreign_legacy = legacy.clone();
+    foreign_legacy.id = "vk_legacy_517_tenant_b".into();
+    foreign_legacy.workspace_id = workspace_b.id;
+    foreign_legacy.tenant_id = tenant_b_id;
+    foreign_legacy.project_id = workspace_b.project_id;
+    foreign_legacy.key_prefix = "fg_legacy517b".into();
+    foreign_legacy.key_hash = "sha256:legacy-b".into();
+    foreign_legacy.last4 = "acyb".into();
+    foreign_legacy.tenant = tenant_b;
     block_on_sync_bridge(console.repositories.upsert_api_key_record(legacy)).unwrap();
     block_on_sync_bridge(console.repositories.upsert_api_key_record(operator)).unwrap();
+    block_on_sync_bridge(console.repositories.upsert_api_key_record(foreign_legacy)).unwrap();
 
     login_gateway_key_scopes(
         &console,
@@ -897,6 +944,18 @@ fn a_pre_517_unattributed_session_key_is_swept_on_the_next_login() {
         untouched.enabled && untouched.revoked_at_unix.is_none(),
         "the sweep must key off the session-key name and leave operator keys alone"
     );
+    let foreign = block_on_sync_bridge(
+        console
+            .repositories
+            .get_api_key_record("vk_legacy_517_tenant_b"),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        foreign.enabled && foreign.revoked_at_unix.is_none(),
+        "tenant A's login must leave tenant B's unattributed legacy session key live: \
+         {foreign:?}"
+    );
 }
 
 /// Issue #517, review finding 3: the tier was enforced at MINT time only, so
@@ -912,6 +971,10 @@ fn demoting_a_teammate_revokes_the_key_their_old_tier_minted() {
     ));
     let owner_token = owner["access_token"].as_str().unwrap().to_string();
     let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let owner_user_id = owner["user"]["id"].as_str().unwrap();
+    let owner_key_id = live_console_session_keys(&console, &tenant_id, owner_user_id)[0]
+        .id
+        .clone();
     let admin_id = seed_teammate(
         &console,
         &tenant_id,
@@ -941,6 +1004,13 @@ fn demoting_a_teammate_revokes_the_key_their_old_tier_minted() {
         live_console_session_keys(&console, &tenant_id, &admin_id).is_empty(),
         "the demoted user must hold no live session key: {:?}",
         console_session_keys(&console, &tenant_id, &admin_id)
+    );
+    let owner_key = block_on_sync_bridge(console.repositories.get_api_key_record(&owner_key_id))
+        .unwrap()
+        .unwrap();
+    assert!(
+        owner_key.enabled && owner_key.revoked_at_unix.is_none(),
+        "demoting a teammate must leave the owner's own session key live: {owner_key:?}"
     );
 
     // ... and signing in again gets them the tier they now actually have.
@@ -1798,6 +1868,21 @@ fn scim_patch_deactivate_revokes_refresh_tokens_and_supports_reactivation() {
     .unwrap()
     .revoked_at_unix
     .is_none());
+    let workspace = resolve_default_workspace(&console, &tenant_id)
+        .unwrap()
+        .unwrap();
+    provision_gateway_api_key(
+        &console,
+        &workspace.id,
+        &workspace.project_id,
+        &tenant_id,
+        &user_id,
+        MembershipRole::Member,
+    )
+    .unwrap();
+    let session_key_id = live_console_session_keys(&console, &tenant_id, &user_id)[0]
+        .id
+        .clone();
 
     let patch_body = serde_json::to_vec(&serde_json::json!({ "active": false })).unwrap();
     let patch = handle_scim_user_patch(&console, &tenant_id, &user_id, &patch_body);
@@ -1818,6 +1903,14 @@ fn scim_patch_deactivate_revokes_refresh_tokens_and_supports_reactivation() {
     assert!(
         refreshed.revoked_at_unix.is_some(),
         "deactivation must revoke existing sessions, not just block future logins"
+    );
+    let session_key =
+        block_on_sync_bridge(console.repositories.get_api_key_record(&session_key_id))
+            .unwrap()
+            .unwrap();
+    assert!(
+        !session_key.enabled && session_key.revoked_at_unix.is_some(),
+        "SCIM deactivation must revoke the target's gateway session key: {session_key:?}"
     );
 
     // The standards-shaped SCIM PATCH Operations body also works.
@@ -1924,6 +2017,49 @@ fn scim_groups_list_reflects_distinct_tenant_roles() {
         .collect();
     assert!(names.contains(&"owner".to_string()));
     assert!(names.contains(&"admin".to_string()));
+}
+
+#[test]
+fn scim_users_and_groups_report_the_resolved_tier_for_a_legacy_role() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-legacy-role-owner@acme.test",
+        "correct-horse-517k",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let legacy_user_id = seed_teammate(
+        &console,
+        &tenant_id,
+        "scim-legacy-role@acme.test",
+        "correct-horse-517k",
+        "superuser",
+    );
+
+    let users = body_json(&handle_scim_users_list(&console, &tenant_id));
+    let legacy_user = users["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|resource| resource["id"] == legacy_user_id)
+        .unwrap();
+    assert_eq!(
+        legacy_user["ferrogateRole"], "viewer",
+        "SCIM Users must report the fail-closed resolved tier, not the raw legacy value"
+    );
+
+    let groups = body_json(&handle_scim_groups_list(&console, &tenant_id));
+    let names: Vec<_> = groups["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["displayName"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["owner", "viewer"],
+        "SCIM Groups must expose only resolved, assignable tiers"
+    );
 }
 
 #[test]
