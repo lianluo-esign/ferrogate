@@ -46,6 +46,7 @@ pub const MCP_NAME_HEADER: &str = "mcp-name";
 const MODERN_ERROR_HEADER_MISMATCH: i64 = -32020;
 const MODERN_ERROR_MISSING_CLIENT_CAPABILITY: i64 = -32021;
 const MODERN_ERROR_UNSUPPORTED_VERSION: i64 = -32022;
+const JSONRPC_ERROR_METHOD_NOT_FOUND: i64 = -32601;
 
 /// The MCP protocol era selected for one upstream process or HTTP endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -220,7 +221,8 @@ pub(crate) fn jsonrpc_error_code(response: &Value) -> Option<i64> {
     error.get("code").and_then(Value::as_i64)
 }
 
-pub(crate) fn is_recognized_modern_error(response: &Value) -> bool {
+/// Errors that prove modern protocol semantics independent of transport.
+pub(crate) fn is_recognized_modern_protocol_error(response: &Value) -> bool {
     matches!(
         jsonrpc_error_code(response),
         Some(
@@ -231,11 +233,19 @@ pub(crate) fn is_recognized_modern_error(response: &Value) -> bool {
     )
 }
 
+/// Streamable HTTP uses a structured 404 / `-32601` response to distinguish a
+/// modern endpoint from a legacy endpoint's unstructured HTTP error. Stdio has
+/// different probe semantics: the same JSON-RPC code selects legacy fallback.
+fn is_recognized_http_modern_error(response: &Value) -> bool {
+    is_recognized_modern_protocol_error(response)
+        || jsonrpc_error_code(response) == Some(JSONRPC_ERROR_METHOD_NOT_FOUND)
+}
+
 pub(crate) fn http_legacy_downgrade_reason(
     status: u16,
     response: Option<&Value>,
 ) -> Option<McpProtocolDowngradeReason> {
-    if response.is_some_and(is_recognized_modern_error) {
+    if response.is_some_and(is_recognized_http_modern_error) {
         return None;
     }
     match status {

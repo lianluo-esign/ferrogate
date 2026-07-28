@@ -27,7 +27,7 @@ use crate::jsonrpc::{
 };
 use crate::manager::McpToolExecutionResult;
 use crate::protocol::{
-    discover_supports_current_version, is_recognized_modern_error, jsonrpc_error_code,
+    discover_supports_current_version, is_recognized_modern_protocol_error, jsonrpc_error_code,
     modern_discover_params, modern_request_params, resolve_legacy_protocol_version,
     McpClientNegotiation, McpNegotiatedProtocol, McpProtocolDowngradeReason,
     MCP_LEGACY_PROTOCOL_VERSION,
@@ -137,7 +137,7 @@ impl StdioMcpClient {
             Err(error) => return Err(error.into()),
         };
         if let Some(code) = jsonrpc_error_code(&response) {
-            if is_recognized_modern_error(&response) {
+            if is_recognized_modern_protocol_error(&response) {
                 bail!("MCP modern discovery returned JSON-RPC error code {code}");
             }
             let reason = if code == -32601 {
