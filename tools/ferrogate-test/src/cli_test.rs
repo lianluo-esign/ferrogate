@@ -82,6 +82,15 @@ fn managed_action_project_is_a_deterministic_local_scenario() {
 }
 
 #[test]
+fn observed_activity_d1_failure_is_a_deterministic_local_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "observed-activity-d1-failure"]).unwrap();
+    let Commands::ObservedActivityD1Failure(args) = cli.command else {
+        panic!("expected observed-activity-d1-failure command");
+    };
+    assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
+}
+
+#[test]
 fn asset_buffer_admission_is_a_deterministic_local_scenario() {
     let cli = Cli::try_parse_from(["ferrogate-test", "asset-buffer-admission"]).unwrap();
     let Commands::AssetBufferAdmission(args) = cli.command else {

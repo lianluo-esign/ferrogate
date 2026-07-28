@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc,
     },
     thread::{self, JoinHandle},
@@ -33,6 +33,95 @@ pub(crate) struct MockOtlpServer {
 pub(crate) struct MockThirdPartyAuthServer {
     pub(crate) addr: String,
     pub(crate) handle: Option<JoinHandle<Vec<String>>>,
+}
+
+/// Local Cloudflare D1 REST double for the observed-activity failure contract.
+/// Ordinary control-plane reads return an empty result, while request-log
+/// reads return one caller-provided durable row. The presence read itself uses
+/// the separate proxy-Worker transport and is intentionally unavailable in the
+/// scenario that owns this mock.
+pub(crate) struct MockD1RestServer {
+    pub(crate) addr: String,
+    request_log_reads: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl MockD1RestServer {
+    pub(crate) fn request_log_reads(&self) -> usize {
+        self.request_log_reads.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for MockD1RestServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub(crate) fn spawn_mock_d1_rest_server(request_log_json: String) -> Result<MockD1RestServer> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?.to_string();
+    let request_log_reads = Arc::new(AtomicUsize::new(0));
+    let request_log_reads_for_thread = request_log_reads.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = stop.clone();
+    let handle = thread::spawn(move || {
+        while !stop_for_thread.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) if !request.trim().is_empty() => request,
+                        _ => continue,
+                    };
+                    let sql = http_request_body(&request)
+                        .ok()
+                        .and_then(|body| serde_json::from_str::<Value>(body).ok())
+                        .and_then(|body| body.get("sql").and_then(Value::as_str).map(str::to_owned))
+                        .unwrap_or_default();
+                    let rows = if sql.contains("request_json AS document_json")
+                        && sql.contains("FROM request_logs")
+                    {
+                        request_log_reads_for_thread.fetch_add(1, Ordering::SeqCst);
+                        serde_json::json!([{ "document_json": request_log_json.clone() }])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    let body = serde_json::json!({
+                        "success": true,
+                        "errors": [],
+                        "messages": [],
+                        "result": [{
+                            "results": rows,
+                            "success": true,
+                            "meta": { "changes": 0 }
+                        }]
+                    })
+                    .to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(MockD1RestServer {
+        addr,
+        request_log_reads,
+        stop,
+        handle: Some(handle),
+    })
 }
 
 impl MockThirdPartyAuthServer {

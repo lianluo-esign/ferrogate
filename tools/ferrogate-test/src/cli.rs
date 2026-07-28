@@ -62,6 +62,8 @@ pub(crate) enum Commands {
     AgentJobsApi(LocalArgs),
     /// Prove managed actions use the workspace's real project for policy and evidence (#519).
     ManagedActionProject(LocalArgs),
+    /// Prove a failed D1 presence read renders Unknown without leaking backend details (#494).
+    ObservedActivityD1Failure(LocalArgs),
     /// Run the #505 CLI mutation decision-receipt E2E: dry-run issues nothing,
     /// and the receipt's own rollback pointer reverses a guardrail policy
     /// revision with no identifier typed by hand.
@@ -250,6 +252,7 @@ pub(crate) struct Dispatch {
     pub(crate) asset_registry: fn(&LocalArgs) -> Result<()>,
     pub(crate) agent_jobs: fn(&LocalArgs) -> Result<()>,
     pub(crate) managed_action_project: fn(&LocalArgs) -> Result<()>,
+    pub(crate) observed_activity_d1_failure: fn(&LocalArgs) -> Result<()>,
     pub(crate) cli_mutation_receipt: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_live_smoke: fn(&SupabaseLiveRestartArgs) -> Result<()>,
@@ -275,7 +278,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, mcp-candidate-client-official (locked official npm opponent), cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-buffer-admission, asset-registry-api, agent-jobs-api, managed-action-project, cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, worker-release"
+                "local: admin-api, auth-api, gateway-api, mcp-candidate-client-official (locked official npm opponent), cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-buffer-admission, asset-registry-api, agent-jobs-api, managed-action-project, observed-activity-d1-failure, cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, worker-release"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -309,6 +312,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::AssetRegistryApi(args) => (dispatch.asset_registry)(&args),
         Commands::AgentJobsApi(args) => (dispatch.agent_jobs)(&args),
         Commands::ManagedActionProject(args) => (dispatch.managed_action_project)(&args),
+        Commands::ObservedActivityD1Failure(args) => (dispatch.observed_activity_d1_failure)(&args),
         Commands::CliMutationReceipt(args) => (dispatch.cli_mutation_receipt)(&args),
         Commands::SupabaseRestart(args) => (dispatch.supabase_restart)(&args),
         Commands::SupabaseLiveSmoke(args) => (dispatch.supabase_live_smoke)(&args),

@@ -30,6 +30,7 @@ mod managed_action_project;
 mod mcp_candidate_official;
 mod mcp_identity;
 mod mocks;
+mod observed_activity_d1;
 /// #352: durable x402 payment attempts + their wallet-hold links inside the
 /// `*-restart` scenarios' verified set.
 mod payment_attempt_restart;
@@ -63,6 +64,7 @@ use guardrails::run_guardrail_supabase;
 use managed_action_project::run_managed_action_project;
 use mcp_candidate_official::run_mcp_candidate_client_official;
 use mcp_identity::run_mcp_identity_supabase;
+use observed_activity_d1::run_observed_activity_d1_failure;
 use scenarios::{
     run_admin_api, run_auth_api, run_function_egress_api, run_gateway_api,
     run_gateway_billing_chain, run_gateway_external_auth_api, run_gateway_third_party_auth_api,
@@ -98,6 +100,7 @@ fn main() -> Result<()> {
         asset_registry: run_asset_registry_api,
         agent_jobs: run_agent_jobs_api,
         managed_action_project: run_managed_action_project,
+        observed_activity_d1_failure: run_observed_activity_d1_failure,
         cli_mutation_receipt: run_cli_mutation_receipt,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,
@@ -145,6 +148,7 @@ fn main() -> Result<()> {
             run_asset_registry_api(local)?;
             run_agent_jobs_api(local)?;
             run_managed_action_project(local)?;
+            run_observed_activity_d1_failure(local)?;
             // #505: the CLI's own governed-output contract. Docker-free and
             // deterministic (one local gateway, the shipped `ferrogate` binary
             // as its own client), so it belongs in the always-run set — a

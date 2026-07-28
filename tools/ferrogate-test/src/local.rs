@@ -348,6 +348,16 @@ struct ProviderSecretBinding<'a> {
     binding_value: &'a str,
 }
 
+#[derive(Default)]
+struct LocalHarnessOptions<'a> {
+    billing: Option<MockBillingServer>,
+    auth_addr: Option<&'a str>,
+    include_agent: bool,
+    billing_service_addr: Option<&'a str>,
+    provider_secret_binding: Option<ProviderSecretBinding<'a>>,
+    config_template: Option<&'a str>,
+}
+
 pub(crate) struct LocalHarness {
     _dir: tempfile::TempDir,
     pub(crate) gateway_addr: String,
@@ -367,11 +377,26 @@ impl LocalHarness {
         Self::start_inner(
             ferrogate_bin,
             expected_provider_requests,
-            None,
-            None,
-            false,
-            None,
-            None,
+            LocalHarnessOptions::default(),
+        )
+    }
+
+    /// Start the standard local process harness with a test-owned config
+    /// template. The template's `__FERROGATE_TEST_LISTEN__` marker is replaced
+    /// with the reserved listener, while process readiness and teardown remain
+    /// identical to the ordinary harness.
+    pub(crate) fn start_with_config_template(
+        ferrogate_bin: &Path,
+        expected_provider_requests: usize,
+        config_template: &str,
+    ) -> Result<Self> {
+        Self::start_inner(
+            ferrogate_bin,
+            expected_provider_requests,
+            LocalHarnessOptions {
+                config_template: Some(config_template),
+                ..LocalHarnessOptions::default()
+            },
         )
     }
 
@@ -384,11 +409,11 @@ impl LocalHarness {
         Self::start_inner(
             ferrogate_bin,
             expected_provider_requests,
-            Some(billing),
-            None,
-            true,
-            None,
-            None,
+            LocalHarnessOptions {
+                billing: Some(billing),
+                include_agent: true,
+                ..LocalHarnessOptions::default()
+            },
         )
     }
 
@@ -400,11 +425,10 @@ impl LocalHarness {
         Self::start_inner(
             ferrogate_bin,
             expected_provider_requests,
-            None,
-            Some(auth_addr),
-            false,
-            None,
-            None,
+            LocalHarnessOptions {
+                auth_addr: Some(auth_addr),
+                ..LocalHarnessOptions::default()
+            },
         )
     }
 
@@ -416,11 +440,10 @@ impl LocalHarness {
         Self::start_inner(
             ferrogate_bin,
             expected_provider_requests,
-            None,
-            None,
-            false,
-            Some(billing_service_addr),
-            None,
+            LocalHarnessOptions {
+                billing_service_addr: Some(billing_service_addr),
+                ..LocalHarnessOptions::default()
+            },
         )
     }
 
@@ -438,27 +461,30 @@ impl LocalHarness {
         Self::start_inner(
             ferrogate_bin,
             expected_provider_requests,
-            None,
-            None,
-            false,
-            None,
-            Some(ProviderSecretBinding {
-                secret_ref,
-                binding_env,
-                binding_value,
-            }),
+            LocalHarnessOptions {
+                provider_secret_binding: Some(ProviderSecretBinding {
+                    secret_ref,
+                    binding_env,
+                    binding_value,
+                }),
+                ..LocalHarnessOptions::default()
+            },
         )
     }
 
     fn start_inner(
         ferrogate_bin: &Path,
         expected_provider_requests: usize,
-        billing: Option<MockBillingServer>,
-        auth_addr: Option<&str>,
-        include_agent: bool,
-        billing_service_addr: Option<&str>,
-        provider_secret_binding: Option<ProviderSecretBinding<'_>>,
+        options: LocalHarnessOptions<'_>,
     ) -> Result<Self> {
+        let LocalHarnessOptions {
+            billing,
+            auth_addr,
+            include_agent,
+            billing_service_addr,
+            provider_secret_binding,
+            config_template,
+        } = options;
         if !ferrogate_bin.exists() {
             bail!(
                 "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
@@ -489,8 +515,13 @@ impl LocalHarness {
         let observability =
             spawn_mock_otlp_server().context("start observability provider mock")?;
         let config_path = dir.path().join("ferrogate.toml");
-        std::fs::write(
-            &config_path,
+        let gateway_config = if let Some(template) = config_template {
+            const LISTEN_MARKER: &str = "__FERROGATE_TEST_LISTEN__";
+            if !template.contains(LISTEN_MARKER) {
+                bail!("custom gateway config is missing {LISTEN_MARKER}");
+            }
+            template.replace(LISTEN_MARKER, &gateway_addr)
+        } else {
             local_gateway_config(LocalGatewayConfig {
                 gateway_addr: &gateway_addr,
                 provider_addr: &provider_addr,
@@ -504,8 +535,9 @@ impl LocalHarness {
                 primary_provider_secret_ref: provider_secret_binding
                     .as_ref()
                     .map(|binding| binding.secret_ref),
-            }),
-        )?;
+            })
+        };
+        std::fs::write(&config_path, gateway_config)?;
 
         let mut command = Command::new(ferrogate_bin);
         command
