@@ -413,7 +413,7 @@ fn scan_example(file_name: &str, source: &str, convention: Convention) -> Option
                     line: line_of(&code, index),
                 }),
                 Some(name) => {
-                    if name != OPT_IN_VAR && !declared.iter().any(|declared| *declared == name) {
+                    if name != OPT_IN_VAR && !declared.contains(&name) {
                         findings.push(Finding::UndeclaredRead {
                             name,
                             line: line_of(&code, index),
@@ -592,7 +592,7 @@ fn classify(chars: &[char]) -> Vec<Class> {
                 let (hashes, quote) = raw_hashes(chars, index).expect("raw string prefix");
                 index = quote + 1;
                 let closing: String = std::iter::once('"')
-                    .chain(std::iter::repeat('#').take(hashes))
+                    .chain(std::iter::repeat_n('#', hashes))
                     .collect();
                 while index < chars.len() {
                     if starts_with(chars, index, &closing) {
