@@ -237,104 +237,242 @@ fn post_http_json_rejects_untrusted_https_certificate_by_default() {
     let _ = handle.join();
 }
 
-/// Runs a single request against a throwaway plain-HTTP server that captures
-/// the raw request and replies with `reply_body`. Returns the captured request.
-fn capture_one_http_request(addr_reply: &str, client_call: impl FnOnce(String)) -> String {
+fn capture_http_exchange(responses: Vec<String>, client_call: impl FnOnce(String)) -> Vec<String> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    let reply = addr_reply.to_string();
     let handle = thread::spawn(move || {
-        let (mut tcp, _) = listener.accept().unwrap();
-        let received = read_until_headers_end(&mut tcp);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            reply.len(),
-            reply
-        );
-        // The request is fully captured before we reply, so return it even if
-        // the client already gave up and the write races an EPIPE under load.
-        write_response_tolerant(&mut tcp, response.as_bytes());
-        String::from_utf8_lossy(&received).to_string()
+        responses
+            .into_iter()
+            .map(|response| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(60);
+                let mut tcp = loop {
+                    match listener.accept() {
+                        Ok((tcp, _)) => break tcp,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("timed out accepting MCP test request: {error}"),
+                    }
+                };
+                let received = read_until_headers_end(&mut tcp);
+                write_response_tolerant(&mut tcp, response.as_bytes());
+                String::from_utf8_lossy(&received).to_string()
+            })
+            .collect()
     });
     client_call(format!("http://{addr}/mcp"));
-    // Never hard-panic on a benign server-thread exit; the captured request is
-    // what the callers assert on and it is produced before the reply write.
-    handle.join().unwrap_or_default()
+    handle.join().unwrap()
+}
+
+fn json_response_with_session(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: must-not-be-echoed\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn error_json_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn request_json(request: &str) -> Value {
+    serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+fn header_value<'a>(request: &'a str, wanted: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(wanted).then_some(value.trim())
+    })
 }
 
 #[test]
-fn streamable_http_emits_mcp_method_and_name_headers_on_tools_call() {
-    let request = capture_one_http_request(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"content":[],"isError":false}}"#,
-        |endpoint| {
-            let mut config = test_config("github");
-            config.url = Some(endpoint);
-            // Generous test-only timeout so the client never abandons the
-            // round trip under CPU load (issue #327); production default is 30s.
-            config.timeout_ms = 30_000;
-            let mut client = HttpMcpClient::new(&config).unwrap();
-            client
-                .call_tool("search", json!({"q": "x"}), &McpDispatchHeaders::empty())
-                .unwrap();
-        },
-    );
-    let lower = request.to_ascii_lowercase();
-    assert!(
-        lower.contains("mcp-method: tools/call"),
-        "request: {request}"
-    );
-    assert!(lower.contains("mcp-name: search"), "request: {request}");
-}
-
-#[test]
-fn http_client_adopts_2026_07_28_when_server_echoes_it() {
-    let mut negotiated = String::new();
-    let request = capture_one_http_request(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28"}}"#,
-        |endpoint| {
-            let mut config = test_config("srv");
-            config.url = Some(endpoint);
-            // Generous test-only timeout so the client never abandons the
-            // round trip under CPU load (issue #327); production default is 30s.
-            config.timeout_ms = 30_000;
-            let mut client = HttpMcpClient::new(&config).unwrap();
-            client.initialize().unwrap();
-            negotiated = client.protocol_version().to_string();
-        },
-    );
-    // Outbound initialize advertises the new revision...
-    assert!(request.contains("2026-07-28"), "request: {request}");
-    // ...and the client adopts the server's echoed version.
-    assert_eq!(negotiated, "2026-07-28");
-}
-
-#[test]
-fn http_client_falls_back_when_server_pins_or_omits_protocol_version() {
-    let mut pinned = String::new();
-    capture_one_http_request(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}"#,
-        |endpoint| {
-            let mut config = test_config("srv");
-            config.url = Some(endpoint);
-            // Generous test-only timeout so the client never abandons the
-            // round trip under CPU load (issue #327); production default is 30s.
-            config.timeout_ms = 30_000;
-            let mut client = HttpMcpClient::new(&config).unwrap();
-            client.initialize().unwrap();
-            pinned = client.protocol_version().to_string();
-        },
-    );
-    assert_eq!(pinned, "2025-06-18");
-
-    let mut omitted = String::new();
-    capture_one_http_request(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, |endpoint| {
+fn modern_http_wire_is_stateless_and_carries_headers_meta_and_identity() {
+    let replies = vec![
+        json_response_with_session(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#,
+        ),
+        json_response_with_session(
+            r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}"#,
+        ),
+        json_response_with_session(
+            r#"{"jsonrpc":"2.0","id":3,"result":{"content":[],"isError":false}}"#,
+        ),
+        json_response_with_session(r#"{"jsonrpc":"2.0","id":4,"result":{}}"#),
+    ];
+    let mut protocol = None;
+    let requests = capture_http_exchange(replies, |endpoint| {
         let mut config = test_config("srv");
         config.url = Some(endpoint);
+        config.timeout_ms = 30_000;
         let mut client = HttpMcpClient::new(&config).unwrap();
-        client.initialize().unwrap();
-        omitted = client.protocol_version().to_string();
+        client.negotiate().unwrap();
+        client.list_tools().unwrap();
+        let identity = McpDispatchHeaders::bearer("per-user-token".into()).unwrap();
+        client
+            .call_tool(
+                "=?base64?literal?=",
+                json!({"q": "x", "limit": 3}),
+                &identity,
+            )
+            .unwrap();
+        client.ping().unwrap();
+        protocol = client.negotiated_protocol();
     });
-    assert_eq!(omitted, "2025-06-18");
+
+    assert_eq!(requests.len(), 4);
+    assert!(!requests
+        .iter()
+        .any(|request| request.contains("initialize")));
+    for (request, method) in
+        requests
+            .iter()
+            .zip(["server/discover", "tools/list", "tools/call", "ping"])
+    {
+        assert_eq!(
+            header_value(request, "MCP-Protocol-Version"),
+            Some("2026-07-28")
+        );
+        assert_eq!(header_value(request, "Mcp-Method"), Some(method));
+        assert_eq!(header_value(request, "Mcp-Session-Id"), None);
+        let body = request_json(request);
+        assert_eq!(body["method"], method);
+        assert_eq!(
+            body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            "2026-07-28"
+        );
+        assert_eq!(
+            body["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
+            "ferrogate"
+        );
+        assert!(body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"].is_object());
+    }
+    assert_eq!(
+        header_value(&requests[2], "Mcp-Name"),
+        Some("=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=")
+    );
+    assert_eq!(
+        header_value(&requests[2], "Authorization"),
+        Some("Bearer per-user-token")
+    );
+    let call = request_json(&requests[2]);
+    assert_eq!(call["params"]["name"], "=?base64?literal?=");
+    assert_eq!(call["params"]["arguments"], json!({"q": "x", "limit": 3}));
+    assert_eq!(
+        protocol.unwrap().mode,
+        crate::protocol::McpProtocolMode::Modern
+    );
+}
+
+#[test]
+fn http_unrecognized_404_falls_back_to_strict_legacy_wire() {
+    let replies = vec![
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        json_http_response(r#"{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-06-18"}}"#),
+        json_http_response(r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#),
+    ];
+    let mut protocol = None;
+    let requests = capture_http_exchange(replies, |endpoint| {
+        let mut config = test_config("srv");
+        config.url = Some(endpoint);
+        config.timeout_ms = 30_000;
+        let mut client = HttpMcpClient::new(&config).unwrap();
+        client.negotiate().unwrap();
+        client.list_tools().unwrap();
+        protocol = client.negotiated_protocol();
+    });
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(request_json(&requests[0])["method"], "server/discover");
+    let initialize = request_json(&requests[1]);
+    assert_eq!(initialize["method"], "initialize");
+    assert_eq!(initialize["params"]["protocolVersion"], "2025-11-25");
+    let list = request_json(&requests[2]);
+    assert_eq!(list["method"], "tools/list");
+    assert!(list["params"].get("_meta").is_none());
+    for request in &requests[1..] {
+        assert_eq!(header_value(request, "MCP-Protocol-Version"), None);
+        assert_eq!(header_value(request, "Mcp-Method"), None);
+        assert_eq!(header_value(request, "Mcp-Name"), None);
+    }
+    let protocol = protocol.unwrap();
+    assert_eq!(protocol.mode, crate::protocol::McpProtocolMode::Legacy);
+    assert_eq!(protocol.version, "2025-06-18");
+    assert_eq!(
+        protocol.downgrade_reason,
+        Some(crate::protocol::McpProtocolDowngradeReason::Http404UnrecognizedResponse)
+    );
+}
+
+#[test]
+fn http_empty_sse_error_body_still_takes_the_legacy_fallback() {
+    let replies = vec![
+        "HTTP/1.1 404 Not Found\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        json_http_response(
+            r#"{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25"}}"#,
+        ),
+        json_http_response(r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#),
+    ];
+    let requests = capture_http_exchange(replies, |endpoint| {
+        let mut config = test_config("srv");
+        config.url = Some(endpoint);
+        config.timeout_ms = 30_000;
+        let mut client = HttpMcpClient::new(&config).unwrap();
+        client.negotiate().unwrap();
+        client.list_tools().unwrap();
+    });
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(request_json(&requests[0])["method"], "server/discover");
+    assert_eq!(request_json(&requests[1])["method"], "initialize");
+}
+
+#[test]
+fn malformed_discovery_success_fails_without_legacy_fallback() {
+    let reply = json_http_response(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{}}}"#,
+    );
+    let mut error = String::new();
+    let requests = capture_http_exchange(vec![reply], |endpoint| {
+        let mut config = test_config("srv");
+        config.url = Some(endpoint);
+        config.timeout_ms = 30_000;
+        let mut client = HttpMcpClient::new(&config).unwrap();
+        error = client.negotiate().unwrap_err().to_string();
+    });
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(request_json(&requests[0])["method"], "server/discover");
+    assert!(error.contains("did not advertise"), "{error}");
+}
+
+#[test]
+fn http_recognized_modern_error_never_falls_back_to_initialize() {
+    let reply = error_json_response(
+        "400 Bad Request",
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"unsupported","data":{"supported":[]}}}"#,
+    );
+    let mut error = String::new();
+    let requests = capture_http_exchange(vec![reply], |endpoint| {
+        let mut config = test_config("srv");
+        config.url = Some(endpoint);
+        config.timeout_ms = 30_000;
+        let mut client = HttpMcpClient::new(&config).unwrap();
+        error = client.negotiate().unwrap_err().to_string();
+    });
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(request_json(&requests[0])["method"], "server/discover");
+    assert!(error.contains("JSON-RPC error code -32022"), "{error}");
 }
 
 #[test]

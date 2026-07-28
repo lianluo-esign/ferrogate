@@ -130,6 +130,26 @@ fn unsupported_identity_modes_fail_config_validation_exactly() {
 }
 
 #[test]
+fn static_headers_cannot_override_protocol_owned_or_session_headers() {
+    for name in [
+        "MCP-Protocol-Version",
+        "Mcp-Method",
+        "Mcp-Name",
+        "Mcp-Session-Id",
+    ] {
+        let mut config = test_config("reserved-header");
+        config.auth_type = McpAuthType::SharedHeaders;
+        config.headers = vec![McpHeaderConfig {
+            name: name.into(),
+            value: Some("operator-value".into()),
+            value_env: None,
+        }];
+        let error = validate_mcp_server_config(&config).unwrap_err().to_string();
+        assert!(error.contains("protocol-owned"), "{name}: {error}");
+    }
+}
+
+#[test]
 fn per_user_oauth_requires_complete_https_authorization_code_config() {
     let mut config = test_config("identity");
     config.auth_type = McpAuthType::PerUserOauth;

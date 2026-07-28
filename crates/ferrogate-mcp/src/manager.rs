@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use crate::config::{tool_allowlisted, tool_selected, McpServerConfig, McpTransport};
 use crate::http_client::HttpMcpClient;
-use crate::protocol::MCP_PROTOCOL_VERSION_FALLBACK;
+use crate::protocol::{McpNegotiatedProtocol, McpProtocolDowngradeReason, McpProtocolMode};
 use crate::stdio_client::StdioMcpClient;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -41,6 +41,10 @@ pub struct McpServerStatus {
     /// MCP protocol revision negotiated with this upstream (issue #277).
     /// `None` while disconnected.
     pub protocol_version: Option<String>,
+    /// Candidate per-request metadata mode or initialize-based legacy mode.
+    pub protocol_mode: Option<McpProtocolMode>,
+    /// Bounded reason for selecting legacy mode after a modern probe.
+    pub protocol_downgrade_reason: Option<McpProtocolDowngradeReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -340,6 +344,14 @@ impl McpSession {
     }
 
     fn status(&self) -> McpServerStatus {
+        let protocol = self
+            .connected
+            .then(|| {
+                self.client
+                    .as_ref()
+                    .and_then(McpClient::negotiated_protocol)
+            })
+            .flatten();
         McpServerStatus {
             name: self.config.name.clone(),
             transport: self.config.transport.clone(),
@@ -350,10 +362,9 @@ impl McpSession {
             last_error: self.last_error.clone(),
             last_connected_at_unix: self.last_connected_at_unix,
             next_reconnect_backoff_secs: self.next_reconnect_backoff_secs,
-            protocol_version: self
-                .client
-                .as_ref()
-                .map(|client| client.protocol_version().to_string()),
+            protocol_version: protocol.map(|protocol| protocol.version.to_string()),
+            protocol_mode: protocol.map(|protocol| protocol.mode),
+            protocol_downgrade_reason: protocol.and_then(|protocol| protocol.downgrade_reason),
         }
     }
 
@@ -382,7 +393,7 @@ impl McpSession {
             }
             McpTransport::Stdio => McpClient::Stdio(StdioMcpClient::new(&self.config)?),
         };
-        client.initialize()?;
+        client.negotiate()?;
         let defs = client.list_tools()?;
         self.tools = defs
             .into_iter()
@@ -492,10 +503,10 @@ impl McpSession {
 }
 
 impl McpClient {
-    fn initialize(&mut self) -> AnyResult<()> {
+    fn negotiate(&mut self) -> AnyResult<()> {
         match self {
-            Self::Http(client) => client.initialize(),
-            Self::Stdio(client) => client.initialize(),
+            Self::Http(client) => client.negotiate(),
+            Self::Stdio(client) => client.negotiate(),
         }
     }
 
@@ -532,13 +543,10 @@ impl McpClient {
         }
     }
 
-    fn protocol_version(&self) -> &str {
+    fn negotiated_protocol(&self) -> Option<McpNegotiatedProtocol> {
         match self {
-            Self::Http(client) => client.protocol_version(),
-            // Stdio always sends the 2026-07-28 `initialize` but does not carry
-            // the Streamable-HTTP routing headers; report the negotiated value
-            // it defaults to.
-            Self::Stdio(_) => MCP_PROTOCOL_VERSION_FALLBACK,
+            Self::Http(client) => client.negotiated_protocol(),
+            Self::Stdio(client) => client.negotiated_protocol(),
         }
     }
 }

@@ -23227,6 +23227,42 @@
           "next_reconnect_backoff_secs": {
             "type": "integer",
             "minimum": 0
+          },
+          "protocol_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "2026-07-28",
+              "2025-11-25",
+              "2025-06-18",
+              null
+            ]
+          },
+          "protocol_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "modern",
+              "legacy",
+              null
+            ]
+          },
+          "protocol_downgrade_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "http400_unrecognized_response",
+              "http404_unrecognized_response",
+              "http405_unrecognized_response",
+              "stdio_method_not_found",
+              null
+            ]
           }
         },
         "additionalProperties": false

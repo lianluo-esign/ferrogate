@@ -19,16 +19,17 @@
 - **AI 响应缓存**：非流式请求的 exact-match 缓存，以及同一缓存 seam 之后
   可选启用的 semantic（向量相似度）缓存，提供全局、模型、API Key 级别
   启用控制。
-- **MCP gateway**：通过 `ferrogate-mcp` 支持 streamable HTTP、SSE、stdio
-  session、`initialize`、`tools/list`、命名空间工具、默认拒绝的执行 allowlist、
-  健康检查、重连和受治理的工具执行。这些适配器仍基于 `initialize`；原生入口
-  支持旧版 2025-11-25，并保留 2025-06-18。
+- **MCP gateway**：通过 `ferrogate-mcp` 支持 streamable HTTP、SSE、stdio、
+  `tools/list`、命名空间工具、默认拒绝的执行 allowlist、健康检查、重连和受治理
+  的工具执行。Streamable HTTP 和 stdio 会先探测固定的 2026-07-28 候选规范，
+  成功后使用无状态逐请求元数据；只有明确的旧版信号才会回退到基于 `initialize`
+  的 2025-11-25/2025-06-18。
 - **原生 MCP JSON-RPC 入口**：`POST /v1/mcp` 支持 `initialize`、`ping`、
   `tools/list`、`tools/call`，以及基于托管资产注册表的
   `resources/list`/`resources/read`。入口还实现了基于官方 commit
   `71e306956a4959c9655e5036be215d41986596e6` 固定的 MCP 2026-07-28 候选规范：
-  无状态 `server/discover` 和逐请求校验。这只是入口切片，不代表候选规范的
-  出站客户端支持或最终规范一致性。
+  无状态 `server/discover` 和逐请求校验。入口和出站客户端切片已有仓库内聚焦
+  对端覆盖；外部官方 SDK 验证和最终规范一致性仍待完成。
 - **托管资产闭环**：`/v1/assets/*` 上的版本化 publish/pull/delete 带租户
   配额记账、artifact registry 语义（latest/stable/canary 等 channel、
   semver 解析、平台/架构 variant、yank）、供应链信任门禁（恶意软件扫描、
@@ -108,8 +109,7 @@
 - Agentic Lite tools 和 MCP gateway 执行，并经过鉴权、策略、计费、审计和指标链路。
 - `POST /v1/mcp` 原生旧版 MCP JSON-RPC 入口，包括基于托管资产的
   `resources/list`/`resources/read`。固定版本的 MCP 2026-07-28 候选规范入口切片
-  已有聚焦回归覆盖；外部 SDK 兼容性、候选规范出站客户端行为和最终规范一致性
-  仍待完成。
+  及出站客户端切片已有聚焦回归覆盖；外部官方 SDK 兼容性和最终规范一致性仍待完成。
 - 托管资产闭环：`/v1/assets/*` 上带鉴权的 publish/pull/delete、
   channel/semver/variant 解析、签名与恶意软件扫描门禁、私有 bucket 上的
   presigned 大文件 upload/commit/download（基于 mock S3 兼容端点验证；

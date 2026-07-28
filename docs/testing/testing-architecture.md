@@ -151,6 +151,12 @@ through the admin API but the runtime only ever read the tenant scope.
 - **Load boundary:** keep every live scenario bounded and low-volume. Live
   Supabase is not a performance target; do not run load, stress, throughput, or
   high-concurrency benchmarks through these commands.
+- **MCP candidate opponent path:** `ferrogate-test gateway-api` owns the local
+  deterministic client-wire contract. The downstream Tier-1 target tracked by
+  #570 is named `ferrogate-test mcp-candidate-client-official`: it must run the
+  pinned official opponent against both modern and legacy transport cases.
+  That command is not implemented or claimed as passing by the current
+  self-mock slice.
 
 ### 10. Performance
 

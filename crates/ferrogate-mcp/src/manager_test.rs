@@ -7,6 +7,7 @@
 //! Unit tests for the sibling module; kept out of the business-logic file.
 
 use super::*;
+use crate::protocol::McpClientNegotiation;
 use crate::test_support::test_config;
 use serde_json::json;
 use std::io::BufReader;
@@ -75,6 +76,7 @@ fn timeout_cleanup_kills_stdio_child_and_marks_session_degraded() {
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
+            negotiation: McpClientNegotiation::Pending,
         })),
         connected: true,
         last_error: None,

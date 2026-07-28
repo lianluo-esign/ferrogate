@@ -4888,6 +4888,14 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
                 .as_u64()
                 .is_some_and(|attempts| attempts >= 1));
             assert!(stdio["last_connected_at_unix"].as_u64().is_some());
+            assert_eq!(stdio["protocol_mode"], "legacy");
+            assert_eq!(stdio["protocol_version"], "2025-06-18");
+            assert_eq!(stdio["protocol_downgrade_reason"], "stdio_method_not_found");
+            let http =
+                admin_list_item(&body, "name", "http").context("HTTP MCP server status missing")?;
+            assert_eq!(http["protocol_mode"], "modern");
+            assert_eq!(http["protocol_version"], "2026-07-28");
+            assert!(http["protocol_downgrade_reason"].is_null());
             Ok(())
         },
     )?;

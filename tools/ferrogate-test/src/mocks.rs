@@ -321,113 +321,158 @@ pub(crate) fn spawn_mock_mcp_server(
                         Ok(request) => request,
                         Err(_) => continue,
                     };
-                    let body = if request.contains(r#""method":"initialize""#) {
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": extract_jsonrpc_id(&request),
-                            "result": {
-                                "protocolVersion": "2025-06-18",
-                                "capabilities": {
-                                    "tools": {
-                                        "listChanged": false
-                                    }
-                                },
-                                "serverInfo": {
-                                    "name": "mcp-harness",
-                                    "version": "1.0.0"
-                                },
-                                "instructions": "Use the harness MCP server for compatibility checks."
-                            }
-                        })
-                        .to_string()
-                    } else if request.contains(r#""method":"tools/list""#) {
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": extract_jsonrpc_id(&request),
-                            "result": {
-                                "tools": [
-                                    {
-                                        "name": "search",
-                                        "description": "Search the harness MCP upstream",
-                                        "inputSchema": {
-                                            "type": "object",
-                                            "properties": {
-                                                "query": {
-                                                    "type": "string"
-                                                }
-                                            },
-                                            "required": ["query"]
+                    let (status, body) = if request.contains(r#""method":"initialize""#) {
+                        (
+                            "400 Bad Request",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "error": {
+                                    "code": -32022,
+                                    "message": "modern harness peer does not accept initialize"
+                                }
+                            })
+                            .to_string(),
+                        )
+                    } else if !valid_candidate_mcp_request(&request) {
+                        (
+                            "400 Bad Request",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "error": {
+                                    "code": -32020,
+                                    "message": "candidate request metadata mismatch"
+                                }
+                            })
+                            .to_string(),
+                        )
+                    } else if request.contains(r#""method":"server/discover""#) {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "result": {
+                                    "resultType": "complete",
+                                    "supportedVersions": ["2026-07-28"],
+                                    "capabilities": {"tools": {}},
+                                    "_meta": {
+                                        "io.modelcontextprotocol/serverInfo": {
+                                            "name": "mcp-harness",
+                                            "version": "1.0.0"
                                         }
                                     }
-                                ]
-                            }
-                        })
-                        .to_string()
+                                }
+                            })
+                            .to_string(),
+                        )
+                    } else if request.contains(r#""method":"tools/list""#) {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "result": {
+                                    "tools": [
+                                        {
+                                            "name": "search",
+                                            "description": "Search the harness MCP upstream",
+                                            "inputSchema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "query": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "required": ["query"]
+                                            }
+                                        }
+                                    ]
+                                }
+                            })
+                            .to_string(),
+                        )
                     } else if request.contains(r#""method":"tools/call""#)
                         && request.contains("mcp-tool-error")
                     {
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": extract_jsonrpc_id(&request),
-                            "result": {
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": "tool rejected by harness"
-                                    }
-                                ],
-                                "isError": true
-                            }
-                        })
-                        .to_string()
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "tool rejected by harness"
+                                        }
+                                    ],
+                                    "isError": true
+                                }
+                            })
+                            .to_string(),
+                        )
                     } else if request.contains(r#""method":"tools/call""#)
                         && request.contains("mcp-malformed")
                     {
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": extract_jsonrpc_id(&request),
-                            "result": {
-                                "content": "not-a-valid-content-array",
-                                "isError": false
-                            }
-                        })
-                        .to_string()
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "result": {
+                                    "content": "not-a-valid-content-array",
+                                    "isError": false
+                                }
+                            })
+                            .to_string(),
+                        )
                     } else if request.contains(r#""method":"tools/call""#) {
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": extract_jsonrpc_id(&request),
-                            "result": {
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": "ferrogate-result"
-                                    }
-                                ],
-                                "isError": false
-                            }
-                        })
-                        .to_string()
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "ferrogate-result"
+                                        }
+                                    ],
+                                    "isError": false
+                                }
+                            })
+                            .to_string(),
+                        )
                     } else if request.contains(r#""method":"ping""#) {
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": extract_jsonrpc_id(&request),
-                            "result": {}
-                        })
-                        .to_string()
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "result": {}
+                            })
+                            .to_string(),
+                        )
                     } else {
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": extract_jsonrpc_id(&request),
-                            "error": {
-                                "code": -32601,
-                                "message": "unsupported method"
-                            }
-                        })
-                        .to_string()
+                        (
+                            "404 Not Found",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": extract_jsonrpc_id(&request),
+                                "error": {
+                                    "code": -32601,
+                                    "message": "unsupported method"
+                                }
+                            })
+                            .to_string(),
+                        )
                     };
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nMcp-Session-Id: ignored-by-stateless-client\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     );
@@ -442,6 +487,39 @@ pub(crate) fn spawn_mock_mcp_server(
         requests
     });
     Ok((addr, handle))
+}
+
+fn valid_candidate_mcp_request(request: &str) -> bool {
+    let Ok(body) = http_request_body(request).and_then(|body| {
+        serde_json::from_str::<Value>(body).context("parse candidate MCP request")
+    }) else {
+        return false;
+    };
+    let Some(method) = body.get("method").and_then(Value::as_str) else {
+        return false;
+    };
+    if request_header(request, "MCP-Protocol-Version") != Some("2026-07-28")
+        || request_header(request, "Mcp-Method") != Some(method)
+        || request_header(request, "Mcp-Session-Id").is_some()
+        || body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] != "2026-07-28"
+        || !body["params"]["_meta"]["io.modelcontextprotocol/clientInfo"].is_object()
+        || !body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"].is_object()
+    {
+        return false;
+    }
+    if method == "tools/call" {
+        return body["params"]["name"]
+            .as_str()
+            .is_some_and(|name| request_header(request, "Mcp-Name") == Some(name));
+    }
+    request_header(request, "Mcp-Name").is_none()
+}
+
+fn request_header<'a>(request: &'a str, wanted: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(wanted).then_some(value.trim())
+    })
 }
 
 pub(crate) fn spawn_mock_agent_server() -> Result<(String, JoinHandle<Vec<String>>)> {

@@ -24,16 +24,18 @@ work belongs in [`roadmap.md`](roadmap.md).
   plus an opt-in semantic (vector-similarity) cache behind the same cache
   seam, with global, model, and API-key enablement controls.
 - **MCP gateway support** through `ferrogate-mcp`, including streamable HTTP,
-  SSE, stdio sessions, `initialize`, `tools/list`, namespaced tools,
-  deny-by-default execution allowlists, health checks, reconnects, and governed
-  tool execution. These adapters remain initialize-based; the native ingress
-  retains legacy 2025-11-25 and 2025-06-18 protocol paths.
+  SSE, stdio, `tools/list`, namespaced tools, deny-by-default execution
+  allowlists, health checks, reconnects, and governed tool execution.
+  Streamable HTTP and stdio probe the pinned 2026-07-28 candidate first, use
+  stateless per-request metadata when supported, and fall back only on
+  definitive legacy signals to initialize-based 2025-11-25/2025-06-18 peers.
 - **Native MCP JSON-RPC ingress** at `POST /v1/mcp` for `initialize`, `ping`,
   `tools/list`, `tools/call`, and `resources/list`/`resources/read` over the
   hosted-asset registry. It also implements stateless `server/discover` and
   per-request validation for the MCP 2026-07-28 candidate pinned at official
-  commit `71e306956a4959c9655e5036be215d41986596e6`. This is an ingress slice,
-  not a claim of candidate outbound-client or final-spec conformance.
+  commit `71e306956a4959c9655e5036be215d41986596e6`. Ingress and outbound-client
+  slices have focused in-repo peer coverage; external official-SDK validation
+  and final-spec conformance remain open.
 - **Hosted asset closed loop** at `/v1/assets/*`: versioned publish/pull/
   delete with tenant quota accounting, artifact-registry semantics (channels
   such as latest/stable/canary, semver resolution, platform/arch variants,
@@ -133,9 +135,9 @@ Validated end to end:
   audit, and metrics.
 - Native legacy MCP JSON-RPC ingress at `POST /v1/mcp`, including
   `resources/list`/`resources/read` over hosted assets. A pinned MCP 2026-07-28
-  candidate ingress slice has focused regression coverage; external SDK
-  compatibility, candidate outbound-client behavior, and final-spec
-  conformance remain open.
+  candidate ingress and outbound-client slices have focused regression
+  coverage; external official-SDK compatibility and final-spec conformance
+  remain open.
 - The hosted-asset closed loop: authenticated publish/pull/delete on
   `/v1/assets/*`, channels/semver/variant resolution, signature and
   malware-scan gates, presigned large-file upload/commit/download against a

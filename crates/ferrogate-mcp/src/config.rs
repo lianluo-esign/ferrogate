@@ -160,6 +160,7 @@ pub(crate) fn resolved_headers(config: &McpServerConfig) -> AnyResult<Vec<(Strin
         .headers
         .iter()
         .map(|header| {
+            validate_static_header(header)?;
             let value = match (&header.value, &header.value_env) {
                 (Some(value), _) => value.clone(),
                 (None, Some(env_name)) => std::env::var(env_name).with_context(|| {
@@ -318,6 +319,17 @@ fn validate_oauth_config(config: &McpOauthConfig, authorization_code: bool) -> A
 
 fn validate_static_header(header: &McpHeaderConfig) -> AnyResult<()> {
     HeaderName::from_bytes(header.name.as_bytes()).context("MCP static header name is invalid")?;
+    if [
+        crate::protocol::MCP_PROTOCOL_VERSION_HEADER,
+        crate::protocol::MCP_METHOD_HEADER,
+        crate::protocol::MCP_NAME_HEADER,
+        "mcp-session-id",
+    ]
+    .iter()
+    .any(|reserved| header.name.eq_ignore_ascii_case(reserved))
+    {
+        bail!("MCP static header {} is protocol-owned", header.name);
+    }
     match (&header.value, &header.value_env) {
         (Some(value), None) => {
             HeaderValue::from_str(value).context("MCP static header value is invalid")?;

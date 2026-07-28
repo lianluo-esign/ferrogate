@@ -93,8 +93,9 @@ pub use manager::{
     McpTool, McpToolExecutionRequest, McpToolExecutionResult,
 };
 pub use protocol::{
-    is_supported_protocol_version, negotiate_protocol_version, resolve_negotiated_version,
-    verify_routing_headers, RoutingHeaderMismatch, MCP_LEGACY_PROTOCOL_VERSION, MCP_METHOD_HEADER,
+    is_supported_protocol_version, negotiate_protocol_version, resolve_legacy_protocol_version,
+    resolve_negotiated_version, verify_routing_headers, McpProtocolDowngradeReason,
+    McpProtocolMode, RoutingHeaderMismatch, MCP_LEGACY_PROTOCOL_VERSION, MCP_METHOD_HEADER,
     MCP_NAME_HEADER, MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION_FALLBACK,
     MCP_PROTOCOL_VERSION_HEADER, SUPPORTED_MCP_PROTOCOL_VERSIONS,
 };
