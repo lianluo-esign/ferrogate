@@ -233,19 +233,20 @@ pub(crate) fn is_recognized_modern_protocol_error(response: &Value) -> bool {
     )
 }
 
-/// Streamable HTTP uses a structured 404 / `-32601` response to distinguish a
-/// modern endpoint from a legacy endpoint's unstructured HTTP error. Stdio has
-/// different probe semantics: the same JSON-RPC code selects legacy fallback.
-fn is_recognized_http_modern_error(response: &Value) -> bool {
+/// Streamable HTTP uses specifically a structured HTTP 404 / JSON-RPC `-32601`
+/// pair to distinguish a modern endpoint from a legacy endpoint's unstructured
+/// HTTP error. The JSON-RPC code alone is not enough: on 400/405 it remains a
+/// legacy downgrade signal. Stdio also treats `-32601` as legacy probe failure.
+fn is_recognized_http_modern_error(status: u16, response: &Value) -> bool {
     is_recognized_modern_protocol_error(response)
-        || jsonrpc_error_code(response) == Some(JSONRPC_ERROR_METHOD_NOT_FOUND)
+        || (status == 404 && jsonrpc_error_code(response) == Some(JSONRPC_ERROR_METHOD_NOT_FOUND))
 }
 
 pub(crate) fn http_legacy_downgrade_reason(
     status: u16,
     response: Option<&Value>,
 ) -> Option<McpProtocolDowngradeReason> {
-    if response.is_some_and(is_recognized_http_modern_error) {
+    if response.is_some_and(|response| is_recognized_http_modern_error(status, response)) {
         return None;
     }
     match status {
