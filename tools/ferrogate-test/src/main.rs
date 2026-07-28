@@ -26,6 +26,7 @@ mod function_egress_cloudflare;
 mod guardrails;
 mod http;
 mod local;
+mod managed_action_project;
 mod mcp_identity;
 mod mocks;
 /// #352: durable x402 payment attempts + their wallet-hold links inside the
@@ -58,6 +59,7 @@ use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use function_egress_cloudflare::run_function_egress_cloudflare_api;
 use guardrails::run_guardrail_supabase;
+use managed_action_project::run_managed_action_project;
 use mcp_identity::run_mcp_identity_supabase;
 use scenarios::{
     run_admin_api, run_auth_api, run_function_egress_api, run_gateway_api,
@@ -91,6 +93,7 @@ fn main() -> Result<()> {
         asset_presign: run_asset_presign_api,
         asset_registry: run_asset_registry_api,
         agent_jobs: run_agent_jobs_api,
+        managed_action_project: run_managed_action_project,
         cli_mutation_receipt: run_cli_mutation_receipt,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,
@@ -136,6 +139,7 @@ fn main() -> Result<()> {
             run_asset_presign_api(local)?;
             run_asset_registry_api(local)?;
             run_agent_jobs_api(local)?;
+            run_managed_action_project(local)?;
             // #505: the CLI's own governed-output contract. Docker-free and
             // deterministic (one local gateway, the shipped `ferrogate` binary
             // as its own client), so it belongs in the always-run set — a

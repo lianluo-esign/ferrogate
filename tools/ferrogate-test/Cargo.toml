@@ -25,6 +25,7 @@ base64.workspace = true
 clap.workspace = true
 ferrogate-billing = { path = "../../crates/ferrogate-billing" }
 ferrogate-core = { path = "../../crates/ferrogate-core" }
+ferrogate-guardrails = { path = "../../crates/ferrogate-guardrails" }
 ferrogate-providers = { path = "../../crates/ferrogate-providers" }
 ferrogate-runtime = { path = "../../crates/ferrogate-runtime" }
 ferrogate-storage = { path = "../../crates/ferrogate-storage" }

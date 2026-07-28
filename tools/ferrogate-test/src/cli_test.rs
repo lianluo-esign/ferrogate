@@ -71,3 +71,12 @@ fn worker_release_is_a_named_local_scenario() {
     let cli = Cli::try_parse_from(["ferrogate-test", "worker-release"]).unwrap();
     assert!(matches!(cli.command, Commands::WorkerRelease));
 }
+
+#[test]
+fn managed_action_project_is_a_deterministic_local_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "managed-action-project"]).unwrap();
+    let Commands::ManagedActionProject(args) = cli.command else {
+        panic!("expected managed-action-project command");
+    };
+    assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
+}

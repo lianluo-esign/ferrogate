@@ -1530,6 +1530,7 @@ dependencies = [
  "clap",
  "ferrogate-billing",
  "ferrogate-core",
+ "ferrogate-guardrails",
  "ferrogate-providers",
  "ferrogate-runtime",
  "ferrogate-storage",
