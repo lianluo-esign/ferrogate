@@ -71,6 +71,22 @@ impl VerbEffect {
     }
 }
 
+/// Whether a mutating verb requires the operator to confirm intent before the
+/// client sends its request.
+///
+/// This is explicit registry metadata rather than a check against a resource
+/// or verb name. The generic CLI dispatcher can therefore enforce the same
+/// policy for every current and future command family without learning any
+/// provider or product-specific routing rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmationPolicy {
+    /// The operation does not require an additional client-side confirmation.
+    None,
+    /// The operation requires an interactive confirmation or an explicit
+    /// `--yes` before the request may leave the process.
+    Required,
+}
+
 /// Metadata for one verb (operation) within a resource family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerbDescriptor {
@@ -84,6 +100,8 @@ pub struct VerbDescriptor {
     pub operation_id: Option<String>,
     /// Whether the verb changes state — the render gate's input (issue #505).
     pub effect: VerbEffect,
+    /// Whether the CLI must confirm operator intent before sending the request.
+    pub confirmation: ConfirmationPolicy,
     /// Required query values supplied as positional CLI segments after the
     /// operation's OpenAPI path parameters.
     ///
@@ -114,6 +132,7 @@ impl VerbDescriptor {
             about: about.into(),
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Read,
+            confirmation: ConfirmationPolicy::None,
             positional_query_segments: 0,
         }
     }
@@ -131,6 +150,24 @@ impl VerbDescriptor {
             about: about.into(),
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Mutating,
+            confirmation: ConfirmationPolicy::None,
+            positional_query_segments: 0,
+        }
+    }
+
+    /// A state-changing verb that must not be sent until the operator confirms
+    /// it interactively or passes the explicit `--yes` acknowledgement.
+    pub fn mutating_with_confirmation(
+        name: impl Into<String>,
+        about: impl Into<String>,
+        operation_id: impl Into<String>,
+    ) -> VerbDescriptor {
+        VerbDescriptor {
+            name: name.into(),
+            about: about.into(),
+            operation_id: Some(operation_id.into()),
+            effect: VerbEffect::Mutating,
+            confirmation: ConfirmationPolicy::Required,
             positional_query_segments: 0,
         }
     }
@@ -142,6 +179,7 @@ impl VerbDescriptor {
             about: about.into(),
             operation_id: None,
             effect: VerbEffect::Local,
+            confirmation: ConfirmationPolicy::None,
             positional_query_segments: 0,
         }
     }
@@ -161,6 +199,12 @@ impl VerbDescriptor {
     /// Whether this verb changes Control-Plane state.
     pub fn is_mutating(&self) -> bool {
         self.effect.is_mutating()
+    }
+
+    /// Whether the generic CLI dispatcher must confirm intent before sending
+    /// this verb's request.
+    pub fn requires_confirmation(&self) -> bool {
+        self.confirmation == ConfirmationPolicy::Required
     }
 }
 

@@ -22,11 +22,9 @@
 //! shape #362 used for lifecycle operations — so operator intent is explicit in
 //! the audit trail rather than hidden inside a generic mutation. `config
 //! validate` is the safe dry-run that pairs with `reload`. The `VerbDescriptor`
-//! metadata layer carries no confirm-intent field (and this slice does not
-//! modify the #360 foundation), so the explicit-confirmation / non-interactive
-//! intent gate for `reload` and `drain set` is enforced at the command-dispatch
-//! layer that consumes this metadata; the verbs' `about` text marks them as the
-//! runtime-affecting operations that gate must guard. The reload response
+//! metadata marks `reload` and `drain set` as requiring confirmation. The
+//! generic command dispatcher consumes that policy, prompts before sending,
+//! and requires `--yes` when `--non-interactive` is active. The reload response
 //! carries the server's generation/commit outcome verbatim (never recomputed
 //! here), and `classify` preserves the request/trace id for attribution.
 //!
@@ -142,7 +140,7 @@ impl CommandGroup for ConfigGroup {
                     "Validate a candidate config without committing",
                     "validateAdminConfig",
                 ),
-                VerbDescriptor::mutating(
+                VerbDescriptor::mutating_with_confirmation(
                     "reload",
                     "Validate and apply a config reload (state-changing; requires confirmation)",
                     "reloadAdminConfig",
@@ -176,7 +174,7 @@ impl CommandGroup for DrainGroup {
             "Inspect and control node drain mode",
             vec![
                 VerbDescriptor::read("get", "Show current drain state", "getAdminDrain"),
-                VerbDescriptor::mutating(
+                VerbDescriptor::mutating_with_confirmation(
                     "set",
                     "Set or clear node drain mode (state-changing; requires confirmation)",
                     "setAdminDrain",

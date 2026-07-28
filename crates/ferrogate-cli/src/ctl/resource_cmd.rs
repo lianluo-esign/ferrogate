@@ -36,7 +36,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use clap::{ArgMatches, Args, Command, FromArgMatches};
+use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 use ferrogate_control_plane_client::action_identity::{ClientActionIdentity, FingerprintEnv};
 use ferrogate_control_plane_client::args::GlobalArgs;
 use ferrogate_control_plane_client::auth::{resolve_credential, Credential};
@@ -56,10 +56,12 @@ use ferrogate_control_plane_client::transport::{
 };
 use serde_json::{Map, Value};
 
+use super::confirmation;
 use super::dispatch::{self, report_error_for, ProcessSecretResolver};
 
 /// Top-level namespace command that hosts every registered resource family.
 pub(crate) const CTL_COMMAND: &str = "ctl";
+const CONFIRM_ARG: &str = "yes";
 
 /// Resource-specific arguments shared by every generic verb: the id path
 /// segments, an optional JSON request document (for writes), and list
@@ -243,6 +245,17 @@ pub(crate) fn build_ctl_command(registry: &Registry) -> Command {
             let mut verb_cmd = Command::new(verb.name.clone());
             verb_cmd = ResourceArgs::augment_args(verb_cmd);
             verb_cmd = GlobalArgs::augment_args(verb_cmd);
+            if verb.requires_confirmation() {
+                verb_cmd = verb_cmd.arg(
+                    Arg::new(CONFIRM_ARG)
+                        .long(CONFIRM_ARG)
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("dry_run")
+                        .help(
+                            "Acknowledge this guarded state-changing operation without prompting",
+                        ),
+                );
+            }
             // Set the verb's own help LAST: `augment_args` stamps the args
             // struct's doc comment onto the command's `about`, which would
             // otherwise shadow the verb description with "Global flags…".
@@ -302,6 +315,21 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         .map_err(|error| CliError::usage(error.to_string()))?;
     let resource = ResourceArgs::from_arg_matches(verb_matches)
         .map_err(|error| CliError::usage(error.to_string()))?;
+    let effective = dispatch::resolve_effective(&global)?;
+    let confirmed = descriptor.requires_confirmation() && verb_matches.get_flag(CONFIRM_ARG);
+    confirmation::require(
+        descriptor,
+        group_name,
+        verb_name,
+        &resource.segments,
+        resource.dry_run,
+        confirmed,
+        effective.non_interactive,
+    )?;
+
+    // Confirmation deliberately precedes this conversion: `--file -` may
+    // consume stdin, and a guarded mutation must not lose its prompt merely
+    // because its request body also comes from stdin.
     let input = resource.to_input()?;
 
     // `--sort` is honest about being unhonored. A structural parse of
@@ -329,7 +357,6 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     let spec = build_request(group_name, verb_name, &input)?;
     let redaction_spec = spec.clone();
 
-    let effective = dispatch::resolve_effective(&global)?;
     let credential = resolve_credential(&effective.auth, &ProcessSecretResolver)?;
     let output_format = effective.output;
     // One identity per operator action (issue #548), minted before the verb is

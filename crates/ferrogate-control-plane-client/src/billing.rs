@@ -117,12 +117,12 @@ impl CommandGroup for WalletsGroup {
                     "Update a wallet's recharge settings",
                     "updateWallet",
                 ),
-                VerbDescriptor::mutating(
+                VerbDescriptor::mutating_with_confirmation(
                     "adjust",
                     "Atomically adjust wallet credits (irreversible; requires confirmation)",
                     "adjustWallet",
                 ),
-                VerbDescriptor::mutating(
+                VerbDescriptor::mutating_with_confirmation(
                     "charge",
                     "Charge a payment method and credit a wallet (irreversible; requires confirmation)",
                     "chargeWallet",

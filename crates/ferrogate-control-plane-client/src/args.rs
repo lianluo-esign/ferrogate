@@ -61,7 +61,8 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_name = "FORMAT")]
     pub output: Option<String>,
 
-    /// Do not prompt; fail instead of asking (for scripts/CI).
+    /// Do not prompt. Commands requiring confirmation fail unless --yes is
+    /// also supplied (for scripts/CI).
     #[arg(long, global = true)]
     pub non_interactive: bool,
 }

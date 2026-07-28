@@ -25,12 +25,15 @@
 //! * [`store`] — on-disk persistence for the library's in-memory `ContextStore`.
 //! * [`dispatch`] — shared glue: precedence resolution, credential/stdin/env
 //!   readers, the async runtime, and stderr diagnostics.
+//! * [`confirmation`] — metadata-driven intent confirmation before guarded
+//!   mutations may leave the process.
 //! * [`context_cmd`] — the `context` verbs (create/list/show/use/delete).
 //! * [`ops_cmd`] — the `ops status` vertical slice on the shared client.
 //! * [`resource_cmd`] — the generic `ctl <group> <verb>` tree (#361–#365) built
 //!   from the `ferrogate-control-plane-client` registry and dispatched through the same
 //!   foundation, with no per-resource code in the binary.
 
+pub(crate) mod confirmation;
 pub(crate) mod context_cmd;
 pub(crate) mod dispatch;
 pub(crate) mod ops_cmd;
