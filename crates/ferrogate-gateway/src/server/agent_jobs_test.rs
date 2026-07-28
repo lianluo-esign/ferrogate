@@ -200,9 +200,10 @@ fn cancel_stops_the_work_in_the_runtime_and_terminalizes_the_run() {
     let state = AppState::new(Config::default());
     let (_worker_id, identity) = register_job_worker(&state, "tenant-a");
 
-    // Arm 1 -- nobody holds it. Withdrawal is the remedy, and it is complete:
-    // out of the lease queue AND out of the durable table, with no `cancel_run`
-    // addressed at a worker that does not exist.
+    // Arm 1 -- nobody on this node holds it. Withdrawal is the local remedy:
+    // out of this lease queue, with no `cancel_run` addressed at a worker that
+    // does not exist. The durable row is removed separately as settled work,
+    // never because this process pretended its local copy was unique.
     let idle_id = agent_job_run_id("tenant-a", "cancel-me");
     state
         .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&idle_id, "tenant-a"))
@@ -231,7 +232,7 @@ fn cancel_stops_the_work_in_the_runtime_and_terminalizes_the_run() {
     );
     assert!(
         !durable_dispatch_ids(&state).contains(&agent_job_start_dispatch_id(&idle_id)),
-        "...and from the durable table, so a submit/cancel loop leaves no permanent row"
+        "settled-run cleanup reclaims the row after the node-local withdrawal"
     );
 
     // Arm 2 -- a worker holds it. Now there IS somebody to tell, and the
@@ -299,9 +300,9 @@ fn cancel_stops_the_work_in_the_runtime_and_terminalizes_the_run() {
 #[test]
 fn stopping_the_work_before_its_run_row_is_settled_is_refused() {
     // The ORDERING guard, which is the whole of #551's cross-replica fix and
-    // is otherwise invisible: a cancel deletes the durable dispatch row that is
-    // the only thing a peer replica's own in-memory copy could be superseded
-    // by, and the settled `agent_runs` row is what replaces it. On the durable
+    // is otherwise invisible: a cancel withdraws only this node's in-memory
+    // copy while a peer may still hold the same dispatch. The settled
+    // `agent_runs` row is what makes every peer copy unstartable. On the durable
     // backend that row is written through a background evidence writer that
     // returns before the write lands and drops the job outright under
     // back-pressure, so "write it afterwards" is a window a peer can poll
@@ -310,7 +311,7 @@ fn stopping_the_work_before_its_run_row_is_settled_is_refused() {
     // `cancel_agent_job` therefore settles FIRST and `cancel_agent_job_in_runtime`
     // refuses until it can READ the settled row back out of the store. Deleting
     // that guard reddens the first half here (the withdrawal would succeed on a
-    // `queued` run and the dispatch rows would be gone); swapping the settle and
+    // `queued` run and its local copy would be gone); swapping the settle and
     // the withdrawal in `cancel_agent_job` reddens the second, because the store
     // still answers `queued` when the guard runs and the cancel 503s.
     // `the_ordering_guard_reads_the_settled_row_not_the_callers_struct` is what
@@ -337,8 +338,8 @@ fn stopping_the_work_before_its_run_row_is_settled_is_refused() {
     assert!(state.self_hosted_dispatch_unacked(&agent_job_start_dispatch_id(&run_id)));
 
     // And the ordering the guard enforces is the one `cancel_agent_job` runs:
-    // by the time the dispatch row is gone, the settled row a peer reads is
-    // already durable.
+    // by the time the local queue entry is gone, the settled row a peer reads
+    // is already durable.
     cancel_agent_job(&state, &open, "fg-cancel", 300).expect("the ordered cancel is accepted");
     assert_eq!(
         state
@@ -349,15 +350,16 @@ fn stopping_the_work_before_its_run_row_is_settled_is_refused() {
     );
     assert!(
         !durable_dispatch_ids(&state).contains(&agent_job_start_dispatch_id(&run_id)),
-        "...and only then is the durable dispatch row withdrawn"
+        "separate settled-run cleanup reclaims the durable row after withdrawal"
     );
+    assert!(!state.self_hosted_dispatch_unacked(&agent_job_start_dispatch_id(&run_id)));
 }
 
 #[test]
 fn the_ordering_guard_reads_the_settled_row_not_the_callers_struct() {
-    // Two ways the withdrawal could still destroy a peer's only evidence while
-    // the row meant to replace it is unreadable, and the one guard that closes
-    // both.
+    // Two ways the withdrawal could still strand a runnable peer copy while
+    // the settled row meant to stop it is unreadable, and the one guard that
+    // closes both.
     //
     // The guard used to test `run.status` -- the CALLER's struct, which
     // `cancel_agent_job` stamps `cancelled` before either statement runs. It
@@ -423,8 +425,9 @@ fn the_ordering_guard_reads_the_settled_row_not_the_callers_struct() {
     );
 
     // The control. Once the row genuinely IS in the store, the same call on the
-    // same struct withdraws -- so neither refusal above is a guard that simply
-    // refuses everything, which is the shape #500 exists about.
+    // same struct withdraws the local copy -- so neither refusal above is a
+    // guard that simply refuses everything, which is the shape #500 exists
+    // about.
     assert!(
         state.settle_agent_run_record(never_written.clone()),
         "the in-memory settle must actually land, or the control proves nothing"
@@ -435,9 +438,10 @@ fn the_ordering_guard_reads_the_settled_row_not_the_callers_struct() {
         "an unleased job whose run row is genuinely settled is withdrawn, not dispatched at"
     );
     assert!(
-        !durable_dispatch_ids(&state).contains(&lost_dispatch_id),
-        "...and only then is the durable dispatch row gone"
+        durable_dispatch_ids(&state).contains(&lost_dispatch_id),
+        "local withdrawal must retain the shared row until settled-run reclaim"
     );
+    assert!(!state.self_hosted_dispatch_unacked(&lost_dispatch_id));
 }
 
 #[test]
@@ -514,6 +518,10 @@ fn the_published_meaning_of_runtime_cancel_dispatched_matches_the_code() {
     assert!(
         !published.contains("only when a worker had already leased"),
         "a peer-served cancel dispatches one with no worker having leased the job"
+    );
+    assert!(
+        !published.contains("held the only copy"),
+        "a node-local queue cannot prove that no peer restored the durable StartRun row"
     );
 }
 
@@ -1580,10 +1588,10 @@ fn cancelling_a_job_frees_exactly_one_submit_slot_when_no_worker_will_ever_ack()
 
 #[test]
 fn a_submit_cancel_loop_leaves_no_permanent_dispatch_rows_behind() {
-    // #502's retention half. The cap USED to be the only bound on a table
-    // nothing ever deleted, so making cancel free a slot -- without also
-    // reclaiming the row -- turned `submit x N -> cancel x N -> repeat` into an
-    // unlimited-submit bypass that added permanent rows forever.
+    // #502's retention half without reviving the unsafe ownership guess from
+    // the first patch. Withdrawal touches only this node's queue; the separate
+    // settled-run reclaim returns the durable rows. A submit -> cancel loop is
+    // therefore bounded without claiming the serving node held a unique copy.
     let state = AppState::new(Config::default());
     let baseline = durable_dispatch_ids(&state);
 
@@ -1600,7 +1608,7 @@ fn a_submit_cancel_loop_leaves_no_permanent_dispatch_rows_behind() {
         assert_eq!(
             durable_dispatch_ids(&state),
             baseline,
-            "round {round}: a settled job must leave NO dispatch row behind"
+            "round {round}: settled-run cleanup must reclaim every withdrawn row"
         );
     }
 }
@@ -1781,13 +1789,12 @@ fn a_peer_still_holding_a_cancelled_jobs_start_dispatch_refuses_to_lease_it() {
     // lease queue with the WHOLE `self_hosted_run_dispatches` table, unfiltered
     // by node, so any replica that rebuilds after a submit is holding every
     // other replica's dispatches in its own memory. Node A then cancels a job
-    // nobody leased: it withdraws its own copy, deletes the durable row, and
-    // correctly mints no `cancel_run` -- there was no holder to address. Node B
-    // is left sitting on a perfectly leasable `start_run` for work the caller
-    // paid to stop, with no durable evidence left anywhere that could ever
-    // supersede it. That is reading 2's harm surviving inside reading 1's
-    // contract, and it is why the contract needed a predicate that crosses
-    // replicas.
+    // nobody leased: it withdraws its own copy and correctly mints no
+    // `cancel_run` -- there was no holder to address. Node B is still sitting
+    // on a locally leasable `start_run` for work the caller paid to stop. A
+    // node-local withdrawal must therefore retain the shared StartRun row and
+    // rely on a predicate that crosses replicas rather than pretending it can
+    // prove exclusive ownership.
     //
     // The only such predicate is the run row itself, which the cancel writes.
     // Deleting `start_run_lease_is_settled` from
@@ -1797,9 +1804,8 @@ fn a_peer_still_holding_a_cancelled_jobs_start_dispatch_refuses_to_lease_it() {
     // be independent stores with rows hand-copied between them, and the copy
     // included the settled run row -- which handed the guard the precondition
     // the cancel path is responsible for establishing. Nothing here supplies
-    // it now: if the cancel does not put that row where a peer reads it, and
-    // put it there before it deletes the dispatch row, the peer below leases
-    // the cancelled job.
+    // it now: if the cancel does not put that row where a peer reads it before
+    // withdrawing locally, the peer below leases the cancelled job.
     let submitter = AppState::new(Config::default());
     let cancelled_id =
         try_submit_job(&submitter, "tenant-a", "cancel-then-a-peer-polls").expect("submitted");
@@ -1827,16 +1833,14 @@ fn a_peer_still_holding_a_cancelled_jobs_start_dispatch_refuses_to_lease_it() {
     // Nothing after this line copies anything to the peer: whatever the peer
     // can see is what the cancel actually made durable.
     cancel_open_job(&submitter, &cancelled_id);
-    // What the cancel traded: the durable dispatch row a peer could have been
-    // superseded by is gone, and the settled run row that replaces it is
-    // readable from the peer. In that order -- `cancel_agent_job` settles
-    // durably and only then withdraws, and `cancel_agent_job_in_runtime`
-    // refuses a run that is not yet settled, so the trade cannot be made the
-    // other way round.
+    // The cancel settles durably and only then withdraws its local copy.
+    // `cancel_agent_job_in_runtime` refuses a run that is not yet settled, so
+    // the peer protection cannot be installed in the other order. The shared
+    // row is then reclaimed as settled work, not because success on one node's
+    // queue said anything about copies another replica restored earlier.
     assert!(
         !durable_dispatch_ids(&submitter).contains(&cancelled_dispatch_id),
-        "the withdrawal deleted the shared dispatch row, which is what makes the run row the \
-         peer's only remaining protection"
+        "settled-run cleanup reclaims the shared row after local withdrawal"
     );
     assert_eq!(
         peer.agent_run_record(&cancelled_id)

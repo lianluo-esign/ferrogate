@@ -708,10 +708,12 @@ impl AppState {
     /// sound predicate -- but only if it is already THERE when a peer looks.
     /// That is an ordering obligation on the cancel, and the cancel discharges
     /// it by evaluating THIS predicate (`settled_agent_run_ids`) before it
-    /// deletes the dispatch row a peer would otherwise still be stopped by. A
-    /// run with NO row is not settled -- absence of evidence never stops work,
-    /// exactly as it never releases a submit slot -- so dispatches created
-    /// through non-job paths lease unchanged.
+    /// withdraws its node-local copy. The durable dispatch row is deliberately
+    /// retained until a settled-run reclaim: a local queue cannot prove that a
+    /// peer did not already restore the same row into its own queue. A run with
+    /// NO row is not settled -- absence of evidence never stops work, exactly
+    /// as it never releases a submit slot -- so dispatches created through
+    /// non-job paths lease unchanged.
     ///
     /// `CancelRun` is deliberately exempt: its run is terminal BY CONSTRUCTION
     /// (that is what the cancel wrote), and refusing to hand it out would
@@ -1743,55 +1745,31 @@ impl AppState {
         }
     }
 
-    /// Withdraw ONE never-leased dispatch from this process's lease queue and,
-    /// only if that succeeded, from the durable `self_hosted_run_dispatches`
-    /// table.
+    /// Withdraw ONE never-leased dispatch from this process's lease queue.
     ///
     /// The cancel path's withdrawable arm (#502, made atomic by #551). It
     /// answers a question no pair of separate reads can answer without a race:
-    /// "is the only runnable copy of this work mine, unclaimed, and now gone?"
-    /// A `false` means some other node holds the runnable copy, or a worker on
-    /// this one leased it -- in both cases the remedy is a durable `cancel_run`
-    /// the holder can read, not a delete, so the caller falls through to that.
+    /// "does this node still hold an unclaimed copy, and can it remove that copy
+    /// now?" A `false` means this node does not hold the copy or a local worker
+    /// leased it -- in both cases the remedy is a durable `cancel_run` the
+    /// holder can read, so the caller falls through to that.
     ///
     /// Distinct from [`AppState::discard_self_hosted_dispatch`], which is the
-    /// RECLAIM of a dispatch whose run has already settled: that one deletes
-    /// unconditionally and cluster-wide, because a settled run's rows have no
-    /// remaining reader whoever holds them. This one is a withdrawal of work
-    /// that is still live, so it must not touch a row another reader still
-    /// needs.
+    /// cluster-wide RECLAIM of a dispatch whose run has already settled. This
+    /// operation intentionally leaves `self_hosted_run_dispatches` untouched:
+    /// every replica may restore the whole durable table into its own queue, so
+    /// success here cannot prove that this process held the only copy. The
+    /// cancel caller's separate settled-run cleanup, worker settlement/ack, a
+    /// peer refusing settled work, or a retried cancel owns the later durable
+    /// reclaim.
     pub(crate) fn withdraw_unleased_self_hosted_dispatch(&self, dispatch_id: &str) -> bool {
-        let withdrawn = match self.self_hosted_dispatch.lock() {
+        match self.self_hosted_dispatch.lock() {
             Ok(mut runtime) => runtime.queue.withdraw_unleased_run(dispatch_id),
             Err(poisoned) => poisoned
                 .into_inner()
                 .queue
                 .withdraw_unleased_run(dispatch_id),
-        };
-        if !withdrawn {
-            return false;
         }
-        if let Err(error) = ferrogate_sync_bridge::block_on_sync_bridge(
-            self.repositories
-                .delete_self_hosted_run_dispatch(dispatch_id),
-        ) {
-            // A retention leak, not a correctness hole. The row is out of this
-            // node's queue and the caller terminalizes the run immediately
-            // after, so a rebuild that reads the row back cannot lease it out:
-            // `start_run_lease_is_settled` drops it at the poll that would have
-            // offered it, which is also what eventually deletes it. A retried
-            // cancel on the now-terminal run reclaims it sooner. Surfaced
-            // rather than swallowed, because "the delete failed" and "the row
-            // is fine" must not look the same in a log.
-            warn!(
-                dispatch_id,
-                error = %error,
-                "withdrew a cancelled job's start dispatch from the lease queue but could not \
-                 delete its durable row; a rebuild of this node may re-offer it until the \
-                 settled-run reclaim removes it"
-            );
-        }
-        true
     }
 
     /// Dispatch ids THIS PROCESS's lease queue holds for `run_id`, whatever
@@ -1799,10 +1777,10 @@ impl AppState {
     ///
     /// Deliberately node-local, with no durable fallback: its callers are
     /// deciding what only this node can act on. The cancel path (#502 rework)
-    /// uses it to tell "the runnable copy is mine, so withdrawing it is the
-    /// whole remedy" apart from "a peer holds the runnable copy, so the remedy
-    /// has to be durable evidence that peer will read" -- a distinction the
-    /// durable row cannot make, because a durable row exists in both cases.
+    /// uses it to tell "this node can withdraw its local unleased copy" apart
+    /// from "this node needs durable `cancel_run` evidence for a possible
+    /// holder" -- a distinction the durable row cannot make, because a durable
+    /// row exists in both cases and may already be restored by multiple peers.
     pub(crate) fn self_hosted_dispatch_ids_for_run(&self, run_id: &str) -> Vec<String> {
         match self.self_hosted_dispatch.lock() {
             Ok(runtime) => runtime.queue.dispatch_ids_for_run(run_id),
