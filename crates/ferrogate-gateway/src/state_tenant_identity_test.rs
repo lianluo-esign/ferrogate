@@ -61,8 +61,10 @@ fn declared_key(id: &str) -> ferrogate_config::ApiKey {
 /// no identity, which is the whole input.
 #[test]
 fn two_pre_515_durable_rows_do_not_block_an_admin_write_that_never_touches_them() {
-    let mut config = Config::default();
-    config.api_keys = vec![declared_key("config-key")];
+    let config = Config {
+        api_keys: vec![declared_key("config-key")],
+        ..Config::default()
+    };
     config.validate().expect("the config file itself is clean");
 
     let node = SharedAppState::with_source_path(config, None);
@@ -141,8 +143,10 @@ fn two_pre_515_durable_rows_do_not_block_an_admin_write_that_never_touches_them(
 /// would red the assertions instead of quieting them.
 #[test]
 fn a_pre_515_durable_row_is_reported_at_boot_not_only_at_the_next_admin_write() {
-    let mut config = Config::default();
-    config.api_keys = vec![declared_key("config-key")];
+    let config = Config {
+        api_keys: vec![declared_key("config-key")],
+        ..Config::default()
+    };
     config.validate().expect("the config file itself is clean");
 
     let first_boot = SharedAppState::with_source_path(config.clone(), None);
@@ -200,8 +204,10 @@ fn a_pre_515_durable_row_is_reported_at_boot_not_only_at_the_next_admin_write() 
 /// beside it deliberately no longer refuses on this path.
 #[test]
 fn the_admin_api_still_refuses_to_mint_a_key_with_no_tenant_identity() {
-    let mut config = Config::default();
-    config.api_keys = vec![declared_key("config-key")];
+    let config = Config {
+        api_keys: vec![declared_key("config-key")],
+        ..Config::default()
+    };
     config.validate().expect("the config file itself is clean");
 
     let node = SharedAppState::with_source_path(config, None);

@@ -154,8 +154,10 @@ fn endpoint_capabilities_and_context_limit_filter_fail_closed() {
     )
     .is_empty());
 
-    let mut bounded = ModelRouteRequirements::default();
-    bounded.required_context_window = Some(4096);
+    let bounded = ModelRouteRequirements {
+        required_context_window: Some(4096),
+        ..ModelRouteRequirements::default()
+    };
     assert_eq!(
         route_exclusion_reasons(&route(&[], Some(2048)), &bounded, &HashSet::new())[0].code(),
         "context_window_too_small"

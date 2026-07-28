@@ -767,8 +767,7 @@ fn a_quarantined_site_file_is_not_served() {
     // The lookup the handler performs refuses it -- and reports it as ABSENT,
     // so the refusal does not confirm that quarantined bytes are held here.
     let refusal = block_on(gw.resolve_servable_site_file(&resolved, T, SITE, "index.html"))
-        .err()
-        .expect("a quarantined site file must not be servable");
+        .expect_err("a quarantined site file must not be servable");
     assert_eq!(refusal.status, StatusCode::NOT_FOUND);
     assert_eq!(refusal.code, "site_file_not_found");
     assert!(
