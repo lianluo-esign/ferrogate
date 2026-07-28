@@ -27,7 +27,7 @@ use std::pin::Pin;
 
 use http::Method;
 
-use crate::action_identity::{ClientActionIdentity, TIME_TOKEN_HEADER};
+use crate::action_identity::{ClientActionIdentity, ACTION_TIME_PREFLIGHT_PATH, TIME_TOKEN_HEADER};
 use crate::auth::Credential;
 use crate::context::EffectiveContext;
 use crate::error::{ApiError, CliError, CliResult, ExitClass};
@@ -883,15 +883,12 @@ impl<T: Transport> ControlPlaneClient<T> {
 
     /// Prepare, send, and classify one request.
     ///
-    /// After the response is read, any [`TIME_TOKEN_HEADER`] it carries is
-    /// harvested into the identity, so the *next* request of this action echoes
-    /// a server-issued instant. That is the piggy-back design: no preflight
-    /// request is ever issued, so the extra round-trip cost is zero and only the
-    /// first request of an invocation goes without a server time. A token that
-    /// is malformed, bound to another action, or outside its TTL is refused and
-    /// reported on stderr rather than stored — carrying a token that is not this
-    /// action's would put a false instant in the audit trail.
+    /// The first request of a logical action performs a safe time-token
+    /// challenge. The API request is prepared only after that succeeds, so it
+    /// always carries the authoritative token. Later responses refresh the
+    /// token for retries or additional pages.
     pub async fn send(&self, spec: &RequestSpec) -> CliResult<ApiResponse> {
+        self.ensure_server_time().await?;
         let prepared = prepare_request(
             spec,
             &self.context,
@@ -906,6 +903,7 @@ impl<T: Transport> ControlPlaneClient<T> {
     /// Send an export request and preserve every successful response byte.
     /// Error responses still use the normal typed API-envelope classifier.
     pub async fn send_raw(&self, spec: &RequestSpec, accept: &str) -> CliResult<RawApiResponse> {
+        self.ensure_server_time().await?;
         let prepared = prepare_request_accepting(
             spec,
             &self.context,
@@ -918,13 +916,41 @@ impl<T: Transport> ControlPlaneClient<T> {
         classify_raw(raw).map_err(CliError::from)
     }
 
+    pub(crate) async fn ensure_server_time(&self) -> CliResult<()> {
+        if self.identity.server_issued_time().is_some() {
+            return Ok(());
+        }
+
+        let challenge = RequestSpec::get(ACTION_TIME_PREFLIGHT_PATH);
+        let prepared = prepare_request(
+            &challenge,
+            &self.context,
+            self.credential.as_ref(),
+            &self.identity,
+        )?;
+        let raw = self.transport.execute(prepared).await?;
+        classify(&raw).map_err(CliError::from)?;
+        let token = raw.header(TIME_TOKEN_HEADER).ok_or_else(|| {
+            CliError::transport(format!(
+                "server did not issue {TIME_TOKEN_HEADER} for action {}; refusing to send the \
+                 API request without an authoritative timestamp",
+                self.identity.action_id()
+            ))
+        })?;
+        self.identity.accept_server_time(token).map_err(|error| {
+            CliError::transport(format!(
+                "server issued an unusable action time token; refusing to send the API request: \
+                 {error}"
+            ))
+        })?;
+        Ok(())
+    }
+
     /// Take a server-issued time token off a response, if it carried one.
     ///
-    /// Deliberately infallible from the caller's point of view: a control plane
-    /// that issues no token (every deployment today — the issuing endpoint is
-    /// server-side work this issue defers) must not make requests fail, and a
-    /// refused token is a diagnostic, not an error. The receipt records the
-    /// absence with a reason either way.
+    /// Deliberately infallible after the mandatory challenge: an ordinary
+    /// response token is a refresh for retries/pages, so refusing that refresh
+    /// leaves the already-validated held token intact and emits a diagnostic.
     fn harvest_time_token(&self, raw: &RawResponse) {
         let Some(token) = raw.header(TIME_TOKEN_HEADER) else {
             return;

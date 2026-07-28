@@ -112,5 +112,6 @@ New in this slice:
   are documented by hand instead:
   [`docs/cli-audit-attribution.md`](cli-audit-attribution.md) describes
   `FERROGATE_CLIENT_HOST_LABEL` and `FERROGATE_CLIENT_REPORTED_IP`, what every
-  request now carries about the client (issue #548), and why a receipt's
-  `client_sent_at` is `null` on every deployment that exists today.
+  request now carries about the client (issue #548), and how the mandatory
+  server-time challenge and deployment keyring make `client_sent_at`
+  authoritative before an API operation is sent.

@@ -16,7 +16,9 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result as AnyResult};
-use ferrogate_control_plane_client::action_identity::{ClientActionIdentity, FingerprintEnv};
+use ferrogate_control_plane_client::action_identity::{
+    ClientActionIdentity, FingerprintEnv, ACTION_TIME_PREFLIGHT_PATH, TIME_TOKEN_HEADER,
+};
 use ferrogate_control_plane_client::auth::AuthSource;
 use ferrogate_control_plane_client::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
 use ferrogate_control_plane_client::output::OutputFormat;
@@ -297,6 +299,20 @@ pub(crate) struct RawHttpResponse {
     pub(crate) body: Vec<u8>,
 }
 
+struct RawHttpExchange {
+    response: RawHttpResponse,
+    headers: Vec<(String, String)>,
+}
+
+impl RawHttpExchange {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 /// The `Name: value\r\n` block for a list of headers.
 ///
 /// Refuses, rather than strips, a name or value that is not printable ASCII.
@@ -363,6 +379,63 @@ pub(crate) fn send_request(
     body: &[u8],
     identity: &ClientActionIdentity,
 ) -> AnyResult<RawHttpResponse> {
+    ensure_server_time(endpoint, api_key, identity)?;
+    Ok(send_request_once(
+        endpoint,
+        method,
+        path,
+        api_key,
+        content_type,
+        body,
+        identity,
+    )?
+    .response)
+}
+
+fn ensure_server_time(
+    endpoint: &GatewayEndpoint,
+    api_key: &str,
+    identity: &ClientActionIdentity,
+) -> AnyResult<()> {
+    if identity.server_issued_time().is_some() {
+        return Ok(());
+    }
+    let response = send_request_once(
+        endpoint,
+        "GET",
+        ACTION_TIME_PREFLIGHT_PATH,
+        api_key,
+        None,
+        &[],
+        identity,
+    )?;
+    if !(200..300).contains(&response.response.status) {
+        bail!(
+            "client action time challenge failed with HTTP {}: {}",
+            response.response.status,
+            String::from_utf8_lossy(&response.response.body)
+        );
+    }
+    let token = response.header(TIME_TOKEN_HEADER).ok_or_else(|| {
+        anyhow::anyhow!(
+            "server did not issue {TIME_TOKEN_HEADER}; refusing to send the API request without an authoritative timestamp"
+        )
+    })?;
+    identity
+        .accept_server_time(token)
+        .map_err(|error| anyhow::anyhow!("server issued an unusable action time token: {error}"))?;
+    Ok(())
+}
+
+fn send_request_once(
+    endpoint: &GatewayEndpoint,
+    method: &str,
+    path: &str,
+    api_key: &str,
+    content_type: Option<&str>,
+    body: &[u8],
+    identity: &ClientActionIdentity,
+) -> AnyResult<RawHttpExchange> {
     let identity_headers = render_header_block(identity.headers())?;
 
     let mut stream = TcpStream::connect(endpoint.connect_addr()).with_context(|| {
@@ -399,7 +472,7 @@ pub(crate) fn send_request(
     parse_http_response(&raw)
 }
 
-fn parse_http_response(raw: &[u8]) -> AnyResult<RawHttpResponse> {
+fn parse_http_response(raw: &[u8]) -> AnyResult<RawHttpExchange> {
     let separator = b"\r\n\r\n";
     let split_at = raw
         .windows(separator.len())
@@ -414,7 +487,16 @@ fn parse_http_response(raw: &[u8]) -> AnyResult<RawHttpResponse> {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|status| status.parse::<u16>().ok())
         .ok_or_else(|| anyhow::anyhow!("gateway returned a malformed HTTP status line"))?;
-    Ok(RawHttpResponse { status, body })
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
+        .collect();
+    Ok(RawHttpExchange {
+        headers,
+        response: RawHttpResponse { status, body },
+    })
 }
 
 #[cfg(test)]

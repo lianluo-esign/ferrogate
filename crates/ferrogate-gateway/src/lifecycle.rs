@@ -7,7 +7,9 @@
 use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_config::is_caddyfile_path;
 use ferrogate_config::{config_snapshot_id, Config};
-use ferrogate_control_plane_client::action_identity::ClientActionIdentity;
+use ferrogate_control_plane_client::action_identity::{
+    ClientActionIdentity, ACTION_TIME_PREFLIGHT_PATH, TIME_TOKEN_HEADER,
+};
 use ferrogate_runtime::{ReloadCoordinator, ReloadOutcome};
 use serde_json::Value;
 use std::{
@@ -347,6 +349,10 @@ impl AdminEndpoint {
         format!("{}/admin/v1/config/reload", self.base_path)
     }
 
+    fn action_time_preflight_path(&self) -> String {
+        format!("{}{}", self.base_path, ACTION_TIME_PREFLIGHT_PATH)
+    }
+
     fn base_url(&self) -> String {
         format!("http://{}{}", self.host_header(), self.base_path)
     }
@@ -355,12 +361,78 @@ impl AdminEndpoint {
 #[derive(Debug, Clone)]
 struct AdminHttpResponse {
     status: u16,
+    headers: Vec<(String, String)>,
     body: String,
+}
+
+impl AdminHttpResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 fn post_admin_json(
     endpoint: &AdminEndpoint,
     token: &str,
+    body: &str,
+    action_identity: &ClientActionIdentity,
+) -> AnyResult<AdminHttpResponse> {
+    ensure_admin_action_time(endpoint, token, action_identity)?;
+    send_admin_request(
+        endpoint,
+        "POST",
+        &endpoint.reload_path(),
+        token,
+        Some("application/json"),
+        body,
+        action_identity,
+    )
+}
+
+fn ensure_admin_action_time(
+    endpoint: &AdminEndpoint,
+    token: &str,
+    action_identity: &ClientActionIdentity,
+) -> AnyResult<()> {
+    if action_identity.server_issued_time().is_some() {
+        return Ok(());
+    }
+    let response = send_admin_request(
+        endpoint,
+        "GET",
+        &endpoint.action_time_preflight_path(),
+        token,
+        None,
+        "",
+        action_identity,
+    )?;
+    if !(200..300).contains(&response.status) {
+        bail!(
+            "client action time challenge failed: status={} body={}",
+            response.status,
+            response.body
+        );
+    }
+    let server_time = response.header(TIME_TOKEN_HEADER).ok_or_else(|| {
+        anyhow::anyhow!(
+            "server did not issue {TIME_TOKEN_HEADER}; refusing admin reload without an authoritative timestamp"
+        )
+    })?;
+    action_identity
+        .accept_server_time(server_time)
+        .map_err(|error| anyhow::anyhow!("server issued an unusable action time token: {error}"))?;
+    Ok(())
+}
+
+fn send_admin_request(
+    endpoint: &AdminEndpoint,
+    method: &str,
+    path: &str,
+    token: &str,
+    content_type: Option<&str>,
     body: &str,
     action_identity: &ClientActionIdentity,
 ) -> AnyResult<AdminHttpResponse> {
@@ -372,15 +444,16 @@ fn post_admin_json(
         .context("failed to set admin API read timeout")?;
     write!(
         stream,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nConnection: close\r\n{}Content-Length: {}\r\n\r\n{}",
-        endpoint.reload_path(),
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n{action_identity_headers}",
         endpoint.host_header(),
-        token,
-        action_identity_headers,
-        body.len(),
-        body
     )
     .context("failed to write admin reload request")?;
+    if let Some(content_type) = content_type {
+        write!(stream, "Content-Type: {content_type}\r\n")
+            .context("failed to write admin reload content type")?;
+    }
+    write!(stream, "Content-Length: {}\r\n\r\n{body}", body.len())
+        .context("failed to write admin reload body")?;
 
     let mut response = String::new();
     stream
@@ -422,8 +495,15 @@ fn parse_admin_http_response(raw: &str) -> AnyResult<AdminHttpResponse> {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|status| status.parse::<u16>().ok())
         .ok_or_else(|| anyhow::anyhow!("admin API returned malformed HTTP status"))?;
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
+        .collect();
     Ok(AdminHttpResponse {
         status,
+        headers,
         body: body.to_string(),
     })
 }

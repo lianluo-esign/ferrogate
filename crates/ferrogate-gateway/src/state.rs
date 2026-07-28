@@ -318,9 +318,10 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[derive(Debug, Clone)]
 pub(crate) struct SharedAppState {
     inner: Arc<RwLock<AppState>>,
-    /// Process-lifetime key for short-lived client action time tokens (#548).
-    /// It sits outside the reloadable `AppState` snapshot so a hot config
-    /// reload cannot invalidate tokens already issued by this process.
+    /// Deployment keyring for short-lived client action time tokens (#548).
+    /// It sits outside the reloadable `AppState` snapshot because rotation is a
+    /// deployment rollout: every replica receives the overlapping keyring
+    /// before its active key changes.
     client_action_time_signer: Arc<ServerTimeTokenSigner>,
     reload_coordinator: Arc<Mutex<ferrogate_runtime::ReloadCoordinator>>,
     source_path: Option<Arc<PathBuf>>,
@@ -435,9 +436,15 @@ impl SharedAppState {
             Some(repositories) => AppState::try_new_with_repositories(config, repositories, true)?,
             None => AppState::try_new(config)?,
         };
+        let client_action_time_signer = Arc::new(ServerTimeTokenSigner::from_env()?);
+        if !client_action_time_signer.is_configured() {
+            warn!(
+                "FERROGATE_CLIENT_ACTION_TIME_SIGNING_KEY is not configured; ordinary traffic remains available, but attributed CLI requests fail closed until every replica shares a signing key"
+            );
+        }
         let state = Self {
             inner: Arc::new(RwLock::new(app_state)),
-            client_action_time_signer: Arc::new(ServerTimeTokenSigner::generate()?),
+            client_action_time_signer,
             reload_coordinator: Arc::new(Mutex::new(ferrogate_runtime::ReloadCoordinator::new(
                 snapshot,
             ))),

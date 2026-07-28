@@ -96,22 +96,25 @@ Because both start off, no part of the correlation guarantee rests on them:
 Opting in adds evidence; opting out removes none the server did not already
 hold.
 
-## The timestamp: server authority and the first-request `null`
+## The timestamp: server authority before the effect
 
-The audit instant is **server-issued or absent**. The CLI never fills it from
-its own clock, and there is no code path from the local clock into that field.
+The audit instant is **server-issued or the API request is not sent**. The CLI
+never fills it from its own clock, and there is no code path from the local
+clock into that field.
 
-When a request presents `x-ferrogate-action-id`, FerroGate adds a short-lived,
-HMAC-signed `x-ferrogate-time-token` to the response. The client harvests that
-token and echoes it on the next request of the same action. The server validates
-its HMAC signature, action-id binding and TTL against the server's own receive
-clock. An expired token, a bad signature or a token moved to another action is
-rejected by the server.
+Before the first API request of a logical action, the CLI sends one safe
+`GET /healthz` challenge with the same `x-ferrogate-action-id` and fingerprint.
+FerroGate returns a short-lived, HMAC-signed `x-ferrogate-time-token`; the CLI
+accepts it and presents it on the actual API request. If the challenge fails or
+does not return an acceptable token, the API request is refused locally. The
+challenge has no control-plane effect and is the only attributed request allowed
+to omit the token.
 
-That is a stated absence, not a silence, and it is the deliberate outcome: an
-instant read from a skewed or hostile client clock is a *false* record in a
-security-audit trail, which is worse than an absent one. The server's own
-receive time still bounds the action from the other side.
+The server validates the echoed token's HMAC signature, action-id binding and
+TTL against its own receive clock. An expired token, a bad signature, a token
+moved to another action, or an effect request with no token is rejected before
+the handler runs. Successful responses can refresh the held token for retries
+or later pages of the same action.
 
 Beside it, `client_clock_unverified_unix` is always present. It is the client's
 own reading, and it is **evidence about the client, never the event time**: no
@@ -120,23 +123,42 @@ one field cannot express clock skew — a host running hours behind, a suspended
 VM, a backdated workstation — and the difference between them is the finding an
 auditor needs.
 
-This is a piggy-back, not a preflight: the extra round-trip cost is zero and the
-first request simply has no token to present. A mutating verb is currently the
-first request of its action, so its receipt reports `client_sent_at: null` with
-`no_server_issued_time_token`; the response token can only describe a later
-request in the same action. Multi-request reads use that path today.
+The cost is explicit: one bounded challenge round trip per logical action. A
+single-request verb makes one challenge plus one timestamped API request; an
+N-page walk makes one challenge plus N timestamped API requests. No token is
+cached between CLI invocations.
 
 > **Known client-side limitation.** The client also refuses a token
 > that falls outside its declared TTL by more than five minutes, judged against
 > the client's own clock — the one this whole design calls untrusted. The
 > reading is taken once, when the command starts, so a machine whose clock is
 > further out than five minutes, or an invocation that runs longer than that,
-> will refuse **every** token and report `client_sent_at: null` with the same
-> absence code as "none was issued". The refusal is printed on stderr and is not
-> distinguished on the receipt. That is precisely the skewed-host case this page
-> says the two instants exist to expose, so it is a real gap and not a
+> will refuse the challenge token and will not send the API request. The refusal
+> is printed on stderr. That is precisely the skewed-host case this page says
+> the two instants exist to expose, so it is a real availability gap and not a
 > theoretical one; removing the client-side window check in favour of the
 > server's own TTL is deferred work.
+
+### Deployment authority and rotation
+
+Attributed CLI traffic requires an explicit deployment keyring:
+
+* `FERROGATE_CLIENT_ACTION_TIME_SIGNING_KEY` is the active standard-base64
+  encoding of exactly 32 random bytes. Every replica must use the same active
+  key. Without it, ordinary non-attributed traffic remains available, but any
+  request carrying an action id fails closed and the CLI will not send its API
+  operation.
+* `FERROGATE_CLIENT_ACTION_TIME_TRUSTED_KEYS` is an optional comma-separated
+  list of standard-base64 32-byte verification keys used during rotation.
+* `FERROGATE_CLIENT_ACTION_TIME_TTL_SECONDS` is optional, defaults to 30, and
+  must be between 1 and 60.
+
+Rotate in two phases so load balancing never sends a token to a replica that
+cannot verify it: first deploy the new key in every replica's trusted list while
+the old key remains active; then make the new key active everywhere while the
+old key stays trusted. Remove the old key only after the maximum token TTL has
+elapsed. The keyring is read at process startup, so rotation is a rolling
+deployment, not a hot config reload.
 
 `ferrogate ctl <group> <verb> --output json` renders all of this under
 `client_identity`; `--output table` renders it as `client.*` rows, each labelled

@@ -141,9 +141,10 @@
 //! * **`client_sent_at` is server-issued or null.** It is never filled from the
 //!   local clock; a request that presented no token reports
 //!   [`absence_codes::NO_SERVER_TIME_TOKEN`], which is a finding, not a silence.
-//!   The server piggy-backs a token on the response, so a one-request mutation
-//!   still has none to present; a later request in the same action can carry the
-//!   server-issued instant.
+//!   Before a mutation is sent, the client obtains an action-bound token with a
+//!   safe challenge request. A one-request mutation therefore carries an
+//!   authoritative instant; a missing token means the preflight contract was
+//!   not satisfied, not that the local clock may stand in for the server.
 //! * **`client_clock_unverified_unix` is a different fact.** It is the client's
 //!   own reading, carried beside the server's so an auditor can measure skew.
 //!   The two are never merged, and nothing may order or authorize on the second.
@@ -252,9 +253,10 @@ pub mod absence_codes {
     /// No server-issued time token was held when this request was prepared, so
     /// `client_sent_at` has no authoritative value (issue #548).
     ///
-    /// This is the ordinary case for the first request of an invocation, and it
-    /// is reported as an absence **on purpose**: the local clock is not used to
-    /// fill the field. The server's own receive time still bounds the action.
+    /// Mutating requests normally cannot reach the effect endpoint in this
+    /// state: the mandatory safe challenge fails closed before the mutation is
+    /// sent. The code remains explicit for dry runs and for any transport
+    /// contract violation; the local clock is never used to fill the field.
     pub const NO_SERVER_TIME_TOKEN: &str = "no_server_issued_time_token";
     /// The operator disclosed no client-side address
     /// ([`crate::action_identity::REPORTED_IP_ENV`]). The authoritative address
@@ -1674,20 +1676,26 @@ impl<'a> MutationPlan<'a> {
     /// See [`MutationReport`].
     pub async fn send<T: Transport>(self, client: &ControlPlaneClient<T>) -> MutationReport {
         let verb = self.renderer.verb().clone();
-        // Read the server-issued time the identity holds BEFORE the call. The
-        // client harvests a fresh token off the response, and reading afterwards
-        // would have the receipt claim the request carried an instant that in
-        // fact arrived with the answer to it.
+        // Obtain the authoritative token before snapshotting what the mutation
+        // will present. `client.send` repeats this check as a no-op, preserving
+        // the single transport chokepoint for non-receipt reads.
+        let preflight = client.ensure_server_time().await;
         let presented = self.identity.server_issued_time();
-        let (receipt, failure) = match client.send(&self.spec).await {
-            Ok(response) => (
-                self.build_receipt(&verb, Executed::Applied(&response), presented),
-                None,
-            ),
+        let (receipt, failure) = match preflight {
             Err(error) => (
-                self.build_receipt(&verb, Executed::Failed(&error), presented),
+                self.build_receipt(&verb, Executed::NotSent, presented),
                 Some(error),
             ),
+            Ok(()) => match client.send(&self.spec).await {
+                Ok(response) => (
+                    self.build_receipt(&verb, Executed::Applied(&response), presented),
+                    None,
+                ),
+                Err(error) => (
+                    self.build_receipt(&verb, Executed::Failed(&error), presented),
+                    Some(error),
+                ),
+            },
         };
         MutationReport {
             output: self.renderer.render(receipt),
@@ -1904,28 +1912,18 @@ impl<'a> MutationPlan<'a> {
     /// (issue #548).
     ///
     /// `presented_time` is the server-issued instant the request **carried**,
-    /// read before the call. Three things are deliberate here:
+    /// read after the safe challenge succeeds and before the effect request is
+    /// sent. Three things are deliberate here:
     ///
     /// 1. **A dry run reports no `client_sent_at`.** Nothing was sent, so no
     ///    instant was presented, and the absence code says exactly that rather
     ///    than reusing a token the identity happens to hold.
-    /// 2. **A sent request with no token also reports an absence**, coded
+    /// 2. **A sent request with no token reports an invariant failure**, coded
     ///    [`absence_codes::NO_SERVER_TIME_TOKEN`], not a local clock reading.
-    ///    That is the whole point of the design: the audit instant is the
-    ///    server's or it is null.
-    ///
-    ///    A mutating verb is currently the first request of its action, so
-    ///    `(true, None)` remains the normal receipt arm even though the response
-    ///    now carries a token for any later request. That is why it needs a test of
-    ///    its own rather than inheriting confidence from the dry-run arm beside
-    ///    it. `an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in`
-    ///    is that test, and the mutation it exists to catch is filling this arm
-    ///    with `self.identity.client_clock().unverified_unix_seconds()`: the
-    ///    local clock wearing the server's authority, producing a perfectly
-    ///    plausible instant that nothing else in the receipt contradicts.
-    ///    `validate()` cannot see it (a forger sets `bound_action_id` and
-    ///    `authority` too) and the `SystemTime::now()` source guard cannot see it
-    ///    (it adds no clock read — it launders one that was already taken).
+    ///    The transport must obtain a token with the safe challenge before it
+    ///    sends the mutation. This arm remains defensive so a future transport
+    ///    regression cannot launder the client clock into an authoritative
+    ///    field or silently omit the evidence.
     /// 3. **`client_clock_unverified_unix` is always present**, because it is
     ///    always knowable and it is the only evidence of client skew. It is a
     ///    plain `u64` rather than an [`Attested`] for that reason — it is never
@@ -1943,19 +1941,9 @@ impl<'a> MutationPlan<'a> {
             }
             (true, None) => Attested::absent(
                 absence_codes::NO_SERVER_TIME_TOKEN,
-                // The detail states what was observed and stops there. It used
-                // to add "the control plane issues none today", which is a
-                // *cause* this code never checked: the same absence is produced
-                // by a response that carried no header, by a first request with
-                // nothing to echo yet, and by a token this client refused as
-                // outside its window (reported on stderr, and not distinguished
-                // here). Naming one of three as the reason is a guess printed
-                // as a finding.
-                "no server-issued time token was held when this request was prepared; this is \
-                 the observed state and not a diagnosis — no response had carried one yet, or \
-                 the responses that did were refused (see stderr). The client clock is \
-                 deliberately NOT used to fill this field, and the server's own receive time \
-                 still bounds the action",
+                "the request was reported sent without the server-issued token required by the \
+                 action-time preflight contract; the client clock is deliberately NOT used to \
+                 fill this field",
             ),
             (false, _) => Attested::absent(
                 absence_codes::REQUEST_NOT_SENT,

@@ -158,50 +158,36 @@
 //!
 //! ## How the token is obtained, and what it costs
 //!
-//! **Piggy-back, never a preflight.** [`ClientActionIdentity::accept_server_time`]
-//! harvests a token from any response that carries [`TIME_TOKEN_HEADER`], and
-//! the next request of the same action presents it. The steady-state extra
-//! round-trip cost is therefore **zero**: no `POST /v1/audit/time-token` is ever
-//! issued, and the first request of an invocation simply has no token yet.
+//! **One bounded preflight per logical action.** Before the first API request,
+//! each transport sends a safe `GET` to [`ACTION_TIME_PREFLIGHT_PATH`] with the
+//! same action id and fingerprint. The server returns an action-bound token;
+//! the real request is not sent unless the client accepts it. Pagination and
+//! retries reuse that token and harvest replacements from ordinary responses.
 //!
 //! **A cross-invocation cache was evaluated and rejected.** The TTL must be
 //! seconds (otherwise an attacker pre-fetches tokens and replays them later to
 //! backdate an action), and a CLI process lives for less than one command. A
 //! token cached on disk between invocations is expired before the operator types
 //! the next command, so it buys nothing and leaves a token at rest. What that
-//! leaves is honest and measurable:
+//! leaves one honest and measurable cost:
 //!
-//! | invocation shape | requests | requests carrying a server time |
+//! | invocation shape | challenge requests | API requests carrying a server time |
 //! |---|---|---|
-//! | single-request verb (the common case) | 1 | 0 |
-//! | `--all-pages` walk of N pages | N | N − 1 |
-//! | any multi-request verb | N | N − 1 |
+//! | single-request verb (the common case) | 1 | 1 |
+//! | `--all-pages` walk of N pages | 1 | N |
+//! | any multi-request verb | 1 | N |
 //!
-//! **And what that N−1 is worth on a receipt today: nothing.** The table above
-//! describes requests on the wire. A [`crate::receipt::MutationReceipt`] is
-//! rendered only for a *mutating* verb, every mutating verb is a single request
-//! (`--all-pages` is refused on a mutating method), and a token can only arrive
-//! *with a response* — so the request that produces a receipt is always the
-//! action's first, and `client_sent_at` on a receipt is structurally `null`.
-//! The N−1 saving lands on reads, which produce no receipt. The
-//! `(true, Some(_))` arm of [`crate::receipt::MutationPlan::client_identity`] is
-//! therefore production-dead until the server issues tokens *and* something
-//! makes a mutating verb the second request of an action; it is implemented and
-//! tested anyway, because the alternative is discovering the shape only once a
-//! server starts issuing.
-//!
-//! **The server now issues the token on ordinary responses.** A request that
+//! **The server issues the token on challenge and ordinary responses.** A request that
 //! presents [`ACTION_ID_HEADER`] receives a fresh HMAC-signed token at the
-//! downstream response boundary. On the next request of that same action the
-//! server validates signature, action binding and TTL against its own receive
-//! clock. The first request still has no token to present, so a single-request
-//! mutation receipt honestly reports [`crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN`]
-//! rather than laundering the client clock into the server field.
+//! downstream response boundary. The challenge bootstraps the first token; on
+//! every API request the server validates signature, action binding and TTL
+//! against its own receive clock. A mutation receipt therefore reports the
+//! exact server token the mutation presented.
 //!
 //! When no token is held, `client_sent_at` is `null` **with a stated reason**
 //! ([`crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN`]) — not backfilled
-//! from the local clock. That is the point of the whole design, and it is why
-//! the absence is a finding rather than a silence.
+//! from the local clock. That remains possible for a client-only dry run, which
+//! sends no challenge and no API request.
 //!
 //! **The narrower guarantee, stated.** A server-issued token proves when the
 //! *server issued it*, not when the operator ran the command. It is bounded from
@@ -324,6 +310,10 @@ pub const CLIENT_CLOCK_HEADER: &str = "x-ferrogate-client-clock-unverified";
 /// Header carrying the echoed [`ServerIssuedTime`] — the authoritative
 /// `client_sent_at`. Present only when the server has issued one.
 pub const TIME_TOKEN_HEADER: &str = "x-ferrogate-time-token";
+
+/// Safe endpoint used to obtain the first server-issued time token for one
+/// logical action. It is intentionally a read with no Control Plane effect.
+pub const ACTION_TIME_PREFLIGHT_PATH: &str = "/healthz";
 
 /// Header carrying an operator-supplied, **client-asserted** address. Never to
 /// be merged with the source IP the server observes.
@@ -1081,12 +1071,11 @@ impl ClientActionIdentity {
 
     /// Harvest a time token off a response, replacing the held one.
     ///
-    /// This is the piggy-back half: no preflight request is ever made, so the
-    /// steady-state extra round-trip cost is zero and only the first request of
-    /// an invocation goes without a server time. A token that does not parse, or
-    /// is bound to a different action, or is outside its TTL by the client's own
-    /// reading, is **not** stored — the held value stays whatever it was, and
-    /// the refusal is returned for the caller to surface as a diagnostic.
+    /// Used both by the mandatory first-request challenge and by ordinary
+    /// response piggy-back. A token that does not parse, is bound to a different
+    /// action, or is outside its TTL by the client's own reading is **not**
+    /// stored; the held value stays whatever it was and the refusal is returned
+    /// for the caller to surface.
     pub fn accept_server_time(&self, raw: &str) -> Result<ServerIssuedTime, TimeTokenRefusal> {
         let accepted = ServerIssuedTime::parse(raw)?.accept_for(&self.action_id, &self.clock)?;
         if let Ok(mut held) = self.server_time.lock() {
