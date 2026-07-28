@@ -591,7 +591,8 @@ case "$guard_label" in
     realistic_secret_fragment="${pem_open} RSA ${pem_private}\\n${realistic_der}\\n"
     ;;
   "AWS access key id")
-    realistic_secret_fragment="AKIA0123456789ABCDEF"
+    aws_prefix="AK"
+    realistic_secret_fragment="${aws_prefix}IA0123456789ABCDEF"
     ;;
   "GitHub token")
     github_prefix="gh"
