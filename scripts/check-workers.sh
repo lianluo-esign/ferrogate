@@ -72,9 +72,9 @@ for worker in "${WORKERS[@]}"; do
   #
   # So ask for what the gate is about to RUN, not for a directory: `tsc` for
   # the typecheck every Worker gets, and `vitest` for the Workers that opt
-  # into the workerd E2E by committing a vitest.config.ts. Deliberately not
-  # `npm ls`, which reports non-zero on agent-gateway's known-broken peer
-  # graph (#468) and would reinstall on every single run.
+  # into the workerd E2E by committing a vitest.config.ts. `npm ci` on a clean
+  # checkout is the lockfile-reproducibility proof; this local fast path only
+  # avoids reinstalling an already usable tree.
   worker_tree_is_usable() {
     [ -d node_modules ] || return 1
     [ -x node_modules/.bin/tsc ] || return 1
@@ -89,33 +89,9 @@ for worker in "${WORKERS[@]}"; do
       echo "-- reinstalling: node_modules is present but does not satisfy the gate" >&2
     fi
     if [ -f package-lock.json ]; then
-      echo "-- npm ci (node_modules missing)"
-      # A committed lockfile that is out of sync with package.json makes `npm ci`
-      # refuse (EUSAGE). That is drift worth SEEING, but it must not make the
-      # typecheck gate unrunnable -- the point of this script is to compile the
-      # TypeScript we deploy. So fall back to `npm install` and shout about it.
-      # workers/agent-gateway is in exactly this state today (see #468): 127 of
-      # its 220 lockfile entries carry no resolved/integrity, and wrangler's
-      # floating range pulls a peer that conflicts with the pinned
-      # @cloudflare/workers-types, so the lockfile cannot be regenerated without
-      # a dependency decision.
-      if ! npm ci --no-audit --no-fund; then
-        echo "WARNING: workers/$worker: npm ci refused (lockfile out of sync with package.json)." >&2
-        echo "WARNING: workers/$worker: falling back to 'npm install' so the typecheck still runs." >&2
-        echo "WARNING: workers/$worker: the committed lockfile is NOT reproducible -- fix it (see #468)." >&2
-        if ! npm install --no-audit --no-fund; then
-          # Last resort: an unsatisfiable peer graph. agent-gateway hits this
-          # today -- wrangler's floating ^4.114.0 resolves to a build whose
-          # peerOptional wants @cloudflare/workers-types ^5, while the pinned v4
-          # and partyserver's peer both require v4 (#468). --legacy-peer-deps
-          # yields a tree that compiles; it does NOT make the deps correct.
-          echo "WARNING: workers/$worker: npm install failed on an unsatisfiable peer graph." >&2
-          echo "WARNING: workers/$worker: retrying with --legacy-peer-deps purely to keep the" >&2
-          echo "WARNING: workers/$worker: typecheck running. THE DEPENDENCY SET IS BROKEN (#468)." >&2
-          npm install --no-audit --no-fund --legacy-peer-deps \
-            || { echo "ERROR: workers/$worker: install failed even with --legacy-peer-deps" >&2; exit 1; }
-        fi
-      fi
+      echo "-- npm ci (node_modules missing or unusable)"
+      npm ci --no-audit --no-fund \
+        || { echo "ERROR: workers/$worker: npm ci failed; the committed lockfile must reproduce exactly" >&2; exit 1; }
     else
       echo "-- npm install (node_modules missing, no package-lock.json)"
       npm install --no-audit --no-fund \

@@ -565,11 +565,11 @@ code change.
 grant-forgery test was watched failing against the pre-rework route before the
 fix was restored.
 
-To reproduce, install with **`npm install --legacy-peer-deps`**, not `npm ci`:
-`package-lock.json` predates the `devDependencies` block (`npm ci` reports
-`Missing: @cloudflare/vitest-pool-workers … from lock file`), and `agents@0.0.109`
-declares an unsatisfiable `react` peer through `@ai-sdk/react`. Regenerating the
-lockfile shifts ~1400 transitive lines and is left to its own slice.
+To reproduce from `workers/agent-gateway`, run `npm ci --no-audit --no-fund`
+followed by `npm run typecheck` and `npm test`. The committed lockfile includes
+the complete peer graph and pins the Wrangler toolchain to the v4
+`@cloudflare/workers-types` boundary; no `--legacy-peer-deps` suppression is
+required or permitted by the Worker gate.
 
 ---
 
