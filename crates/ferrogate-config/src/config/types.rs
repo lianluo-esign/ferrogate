@@ -1508,6 +1508,7 @@ pub struct Model {
     pub visible_project_ids: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<ModelCapability>,
+    /// Total input-plus-output token limit of this physical primary route.
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
@@ -1531,7 +1532,7 @@ pub struct CanaryRoute {
     /// the primary route because the provider/model pair may differ.
     #[serde(default)]
     pub capabilities: Vec<ModelCapability>,
-    /// Context limit of this physical canary route.
+    /// Total input-plus-output token limit of this physical canary route.
     #[serde(default)]
     pub context_window: Option<u32>,
     /// Percentage of traffic (0-100) routed to the canary. `0` disables the
@@ -1574,7 +1575,7 @@ pub struct ModelFallback {
     /// declaration serves only requests with no explicit feature requirement.
     #[serde(default)]
     pub capabilities: Vec<ModelCapability>,
-    /// Context limit of this physical fallback route.
+    /// Total input-plus-output token limit of this physical fallback route.
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]

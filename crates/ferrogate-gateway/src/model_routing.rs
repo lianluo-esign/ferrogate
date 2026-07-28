@@ -10,6 +10,7 @@ use std::collections::{BTreeSet, HashSet};
 use ferrogate_core::TenantContext;
 use ferrogate_providers::{ModelCapability, ModelRoute, RoutingStrategy};
 use http::StatusCode;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::state::{AdminAuditEventDraft, AppState};
@@ -34,12 +35,15 @@ pub(crate) struct ModelRouteRequirements {
     /// at all. An explicitly declared non-chat route must not inherit this
     /// exemption.
     allow_undeclared_capabilities: bool,
-    /// Exact caller-declared maximum output tokens. FerroGate deliberately
-    /// does not add its estimated prompt tokens here: estimates use tokenizer
-    /// fallbacks and are not an exact context-fit proof. A route therefore
-    /// satisfies this bound only when its declared `context_window` is at
-    /// least this explicit value.
-    pub(crate) explicit_context_window: Option<u64>,
+    /// Conservative upper bound for input tokens when the caller declares an
+    /// output-token maximum. It uses serialized UTF-8 bytes, not the billing
+    /// estimator: every ordinary input token consumes at least one byte, and
+    /// the full JSON envelope also covers structural message framing.
+    pub(crate) input_token_upper_bound: Option<u64>,
+    /// Exact caller-declared maximum output tokens.
+    pub(crate) explicit_output_tokens: Option<u64>,
+    /// Conservative total of input upper bound plus explicit output maximum.
+    pub(crate) required_context_window: Option<u64>,
 }
 
 impl ModelRouteRequirements {
@@ -47,7 +51,8 @@ impl ModelRouteRequirements {
         endpoint: ModelEndpointKind,
         body: &Value,
         stream: bool,
-        gateway_tools_injected: bool,
+        request_input_token_upper_bound: u64,
+        injected_tool_token_upper_bound: u64,
     ) -> Self {
         let mut requirements = Self::default();
         match endpoint {
@@ -62,7 +67,7 @@ impl ModelRouteRequirements {
         if stream {
             requirements.require(ModelCapability::Streaming);
         }
-        if gateway_tools_injected || non_empty(body.get("tools")) {
+        if injected_tool_token_upper_bound > 0 || non_empty(body.get("tools")) {
             requirements.require(ModelCapability::Tools);
         }
         if structured_output_requested(body, endpoint) {
@@ -71,14 +76,20 @@ impl ModelRouteRequirements {
         if request_contains_image_input(body, endpoint) {
             requirements.require(ModelCapability::Vision);
         }
-        requirements.explicit_context_window = explicit_output_token_bound(body, endpoint);
+        requirements.explicit_output_tokens = explicit_output_token_bound(body, endpoint);
+        if let Some(output_tokens) = requirements.explicit_output_tokens {
+            let input_tokens =
+                request_input_token_upper_bound.saturating_add(injected_tool_token_upper_bound);
+            requirements.input_token_upper_bound = Some(input_tokens);
+            requirements.required_context_window = Some(input_tokens.saturating_add(output_tokens));
+        }
         requirements.allow_undeclared_capabilities =
             matches!(
                 endpoint,
                 ModelEndpointKind::ChatCompletions
                     | ModelEndpointKind::Responses
                     | ModelEndpointKind::AnthropicMessages
-            ) && requirements.explicit_context_window.is_none()
+            ) && requirements.required_context_window.is_none()
                 && requirements.capabilities.len() == 1
                 && requirements.capabilities.contains(&ModelCapability::Chat);
         requirements
@@ -106,11 +117,17 @@ impl ModelRouteRequirements {
                 .collect::<Vec<_>>()
                 .join(",")
         };
+        let input = self
+            .input_token_upper_bound
+            .map_or_else(|| "none".to_string(), |value| value.to_string());
+        let output = self
+            .explicit_output_tokens
+            .map_or_else(|| "none".to_string(), |value| value.to_string());
         let context = self
-            .explicit_context_window
+            .required_context_window
             .map_or_else(|| "none".to_string(), |value| value.to_string());
         format!(
-            "required_capabilities={capabilities};explicit_context_window={context};allow_undeclared_capabilities={}",
+            "required_capabilities={capabilities};input_token_upper_bound={input};explicit_output_tokens={output};required_context_window={context};allow_undeclared_capabilities={}",
             self.allow_undeclared_capabilities
         )
     }
@@ -329,7 +346,7 @@ pub(crate) fn route_exclusion_reasons(
             .map(ModelRouteExclusionReason::MissingCapability)
             .collect::<Vec<_>>()
     };
-    if let Some(required) = requirements.explicit_context_window {
+    if let Some(required) = requirements.required_context_window {
         match route.context_window {
             None => reasons.push(ModelRouteExclusionReason::ContextWindowUndeclared { required }),
             Some(declared) if u64::from(declared) < required => {
@@ -476,6 +493,13 @@ fn explicit_output_token_bound(body: &Value, endpoint: ModelEndpointKind) -> Opt
         ModelEndpointKind::Embeddings | ModelEndpointKind::Images => None,
     }
     .and_then(Value::as_u64)
+}
+
+pub(crate) fn conservative_input_token_upper_bound<T: Serialize>(value: &T) -> u64 {
+    serde_json::to_vec(value)
+        .ok()
+        .and_then(|bytes| u64::try_from(bytes.len()).ok())
+        .unwrap_or(u64::MAX)
 }
 
 fn request_contains_image_input(body: &Value, endpoint: ModelEndpointKind) -> bool {

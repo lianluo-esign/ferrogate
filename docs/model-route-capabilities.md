@@ -26,7 +26,8 @@ excluded rather than being tried optimistically.
 
 ## Context Rule
 
-Context filtering uses only the caller's explicit maximum output-token field:
+Context filtering activates when the caller supplies an explicit maximum
+output-token field:
 
 | Endpoint | Field |
 |---|---|
@@ -35,10 +36,16 @@ Context filtering uses only the caller's explicit maximum output-token field:
 | Anthropic Messages | `max_tokens` |
 | Embeddings and Images | none |
 
-FerroGate does not add estimated prompt tokens. Its token estimator has
-fallbacks and cannot prove exact context fit, so using it here would turn an
-estimate into a hidden routing guarantee. When an explicit bound is present, a
-route with no `context_window`, or one smaller than the bound, is excluded.
+FerroGate does not use the billing prompt estimate for this decision. Instead,
+it treats the accepted request JSON's UTF-8 byte length as a
+conservative input-token upper bound, adds the serialized upper bound of any
+gateway-injected tools, then adds the caller's exact output-token maximum. This
+is deliberately stricter than provider-specific token estimates: ordinary
+input tokens consume at least one byte, while the complete JSON envelope also
+covers structural message framing. A route with no `context_window`, or one
+smaller than that conservative total, is excluded before strategy ordering or
+dispatch. Audit evidence reports only the numeric input upper bound, output
+maximum, and required total; it never copies request content.
 
 ## Decision Evidence
 

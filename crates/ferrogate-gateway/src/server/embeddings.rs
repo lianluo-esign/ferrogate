@@ -1087,7 +1087,8 @@ fn build_embeddings_request_plan(
         ModelEndpointKind::Embeddings,
         &body_json,
         false,
-        false,
+        0,
+        0,
     );
     let routing = state.candidate_model_routes(
         &model,

@@ -148,6 +148,7 @@ provider = "incompatible"
 provider_model = "tool-model"
 routing_strategy = "lowest_cost"
 capabilities = ["chat"]
+context_window = 8192
 input_price_per_1m = 0.01
 output_price_per_1m = 0.01
 
@@ -155,6 +156,7 @@ output_price_per_1m = 0.01
 provider = "compatible"
 provider_model = "tool-model"
 capabilities = ["chat", "tools"]
+context_window = 32768
 input_price_per_1m = 10.0
 output_price_per_1m = 10.0
 
@@ -312,10 +314,76 @@ platform_operator = true
         "{rejected_investigation}"
     );
 
+    let context_request = json!({
+        "model": "tool-model",
+        "messages": [{
+            "role": "user",
+            "content": format!("CONTEXT_PROMPT_SECRET{}", "x".repeat(8_192))
+        }],
+        "max_completion_tokens": 1
+    });
+    let context_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer route-secret",
+            "Content-Type: application/json",
+        ],
+        &context_request.to_string(),
+    );
+    assert!(context_response.contains("200 OK"), "{context_response}");
+    let context_request_id = response_header(&context_response, "x-request-id");
+    let context_investigation_response = http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={context_request_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    let context_investigation = response_json(&context_investigation_response);
+    let context_events = context_investigation["audit_events"].as_array().unwrap();
+    let context_exclusion = context_events
+        .iter()
+        .find(|event| {
+            event["action"] == "model_route.excluded"
+                && event["outcome"] == "context_window_too_small"
+        })
+        .unwrap_or_else(|| panic!("missing context exclusion: {context_investigation}"));
+    assert!(
+        context_exclusion["target"]
+            .as_str()
+            .unwrap()
+            .contains("provider=incompatible;provider_model=tool-model"),
+        "{context_exclusion}"
+    );
+    let context_message = context_exclusion["message"].as_str().unwrap();
+    assert!(context_message.contains("declared_context_window=8192"));
+    assert!(context_message.contains("input_token_upper_bound="));
+    assert!(context_message.contains("explicit_output_tokens=1"));
+    assert!(!context_message.contains("CONTEXT_PROMPT_SECRET"));
+    let context_selected = context_events
+        .iter()
+        .find(|event| event["action"] == "model_route.selected")
+        .unwrap_or_else(|| panic!("missing context selection: {context_investigation}"));
+    assert!(
+        context_selected["target"]
+            .as_str()
+            .unwrap()
+            .contains("provider=compatible;provider_model=tool-model"),
+        "{context_selected}"
+    );
+    assert!(
+        !context_investigation
+            .to_string()
+            .contains("CONTEXT_PROMPT_SECRET"),
+        "{context_investigation}"
+    );
+
     let compatible_requests = compatible.finish();
     let incompatible_requests = incompatible.finish();
     assert_eq!(incompatible_requests, Vec::<Value>::new());
-    assert_eq!(compatible_requests, [request]);
+    assert_eq!(compatible_requests, [request, context_request]);
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();

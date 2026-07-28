@@ -66,7 +66,8 @@ use ferrogate_providers::{
 use ferrogate_storage::StoredRequestLog;
 
 use crate::model_routing::{
-    ModelEndpointKind, ModelRouteRequirements, ModelRoutingAuditContext, ModelRoutingDecision,
+    conservative_input_token_upper_bound, ModelEndpointKind, ModelRouteRequirements,
+    ModelRoutingAuditContext, ModelRoutingDecision,
 };
 
 use super::{
@@ -1607,18 +1608,20 @@ fn build_messages_request_plan(
     }
 
     let estimated_usage = estimate_messages_usage(&chat_body, &request.model);
-    let gateway_tools_injected = !state
-        .tools_for(
-            &auth.tenant_context(),
-            auth.api_key_id.as_deref(),
-            Some(MESSAGES_ROUTE),
-        )
-        .is_empty();
+    let gateway_tools = state.tools_for(
+        &auth.tenant_context(),
+        auth.api_key_id.as_deref(),
+        Some(MESSAGES_ROUTE),
+    );
+    let injected_tool_token_upper_bound = (!gateway_tools.is_empty())
+        .then(|| conservative_input_token_upper_bound(&gateway_tools))
+        .unwrap_or_default();
     let requirements = ModelRouteRequirements::from_request(
         ModelEndpointKind::AnthropicMessages,
         &chat_body,
         stream,
-        gateway_tools_injected,
+        u64::try_from(body.len()).unwrap_or(u64::MAX),
+        injected_tool_token_upper_bound,
     );
     let routing = state.candidate_model_routes(
         &model,

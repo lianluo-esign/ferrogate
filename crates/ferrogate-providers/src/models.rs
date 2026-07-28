@@ -88,7 +88,7 @@ pub struct ModelRoute {
     pub capabilities: Vec<ModelCapability>,
     /// Declared maximum context tokens for this physical route. `None` is
     /// retained for legacy requests without an explicit output-token bound,
-    /// but never satisfies an explicit context requirement.
+    /// but never satisfies a total input-plus-output context requirement.
     pub context_window: Option<u32>,
     /// The provider's declared physical region (issue #173), e.g.
     /// "eu-west-1" -- `None` when the provider config doesn't declare one.

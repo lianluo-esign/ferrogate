@@ -46,7 +46,8 @@ use ferrogate_providers::{
 use ferrogate_storage::StoredRequestLog;
 
 use crate::model_routing::{
-    ModelEndpointKind, ModelRouteRequirements, ModelRoutingAuditContext, ModelRoutingDecision,
+    conservative_input_token_upper_bound, ModelEndpointKind, ModelRouteRequirements,
+    ModelRoutingAuditContext, ModelRoutingDecision,
 };
 
 use super::{
@@ -2994,14 +2995,18 @@ fn build_ai_request_plan(
     }
 
     let estimated_usage = estimate_chat_completion_usage(&body_json, &request.model);
-    let gateway_tools_injected = endpoint == AiEndpoint::ChatCompletions
-        && !state
-            .tools_for(
-                &auth.tenant_context(),
-                auth.api_key_id.as_deref(),
-                Some(endpoint.route()),
-            )
-            .is_empty();
+    let injected_tool_token_upper_bound = if endpoint == AiEndpoint::ChatCompletions {
+        let tools = state.tools_for(
+            &auth.tenant_context(),
+            auth.api_key_id.as_deref(),
+            Some(endpoint.route()),
+        );
+        (!tools.is_empty())
+            .then(|| conservative_input_token_upper_bound(&tools))
+            .unwrap_or_default()
+    } else {
+        0
+    };
     let requirements = ModelRouteRequirements::from_request(
         match endpoint {
             AiEndpoint::ChatCompletions => ModelEndpointKind::ChatCompletions,
@@ -3009,7 +3014,8 @@ fn build_ai_request_plan(
         },
         &body_json,
         request.stream,
-        gateway_tools_injected,
+        u64::try_from(body.len()).unwrap_or(u64::MAX),
+        injected_tool_token_upper_bound,
     );
     let mut routing = state.candidate_model_routes(
         &model,

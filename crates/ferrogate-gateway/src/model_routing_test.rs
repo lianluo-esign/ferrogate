@@ -18,7 +18,8 @@ fn neutral_legacy_request_keeps_a_route_with_no_declarations() {
         ModelEndpointKind::ChatCompletions,
         &json!({"model": "logical", "messages": []}),
         false,
-        false,
+        0,
+        0,
     );
     assert!(requirements.is_neutral());
     assert_eq!(
@@ -40,18 +41,20 @@ fn neutral_legacy_request_keeps_a_route_with_no_declarations() {
 
 #[test]
 fn request_features_become_exact_typed_requirements() {
+    let body = json!({
+        "model": "logical",
+        "stream": true,
+        "max_output_tokens": 4096,
+        "tools": [{"type": "function", "name": "lookup"}],
+        "text": {"format": {"type": "json_schema", "name": "answer"}},
+        "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.test/a.png"}]}]
+    });
     let requirements = ModelRouteRequirements::from_request(
         ModelEndpointKind::Responses,
-        &json!({
-            "model": "logical",
-            "stream": true,
-            "max_output_tokens": 4096,
-            "tools": [{"type": "function", "name": "lookup"}],
-            "text": {"format": {"type": "json_schema", "name": "answer"}},
-            "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.test/a.png"}]}]
-        }),
+        &body,
         true,
-        false,
+        conservative_input_token_upper_bound(&body),
+        0,
     );
     assert_eq!(
         requirements.capabilities().collect::<Vec<_>>(),
@@ -63,7 +66,15 @@ fn request_features_become_exact_typed_requirements() {
             ModelCapability::StructuredOutput,
         ]
     );
-    assert_eq!(requirements.explicit_context_window, Some(4096));
+    assert_eq!(
+        requirements.input_token_upper_bound,
+        Some(conservative_input_token_upper_bound(&body))
+    );
+    assert_eq!(requirements.explicit_output_tokens, Some(4096));
+    assert_eq!(
+        requirements.required_context_window,
+        Some(conservative_input_token_upper_bound(&body) + 4096)
+    );
 }
 
 #[test]
@@ -77,7 +88,8 @@ fn every_missing_requirement_produces_a_stable_exclusion_reason() {
             "max_completion_tokens": 2048
         }),
         true,
-        false,
+        0,
+        0,
     );
     let reasons = route_exclusion_reasons(&route(&[], None), &requirements, &HashSet::new());
     let codes = reasons
@@ -120,7 +132,8 @@ fn endpoint_capabilities_and_context_limit_filter_fail_closed() {
         ModelEndpointKind::Embeddings,
         &json!({"input": "hello"}),
         false,
-        false,
+        0,
+        0,
     );
     assert_eq!(
         route_exclusion_reasons(&route(&[], None), &embeddings, &HashSet::new())[0].code(),
@@ -131,7 +144,8 @@ fn endpoint_capabilities_and_context_limit_filter_fail_closed() {
         ModelEndpointKind::Images,
         &json!({"prompt": "hello"}),
         false,
-        false,
+        0,
+        0,
     );
     assert!(route_exclusion_reasons(
         &route(&[ModelCapability::Images], None),
@@ -141,12 +155,76 @@ fn endpoint_capabilities_and_context_limit_filter_fail_closed() {
     .is_empty());
 
     let mut bounded = ModelRouteRequirements::default();
-    bounded.explicit_context_window = Some(4096);
+    bounded.required_context_window = Some(4096);
     assert_eq!(
         route_exclusion_reasons(&route(&[], Some(2048)), &bounded, &HashSet::new())[0].code(),
         "context_window_too_small"
     );
     assert!(route_exclusion_reasons(&route(&[], Some(4096)), &bounded, &HashSet::new()).is_empty());
+}
+
+#[test]
+fn injected_tools_add_their_serialized_upper_bound_to_context() {
+    let body = json!({
+        "model": "logical",
+        "messages": [],
+        "max_tokens": 8
+    });
+    let requirements = ModelRouteRequirements::from_request(
+        ModelEndpointKind::ChatCompletions,
+        &body,
+        false,
+        conservative_input_token_upper_bound(&body),
+        512,
+    );
+    let expected_input = conservative_input_token_upper_bound(&body) + 512;
+    assert!(requirements.capabilities.contains(&ModelCapability::Tools));
+    assert_eq!(requirements.input_token_upper_bound, Some(expected_input));
+    assert_eq!(
+        requirements.required_context_window,
+        Some(expected_input + 8)
+    );
+}
+
+#[test]
+fn input_and_output_bounds_exclude_a_route_that_output_alone_would_admit() {
+    let prompt = "x".repeat(8_192);
+    let body = json!({
+        "model": "logical",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_completion_tokens": 1
+    });
+    let requirements = ModelRouteRequirements::from_request(
+        ModelEndpointKind::ChatCompletions,
+        &body,
+        false,
+        conservative_input_token_upper_bound(&body),
+        0,
+    );
+    let input = conservative_input_token_upper_bound(&body);
+    assert!(input > 8_192);
+    assert_eq!(requirements.input_token_upper_bound, Some(input));
+    assert_eq!(requirements.explicit_output_tokens, Some(1));
+    assert_eq!(requirements.required_context_window, Some(input + 1));
+
+    assert!(matches!(
+        route_exclusion_reasons(
+            &route(&[ModelCapability::Chat], Some(8_192)),
+            &requirements,
+            &HashSet::new()
+        )
+        .as_slice(),
+        [ModelRouteExclusionReason::ContextWindowTooSmall {
+            required,
+            declared: 8_192
+        }] if *required == input + 1
+    ));
+    assert!(route_exclusion_reasons(
+        &route(&[ModelCapability::Chat], Some(32_768)),
+        &requirements,
+        &HashSet::new()
+    )
+    .is_empty());
 }
 
 #[test]

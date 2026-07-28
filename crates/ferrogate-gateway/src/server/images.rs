@@ -1034,7 +1034,7 @@ fn build_images_request_plan(
 
     let estimated_usage = estimate_images_usage(&body_json);
     let requirements =
-        ModelRouteRequirements::from_request(ModelEndpointKind::Images, &body_json, false, false);
+        ModelRouteRequirements::from_request(ModelEndpointKind::Images, &body_json, false, 0, 0);
     let routing = state.candidate_model_routes(
         &model,
         &requirements,
