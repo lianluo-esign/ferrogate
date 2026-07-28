@@ -1945,9 +1945,14 @@ fn parse_rollback_argv(argv: &[String]) -> (String, String, Vec<String>, Option<
 #[test]
 fn rollback_pointer_argv_round_trips_through_every_familys_own_builder() {
     let registry = full_registry();
-    assert!(
-        !REVISIONED_FAMILIES.is_empty(),
-        "the guard must not pass by covering nothing"
+    let revisioned_groups = REVISIONED_FAMILIES
+        .iter()
+        .map(|family| family.group)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        revisioned_groups,
+        BTreeSet::from(["guardrail-policies"]),
+        "the guard must cover the complete reviewed revisioned-family set"
     );
     for family in REVISIONED_FAMILIES {
         // The verbs the pointer names must exist on the family it names.

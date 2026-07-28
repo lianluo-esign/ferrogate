@@ -1175,6 +1175,7 @@ fn the_only_local_clock_read_in_the_audit_path_is_the_one_named_for_it() {
 #[test]
 fn the_opt_in_variables_are_documented_where_an_operator_will_find_them() {
     const PAGE: &str = include_str!("../../../docs/cli-audit-attribution.md");
+    let prose = PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
     for needle in [
         HOST_LABEL_ENV,
         REPORTED_IP_ENV,
@@ -1190,8 +1191,8 @@ fn the_opt_in_variables_are_documented_where_an_operator_will_find_them() {
              flag, so the generated cli-reference.md will never mention it either"
         );
     }
-    assert!(PAGE.contains("server validates its HMAC signature"));
-    assert!(PAGE.contains("server's own receive clock"));
+    assert!(prose.contains("server validates its HMAC signature"));
+    assert!(prose.contains("server's own receive clock"));
     assert!(
         PAGE.contains(crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN),
         "the page must name the absence code an operator will actually see on a receipt"
