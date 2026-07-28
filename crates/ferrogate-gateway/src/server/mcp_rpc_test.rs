@@ -252,6 +252,91 @@ fn a_resources_read_response_holds_its_charge_until_the_response_is_dropped() {
     );
 }
 
+/// The second #529 rework bounce was specifically the `builtin.fetch_asset`
+/// path through MCP `tools/call`: content was copied into the JSON-RPC result,
+/// but no behavioral test proved the real charge followed that copy. Drive the
+/// two exact production builders so replacing either handoff with `none()`
+/// releases the semaphore here and fails before the response is dropped.
+#[test]
+fn tools_call_keeps_fetch_asset_charge_through_result_holding_until_drop() {
+    use crate::server::asset_admission::{
+        BufferedObject, GatewayBufferBudget, ReadResidency, ADMISSION_UNIT_BYTES,
+    };
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+    const OBJECT_BYTES: u64 = 4 * ADMISSION_UNIT_BYTES;
+    const BUDGET_BYTES: u64 = 32 * ADMISSION_UNIT_BYTES;
+    let budget = GatewayBufferBudget::new(BUDGET_BYTES, OBJECT_BYTES, std::time::Duration::ZERO);
+    let body = vec![0xff; OBJECT_BYTES as usize];
+    let expected_blob_len = BASE64_STANDARD.encode(&body).len();
+    let permit = block_on(budget.admit(ReadResidency::InlinedInJsonResponse, OBJECT_BYTES))
+        .map_err(|_| ())
+        .expect("the fixture read fits its budget");
+    let free_while_held = budget.available_bytes();
+    assert!(
+        free_while_held < BUDGET_BYTES,
+        "the fixture must hold a real semaphore charge"
+    );
+
+    let asset = StoredAsset {
+        content_type: "application/octet-stream".into(),
+        content_hash: sha256_hex(&body),
+        size_bytes: OBJECT_BYTES,
+        ..seeded_asset("tenant-1", "cli_tool", "deploy", "1.0.0", b"")
+    };
+    let request = ToolExecutionRequest {
+        name: crate::builtin_tools::FETCH_ASSET_TOOL_NAME.to_string(),
+        arguments: json!({ "uri": "asset://cli_tool/deploy/1.0.0" }),
+        route: Some("/v1/mcp".into()),
+        session_id: None,
+    };
+    let tool_response = crate::builtin_tools::fetch_asset_response(
+        &request,
+        "req",
+        3,
+        &asset,
+        BufferedObject::new(body, permit),
+    );
+    assert!(
+        tool_response.budget.is_charged(),
+        "fetch_asset_response must hand the real charge to the governed tool response"
+    );
+    assert_eq!(budget.available_bytes(), free_while_held);
+
+    let response = tool_call_result(Some(json!(17)), tool_response);
+    assert!(
+        response.holds_a_buffer_charge(),
+        "tools/call must forward fetch_asset's charge through result_holding"
+    );
+    assert_eq!(
+        budget.available_bytes(),
+        free_while_held,
+        "the charge must remain committed while the JSON-RPC response owns the copied bytes"
+    );
+    let value = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(value["id"], 17);
+    assert_eq!(value["result"]["isError"], false);
+    assert_eq!(
+        value["result"]["content"][0]["resource"]["blob"]
+            .as_str()
+            .map(str::len),
+        Some(expected_blob_len),
+        "the JSON-RPC result must still contain the binary copy being charged"
+    );
+    assert!(
+        value.get("budget").is_none(),
+        "the charge is internal accounting, not protocol data"
+    );
+    assert_eq!(budget.available_bytes(), free_while_held);
+
+    drop(response);
+    assert_eq!(
+        budget.available_bytes(),
+        BUDGET_BYTES,
+        "the final JSON-RPC response drop returns the charge"
+    );
+}
+
 #[test]
 fn resources_read_rejects_bad_uri_and_missing_asset() {
     let state = reader_state(Some("tenant-1"));

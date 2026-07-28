@@ -101,6 +101,15 @@
 //! Charging them one object's worth would have made
 //! `max_total_gateway_buffer_bytes` a number the gateway exceeded by ~3.7x on
 //! its own documented surfaces.
+//!
+//! Two bounded residuals remain explicit. First, a configured aggregate below
+//! one inlined read's ~3.7x residency admits that read only when the pool is
+//! otherwise empty, but clamps its charge to the whole pool; resident bytes may
+//! therefore exceed the configured total by that one read. Second, MCP
+//! `tools/call` clones the inlined content while converting the governed tool
+//! response into its JSON-RPC result, so its short-lived peak can be one
+//! encoded copy above the estimate. The runbook includes both in sizing rather
+//! than calling the configured total an unconditional physical-memory ceiling.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -185,6 +194,12 @@ impl ReadResidency {
     /// realistic shape for this surface, and the alternative -- charging 6x for
     /// every textual read -- would shed ordinary traffic to price in a body
     /// nobody publishes.
+    ///
+    /// The MCP `tools/call` adapter also clones its inlined content while
+    /// building the JSON-RPC result. That short-lived copy can put the adapter's
+    /// actual peak about one encoded copy above this charge; the charge remains
+    /// held throughout, so the discrepancy is bounded rather than multiplied
+    /// by unadmitted reads.
     pub(crate) fn residency_bytes(self, object_bytes: u64) -> u64 {
         match self {
             Self::BufferOnly => object_bytes,

@@ -522,31 +522,38 @@ async fn tools_call(
         .execute_tool_request_with_governance(ctx, auth, execution, request, backend)
         .await
     {
-        Ok(response) => {
-            let content = response
-                .content
-                .get("content")
-                .cloned()
-                .unwrap_or_else(|| response.content.clone());
-            // `builtin.fetch_asset` reaches this arm too, carrying a charge for
-            // the asset bytes inlined in `content`. Forward it onto the
-            // JSON-RPC response rather than dropping `response` (and the
-            // charge) while a copy of those bytes travels on (issue #529).
-            result_holding(
-                id,
-                json!({
-                    "content": content,
-                    "isError": response.is_error
-                }),
-                response.budget,
-            )
-        }
+        Ok(response) => tool_call_result(id, response),
         Err(error_response) => error(
             id,
             mcp_error_code(error_response.code),
             error_response.message,
         ),
     }
+}
+
+/// Converts a governed tool response into its MCP `tools/call` result while
+/// preserving any aggregate-buffer charge carried by `builtin.fetch_asset`.
+///
+/// Kept separate from the policy-heavy handler so the response-lifetime rule
+/// can be asserted with a genuinely charged tool response. A content-only test
+/// cannot distinguish this from dropping the charge before `result_holding`.
+fn tool_call_result(
+    id: Option<Value>,
+    response: crate::extensions::ToolExecutionResponse,
+) -> McpJsonRpcResponse {
+    let content = response
+        .content
+        .get("content")
+        .cloned()
+        .unwrap_or_else(|| response.content.clone());
+    result_holding(
+        id,
+        json!({
+            "content": content,
+            "isError": response.is_error
+        }),
+        response.budget,
+    )
 }
 
 pub(super) fn tool_session_audit_target(session_id: &str) -> String {

@@ -259,39 +259,13 @@ pub(crate) async fn execute_fetch_asset(
 
     let id = stored_asset_id(tenant_id, &asset_type, &name, &version);
     match state.read_asset_content(&id, request_id).await {
-        Ok((asset, content)) => {
-            let latency_ms = elapsed_ms(started);
-            // Destructured on the spot so the charge cannot be left behind on a
-            // value that goes out of scope while the copy it paid for travels
-            // on inside the response (issue #529 rework).
-            let InlinedAssetEntry { value, budget } = asset_resource_content_entry(&asset, content);
-            let content = json!({
-                "content": [
-                    { "type": "resource", "resource": value }
-                ],
-                "_meta": {
-                    "uri": asset_uri(&asset.asset_type, &asset.name, &asset.version),
-                    "sha256": asset.content_hash,
-                    "sizeBytes": asset.size_bytes,
-                    "contentType": asset.content_type,
-                }
-            });
-            Ok(ToolExecutionResponse {
-                object: "tool_execution",
-                name: request.name.clone(),
-                content,
-                is_error: false,
-                request_id: request_id.to_string(),
-                session_id: request.session_id.clone(),
-                latency_ms,
-                // #529 rework: the inlined copy of the object is resident until
-                // this response is serialized and written, which happens in the
-                // tool chokepoint's caller, not here. The charge rides along so
-                // it is returned then -- not at the end of this match arm, with
-                // the copy still in flight.
-                budget,
-            })
-        }
+        Ok((asset, content)) => Ok(fetch_asset_response(
+            request,
+            request_id,
+            elapsed_ms(started),
+            &asset,
+            content,
+        )),
         Err(AssetReadError::NotFound) => Err(ToolExecutionError::NotFound(format!(
             "no asset at {asset_type}/{name}/{version}"
         ))),
@@ -309,6 +283,47 @@ pub(crate) async fn execute_fetch_asset(
         Err(AssetReadError::Overloaded(message)) => Err(ToolExecutionError::Failed(message)),
         Err(AssetReadError::BucketUnavailable(message)) => Err(ToolExecutionError::Failed(message)),
         Err(AssetReadError::Storage(message)) => Err(ToolExecutionError::Failed(message)),
+    }
+}
+
+/// Builds the successful `fetch_asset` response from a verified buffer.
+///
+/// The response owns both the inlined asset copy and its aggregate-buffer
+/// charge. Keeping this as one operation makes the lifetime rule behaviorally
+/// testable with a genuinely charged [`BufferedObject`]: the surrounding
+/// handler cannot obtain one without a live bucket, while this is the exact
+/// production step that must carry the charge to the governed tool writer.
+pub(crate) fn fetch_asset_response(
+    request: &ToolExecutionRequest,
+    request_id: &str,
+    latency_ms: u64,
+    asset: &StoredAsset,
+    content: BufferedObject,
+) -> ToolExecutionResponse {
+    let InlinedAssetEntry { value, budget } = asset_resource_content_entry(asset, content);
+    let content = json!({
+        "content": [
+            { "type": "resource", "resource": value }
+        ],
+        "_meta": {
+            "uri": asset_uri(&asset.asset_type, &asset.name, &asset.version),
+            "sha256": asset.content_hash,
+            "sizeBytes": asset.size_bytes,
+            "contentType": asset.content_type,
+        }
+    });
+    ToolExecutionResponse {
+        object: "tool_execution",
+        name: request.name.clone(),
+        content,
+        is_error: false,
+        request_id: request_id.to_string(),
+        session_id: request.session_id.clone(),
+        latency_ms,
+        // The inlined copy remains resident until the caller serializes and
+        // writes this response. The charge therefore rides on the response,
+        // rather than dying here while those bytes continue downstream.
+        budget,
     }
 }
 

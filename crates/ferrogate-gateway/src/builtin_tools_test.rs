@@ -248,6 +248,75 @@ fn inlining_an_asset_keeps_its_charge_until_the_entry_is_dropped() {
     }
 }
 
+/// The `fetch_asset` constructor itself must forward the charge from the
+/// verified buffer onto `ToolExecutionResponse`. Testing only
+/// `asset_resource_content_entry` leaves both production handoff assignments
+/// mutable to `ResponseBufferBudget::none()` with a green suite.
+#[test]
+fn fetch_asset_response_holds_a_real_charge_until_the_response_is_dropped() {
+    use crate::server::asset_admission::{
+        BufferedObject, GatewayBufferBudget, ReadResidency, ADMISSION_UNIT_BYTES,
+    };
+
+    const OBJECT_BYTES: u64 = 4 * ADMISSION_UNIT_BYTES;
+    const BUDGET_BYTES: u64 = 32 * ADMISSION_UNIT_BYTES;
+    let budget = GatewayBufferBudget::new(BUDGET_BYTES, OBJECT_BYTES, std::time::Duration::ZERO);
+    let body = vec![b'x'; OBJECT_BYTES as usize];
+    let permit = block_on(budget.admit(ReadResidency::InlinedInJsonResponse, OBJECT_BYTES))
+        .map_err(|_| ())
+        .expect("the fixture read fits its budget");
+    let free_while_held = budget.available_bytes();
+    assert!(
+        free_while_held < BUDGET_BYTES,
+        "the fixture must hold a real semaphore charge"
+    );
+
+    let asset = StoredAsset {
+        content_type: "text/plain".into(),
+        content_hash: sha256_hex(&body),
+        size_bytes: OBJECT_BYTES,
+        ..blank_asset()
+    };
+    let request = ToolExecutionRequest {
+        name: FETCH_ASSET_TOOL_NAME.to_string(),
+        arguments: json!({ "uri": "asset://cli_tool/deploy/1.0.0" }),
+        route: Some("/v1/mcp".into()),
+        session_id: Some("session-1".into()),
+    };
+    let response = fetch_asset_response(
+        &request,
+        "req-1",
+        7,
+        &asset,
+        BufferedObject::new(body, permit),
+    );
+
+    assert!(
+        response.budget.is_charged(),
+        "fetch_asset must park the buffer's real charge on ToolExecutionResponse"
+    );
+    assert_eq!(
+        budget.available_bytes(),
+        free_while_held,
+        "consuming BufferedObject must not release the charge while its inlined bytes remain in \
+         ToolExecutionResponse"
+    );
+    assert_eq!(
+        response.content["content"][0]["resource"]["text"]
+            .as_str()
+            .map(str::len),
+        Some(OBJECT_BYTES as usize),
+        "the response must contain the bytes whose residency is charged"
+    );
+
+    drop(response);
+    assert_eq!(
+        budget.available_bytes(),
+        BUDGET_BYTES,
+        "only dropping ToolExecutionResponse may return the charge"
+    );
+}
+
 fn blank_asset() -> StoredAsset {
     StoredAsset {
         id: "id".into(),

@@ -117,10 +117,21 @@ surfaces ignored it.
 
 ### Sizing a box
 
-Peak gateway memory for buffered asset work is
-**`max_total_gateway_buffer_bytes`** — an enforced ceiling, not a
-multiplication you have to estimate. This holds for all four read surfaces and
-the buffered commit leg, in the same sense for each.
+Peak gateway memory for buffered asset work is bounded by admission, rather
+than by an unbounded concurrency multiplication. For ordinary configurations,
+**`max_total_gateway_buffer_bytes`** is that enforced ceiling across all four
+read surfaces and the buffered commit leg.
+
+There is one configuration edge to include in sizing: an inlining read is
+charged roughly `3.7 x object size`, but a single charge is clamped to the
+whole aggregate pool so it can run when the gateway is otherwise idle. If
+`max_total_gateway_buffer_bytes` is below
+`3.7 x max_gateway_buffer_bytes`, the admission-accounted bound is therefore
+the larger of the configured aggregate and one maximum-size inlining read.
+This is a one-read overshoot, not a concurrency multiplier. Size the aggregate
+to at least `3.7 x max_gateway_buffer_bytes` when `fetch_asset` or MCP
+`resources/read` serves objects near the per-operation maximum; the short-lived
+adapter residual documented below is additional process headroom.
 
 `max_gateway_buffer_bytes` bounds one operation; `max_total_gateway_buffer_bytes`
 bounds their sum. Every buffering read is admitted against the total before it
@@ -170,6 +181,13 @@ surfaces means until the response value is dropped by the code that writes it,
 not until the read returns. That distinction is the whole point: a client that
 stalls after reading the response header keeps its copy of the object resident
 in the gateway, and that copy is inside the ceiling.
+
+One short-lived adapter copy is not included in the ~3.7x estimate: MCP
+`tools/call` clones the inlined `fetch_asset` content while converting the
+governed tool response into its JSON-RPC result. Its binary-response peak can
+therefore be about one base64-sized copy higher. The admission charge remains
+held across that conversion and the socket write, so this is a bounded sizing
+residual rather than a path that admits additional concurrent reads.
 
 **The ceiling is global, not per tenant.** One process-wide pool means one
 tenant's burst can shed another tenant's reads with a `503`. That is a memory

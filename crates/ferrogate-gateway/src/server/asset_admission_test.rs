@@ -259,6 +259,13 @@ async fn a_charge_rounds_up_to_the_accounting_unit_never_down() {
 /// documented surfaces exceeded by ~3.7x.
 #[tokio::test]
 async fn an_inlined_read_is_charged_for_the_copies_it_will_hold() {
+    assert_eq!(
+        ReadResidency::InlinedInJsonResponse.residency_bytes(4),
+        20,
+        "four input bytes base64-encode to eight, not four: both inlined copies must use the \
+         rounded-up encoded length"
+    );
+
     let object = 3 * ADMISSION_UNIT_BYTES;
 
     assert_eq!(
