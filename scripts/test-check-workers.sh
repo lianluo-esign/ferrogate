@@ -135,6 +135,7 @@ run_gate() {
     HOME="$tmp/home" \
     PATH="$tmp/toolchain:/usr/bin:/bin" \
     FERROGATE_NODE_BIN="$tmp/toolchain" \
+    FAKE_NPM_INSTALL_FAIL="${FAKE_NPM_INSTALL_FAIL:-0}" \
     NPM_LOG="$npm_log" \
     "$fixture/scripts/check-workers.sh" >"$gate_out" 2>"$gate_err"
 }
@@ -165,6 +166,24 @@ rm -f "$fixture/workers/agent-gateway/node_modules/.bin/vitest"
 run_gate || fail "missing vitest was not repaired: $(cat "$gate_err")"
 assert_words_equal "agent-gateway" "$(logged_workers_for 'ci --no-audit --no-fund')" \
   "missing vitest reinstall"
+
+# A broken committed lockfile must stop at npm ci. The pre-#468 fallback retried
+# with npm install --legacy-peer-deps and let an unreproducible tree pass.
+rm -f "$fixture/workers/d1-proxy/node_modules/.bin/tsc"
+if FAKE_NPM_INSTALL_FAIL=1 run_gate; then
+  fail "failed npm ci unexpectedly passed the Workers gate"
+fi
+assert_words_equal "d1-proxy" "$(logged_workers_for 'ci --no-audit --no-fund')" \
+  "failed lockfile install"
+if awk -F '|' '$2 ~ /^install( |$)/ { found = 1 } END { exit !found }' "$npm_log"; then
+  fail "failed npm ci fell back to npm install"
+fi
+if grep -q -- '--legacy-peer-deps' "$npm_log"; then
+  fail "Workers gate invoked npm with --legacy-peer-deps"
+fi
+if awk -F '|' '$1 == "d1-proxy" && $2 ~ /^(run typecheck|test)( |$)/ { found = 1 } END { exit !found }' "$npm_log"; then
+  fail "d1-proxy continued after its npm ci failed"
+fi
 
 # A future manifest is covered without editing check-workers.sh. This is the
 # behavioral assertion that catches a regression back to a literal array.

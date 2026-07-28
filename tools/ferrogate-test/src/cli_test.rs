@@ -65,3 +65,9 @@ fn target_capability_supabase_uses_live_schema_controls() {
     };
     assert!(args.keep_supabase_schema);
 }
+
+#[test]
+fn worker_release_is_a_named_local_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "worker-release"]).unwrap();
+    assert!(matches!(cli.command, Commands::WorkerRelease));
+}

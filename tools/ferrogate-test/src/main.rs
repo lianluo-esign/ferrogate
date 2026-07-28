@@ -37,6 +37,7 @@ mod static_site;
 mod storage;
 mod supabase_schema;
 mod target_capability;
+mod worker_release;
 mod workers_ai_guardrail;
 /// #354: the narrow cross-component managed paid-egress chain command --
 /// gateway policy decision, deterministic merchant double, durable attempt/hold
@@ -69,6 +70,7 @@ use storage::{
     run_supabase_restart,
 };
 use target_capability::run_target_capability_supabase;
+use worker_release::run_worker_release;
 use workers_ai_guardrail::run_workers_ai_llama_guard;
 use x402_paid_egress_chain::run_x402_paid_egress_chain;
 
@@ -102,6 +104,7 @@ fn main() -> Result<()> {
         supabase_migration: run_supabase_migration,
         postgres_restart: run_postgres_restart,
         postgres_tls_restart: run_postgres_tls_restart,
+        worker_release: run_worker_release,
         docker: run_docker_scenario,
         run_all_admin_auth_gateway: |local, auth, include_docker, image| {
             run_admin_api(local)?;
@@ -118,6 +121,7 @@ fn main() -> Result<()> {
             Ok(())
         },
         ci: |local, auth| {
+            run_worker_release()?;
             run_api_contract(local)?;
             run_component_compliance(local)?;
             run_admin_api(local)?;

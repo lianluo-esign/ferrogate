@@ -84,6 +84,8 @@ pub(crate) enum Commands {
     PostgresRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
     PostgresTlsRestart(LocalArgs),
+    /// Prove Worker lockfiles install, resolve, typecheck, and run from a clean checkout.
+    WorkerRelease,
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
     Ci(CiArgs),
 }
@@ -252,6 +254,7 @@ pub(crate) struct Dispatch {
     pub(crate) supabase_migration: fn(&LocalArgs) -> Result<()>,
     pub(crate) postgres_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) postgres_tls_restart: fn(&LocalArgs) -> Result<()>,
+    pub(crate) worker_release: fn() -> Result<()>,
     pub(crate) docker: fn(DockerScenario, &str) -> Result<()>,
     pub(crate) run_all_admin_auth_gateway: fn(&LocalArgs, &AuthArgs, bool, &str) -> Result<()>,
     pub(crate) ci: fn(&LocalArgs, &AuthArgs) -> Result<()>,
@@ -263,7 +266,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-registry-api, agent-jobs-api, cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
+                "local: admin-api, auth-api, gateway-api, cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-registry-api, agent-jobs-api, cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, worker-release"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -309,6 +312,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::SupabaseMigration(args) => (dispatch.supabase_migration)(&args),
         Commands::PostgresRestart(args) => (dispatch.postgres_restart)(&args),
         Commands::PostgresTlsRestart(args) => (dispatch.postgres_tls_restart)(&args),
+        Commands::WorkerRelease => (dispatch.worker_release)(),
         Commands::Ci(args) => (dispatch.ci)(&args.local, &args.auth),
     }
 }
