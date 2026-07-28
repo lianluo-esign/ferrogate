@@ -65,6 +65,14 @@ const PRESIGN_TTL_SECS: u64 = 120;
 /// Deliberately small so an over-ceiling intent is a one-line request rather
 /// than a large upload -- the ceiling rejection is a preflight, no bytes move.
 const MAX_OBJECT_BYTES: u64 = 4096;
+const ASSET_SCANNER_ENV_KEYS: &[&str] = &[
+    "FERROGATE_ASSET_SCANNER",
+    "FERROGATE_ASSET_SCANNER_ADDR",
+    "FERROGATE_ASSET_SCANNER_ENDPOINT",
+    "FERROGATE_ASSET_SCANNER_UNAVAILABLE",
+    "FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES",
+    "FERROGATE_ASSET_SCANNER_TIMEOUT_SECS",
+];
 
 pub(crate) fn run_asset_presign_api(args: &LocalArgs) -> Result<()> {
     if !args.ferrogate_bin.exists() {
@@ -74,6 +82,7 @@ pub(crate) fn run_asset_presign_api(args: &LocalArgs) -> Result<()> {
         );
     }
 
+    let content = b"#!/bin/sh\necho ferrogate presign harness\n".to_vec();
     let (bucket_endpoint, bucket) = spawn_sigv4_bucket_mock()?;
     let gateway_addr = free_addr()?;
     let dir = tempfile::tempdir()?;
@@ -82,7 +91,14 @@ pub(crate) fn run_asset_presign_api(args: &LocalArgs) -> Result<()> {
         &config_path,
         scenario_config(&gateway_addr, &bucket_endpoint),
     )?;
-    let _gateway = GatewayGuard::start(&args.ferrogate_bin, &config_path, &gateway_addr)?;
+    // The threshold is strict (`size > threshold`): this fixture remains the
+    // clean 200 control, while the one-byte-larger fixture below is withheld.
+    let _gateway = GatewayGuard::start(
+        &args.ferrogate_bin,
+        &config_path,
+        &gateway_addr,
+        content.len(),
+    )?;
 
     // Asset hosting is plan-gated: the presign routes require it.
     expect_created(
@@ -108,7 +124,6 @@ pub(crate) fn run_asset_presign_api(args: &LocalArgs) -> Result<()> {
         "create hosting tenant",
     )?;
 
-    let content = b"#!/bin/sh\necho ferrogate presign harness\n".to_vec();
     let sha = sha256_hex(&content);
 
     // ---- 1. The intent publishes the exact contract for the direct PUT. ----
@@ -225,6 +240,9 @@ pub(crate) fn run_asset_presign_api(args: &LocalArgs) -> Result<()> {
             committed.raw
         ),
     )?;
+
+    // ---- 3b. A valid presigned upload can still be withheld by screening. ----
+    verify_withheld_presigned_commit(&gateway_addr, content.len())?;
 
     // ---- 4. Provoke each of the four rejection classes for real. ----
 
@@ -372,6 +390,91 @@ pub(crate) fn run_asset_presign_api(args: &LocalArgs) -> Result<()> {
 
     println!("asset-presign-api scenario passed");
     Ok(())
+}
+
+/// #528 at the presigned terminal, including its idempotent replay. The upload
+/// is valid at the bucket and commit verifier; only the async scan threshold
+/// withholds it. Both the first commit and an identical retry must preserve the
+/// exact 202 + pending_scan contract instead of flattening to a successful 200.
+fn verify_withheld_presigned_commit(gateway_addr: &str, threshold_bytes: usize) -> Result<()> {
+    let content = vec![b'p'; threshold_bytes + 1];
+    let sha = sha256_hex(&content);
+    let intent = json(&register_intent(
+        gateway_addr,
+        "presign-withheld",
+        "1.0.0",
+        content.len() as u64,
+        &sha,
+    )?)?;
+    let upload_url = intent["upload_url"]
+        .as_str()
+        .context("withheld presign intent omitted upload_url")?;
+    let upload_id = intent["upload_id"]
+        .as_str()
+        .context("withheld presign intent omitted upload_id")?;
+    let uploaded = direct_put(
+        upload_url,
+        &content,
+        &[("x-amz-content-sha256", sha.as_str())],
+    )?;
+    check(
+        uploaded == 200,
+        &format!("the withheld fixture must first reach the bucket, got {uploaded}"),
+    )?;
+
+    let commit_path = "/v1/assets/presign/commit/cli_tool/presign-withheld/1.0.0";
+    let commit_body = format!(
+        r#"{{"upload_id":"{upload_id}","size_bytes":{},"sha256":"{sha}","content_type":"application/octet-stream"}}"#,
+        content.len()
+    );
+    for attempt in ["initial commit", "idempotent re-commit"] {
+        let committed = http_request_addr(
+            gateway_addr,
+            "POST",
+            commit_path,
+            &[CLIENT_AUTH, JSON_CONTENT],
+            &commit_body,
+        )?;
+        check(
+            committed.status == 202,
+            &format!(
+                "withheld presigned {attempt} must answer exactly 202 Accepted: {}",
+                committed.raw
+            ),
+        )?;
+        let body = json(&committed)?;
+        check(
+            body["asset"]["visibility"] == "pending_scan",
+            &format!(
+                "withheld presigned {attempt} must report pending_scan: {}",
+                committed.body
+            ),
+        )?;
+    }
+
+    let get = http_request_addr(
+        gateway_addr,
+        "GET",
+        "/v1/assets/cli_tool/presign-withheld/1.0.0",
+        &[CLIENT_AUTH],
+        "",
+    )?;
+    check(
+        get.status == 404,
+        &format!(
+            "pending presigned bytes must not be downloadable: {}",
+            get.raw
+        ),
+    )?;
+    let listed = http_request_addr(gateway_addr, "GET", "/v1/assets", &[CLIENT_AUTH], "")?;
+    let rows = json(&listed)?["data"]
+        .as_array()
+        .context("asset list must return a data array")?
+        .clone();
+    check(
+        !rows.iter().any(|row| row["name"] == "presign-withheld"),
+        "pending presigned asset must be absent from the normal registry list",
+    )
 }
 
 /// Drives the commit-time verification failure: an intent is registered and its
@@ -793,11 +896,24 @@ struct GatewayGuard {
 }
 
 impl GatewayGuard {
-    fn start(binary: &Path, config_path: &Path, gateway_addr: &str) -> Result<Self> {
-        let child = Command::new(binary)
+    fn start(
+        binary: &Path,
+        config_path: &Path,
+        gateway_addr: &str,
+        async_scan_threshold_bytes: usize,
+    ) -> Result<Self> {
+        let mut command = Command::new(binary);
+        for key in ASSET_SCANNER_ENV_KEYS {
+            command.env_remove(key);
+        }
+        let child = command
             .args(["run", "--config"])
             .arg(config_path)
             .env(SECRET_ENV, SECRET_ACCESS_KEY)
+            .env(
+                "FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES",
+                async_scan_threshold_bytes.to_string(),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(

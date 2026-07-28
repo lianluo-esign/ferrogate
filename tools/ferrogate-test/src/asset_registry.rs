@@ -49,6 +49,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::{
     env, fs,
+    io::{Read, Write},
+    net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -63,6 +65,14 @@ const TENANT: &str = "org_registry_e2e";
 const QUOTA_BYTES: u64 = 1_000_000;
 /// The per-object ceiling. Deliberately small so a refused push is one request.
 const MAX_OBJECT_BYTES: u64 = 4096;
+const ASSET_SCANNER_ENV_KEYS: &[&str] = &[
+    "FERROGATE_ASSET_SCANNER",
+    "FERROGATE_ASSET_SCANNER_ADDR",
+    "FERROGATE_ASSET_SCANNER_ENDPOINT",
+    "FERROGATE_ASSET_SCANNER_UNAVAILABLE",
+    "FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES",
+    "FERROGATE_ASSET_SCANNER_TIMEOUT_SECS",
+];
 
 /// Exactly the families `admin-console/src/pages/assets.tsx` `ASSET_TYPES`
 /// enumerates. If the gateway ever stopped serving one of these as an ordinary
@@ -104,6 +114,7 @@ pub(crate) fn run_asset_registry_api(args: &LocalArgs) -> Result<()> {
     }
 
     verify_withheld_push_is_distinct_on_the_wire(&args.ferrogate_bin)?;
+    verify_quarantined_push_is_distinct_on_the_wire(&args.ferrogate_bin)?;
 
     println!("asset-registry-api scenario passed");
     Ok(())
@@ -232,6 +243,87 @@ fn verify_withheld_push_is_distinct_on_the_wire(binary: &Path) -> Result<()> {
             visible_get.raw
         ),
     )
+}
+
+/// The second withheld terminal from #528: a real scanner-unavailable result
+/// under the configured quarantine policy. This is not interchangeable with
+/// threshold deferral -- it must report `quarantined`, while remaining just as
+/// unavailable to normal list and download consumers.
+fn verify_quarantined_push_is_distinct_on_the_wire(binary: &Path) -> Result<()> {
+    let scanner_endpoint = spawn_unavailable_scanner()?;
+    let gateway_addr = free_addr()?;
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("asset-registry-quarantined.yaml");
+    fs::write(&config_path, scenario_config(&gateway_addr))?;
+    let _gateway = GatewayGuard::start_with_quarantine_scanner(
+        binary,
+        &config_path,
+        &gateway_addr,
+        &scanner_endpoint,
+    )?;
+    provision_registry(&gateway_addr)?;
+
+    let quarantined_path = "/v1/assets/cli_tool/quarantined-wire-probe/1.0.0";
+    let quarantined = http_request_addr_bytes(
+        &gateway_addr,
+        "PUT",
+        quarantined_path,
+        &[CLIENT_AUTH, "Content-Type: application/octet-stream"],
+        b"quarantine-me",
+    )?;
+    check(
+        quarantined.status == 202,
+        &format!(
+            "a quarantined push must answer exactly 202 Accepted, got {}",
+            quarantined.raw
+        ),
+    )?;
+    let quarantined_body = json(&quarantined)?;
+    check(
+        quarantined_body["asset"]["visibility"] == "quarantined",
+        &format!(
+            "the 202 body must report asset.visibility=quarantined: {}",
+            quarantined.body
+        ),
+    )?;
+
+    let quarantined_get = get(&gateway_addr, quarantined_path)?;
+    check(
+        quarantined_get.status == 404,
+        &format!(
+            "a quarantined asset must be withheld from GET-by-id, got {}",
+            quarantined_get.raw
+        ),
+    )?;
+    let rows = list(&gateway_addr)?;
+    check(
+        !rows
+            .iter()
+            .any(|row| row["name"] == "quarantined-wire-probe"),
+        "a quarantined asset must be absent from the normal registry list",
+    )
+}
+
+/// One deterministic hosted-scanner double. It accepts exactly the request
+/// this scenario sends and returns 503, which the gateway must map through the
+/// configured `quarantine` unavailable policy rather than treating as clean.
+fn spawn_unavailable_scanner() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = format!("http://{}/scan", listener.local_addr()?);
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let timeout = Some(Duration::from_secs(5));
+        let _ = stream.set_read_timeout(timeout);
+        let _ = stream.set_write_timeout(timeout);
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        let _ = stream.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    });
+    Ok(endpoint)
 }
 
 // ---------------------------------------------------------------------------
@@ -959,7 +1051,7 @@ struct GatewayGuard {
 
 impl GatewayGuard {
     fn start(binary: &Path, config_path: &Path, gateway_addr: &str) -> Result<Self> {
-        Self::start_process(binary, config_path, gateway_addr, None)
+        Self::start_process(binary, config_path, gateway_addr, None, None)
     }
 
     fn start_with_async_scan_threshold(
@@ -968,7 +1060,28 @@ impl GatewayGuard {
         gateway_addr: &str,
         threshold_bytes: usize,
     ) -> Result<Self> {
-        Self::start_process(binary, config_path, gateway_addr, Some(threshold_bytes))
+        Self::start_process(
+            binary,
+            config_path,
+            gateway_addr,
+            Some(threshold_bytes),
+            None,
+        )
+    }
+
+    fn start_with_quarantine_scanner(
+        binary: &Path,
+        config_path: &Path,
+        gateway_addr: &str,
+        scanner_endpoint: &str,
+    ) -> Result<Self> {
+        Self::start_process(
+            binary,
+            config_path,
+            gateway_addr,
+            None,
+            Some(scanner_endpoint),
+        )
     }
 
     fn start_process(
@@ -976,14 +1089,24 @@ impl GatewayGuard {
         config_path: &Path,
         gateway_addr: &str,
         async_scan_threshold_bytes: Option<usize>,
+        quarantine_scanner_endpoint: Option<&str>,
     ) -> Result<Self> {
         let mut command = Command::new(binary);
-        command.env_remove("FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES");
+        for key in ASSET_SCANNER_ENV_KEYS {
+            command.env_remove(key);
+        }
         if let Some(threshold_bytes) = async_scan_threshold_bytes {
             command.env(
                 "FERROGATE_ASSET_SCANNER_ASYNC_THRESHOLD_BYTES",
                 threshold_bytes.to_string(),
             );
+        }
+        if let Some(endpoint) = quarantine_scanner_endpoint {
+            command
+                .env("FERROGATE_ASSET_SCANNER", "http")
+                .env("FERROGATE_ASSET_SCANNER_ENDPOINT", endpoint)
+                .env("FERROGATE_ASSET_SCANNER_UNAVAILABLE", "quarantine")
+                .env("FERROGATE_ASSET_SCANNER_TIMEOUT_SECS", "2");
         }
         let child = command
             .args(["run", "--config"])
