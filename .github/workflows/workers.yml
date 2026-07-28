@@ -6,7 +6,7 @@
 
 name: Workers
 
-# Why this workflow triggers on push/pull_request when every other module is
+# Why this workflow triggers on push/pull_request while the Rust modules are
 # `workflow_call`-only (issue #499):
 #
 # `ci.yml` runs on `release: published`, deliberately, so day-to-day work does
@@ -27,12 +27,14 @@ on:
     paths:
       - "workers/**"
       - "scripts/check-workers.sh"
+      - "scripts/test-check-workers.sh"
       - "scripts/node-env.sh"
       - ".github/workflows/workers.yml"
   pull_request:
     paths:
       - "workers/**"
       - "scripts/check-workers.sh"
+      - "scripts/test-check-workers.sh"
       - "scripts/node-env.sh"
       - ".github/workflows/workers.yml"
 
@@ -56,11 +58,16 @@ jobs:
         with:
           node-version: 24
 
+      # The contract test holds discovery, trigger, usable-tree, and explicit
+      # workerd opt-in behavior without running npm or workerd.
+      - name: Test workers gate contract
+        run: ./scripts/test-check-workers.sh
+
       # The script owns the per-Worker logic: it locates Node and refuses
       # loudly when it cannot (#508), installs dependencies, runs
-      # `tsc --noEmit` for every Worker, and boots the ones shipping a
-      # `vitest.config.ts` in workerd via @cloudflare/vitest-pool-workers --
-      # no Docker, no live Cloudflare account. Keeping the logic in the script
-      # rather than in YAML is what makes the same gate runnable locally.
+      # `tsc --noEmit` for every Worker, and boots the explicitly pinned set in
+      # workerd via @cloudflare/vitest-pool-workers. The script requires that set
+      # to equal the committed vitest.config.ts files, so deleting a config is
+      # red, not a silent skip. No Docker or live Cloudflare account is used.
       - name: Run workers gate
         run: ./scripts/check-workers.sh

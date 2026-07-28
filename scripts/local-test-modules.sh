@@ -82,6 +82,12 @@ run_quality() {
   # on a box without it the gate died instead of running. Both are sub-second.
   scripts/check-secret-scan.sh
   scripts/test-check-secret-scan.sh
+  # Gate contracts and the module-layout ratchet mirror rust-quality.yml. A
+  # workflow-only invocation would catch these only after release (#499).
+  scripts/test-check-admin-console.sh
+  scripts/test-check-workers.sh
+  python3 -m unittest scripts/test_module_layout.py
+  python3 scripts/check-module-layout.py
   scripts/check-kubernetes-examples.sh
 }
 

@@ -100,7 +100,8 @@ else
   # Admin-console gate (#314): lint + Vitest + build for the SPA that ships in
   # the image.
   # Cloudflare Workers gate (#465): tsc --noEmit for workers/{agent-gateway,
-  # mcp-server,d1-proxy}, which are deployed straight to Cloudflare.
+  # d1-proxy,gateway-front,mcp-server,telemetry-collector}, which are deployed
+  # straight to Cloudflare.
   #
   # These used to soft-skip on `command -v node` — which is exactly how a
   # release could be cut with the SPA and the Workers unchecked and nothing but
@@ -109,8 +110,13 @@ else
   # release that cannot run them STOPS. Set SKIP_ADMIN_CONSOLE_CHECK=1 /
   # SKIP_WORKERS_CHECK=1 to opt out on purpose, or FERROGATE_NODE_BIN=<dir> to
   # point at an off-PATH toolchain.
+  "$ROOT/scripts/test-check-workers.sh"
   "$ROOT/scripts/check-admin-console.sh"
   "$ROOT/scripts/check-workers.sh"
+  # Keep the modular-layout ratchet and its mutation-facing tests in the local
+  # release mirror, not only in the release-triggered rust-quality workflow.
+  python3 -m unittest scripts/test_module_layout.py
+  python3 "$ROOT/scripts/check-module-layout.py"
 fi
 
 if [ "$ENGINE" = "crane" ]; then

@@ -6,9 +6,9 @@
 # description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 #
 # Cloudflare Workers gate (#465): TypeScript typecheck for every Worker under
-# workers/ (agent-gateway, mcp-server, d1-proxy, telemetry-collector).
-# Runs standalone for dev use and from scripts/release-local.sh (no GitHub
-# Actions per the release directive), mirroring scripts/check-admin-console.sh.
+# workers/, plus workerd/Vitest for the explicitly pinned opt-in set.
+# Runs standalone for dev use, from scripts/release-local.sh, and from the
+# path-filtered Workers workflow, mirroring scripts/check-admin-console.sh.
 #
 #   scripts/check-workers.sh                  # full gate
 #   SKIP_WORKERS_CHECK=1 scripts/...          # explicit skip (prints a note)
@@ -17,10 +17,9 @@
 # gate nothing ever invoked it: the TypeScript that ships to Cloudflare was
 # checked by no gate at all, so a type error surfaced only at `wrangler deploy`.
 #
-# Dependencies install only when node_modules is missing (same contract as the
-# admin-console gate): `npm ci` when the Worker has a committed
-# package-lock.json — pinned and reproducible — and `npm install` otherwise.
-# Delete node_modules (or run the install yourself) to force a clean install.
+# Dependencies install when node_modules is missing or cannot run the commands
+# this gate needs. A committed package-lock.json is reproduced with fail-closed
+# `npm ci`; Workers without one use `npm install`.
 set -euo pipefail
 
 if [ "${SKIP_WORKERS_CHECK:-}" = "1" ]; then
@@ -57,6 +56,39 @@ if [ "${#WORKERS[@]}" -eq 0 ]; then
 fi
 echo "-- gating ${#WORKERS[@]} workers: ${WORKERS[*]}"
 
+# File presence alone is not an opt-in contract. Deleting vitest.config.ts used
+# to make the corresponding workerd suite disappear while the gate stayed
+# green. Keep the expected set explicit, then require it to equal the configs
+# in the tree before any Worker is checked. Adding or removing a workerd suite
+# is therefore an intentional gate change, never a silent coverage change.
+EXPECTED_WORKER_E2E=(agent-gateway gateway-front telemetry-collector)
+ACTUAL_WORKER_E2E=()
+for expected in "${EXPECTED_WORKER_E2E[@]}"; do
+  if [ ! -f "$ROOT/workers/$expected/package.json" ]; then
+    echo "ERROR: workers gate expected workerd/Vitest Worker '$expected' has no package.json" >&2
+    exit 1
+  fi
+done
+for config in "$ROOT"/workers/*/vitest.config.ts; do
+  [ -f "$config" ] || continue
+  ACTUAL_WORKER_E2E+=("$(basename "$(dirname "$config")")")
+done
+if [ "${ACTUAL_WORKER_E2E[*]}" != "${EXPECTED_WORKER_E2E[*]}" ]; then
+  echo "ERROR: workers gate workerd/Vitest opt-in set changed" >&2
+  echo "       expected: ${EXPECTED_WORKER_E2E[*]}" >&2
+  echo "       actual:   ${ACTUAL_WORKER_E2E[*]:-(none)}" >&2
+  echo "       update EXPECTED_WORKER_E2E deliberately when adding or removing a suite" >&2
+  exit 1
+fi
+
+worker_runs_e2e() {
+  local expected
+  for expected in "${EXPECTED_WORKER_E2E[@]}"; do
+    [ "$expected" = "$1" ] && return 0
+  done
+  return 1
+}
+
 echo "== workers gate =="
 for worker in "${WORKERS[@]}"; do
   echo "== workers/$worker =="
@@ -71,14 +103,13 @@ for worker in "${WORKERS[@]}"; do
   # the silent-skip class this issue is about.
   #
   # So ask for what the gate is about to RUN, not for a directory: `tsc` for
-  # the typecheck every Worker gets, and `vitest` for the Workers that opt
-  # into the workerd E2E by committing a vitest.config.ts. `npm ci` on a clean
-  # checkout is the lockfile-reproducibility proof; this local fast path only
-  # avoids reinstalling an already usable tree.
+  # the typecheck every Worker gets, and `vitest` for the explicitly pinned
+  # workerd E2E set. `npm ci` on a clean checkout is the lockfile-reproducibility
+  # proof; this local fast path only avoids reinstalling an already usable tree.
   worker_tree_is_usable() {
     [ -d node_modules ] || return 1
     [ -x node_modules/.bin/tsc ] || return 1
-    if [ -f vitest.config.ts ]; then
+    if worker_runs_e2e "$worker"; then
       [ -x node_modules/.bin/vitest ] || return 1
     fi
     return 0
@@ -103,12 +134,11 @@ for worker in "${WORKERS[@]}"; do
   npm run typecheck \
     || { echo "ERROR: workers/$worker: typecheck failed" >&2; exit 1; }
 
-  # Docker-free Worker E2E: a Worker that ships a vitest.config.ts is booted in
+  # Docker-free Worker E2E: every Worker in EXPECTED_WORKER_E2E is booted in
   # workerd via @cloudflare/vitest-pool-workers (miniflare) — NO Docker, NO live
-  # Cloudflare account. agent-gateway (#413) proves its control routes' auth gate
-  # + name-addressed DO RPC round-trip this way. Only runs for workers that opt in
-  # by committing a vitest.config.ts, so mcp-server / d1-proxy stay typecheck-only.
-  if [ -f vitest.config.ts ]; then
+  # Cloudflare account. The exact set is checked above so deleting a config is a
+  # hard failure rather than a silent downgrade to typecheck-only.
+  if worker_runs_e2e "$worker"; then
     echo "-- worker E2E (vitest run, workerd/miniflare — no docker)"
     # WALL CLOCK, because the failure this gate met in #559 was not a red suite but
     # NO suite: a Durable Object aborted mid-request wedged vitest-pool-workers, and

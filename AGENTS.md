@@ -476,9 +476,13 @@ Run the narrowest verification that proves the claim, then read the output.
 Day-to-day development proof is local: build FerroGate and `ferrogate-test` in
 the development container, then run the matching harness scenarios directly.
 Use Docker only in environments where Docker is actually available and the
-scenario requires an image boundary. GitHub Actions are a release gate and
-trigger only on `release: published`; they are never a per-commit fallback. If
-local network, credentials, or infrastructure cannot provide a required proof,
+scenario requires an image boundary. Rust GitHub Actions are a release gate and
+trigger only on `release: published`; they are never a per-commit fallback. The
+only per-commit exceptions are `.github/workflows/workers.yml` and
+`.github/workflows/api-contract-drift.yml`: both are narrowly path-filtered,
+Node/npm-only checks with no Cargo work, because reporting an undeployable
+Worker or stale generated API client after release is too late (#499). If local
+network, credentials, or infrastructure cannot provide a required proof,
 record that surface as not tested instead of pretending a cloud run will appear.
 
 For meaningful code changes, run the lightweight local checks when they are
@@ -532,12 +536,15 @@ sourced by `scripts/check-admin-console.sh` and `scripts/check-workers.sh`; it
 finds Node in the usual `$HOME` locations, honours `FERROGATE_NODE_BIN=<bin dir>`
 as an authoritative override, and when it genuinely cannot find Node the gate
 exits **non-zero** with `<gate> did NOT run: node not found on PATH`. These gates
-never silently skip. `scripts/test-check-admin-console.sh` holds that contract.
+never silently skip. `scripts/test-check-admin-console.sh` and
+`scripts/test-check-workers.sh` hold those contracts; the latter also pins the
+manifest-derived Worker set and the exact workerd/Vitest opt-in set.
 
 `admin-console/node_modules` and `workers/*/node_modules` are **not** checked in.
 `npm ci` from the committed lockfile is the required first step and the gate
-scripts run it for you when `node_modules` is missing. Playwright browsers are a
-separate download plus a set of OS shared libraries; the admin-console gate runs
+scripts run it for you when `node_modules` is missing or lacks a command the
+gate requires. Playwright browsers are a separate download plus a set of OS
+shared libraries; the admin-console gate runs
 the (idempotent) `npx playwright install chromium` itself and fails by name —
 naming `sudo npx playwright install-deps chromium` — when chromium is present but
 cannot launch. `playwright install` only *warns* about missing host libraries and
@@ -556,8 +563,9 @@ For runtime changes, prefer this order:
 3. When the scenario specifically requires an image boundary and Docker is
    available, build and run the local image and repeat the matching scenario.
 4. If a required external service or image boundary is unavailable, record the
-   missing proof in the issue. Do not trigger or wait for per-commit cloud CI;
-   no such workflow is permitted.
+   missing proof in the issue. Do not trigger or wait for per-commit Rust cloud
+   CI. The two path-filtered Node/npm exceptions above are regression guards,
+   not substitutes for missing local runtime proof.
 
 Record the local binary/image command, image reference or digest when relevant,
 and the `ferrogate-test` result in the related GitHub issue.
@@ -577,11 +585,20 @@ settlement.
 Rust CI must stay split by business/runtime boundary instead of collapsing back
 into one monolithic GitHub Actions file. Keep `.github/workflows/ci.yml` as the
 thin, `release: published`-only orchestrator and preserve `rust-ci` as the
-aggregate release gate. Reusable workflow files must remain `workflow_call`-
-only. Put actual Rust validation work in reusable workflow files:
+aggregate release gate. Reusable Rust workflow files must remain
+`workflow_call`-only. Put actual Rust validation work in reusable workflow files:
 quality/schema/deployment-manifest checks, feature-module tests, gateway runtime
 and performance smoke tests, E2E harness execution, and CI image publishing
 should remain separately owned modules.
+
+Two narrow non-Rust workflows are explicit exceptions:
+`.github/workflows/workers.yml` and
+`.github/workflows/api-contract-drift.yml` may expose `push`, `pull_request`,
+and `workflow_dispatch` in addition to `workflow_call`. Their push and pull
+request triggers must stay path-filtered to the Worker or generated-client
+contract they protect, and their jobs must stay Node/npm-only with no Cargo
+work. Do not use #499 as precedent for per-commit Rust suites or an unfiltered
+JavaScript workflow.
 
 Feature-module test CI must map to the product/runtime surface it protects, not
 to "the whole workspace". Current test gates are core/config/policy/routing,
@@ -597,8 +614,9 @@ only covered by a broad workspace-wide gate.
 
 When adding a new CI concern, extend the smallest matching workflow module or
 add a new reusable module, then wire it into the release-only `rust-ci`
-aggregate. Do not add `push`, `pull_request`, `workflow_dispatch`, or `schedule`
-triggers to spend cloud runner time outside a published release.
+aggregate. Except for the two named path-filtered Node/npm workflows above, do
+not add `push`, `pull_request`, `workflow_dispatch`, or `schedule` triggers to
+spend cloud runner time outside a published release.
 
 ## Communication
 
