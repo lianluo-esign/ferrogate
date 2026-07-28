@@ -106,6 +106,20 @@ function mockObservedActivity(
   );
 }
 
+function mockObservedActivityWithoutPresenceFeed(rows: ObservedAgentActivity[]): void {
+  server.use(
+    http.get(gatewayUrl("/admin/v1/observed-agent-activity"), () =>
+      HttpResponse.json({
+        object: "list",
+        data: rows,
+        total: rows.length,
+        offset: 0,
+        limit: 50,
+      }),
+    ),
+  );
+}
+
 /** Opens the Unattributed tab on a page whose runs list is already mocked. */
 async function openUnattributedTab(user: ReturnType<typeof userEvent.setup>) {
   renderWithProviders(<AgentRunsPage />);
@@ -324,15 +338,15 @@ describe("AgentRunsPage — unattributed activity", () => {
             within_running_window: null,
             durable_presence_backed: null,
             presence_feed_status: "unavailable",
-            presence_unavailable_reason: "d1 proxy: 503",
+            presence_unavailable_reason: "presence_read_failed",
             seconds_since_last_seen: 4_000,
-            reason: "durable presence feed unavailable (d1 proxy: 503)",
+            reason: "durable presence feed unavailable (presence_read_failed)",
           },
         ),
       ],
       {
         status: "unavailable",
-        unavailable_reason: "d1 proxy: 503",
+        unavailable_reason: "presence_read_failed",
         rows_may_be_incomplete: true,
       },
     );
@@ -345,14 +359,61 @@ describe("AgentRunsPage — unattributed activity", () => {
     expect(screen.queryByText("Running")).not.toBeInTheDocument();
     expect(
       screen.getByText(
-        "Presence feed unavailable (d1 proxy: 503) — this activity may still be running; it is NOT reported inactive",
+        "Presence feed unavailable (presence_read_failed) — this activity may still be running; it is NOT reported inactive",
       ),
     ).toBeInTheDocument();
     // The list itself says the answer may be incomplete, so an empty page can
     // never read as "nothing is running".
     expect(screen.getByRole("status")).toHaveTextContent(
-      "The durable presence feed could not be read (d1 proxy: 503).",
+      "The durable presence feed could not be read (presence_read_failed).",
     );
+  });
+
+  it("treats a missing presence-feed qualifier as degraded", async () => {
+    const user = userEvent.setup();
+    mockObservedActivityWithoutPresenceFeed([]);
+
+    await openUnattributedTab(user);
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "The durable presence feed could not be read (read failed).",
+    );
+  });
+
+  it("renders inconsistent and unexpected row states as unknown", async () => {
+    const user = userEvent.setup();
+    mockObservedActivity(
+      [
+        activity(
+          { status: "running" },
+          {
+            within_running_window: null,
+            presence_feed_status: "unavailable",
+            presence_unavailable_reason: "presence_read_failed",
+          },
+        ),
+        activity(
+          {
+            id: "observed:tenant-acme:key-2",
+            api_key_id: "key-2",
+            status: "future_status" as ObservedAgentActivity["status"],
+          },
+          { within_running_window: true },
+        ),
+      ],
+      {
+        status: "unavailable",
+        unavailable_reason: "presence_read_failed",
+        rows_may_be_incomplete: true,
+      },
+    );
+
+    await openUnattributedTab(user);
+    await screen.findByText("observed:tenant-acme:key-1");
+
+    expect(screen.getAllByText("Unknown", { selector: "div" })).toHaveLength(2);
+    expect(screen.queryByText("Inactive")).not.toBeInTheDocument();
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
   });
 
   it("makes the evidence behind the derived status reachable", async () => {

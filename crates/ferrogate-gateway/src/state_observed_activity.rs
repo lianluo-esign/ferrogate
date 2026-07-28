@@ -20,6 +20,11 @@ use crate::server::observed_agent_activity::{
     OBSERVED_ACTIVITY_RUNNING_TTL_ENV,
 };
 
+/// Stable tenant-visible classification for a failed durable-presence read.
+/// Backend diagnostics may contain hosts, account ids, or database ids and
+/// belong only in the operator log below.
+const PRESENCE_READ_FAILED: &str = "presence_read_failed";
+
 impl AppState {
     /// Build the tenant-scoped observed-unattributed-activity report. `None`
     /// tenant_scope is the platform-operator cross-tenant view.
@@ -76,10 +81,10 @@ impl AppState {
                     "observed-agent presence read failed; reporting affected rows as unknown \
                      rather than inactive",
                 );
-                Some(error.to_string())
+                Some(PRESENCE_READ_FAILED)
             }
         };
-        let presence = match presence_error.as_deref() {
+        let presence = match presence_error {
             Some(reason) => ObservedPresenceFeed::Unavailable(reason),
             None => ObservedPresenceFeed::Available(&presence_last_seen),
         };

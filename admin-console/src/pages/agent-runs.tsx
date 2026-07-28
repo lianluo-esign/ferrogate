@@ -63,6 +63,8 @@ export type ObservedAgentActivity = AdminSchema<"AdminObservedAgentActivity">;
 /** #494: the list-level "could we even read presence?" qualifier. */
 export type ObservedPresenceFeed = AdminSchema<"AdminObservedAgentPresenceFeed">;
 
+type ObservedActivityState = "running" | "inactive" | "unknown";
+
 const PAGE_SIZE = 50;
 
 /** Tab ids; `runs` is the default and is encoded as an ABSENT `view` param. */
@@ -329,7 +331,9 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
   // that answer unsound. Say so above the table instead of letting "no rows"
   // read as "nothing is running".
   const presenceFeed = data?.presence_feed;
-  const presenceDegraded = presenceFeed?.rows_may_be_incomplete === true;
+  const presenceDegraded =
+    data !== undefined &&
+    (presenceFeed === undefined || presenceFeed.rows_may_be_incomplete !== false);
 
   return (
     <>
@@ -394,15 +398,7 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
             ) : (
               rows.map((row) => {
                 const evidence = row.evidence;
-                // The row is only "running" while the recency window holds; the
-                // window is the ONLY basis, so an expired row is inactive and
-                // there is nothing to render as an end time.
-                const active = row.status === "running" && evidence.within_running_window === true;
-                // #494: a failed presence read is NOT a negative. The badge has
-                // three states, and `unknown` must never render as "Inactive" —
-                // an operator who reads "Inactive" for a live process may
-                // restart it.
-                const unknown = row.status === "unknown";
+                const activityState = observedActivityState(row);
                 const usage = evidence.usage_evidence_available;
                 const isExpanded = expanded === row.id;
                 return (
@@ -423,12 +419,20 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
                       <TableCell className="font-mono text-xs">{row.api_key_id}</TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
-                          <Badge variant={active ? "default" : unknown ? "secondary" : "outline"}>
-                            {unknown
-                              ? t("page.agentRuns.unattributed.status.unknown")
-                              : active
-                                ? t("page.agentRuns.unattributed.status.running")
-                                : t("page.agentRuns.unattributed.status.inactive")}
+                          <Badge
+                            variant={
+                              activityState === "running"
+                                ? "default"
+                                : activityState === "unknown"
+                                  ? "secondary"
+                                  : "outline"
+                            }
+                          >
+                            {activityState === "running"
+                              ? t("page.agentRuns.unattributed.status.running")
+                              : activityState === "inactive"
+                                ? t("page.agentRuns.unattributed.status.inactive")
+                                : t("page.agentRuns.unattributed.status.unknown")}
                           </Badge>
                           {/* The sub-label reads off the window itself, so the
                               badge and the justification can never disagree.
@@ -590,6 +594,23 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
       </div>
     </>
   );
+}
+
+/**
+ * Interpret the status token and its evidence together. Only the two coherent
+ * positive/negative combinations are actionable; missing or contradictory
+ * wire values stay unknown instead of becoming a confident negative.
+ */
+function observedActivityState(row: ObservedAgentActivity): ObservedActivityState {
+  switch (row.status) {
+    case "running":
+      return row.evidence.within_running_window === true ? "running" : "unknown";
+    case "inactive":
+      return row.evidence.within_running_window === false ? "inactive" : "unknown";
+    case "unknown":
+    default:
+      return "unknown";
+  }
 }
 
 /**
