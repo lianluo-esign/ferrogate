@@ -1620,7 +1620,7 @@ fn build_messages_request_plan(
         ModelEndpointKind::AnthropicMessages,
         &chat_body,
         stream,
-        u64::try_from(body.len()).unwrap_or(u64::MAX),
+        conservative_input_token_upper_bound(&chat_body),
         injected_tool_token_upper_bound,
     );
     let routing = state.candidate_model_routes(

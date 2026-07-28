@@ -35,15 +35,20 @@ pub(crate) struct ModelRouteRequirements {
     /// at all. An explicitly declared non-chat route must not inherit this
     /// exemption.
     allow_undeclared_capabilities: bool,
-    /// Conservative upper bound for input tokens when the caller declares an
-    /// output-token maximum. It uses serialized UTF-8 bytes, not the billing
-    /// estimator: every ordinary input token consumes at least one byte, and
-    /// the full JSON envelope also covers structural message framing.
+    /// Conservative upper bound for ordinary text input tokens. It uses
+    /// serialized UTF-8 bytes, not the billing estimator: every ordinary input
+    /// token consumes at least one byte, and the full JSON envelope also covers
+    /// structural message framing.
     pub(crate) input_token_upper_bound: Option<u64>,
     /// Exact caller-declared maximum output tokens.
     pub(crate) explicit_output_tokens: Option<u64>,
     /// Conservative total of input upper bound plus explicit output maximum.
     pub(crate) required_context_window: Option<u64>,
+    /// The request carries media whose provider-side token cost cannot be
+    /// bounded from the request envelope. Such a request is excluded before
+    /// dispatch instead of treating a short URL or compressed payload as the
+    /// media token cost.
+    unbounded_media_context: bool,
 }
 
 impl ModelRouteRequirements {
@@ -73,15 +78,26 @@ impl ModelRouteRequirements {
         if structured_output_requested(body, endpoint) {
             requirements.require(ModelCapability::StructuredOutput);
         }
-        if request_contains_image_input(body, endpoint) {
+        let contains_image_input = request_contains_image_input(body, endpoint);
+        if contains_image_input {
             requirements.require(ModelCapability::Vision);
         }
         requirements.explicit_output_tokens = explicit_output_token_bound(body, endpoint);
-        if let Some(output_tokens) = requirements.explicit_output_tokens {
+        if contains_image_input {
+            requirements.unbounded_media_context = true;
+        } else if matches!(
+            endpoint,
+            ModelEndpointKind::ChatCompletions
+                | ModelEndpointKind::Responses
+                | ModelEndpointKind::AnthropicMessages
+        ) {
             let input_tokens =
                 request_input_token_upper_bound.saturating_add(injected_tool_token_upper_bound);
             requirements.input_token_upper_bound = Some(input_tokens);
-            requirements.required_context_window = Some(input_tokens.saturating_add(output_tokens));
+            requirements.required_context_window = Some(
+                input_tokens
+                    .saturating_add(requirements.explicit_output_tokens.unwrap_or_default()),
+            );
         }
         requirements.allow_undeclared_capabilities =
             matches!(
@@ -89,7 +105,8 @@ impl ModelRouteRequirements {
                 ModelEndpointKind::ChatCompletions
                     | ModelEndpointKind::Responses
                     | ModelEndpointKind::AnthropicMessages
-            ) && requirements.required_context_window.is_none()
+            ) && requirements.explicit_output_tokens.is_none()
+                && !requirements.unbounded_media_context
                 && requirements.capabilities.len() == 1
                 && requirements.capabilities.contains(&ModelCapability::Chat);
         requirements
@@ -127,7 +144,8 @@ impl ModelRouteRequirements {
             .required_context_window
             .map_or_else(|| "none".to_string(), |value| value.to_string());
         format!(
-            "required_capabilities={capabilities};input_token_upper_bound={input};explicit_output_tokens={output};required_context_window={context};allow_undeclared_capabilities={}",
+            "required_capabilities={capabilities};input_token_upper_bound={input};explicit_output_tokens={output};required_context_window={context};unbounded_media_context={};allow_undeclared_capabilities={}",
+            self.unbounded_media_context,
             self.allow_undeclared_capabilities
         )
     }
@@ -151,6 +169,7 @@ impl From<&ModelRoute> for ModelRouteCandidateIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelRouteExclusionReason {
     MissingCapability(ModelCapability),
+    MediaContextUnbounded,
     ContextWindowUndeclared { required: u64 },
     ContextWindowTooSmall { required: u64, declared: u32 },
     RegionUndeclared,
@@ -161,6 +180,7 @@ impl ModelRouteExclusionReason {
     pub(crate) const fn code(&self) -> &'static str {
         match self {
             Self::MissingCapability(_) => "missing_capability",
+            Self::MediaContextUnbounded => "media_context_unbounded",
             Self::ContextWindowUndeclared { .. } => "context_window_undeclared",
             Self::ContextWindowTooSmall { .. } => "context_window_too_small",
             Self::RegionUndeclared => "region_undeclared",
@@ -172,6 +192,9 @@ impl ModelRouteExclusionReason {
         match self {
             Self::MissingCapability(capability) => {
                 format!("required_capability={}", capability.as_str())
+            }
+            Self::MediaContextUnbounded => {
+                "media_kind=image;provider_neutral_token_upper_bound=unavailable".to_string()
             }
             Self::ContextWindowUndeclared { required } => {
                 format!("required_context_window={required};declared_context_window=none")
@@ -190,6 +213,7 @@ impl ModelRouteExclusionReason {
         matches!(
             self,
             Self::MissingCapability(_)
+                | Self::MediaContextUnbounded
                 | Self::ContextWindowUndeclared { .. }
                 | Self::ContextWindowTooSmall { .. }
         )
@@ -346,8 +370,11 @@ pub(crate) fn route_exclusion_reasons(
             .map(ModelRouteExclusionReason::MissingCapability)
             .collect::<Vec<_>>()
     };
-    if let Some(required) = requirements.required_context_window {
+    if requirements.unbounded_media_context {
+        reasons.push(ModelRouteExclusionReason::MediaContextUnbounded);
+    } else if let Some(required) = requirements.required_context_window {
         match route.context_window {
+            None if legacy_undeclared_route => {}
             None => reasons.push(ModelRouteExclusionReason::ContextWindowUndeclared { required }),
             Some(declared) if u64::from(declared) < required => {
                 reasons
