@@ -25,11 +25,11 @@
 //! ## Export separates payload from diagnostics
 //!
 //! `request-logs export` maps to `GET /admin/v1/request-log-exports`, which
-//! streams redacted JSONL. This layer only builds the request; the command layer
-//! that consumes it routes the JSONL payload to stdout and keeps progress /
-//! diagnostics on stderr (the [`crate::output`] contract), so the export stays
-//! pipeable. The response carries `x-request-id` / `x-trace-id`, which
-//! [`crate::transport::classify`] preserves for audit attribution.
+//! returns redacted JSONL. Its descriptor selects the raw transport path, so
+//! the command layer writes the response bytes to stdout without JSON decoding,
+//! table rendering, or an implicit newline. Progress and diagnostics stay on
+//! stderr, keeping the export pipeable; `send_raw` preserves the response's
+//! `x-request-id` / `x-trace-id` for audit attribution.
 //!
 //! ## Excluded from this family (with reason)
 //!
@@ -64,10 +64,11 @@ impl CommandGroup for RequestLogsGroup {
             "Inspect and export retained request logs",
             vec![
                 VerbDescriptor::read("list", "List retained request logs", "listAdminRequestLogs"),
-                VerbDescriptor::read(
+                VerbDescriptor::raw_read(
                     "export",
                     "Export request logs as redacted JSONL",
                     "exportAdminRequestLogsJsonl",
+                    "application/x-ndjson",
                 ),
             ],
         )

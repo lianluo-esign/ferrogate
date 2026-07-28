@@ -87,6 +87,17 @@ pub enum ConfirmationPolicy {
     Required,
 }
 
+/// How a successful response body must leave the CLI process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseMode {
+    /// Decode the body as JSON and pass it through the normal table/JSON
+    /// renderer.
+    Structured,
+    /// Preserve the response bytes exactly and write them directly to stdout.
+    /// The media type is also sent in the request's `Accept` header.
+    Raw { media_type: String },
+}
+
 /// Metadata for one verb (operation) within a resource family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerbDescriptor {
@@ -102,6 +113,8 @@ pub struct VerbDescriptor {
     pub effect: VerbEffect,
     /// Whether the CLI must confirm operator intent before sending the request.
     pub confirmation: ConfirmationPolicy,
+    /// Whether the response is structured CLI data or a byte-faithful export.
+    pub response_mode: ResponseMode,
     /// Required query values supplied as positional CLI segments after the
     /// operation's OpenAPI path parameters.
     ///
@@ -133,6 +146,28 @@ impl VerbDescriptor {
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Read,
             confirmation: ConfirmationPolicy::None,
+            response_mode: ResponseMode::Structured,
+            positional_query_segments: 0,
+        }
+    }
+
+    /// A read whose successful response is an export artifact, not a document
+    /// for the table/JSON renderer.
+    pub fn raw_read(
+        name: impl Into<String>,
+        about: impl Into<String>,
+        operation_id: impl Into<String>,
+        media_type: impl Into<String>,
+    ) -> VerbDescriptor {
+        VerbDescriptor {
+            name: name.into(),
+            about: about.into(),
+            operation_id: Some(operation_id.into()),
+            effect: VerbEffect::Read,
+            confirmation: ConfirmationPolicy::None,
+            response_mode: ResponseMode::Raw {
+                media_type: media_type.into(),
+            },
             positional_query_segments: 0,
         }
     }
@@ -151,6 +186,7 @@ impl VerbDescriptor {
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::None,
+            response_mode: ResponseMode::Structured,
             positional_query_segments: 0,
         }
     }
@@ -168,6 +204,7 @@ impl VerbDescriptor {
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::Required,
+            response_mode: ResponseMode::Structured,
             positional_query_segments: 0,
         }
     }
@@ -180,6 +217,7 @@ impl VerbDescriptor {
             operation_id: None,
             effect: VerbEffect::Local,
             confirmation: ConfirmationPolicy::None,
+            response_mode: ResponseMode::Structured,
             positional_query_segments: 0,
         }
     }
@@ -205,6 +243,14 @@ impl VerbDescriptor {
     /// this verb's request.
     pub fn requires_confirmation(&self) -> bool {
         self.confirmation == ConfirmationPolicy::Required
+    }
+
+    /// The media type of a response that must bypass structured rendering.
+    pub fn raw_response_media_type(&self) -> Option<&str> {
+        match &self.response_mode {
+            ResponseMode::Structured => None,
+            ResponseMode::Raw { media_type } => Some(media_type),
+        }
     }
 }
 

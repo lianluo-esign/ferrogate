@@ -33,7 +33,7 @@
 //! error→exit-class mapping, and — for read verbs — secret redaction of any
 //! one-time key material a server echoes back.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
@@ -52,7 +52,7 @@ use ferrogate_control_plane_client::registry_helpers::ResourceInput;
 use ferrogate_control_plane_client::resource::ListParams;
 use ferrogate_control_plane_client::transport::{
     page_cursor_state, page_envelope, ApiResponse, ControlPlaneClient, PageCursorState,
-    PageRequest, RequestSpec, ReqwestTransport, DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
+    PageRequest, RawApiResponse, RequestSpec, ReqwestTransport, DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
 };
 use serde_json::{Map, Value};
 
@@ -357,6 +357,21 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     let spec = build_request(group_name, verb_name, &input)?;
     let redaction_spec = spec.clone();
 
+    let raw_media_type = descriptor.raw_response_media_type();
+    if let Some(media_type) = raw_media_type {
+        if global.output.is_some() {
+            return Err(CliError::usage(format!(
+                "--output does not apply to '{group_name} {verb_name}'; the command writes its \
+                 {media_type} export bytes to stdout unchanged"
+            )));
+        }
+        if resource.all_pages {
+            return Err(CliError::usage(format!(
+                "--all-pages does not apply to the raw '{group_name} {verb_name}' export"
+            )));
+        }
+    }
+
     let credential = resolve_credential(&effective.auth, &ProcessSecretResolver)?;
     let output_format = effective.output;
     // One identity per operator action (issue #548), minted before the verb is
@@ -365,6 +380,11 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     // transport AND to the mutation plan; both hold clones sharing one
     // server-time slot, so the receipt reports the action the server saw.
     let identity = ClientActionIdentity::mint(&effective, &FingerprintEnv::from_process())?;
+
+    if let Some(media_type) = raw_media_type {
+        write_raw_output(spec, effective, credential, identity, media_type)?;
+        return Ok(());
+    }
 
     // The #505 render gate. This `match` is the whole enforcement: the
     // `Receipt` arm holds a `ReceiptRenderer`, which has no `render(Value)`
@@ -457,6 +477,36 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+/// Write an export response to stdout byte-for-byte. No renderer or implicit
+/// newline is allowed on this path because stdout is the durable artifact.
+fn write_raw_output(
+    spec: RequestSpec,
+    effective: EffectiveContext,
+    credential: Option<Credential>,
+    identity: ClientActionIdentity,
+    media_type: &str,
+) -> CliResult<()> {
+    let runtime = dispatch::runtime()?;
+    let response: RawApiResponse = runtime.block_on(async move {
+        let transport = ReqwestTransport::new(&effective)?;
+        let client = ControlPlaneClient::new(effective, credential, transport, identity);
+        client.send_raw(&spec, media_type).await
+    })?;
+
+    if let Some(request_id) = &response.request_id {
+        eprintln!("request-id: {request_id}");
+    }
+    if let Some(trace_id) = &response.trace_id {
+        eprintln!("trace-id: {trace_id}");
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&response.body)
+        .and_then(|()| stdout.flush())
+        .map_err(|error| CliError::transport(format!("failed to write export to stdout: {error}")))
 }
 
 /// Execute a non-mutating verb and gate its body into a [`VerbOutput`].

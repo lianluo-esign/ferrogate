@@ -34,11 +34,9 @@
 //! own `POST .../{tenant_id}/adjust` and `.../charge` action verbs — exactly the
 //! first-class-action shape #362 used for lifecycle operations — so the audit
 //! trail records precise operator intent instead of an ambiguous `update`. The
-//! `VerbDescriptor` metadata layer carries no confirm-intent field (and this
-//! slice does not modify the #360 foundation), so the explicit-confirmation /
-//! non-interactive-intent gate for these irreversible verbs is enforced at the
-//! command-dispatch layer that consumes this metadata; the verbs' `about` text
-//! marks them as the settlement-affecting operations that gate must guard.
+//! `VerbDescriptor` metadata marks settlement-affecting operations as requiring
+//! confirmation. The generic command dispatcher consumes that policy, prompts
+//! before sending, and requires `--yes` when `--non-interactive` is active.
 //!
 //! ## Excluded from this family (with reason)
 //!
@@ -205,9 +203,9 @@ impl CommandGroup for BillingEventsGroup {
                     "List billing outbox dead letters",
                     "listBillingOutboxDeadLetters",
                 ),
-                VerbDescriptor::mutating(
+                VerbDescriptor::mutating_with_confirmation(
                     "replay",
-                    "Replay a dead-lettered billing outbox record",
+                    "Replay a dead-lettered billing outbox record (state-changing; requires confirmation)",
                     "replayBillingOutboxDeadLetter",
                 ),
             ],

@@ -205,10 +205,20 @@ pub fn prepare_request(
     credential: Option<&Credential>,
     identity: &ClientActionIdentity,
 ) -> CliResult<PreparedRequest> {
+    prepare_request_accepting(spec, context, credential, identity, JSON_MEDIA_TYPE)
+}
+
+fn prepare_request_accepting(
+    spec: &RequestSpec,
+    context: &EffectiveContext,
+    credential: Option<&Credential>,
+    identity: &ClientActionIdentity,
+    accept: &str,
+) -> CliResult<PreparedRequest> {
     let url = build_url(&context.endpoint, &spec.path, &spec.query)?;
 
     let mut headers = vec![
-        ("accept".to_string(), JSON_MEDIA_TYPE.to_string()),
+        ("accept".to_string(), accept.to_string()),
         ("user-agent".to_string(), crate::version::user_agent()),
     ];
     headers.extend(identity.headers());
@@ -275,6 +285,15 @@ pub struct ApiResponse {
     pub request_id: Option<String>,
     pub trace_id: Option<String>,
     pub body: serde_json::Value,
+}
+
+/// A successful export response whose body has not been decoded or rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawApiResponse {
+    pub status: u16,
+    pub request_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub body: Vec<u8>,
 }
 
 /// Classify a [`RawResponse`] into either a decoded [`ApiResponse`] or a typed
@@ -348,6 +367,23 @@ pub fn classify(response: &RawResponse) -> Result<ApiResponse, ApiError> {
         trace_id,
         retry_after_secs,
         details: error_object.and_then(collect_extra_details),
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn classify_raw(response: RawResponse) -> Result<RawApiResponse, ApiError> {
+    if ExitClass::from_http_status(response.status) != ExitClass::Success {
+        return match classify(&response) {
+            Err(error) => Err(error),
+            Ok(_) => unreachable!("a non-success status cannot classify as success"),
+        };
+    }
+
+    Ok(RawApiResponse {
+        status: response.status,
+        request_id: response.header("x-request-id").map(str::to_string),
+        trace_id: response.header("x-trace-id").map(str::to_string),
+        body: response.body,
     })
 }
 
@@ -865,6 +901,21 @@ impl<T: Transport> ControlPlaneClient<T> {
         let raw = self.transport.execute(prepared).await?;
         self.harvest_time_token(&raw);
         classify(&raw).map_err(CliError::from)
+    }
+
+    /// Send an export request and preserve every successful response byte.
+    /// Error responses still use the normal typed API-envelope classifier.
+    pub async fn send_raw(&self, spec: &RequestSpec, accept: &str) -> CliResult<RawApiResponse> {
+        let prepared = prepare_request_accepting(
+            spec,
+            &self.context,
+            self.credential.as_ref(),
+            &self.identity,
+            accept,
+        )?;
+        let raw = self.transport.execute(prepared).await?;
+        self.harvest_time_token(&raw);
+        classify_raw(raw).map_err(CliError::from)
     }
 
     /// Take a server-issued time token off a response, if it carried one.
