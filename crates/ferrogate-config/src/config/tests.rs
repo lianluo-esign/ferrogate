@@ -1600,10 +1600,12 @@ fn an_undeclared_key_stops_a_config_document_and_only_warns_for_a_durable_row() 
 /// the admin API and the file cannot disagree about what is acceptable.
 #[test]
 fn the_per_key_mint_refusal_asks_only_about_the_key_in_the_request() {
-    let mut config = Config::default();
+    let mut config = Config {
+        api_keys_are_control_plane_documents: true,
+        ..Config::default()
+    };
     // A legacy durable row is already present and undeclared: the exact state
     // that used to make every mutation 400.
-    config.api_keys_are_control_plane_documents = true;
     config.api_keys.push(
         // #540-undeclared-on-purpose: a pre-#515 row is exactly the input
         serde_json::from_value(serde_json::json!({

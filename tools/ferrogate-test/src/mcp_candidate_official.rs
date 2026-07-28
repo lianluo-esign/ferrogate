@@ -505,8 +505,8 @@ fn validate_legacy_wire(wire: &[ObservedRequest]) -> Result<()> {
             "official legacy request escaped its initialized FerroGate instance"
         );
         ensure!(
-            request.headers.get("mcp-method").is_none()
-                && request.headers.get("mcp-name").is_none()
+            !request.headers.contains_key("mcp-method")
+                && !request.headers.contains_key("mcp-name")
                 && request
                     .headers
                     .get("mcp-protocol-version")
