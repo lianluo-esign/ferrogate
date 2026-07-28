@@ -28,9 +28,17 @@ security_check="${root}/scripts/security-check.sh"
 bash_bin="$(command -v bash)"
 
 missing_self_test_tools=()
-for required_tool in git mktemp rm mkdir ln head tr grep sed tail sort comm diff cut cp chmod wc sha256sum; do
+for required_tool in git mktemp rm mkdir ln head tr grep sed tail sort comm diff cut cp chmod wc; do
   command -v "$required_tool" >/dev/null 2>&1 || missing_self_test_tools+=("$required_tool")
 done
+self_digest_tool=""
+if command -v sha256sum >/dev/null 2>&1; then
+  self_digest_tool="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  self_digest_tool="shasum"
+else
+  missing_self_test_tools+=("sha256sum-or-shasum")
+fi
 if [[ "${#missing_self_test_tools[@]}" -ne 0 ]]; then
   printf 'secret-scan self-test did NOT run: missing required tool(s) on PATH: %s\n' \
     "${missing_self_test_tools[*]}" >&2
@@ -72,10 +80,9 @@ make_shim_path() {
   printf '%s' "$dir"
 }
 
-# Everything check-secret-scan.sh may exec, minus the search tools. sha256sum
-# is here because the reviewed-exception allowlist pins each entry to one line
-# by digest (#566), so a scan OF THIS REPO needs it; a --root scan does not.
-base_tools=(bash mktemp sed sort comm cat rm sha256sum)
+# Everything check-secret-scan.sh may exec, minus the search tools. Preserve the
+# digest backend this host actually provides; production supports either one.
+base_tools=(bash mktemp sed sort comm cat rm "$self_digest_tool")
 
 # ---------------------------------------------------------------------------
 # A corpus with planted fake credentials, in its own git checkout.
@@ -194,7 +201,7 @@ else
 fi
 
 # A required helper missing after engine selection is also a named refusal.
-missing_comm_path="$(make_shim_path "$work/bin-no-comm" bash mktemp sed sort rm sha256sum git)"
+missing_comm_path="$(make_shim_path "$work/bin-no-comm" bash mktemp sed sort rm "$self_digest_tool" git)"
 missing_comm_out="$(PATH="$missing_comm_path" "$bash_bin" "$script" --root "$clean_repo" 2>&1)"
 missing_comm_status=$?
 missing_comm_line="secret scan did NOT run: missing required tool(s) on PATH: comm"
@@ -531,16 +538,16 @@ done
 #    --root.
 # ---------------------------------------------------------------------------
 
-# Assembled at runtime, like every other fake credential in this file: a
-# realistic PKCS#1 line, ~400 characters of base64 body, of the shape a real
-# leak has and the reviewed placeholders do not.
+# Assembled at runtime, like every other fake credential in this file. The
+# selected value follows the production allowlist row's pattern, so this guard
+# survives removal of the last PEM exception instead of deleting the only test
+# of the exception mechanism with it.
 pem_open="-----BEGIN"
 pem_private="PRIVATE KEY-----"
 realistic_der="MIIEpAIBAAKCAQEA"
 for _ in 1 2 3 4 5 6; do
   realistic_der+="7bQvXk2LmN9pRs0aZbYcJhGfEeDdCcBbAa9876543210QwErTyUiOpAsDfGhJkL"
 done
-realistic_key_line="  KEY: \"${pem_open} RSA ${pem_private}\\n${realistic_der}\\n\","
 
 # The table itself, from the script rather than restated here: a copy in the
 # test is a copy that stops matching the thing it claims to cover.
@@ -552,7 +559,9 @@ else
 fi
 
 allowlist_paths=()
-allowlist_pem_path=""
+guard_label=""
+guard_path=""
+guard_digest=""
 for row in "${allowlist_rows[@]}"; do
   IFS=$'\t' read -r row_label row_path row_digest row_reason <<<"$row"
   if [[ ! "$row_digest" =~ ^[0-9a-f]{64}$ ]]; then
@@ -565,13 +574,73 @@ for row in "${allowlist_rows[@]}"; do
     fail "every allowlist entry names a file that exists" "$row_path"
   fi
   allowlist_paths+=("$row_path")
-  [[ "$row_label" == "private key material" ]] && allowlist_pem_path="$row_path"
+  if [[ -z "$guard_path" ]]; then
+    guard_label="$row_label"
+    guard_path="$row_path"
+    guard_digest="$row_digest"
+  fi
 done
-if [[ -n "$allowlist_pem_path" ]]; then
+if [[ -n "$guard_path" ]]; then
   pass "allowlist entries carry a 64-hex digest, a reason, and an existing path"
 else
-  fail "the allowlist still holds a private-key exception to test against" \
-    "no 'private key material' entry; if that is deliberate, delete section 7's plant cases with it"
+  fail "the allowlist exposes one reviewed row for the mutation guard"
+fi
+
+case "$guard_label" in
+  "private key material")
+    realistic_secret_fragment="${pem_open} RSA ${pem_private}\\n${realistic_der}\\n"
+    ;;
+  "AWS access key id")
+    realistic_secret_fragment="AKIA0123456789ABCDEF"
+    ;;
+  "GitHub token")
+    github_prefix="gh"
+    realistic_secret_fragment="${github_prefix}p_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    ;;
+  "OpenAI-style API key")
+    key_prefix="sk"
+    realistic_secret_fragment="${key_prefix}-abcdefghijklmnopqrstuvwxyz0123456789"
+    ;;
+  "Anthropic API key")
+    key_prefix="sk"
+    realistic_secret_fragment="${key_prefix}-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+    ;;
+  "Google API key")
+    google_prefix="AI"
+    realistic_secret_fragment="${google_prefix}za0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    ;;
+  *)
+    fail "the allowlist mutation guard knows the selected pattern" "$guard_label"
+    realistic_secret_fragment=""
+    ;;
+esac
+realistic_key_line="  PLANTED_SECRET: \"${realistic_secret_fragment}\","
+
+review_line_digest() {
+  local content="$1" rendered
+  if [[ "$self_digest_tool" == "sha256sum" ]]; then
+    rendered="$(printf '%s' "$content" | sha256sum)"
+  else
+    rendered="$(printf '%s' "$content" | shasum -a 256)"
+  fi
+  printf '%s' "${rendered%% *}"
+}
+
+guard_line_number=0
+guard_line_matches=0
+line_number=0
+while IFS= read -r reviewed_line || [[ -n "$reviewed_line" ]]; do
+  line_number=$((line_number + 1))
+  if [[ "$(review_line_digest "$reviewed_line")" == "$guard_digest" ]]; then
+    guard_line_number="$line_number"
+    guard_line_matches=$((guard_line_matches + 1))
+  fi
+done <"$root/$guard_path"
+if [[ "$guard_line_matches" -eq 1 ]]; then
+  pass "allowlist: the selected digest identifies exactly one reviewed line"
+else
+  fail "allowlist: the selected digest identifies exactly one reviewed line" \
+    "$guard_label | $guard_path | matches: $guard_line_matches"
 fi
 
 # A fixture checkout carrying the script and every allowlisted file, so the
@@ -597,6 +666,21 @@ build_self_fixture() {
 }
 run_self_fixture() { "$bash_bin" "$self_fixture/scripts/check-secret-scan.sh" 2>&1; }
 
+replace_fixture_line() {
+  local path="$1" wanted_line="$2" replacement="$3"
+  local source="$self_fixture/$path" rewritten="$work/replaced-line" current=0 content
+  : >"$rewritten"
+  while IFS= read -r content || [[ -n "$content" ]]; do
+    current=$((current + 1))
+    if [[ "$current" -eq "$wanted_line" ]]; then
+      printf '%s\n' "$replacement" >>"$rewritten"
+    else
+      printf '%s\n' "$content" >>"$rewritten"
+    fi
+  done <"$source"
+  cp "$rewritten" "$source"
+}
+
 # 7a. The control. Without this, every plant below could pass because the
 #     fixture never scans clean in the first place.
 build_self_fixture
@@ -612,7 +696,7 @@ fi
 # 7b. THE GUARD. A real-shaped key added to an allowlisted file is reported.
 #     Under the old <label, file> scoping this case passed the scan.
 build_self_fixture
-printf '%s\n' "$realistic_key_line" >>"$self_fixture/$allowlist_pem_path"
+printf '%s\n' "$realistic_key_line" >>"$self_fixture/$guard_path"
 (cd "$self_fixture" && git commit -qam planted) >/dev/null
 planted_self_out="$(run_self_fixture)"
 planted_self_status=$?
@@ -622,20 +706,23 @@ else
   fail "allowlist: a real-shaped key elsewhere in an allowlisted file fails the scan" \
     "the exemption swallowed it; output: $planted_self_out"
 fi
-if [[ "$planted_self_out" == *"$realistic_der"* && "$planted_self_out" == *"$allowlist_pem_path"* ]]; then
+if [[ "$planted_self_out" == *"$realistic_secret_fragment"* && "$planted_self_out" == *"$guard_path"* ]]; then
   pass "allowlist: the planted key is printed, with its path"
 else
   fail "allowlist: the planted key is printed, with its path" "output: $planted_self_out"
 fi
 
-# 7c. The same key ON the reviewed line, which a <label, file, line-number>
-#     exception would still have exempted. The digest is what refuses it.
+# 7c. Put the same key ON the digest-identified reviewed line, preserving the
+#     rest of the file and its line layout. A <label, file, line-number>
+#     exception would still exempt this exact placement; the digest must refuse
+#     it.
 build_self_fixture
-printf '%s\n' "$realistic_key_line" >"$self_fixture/$allowlist_pem_path"
+replace_fixture_line "$guard_path" "$guard_line_number" "$realistic_key_line"
 (cd "$self_fixture" && git commit -qam replaced) >/dev/null
 replaced_self_out="$(run_self_fixture)"
 replaced_self_status=$?
-if [[ "$replaced_self_status" -ne 0 && "$replaced_self_out" == *"$realistic_der"* ]]; then
+if [[ "$replaced_self_status" -ne 0 && "$replaced_self_out" == *"$realistic_secret_fragment"* &&
+  "$replaced_self_out" == *"$guard_path:$guard_line_number:"* ]]; then
   pass "allowlist: a real-shaped key replacing the reviewed line fails the scan"
 else
   fail "allowlist: a real-shaped key replacing the reviewed line fails the scan" \
@@ -653,7 +740,7 @@ fi
 # 7d. An entry that stops matching is a failure, so the table cannot rot into a
 #     permanent exemption for a file nobody reviews any more.
 build_self_fixture
-(cd "$self_fixture" && git rm -q "$allowlist_pem_path" && git commit -qm dropped) >/dev/null
+(cd "$self_fixture" && git rm -q "$guard_path" && git commit -qm dropped) >/dev/null
 stale_self_out="$(run_self_fixture)"
 stale_self_status=$?
 if [[ "$stale_self_status" -ne 0 && "$stale_self_out" == *"no longer match anything"* ]]; then
@@ -667,18 +754,48 @@ fi
 #     unchecked is the silent skip #525 exists to refuse.
 no_digest_path="$(make_shim_path "$work/bin-no-digest" bash mktemp sed sort comm cat rm git)"
 build_self_fixture
+list_without_digest_out="$(PATH="$no_digest_path" "$bash_bin" \
+  "$self_fixture/scripts/check-secret-scan.sh" --list-files 2>&1)"
+list_without_digest_status=$?
+if [[ "$list_without_digest_status" -eq 0 && "$list_without_digest_out" == *"$guard_path"* ]]; then
+  pass "--list-files does not require a digest tool it never uses"
+else
+  fail "--list-files does not require a digest tool it never uses" \
+    "status $list_without_digest_status, output: $list_without_digest_out"
+fi
+
 no_digest_out="$(PATH="$no_digest_path" "$bash_bin" "$self_fixture/scripts/check-secret-scan.sh" 2>&1)"
 no_digest_status=$?
-if [[ "$no_digest_status" -ne 0 && "$no_digest_out" == *"sha256sum"* ]]; then
-  pass "allowlist: no digest tool on PATH exits non-zero naming sha256sum"
+if [[ "$no_digest_status" -ne 0 && "$no_digest_out" == *"neither sha256sum nor shasum"* ]]; then
+  pass "allowlist: no digest tool on PATH exits non-zero naming both supported backends"
 else
-  fail "allowlist: no digest tool on PATH exits non-zero naming sha256sum" \
+  fail "allowlist: no digest tool on PATH exits non-zero naming both supported backends" \
     "status $no_digest_status, output: $no_digest_out"
 fi
 if [[ "$no_digest_out" != *"secret scan passed"* ]]; then
   pass "allowlist: no digest tool on PATH never reports a pass"
 else
   fail "allowlist: no digest tool on PATH never reports a pass" "output: $no_digest_out"
+fi
+
+# 7f. Production explicitly supports macOS's `shasum -a 256`; exercise that
+# branch with sha256sum absent rather than stripping both digest backends from
+# every self-scan fixture.
+if command -v shasum >/dev/null 2>&1; then
+  shasum_only_path="$(make_shim_path "$work/bin-shasum-only" \
+    bash mktemp sed sort comm cat rm git shasum)"
+  build_self_fixture
+  shasum_out="$(PATH="$shasum_only_path" "$bash_bin" \
+    "$self_fixture/scripts/check-secret-scan.sh" 2>&1)"
+  shasum_status=$?
+  if [[ "$shasum_status" -eq 0 && "$shasum_out" == *"secret scan passed"* ]]; then
+    pass "allowlist: the shasum-only digest backend verifies reviewed lines"
+  else
+    fail "allowlist: the shasum-only digest backend verifies reviewed lines" \
+      "status $shasum_status, output: $shasum_out"
+  fi
+else
+  skip "shasum-only allowlist backend (shasum is not installed here)"
 fi
 
 if [[ "$failures" -ne 0 ]]; then

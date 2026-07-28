@@ -171,23 +171,6 @@ if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
   exit 1
 fi
 
-# The allowlist pins each reviewed exemption to one line by SHA-256 (#566), so
-# without a digest tool the scan could only choose between granting every
-# exemption unchecked and reporting three known-good lines as findings. Both are
-# wrong, and only this repo's own scan consults the allowlist at all.
-secret_scan_digest_cmd=()
-if [[ "$scanning_this_repo" -eq 1 ]]; then
-  if command -v sha256sum >/dev/null 2>&1; then
-    secret_scan_digest_cmd=(sha256sum)
-  elif command -v shasum >/dev/null 2>&1; then
-    secret_scan_digest_cmd=(shasum -a 256)
-  else
-    echo "secret scan did NOT run: neither sha256sum nor shasum found on PATH" >&2
-    echo "a gate that cannot verify its own exemptions must fail loudly instead of granting them (#525, #566)" >&2
-    exit 1
-  fi
-fi
-
 # --- file list ----------------------------------------------------------
 # Cargo.lock is generated dependency inventory rather than authored source. Its
 # integrity and advisory surfaces are checked by `cargo metadata --locked`, the
@@ -203,6 +186,24 @@ fi
 if [[ "$list_files_only" -eq 1 ]]; then
   printf '%s\n' "${tracked_secret_scan_files[@]}"
   exit 0
+fi
+
+# The allowlist pins each reviewed exemption to one line by SHA-256 (#566), so
+# without a digest tool the scan could only choose between granting every
+# exemption unchecked and reporting three known-good lines as findings. Both are
+# wrong. `--list-files` exits above because listing tracked inputs does not read
+# or grant an allowlist entry and therefore does not require a digest backend.
+secret_scan_digest_cmd=()
+if [[ "$scanning_this_repo" -eq 1 ]]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    secret_scan_digest_cmd=(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    secret_scan_digest_cmd=(shasum -a 256)
+  else
+    echo "secret scan did NOT run: neither sha256sum nor shasum found on PATH" >&2
+    echo "a gate that cannot verify its own exemptions must fail loudly instead of granting them (#525, #566)" >&2
+    exit 1
+  fi
 fi
 
 # A tracked path missing from the worktree is skipped by `git grep` with exit
