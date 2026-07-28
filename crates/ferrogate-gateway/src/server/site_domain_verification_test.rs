@@ -380,6 +380,35 @@ fn the_backfill_writes_one_explicit_record_and_never_overwrites() {
 }
 
 #[test]
+fn only_a_live_verified_record_is_eligible_for_acme() {
+    let now = 1_000;
+    let mut verified =
+        StoredSiteDomainVerification::pending("org_a", "verified.example", "docs", "tok", now);
+    verified.mark_verified(now);
+    assert!(eligible_for_acme(&verified, now));
+
+    let grandfathered =
+        StoredSiteDomainVerification::grandfathered("org_a", "legacy.example", "docs", "tok", now);
+    assert!(grandfathered.serves(now));
+    assert!(
+        !eligible_for_acme(&grandfathered, now),
+        "a serving migration exception is not ownership proof"
+    );
+
+    let pending =
+        StoredSiteDomainVerification::pending("org_a", "pending.example", "docs", "tok", now);
+    assert!(!eligible_for_acme(&pending, now));
+
+    assert!(
+        !eligible_for_acme(
+            &verified,
+            now + ferrogate_storage::SITE_DOMAIN_VERIFICATION_TTL_SECONDS
+        ),
+        "an expired proof must not enter a certificate order"
+    );
+}
+
+#[test]
 fn grandfathering_defaults_on_and_is_switchable_off() {
     // Default (env unset in this process): grandfather, so an upgrade does not
     // take live customer domains offline.
@@ -448,6 +477,15 @@ fn an_answer_for_another_name_or_without_a_txt_type_is_not_accepted() {
         "an untyped answer must not be assumed to be TXT"
     );
 
+    // A TXT answer with no owner name cannot be tied to this query.
+    let body = br#"{"Status":0,"Answer":[{"type":16,
+        "data":"\"ferrogate-site-verification=abc\""}]}"#;
+    assert_eq!(
+        parse_dns_json_answers(queried, body),
+        TxtLookup::Answers(Vec::new()),
+        "a nameless TXT answer must not satisfy any query"
+    );
+
     // A non-TXT type carrying the value.
     let body = br#"{"Status":0,"Answer":[{"name":"_ferrogate-challenge.example.com",
         "type":5,"data":"\"ferrogate-site-verification=abc\""}]}"#;
@@ -455,6 +493,18 @@ fn an_answer_for_another_name_or_without_a_txt_type_is_not_accepted() {
         parse_dns_json_answers(queried, body),
         TxtLookup::Answers(Vec::new()),
         "a CNAME record's data must not be read as a TXT value"
+    );
+
+    // A CNAME rooted at an unrelated owner must not extend the accepted-name
+    // set and smuggle in a TXT record under its target.
+    let body = br#"{"Status":0,"Answer":[
+        {"name":"_ferrogate-challenge.attacker.test","type":5,"data":"proof.vendor.test"},
+        {"name":"proof.vendor.test","type":16,
+            "data":"\"ferrogate-site-verification=abc\""}]}"#;
+    assert_eq!(
+        parse_dns_json_answers(queried, body),
+        TxtLookup::Answers(Vec::new()),
+        "an unrelated CNAME must not make its target acceptable"
     );
 
     // Case and the trailing root dot must not matter -- resolvers disagree.

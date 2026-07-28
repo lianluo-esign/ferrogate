@@ -277,12 +277,6 @@ fn is_query_safe_dns_name(name: &str) -> bool {
         })
 }
 
-/// Fold a `application/dns-json` reply into a [`TxtLookup`]. Pure/offline so
-/// the resolver contract is tested without a network.
-///
-/// Only `Status: 0` (NOERROR) and `Status: 3` (NXDOMAIN) are AUTHORITATIVE
-/// answers -- NXDOMAIN definitively means "no such name", which is a legitimate
-/// empty answer set. Every other RCODE (SERVFAIL, REFUSED, ...) is a resolver
 /// Case-folds a DNS name and drops the trailing root dot, so a reply's `name`
 /// can be compared with the queried name across resolvers that disagree about
 /// both (#488 review item 3).
@@ -290,6 +284,12 @@ fn normalize_dns_name(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// Fold a `application/dns-json` reply into a [`TxtLookup`]. Pure/offline so
+/// the resolver contract is tested without a network.
+///
+/// Only `Status: 0` (NOERROR) and `Status: 3` (NXDOMAIN) are authoritative
+/// answers -- NXDOMAIN definitively means "no such name", which is a legitimate
+/// empty answer set. Every other RCODE (SERVFAIL, REFUSED, ...) is a resolver
 /// failure and stays `Unavailable`, because "the resolver could not tell us"
 /// must never read as "the record is absent" and certainly not as "verified".
 pub(super) fn parse_dns_json_answers(queried_name: &str, body: &[u8]) -> TxtLookup {
@@ -522,6 +522,11 @@ impl SiteDomainResolverBackend {
 /// `FERROGATE_SITE_DOMAIN_GRANDFATHER=false`, which backfills those bindings as
 /// `pending_verification` (they stop serving until proven).
 ///
+/// Grandfathering is only a serving-availability exception. It is NOT an
+/// ownership proof and never enrolls a hostname in ACME issuance or renewal;
+/// the operator must complete the TXT proof before FerroGate can manage that
+/// hostname's certificate.
+///
 /// Note the narrow blast radius: grandfathering only ever applies to bindings
 /// present at the backfill. Everything bound afterwards must prove ownership.
 pub(super) fn grandfather_existing_bindings() -> bool {
@@ -565,6 +570,15 @@ pub(super) fn now_unix_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+/// Whether a verification record is a live proof eligible for ACME enrollment.
+///
+/// `grandfathered` deliberately returns false even though it may keep serving:
+/// migration availability is not evidence that FerroGate may request a
+/// certificate for the hostname.
+pub(super) fn eligible_for_acme(record: &StoredSiteDomainVerification, now_unix: i64) -> bool {
+    record.effective_state(now_unix) == SiteDomainVerificationState::Verified
+}
+
 /// The bound hostnames that currently hold a LIVE ownership proof.
 ///
 /// This is what the ACME domain set is built from at startup (#488): an
@@ -588,7 +602,7 @@ pub(super) async fn servable_site_domain_hostnames(
             verifications.iter().any(|record| {
                 record.tenant_id == binding.tenant_id
                     && record.hostname == binding.hostname
-                    && record.serves(now_unix)
+                    && eligible_for_acme(record, now_unix)
             })
         })
         .map(|binding| binding.hostname)
