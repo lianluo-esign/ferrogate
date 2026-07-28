@@ -942,12 +942,12 @@ fn is_header_value_safe(ch: char) -> bool {
 ///    `;` in front of it. Anything grepping the blob sees a field that was never
 ///    declared. Encoding cannot weld: `%3B` is one segment's worth of text and
 ///    reads back as one.
-/// 2. **Nothing restricted the output to ASCII.** Two operator-reachable inputs
-///    reach this function — [`HOST_LABEL_ENV`] and, since #548, the resolved
-///    **context name**, which nothing in [`crate::context`] validates — so a
-///    context named `生产` or `prod-café` put raw UTF-8 into a header value.
-///    This project's own issues are written in Chinese; that is not a
-///    hypothetical profile name.
+/// 2. **Nothing restricted the output to ASCII.** Operator-reachable host
+///    labels, reported addresses, and named contexts reach this function, so a
+///    value such as `生产` or `prod-café` put raw UTF-8 into a header value.
+///    The raw `assets`/`plans` commands do not resolve named contexts, but they
+///    do read [`HOST_LABEL_ENV`] and [`REPORTED_IP_ENV`]; either was enough to
+///    make their raw-TCP boundary refuse the request.
 ///
 ///    An earlier revision of this doc said that broke the `reqwest` path,
 ///    because `http::HeaderValue`'s `TryFrom<&str>` "rejects every byte outside
@@ -965,9 +965,10 @@ fn is_header_value_safe(ch: char) -> bool {
 ///    * **The raw-TCP chokepoint refuses outright.** `ferrogate-cli`'s
 ///      `assets_cli::render_header_block` bails on any character outside
 ///      `0x20..=0x7E`, because there is no `http::HeaderValue` between that
-///      string and the socket. A `生产` context therefore fails all seven
-///      `assets`/`plans` verbs before a byte is written — the brick, and it is
-///      real, just one crate to the right of where the old doc put it.
+///      string and the socket. A `生产` host label or reported address therefore
+///      fails all seven `assets`/`plans` verbs before a byte is written — the
+///      brick, and it is real, just one crate to the right of where the old doc
+///      put it.
 ///    * **On the `reqwest` path the bytes leave as obs-text**, which RFC 9110
 ///      §5.5 deprecates and leaves to the recipient to reject or reinterpret,
 ///      and which `HeaderValue::to_str` — the one `http` API that does apply
@@ -983,7 +984,7 @@ pub fn encode_header_value(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         let ch = byte as char;
-        if byte.is_ascii() && is_header_value_safe(ch) {
+        if is_header_value_safe(ch) {
             encoded.push(ch);
         } else {
             encoded.push('%');

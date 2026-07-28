@@ -88,14 +88,14 @@ impl RequestSpec {
 ///
 /// # Why the fields are `pub(crate)` (issue #548)
 ///
-/// They were public. Making them crate-private is the load-bearing half of "a
-/// new verb cannot issue an unattributable request": with a private field, a
-/// struct literal outside `ferrogate-control-plane-client` does not compile, so
-/// the **only** way any consumer can obtain a `PreparedRequest` is
-/// [`prepare_request`] — and [`prepare_request`] takes a
-/// [`ClientActionIdentity`] as a required argument.
-/// Since [`Transport::execute`] accepts nothing else, every byte this stack puts
-/// on the wire came out of a call that had an identity in hand.
+/// They were public. Making them crate-private closes direct construction and
+/// mutation outside `ferrogate-control-plane-client`: with the current
+/// getter-only public API, [`prepare_request`] is the only way a consumer can
+/// obtain one, and it takes a [`ClientActionIdentity`] as a required argument.
+/// This proves what enters [`Transport::execute`]. It does **not** prove what an
+/// arbitrary public [`Transport`] implementation sends. The production
+/// [`ReqwestTransport`] path is held separately by a loopback wire test that
+/// fails if its header-copy loop is removed.
 ///
 /// The alternative — leaving the fields public and adding a lint, a review rule
 /// or a test that enumerates today's verbs — fails the bar the issue sets: a
@@ -105,7 +105,9 @@ impl RequestSpec {
 /// Read access for consumers (a custom [`Transport`], an assertion) is
 /// unchanged in substance: [`PreparedRequest::method`], [`PreparedRequest::url`],
 /// [`PreparedRequest::headers`], [`PreparedRequest::body`] and
-/// [`PreparedRequest::header`] expose everything the public fields did.
+/// [`PreparedRequest::header`] expose everything the public fields did. A
+/// custom transport owns its own wire guarantee; FerroGate's CLI uses
+/// [`ReqwestTransport`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRequest {
     pub(crate) method: Method,

@@ -458,17 +458,16 @@ fn an_operator_supplied_label_cannot_forge_a_header_or_a_field() {
 
 /// A context name or host label outside ASCII must not brick the CLI.
 ///
-/// Pins: `action_identity.rs`'s `if byte.is_ascii() && is_header_value_safe(ch)`
-/// — specifically the `byte.is_ascii()` half, which is what keeps the output
-/// inside `0x20..=0x7E`.
+/// Pins: `action_identity.rs` routing every byte outside
+/// [`is_header_value_safe`] through percent encoding. That predicate, not a
+/// redundant `byte.is_ascii()` precheck, closes the output to visible ASCII.
 ///
-/// Catches: `if !byte.is_ascii() || is_header_value_safe(ch)`, i.e. non-ASCII
-/// passing through raw. That is a one-token mutation and it re-arms the defect
-/// this test is named for: `ferrogate-cli`'s `render_header_block` refuses any
-/// character outside `0x20..=0x7E`, so a context named `生产` — and this
-/// project's own issues are written in Chinese — makes all seven `assets`/
-/// `plans` verbs bail before a byte is written. Nothing in `context.rs`
-/// validates a context name, and #548 is what first put it on the wire.
+/// Catches: widening [`is_header_value_safe`] to admit a non-ASCII byte or
+/// emitting an unsafe character directly. Either re-arms the defect this test
+/// is named for: `ferrogate-cli`'s `render_header_block` refuses any character
+/// outside `0x20..=0x7E`. Named contexts break the typed path's visible-ASCII
+/// contract; the raw `assets`/`plans` path has no named context, but the same
+/// encoder protects its reachable host-label and reported-address inputs.
 ///
 /// # Why the assertion is not `HeaderValue::try_from(..).is_ok()`
 ///
@@ -484,9 +483,9 @@ fn an_operator_supplied_label_cannot_forge_a_header_or_a_field() {
 ///
 /// What replaces it discriminates by construction: the byte range is asserted
 /// directly (the idiom `assets_cli_test.rs` already uses at the other
-/// chokepoint), the escaped spelling of `生产` is asserted as a **literal** that
-/// no mutated encoder can restate, and `HeaderValue::to_str()` — the one `http`
-/// API that really applies `is_visible_ascii` — is exercised on top.
+/// chokepoint), and the escaped spellings are **literals** no mutated encoder
+/// can restate. Once the byte-range assertion passes, constructing and reading
+/// an `http::HeaderValue` would only reassert a weaker predicate.
 #[test]
 fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
     // A literal, computed by hand from UTF-8, so it cannot be restated by
@@ -501,6 +500,16 @@ fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
         encode_header_value("prod-café"),
         "prod-caf%C3%A9",
         "one non-ASCII scalar inside an otherwise safe label escapes to its two UTF-8 bytes"
+    );
+    assert_eq!(
+        encode_header_value("~/"),
+        "~/",
+        "the two reviewed visible-ASCII boundary characters remain readable"
+    );
+    assert_eq!(
+        encode_header_value("\u{7e}\u{7f}"),
+        "~%7F",
+        "0x7E is the inclusive safe boundary and 0x7F is encoded"
     );
 
     for (label, context_name, host_label, reported_ip) in [
@@ -555,16 +564,6 @@ fn a_non_ascii_context_name_or_label_still_produces_a_sendable_header() {
                      obs-text, which an intermediary may drop or reinterpret"
                 );
             }
-            // And it round-trips through the one `http` API that applies
-            // `is_visible_ascii`. `try_from` alone does not: http 1.4.0 accepts
-            // 0x80..=0xFF.
-            let header = http::HeaderValue::try_from(value.as_str())
-                .unwrap_or_else(|error| panic!("[{label}] '{name}: {value}': {error}"));
-            assert!(
-                header.to_str().is_ok(),
-                "[{label}] '{name}: {value}' is not readable back as a &str; an audit consumer \
-                 calling HeaderValue::to_str gets an error instead of the attribution"
-            );
         }
         // And it is escaped, not discarded: an encoder that dropped every
         // non-ASCII byte would satisfy the assertions above while silently

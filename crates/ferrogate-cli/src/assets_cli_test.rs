@@ -7,8 +7,10 @@
 //! The **second** audit chokepoint (issue #548).
 //!
 //! `ferrogate-control-plane-client`'s `prepare_request` is the chokepoint every
-//! `ctl` verb goes through, and its guarantee is a compile error. It is not the
-//! only way this binary puts bytes on the wire: `assets` and `plans` predate the
+//! `ctl` verb goes through; its closed request type proves attributed headers
+//! enter the transport, and a separate loopback test proves the production
+//! transport sends them. It is not the only way this binary puts bytes on the
+//! wire: `assets` and `plans` predate the
 //! typed client and drive a hand-rolled raw-`TcpStream` HTTP client, because
 //! `main()` is a synchronous entry point. Between them they issue seven
 //! requests, four of them **mutations** — two of those Control Plane mutations
@@ -110,13 +112,34 @@ fn send_request_writes_the_identity_onto_the_socket() {
     const API_KEY: &str = "fgk_live_secret_value";
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port is free");
+    listener
+        .set_nonblocking(true)
+        .expect("the loopback listener becomes nonblocking");
     let port = listener
         .local_addr()
         .expect("the listener reports its address")
         .port();
 
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("the client connects");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("the client did not connect: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("the accepted socket gets a read timeout");
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("the accepted socket gets a write timeout");
         let mut head: Vec<u8> = Vec::new();
         let mut byte = [0u8; 1];
         // Byte at a time: the head is a few hundred bytes and this needs no
@@ -140,6 +163,7 @@ fn send_request_writes_the_identity_onto_the_socket() {
     let identity = mint_action_identity(&gateway_url, API_KEY)
         .expect("the OS random source is available in the test env");
     let expected_action_id = identity.action_id().to_string();
+    let expected_client_clock = identity.client_clock().render();
 
     let response = send_request(
         &endpoint,
@@ -186,6 +210,13 @@ fn send_request_writes_the_identity_onto_the_socket() {
         head_only.contains(&format!("\r\n{ACTION_ID_HEADER}: {expected_action_id}\r\n")),
         "the socket carries an action id, but not THIS invocation's ({expected_action_id}): \
          {head:?}"
+    );
+    assert!(
+        !expected_client_clock.is_empty()
+            && head_only.contains(&format!(
+                "\r\n{CLIENT_CLOCK_HEADER}: {expected_client_clock}\r\n"
+            )),
+        "the socket must carry this invocation's non-empty client clock reading: {head:?}"
     );
     // The same leak check as the renderer test, at the place it would actually
     // matter: these are the bytes that left the process. The positive control is
@@ -239,15 +270,16 @@ fn send_request_writes_the_identity_onto_the_socket() {
 /// An earlier cut scanned only `TcpStream::connect` while calling itself "every
 /// outbound HTTP call". It was not: `reqwest` is a **declared, currently unused
 /// direct dependency** of `ferrogate-cli`, so a `reqwest::Client` in a new
-/// command file was a bypass that needed no `Cargo.toml` edit and reded nothing.
-/// Both are scanned now, which is what makes the name honest.
+/// command file was a bypass that reded nothing. Direct qualified calls and
+/// `use reqwest...` imports are both scanned, so `Client::new()` through an
+/// import or alias is still a review event.
 ///
 /// `reqwest::Url` is deliberately *not* a needle — it is a URL parser, not a
 /// client, and `ctl/fingerprint_parity_test.rs` uses it to build an expected
-/// string. The residual is stated rather than implied: a client from some
-/// *third* crate would still slip through, but adding one requires a
-/// `Cargo.toml` edit, which is a review event; `reqwest` was the only HTTP
-/// client already sitting in the manifest.
+/// string. The residual is stated rather than implied: this is a lexical guard,
+/// not Rust name resolution. A client re-exported from another already-linked
+/// crate can still evade it, so the loopback tests remain the behavioral proof
+/// for the two production chokepoints this file knows about.
 ///
 /// # The allow-list
 ///
@@ -309,6 +341,9 @@ fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
         format!("{}{}", "reqwest", "::Client"),
         format!("{}{}", "reqwest", "::blocking"),
         format!("{}{}", "reqwest", "::get("),
+        format!("{}{}", "use ", "reqwest"),
+        format!("{}{}", "use std::net::", "TcpStream as "),
+        format!("{}{}", "use std::net::{", "TcpStream as "),
     ];
 
     let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -451,6 +486,7 @@ fn a_header_value_that_could_split_the_request_is_refused_not_stripped() {
         ),
         ("bare LF in the value", "x-ferrogate-client-host", "a\nb"),
         ("NUL in the value", "x-ferrogate-client-host", "a\0b"),
+        ("DEL in the value", "x-ferrogate-client-host", "a\u{7f}b"),
         (
             "non-ASCII in the value",
             "x-ferrogate-client-host",
@@ -490,5 +526,15 @@ fn a_header_value_that_could_split_the_request_is_refused_not_stripped() {
     assert!(
         render_header_block(vec![("x-probe".to_string(), escaped.clone())]).is_ok(),
         "an encoded hostile label passes the boundary check: {escaped}"
+    );
+    let visible_boundary = render_header_block(vec![(
+        "x-probe".to_string(),
+        "visible~/boundary\u{7e}".to_string(),
+    )])
+    .expect("0x7E and the reviewed safe punctuation pass the raw boundary");
+    assert!(
+        visible_boundary.contains("x-probe: visible~/boundary~\r\n"),
+        "the inclusive 0x7E boundary and safe '~'/'/' values are preserved: \
+         {visible_boundary:?}"
     );
 }

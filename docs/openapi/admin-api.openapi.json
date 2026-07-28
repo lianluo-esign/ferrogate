@@ -16389,7 +16389,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of cli, os, arch, context, cred and host fields; host is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- cred names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all."
+        "description": "Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all."
       },
       "ClientClockUnverifiedHeader": {
         "name": "x-ferrogate-client-clock-unverified",

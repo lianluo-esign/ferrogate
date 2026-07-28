@@ -16,6 +16,7 @@ use crate::auth::Credential;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
 use crate::error::ExitClass;
 use crate::output::OutputFormat;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::task::{Context as TaskContext, Poll, Waker};
 
@@ -103,6 +104,116 @@ fn prepare_request_preserves_endpoint_base_path() {
     let prepared =
         prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap();
     assert_eq!(prepared.url, "https://host.example.com/gw/admin/v1/status");
+}
+
+/// The production reqwest adapter copies every prepared identity header into
+/// the request it sends.
+///
+/// Pins: the header-copy loop in [`ReqwestTransport::execute`]. The registry
+/// sweep proves each verb reaches this adapter with the headers prepared; this
+/// loopback server proves the adapter does not discard them before the socket.
+/// Deleting the loop is compile-clean and leaves all pure request tests green,
+/// so an assertion on the received bytes is the necessary boundary.
+#[test]
+fn reqwest_transport_writes_the_identity_onto_the_socket() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a loopback port is available for the transport test");
+    listener
+        .set_nonblocking(true)
+        .expect("the loopback listener becomes nonblocking");
+    let address = listener.local_addr().expect("the listener has an address");
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("the reqwest client did not connect: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("the accepted socket gets a read timeout");
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("the accepted socket gets a write timeout");
+
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => head.push(byte[0]),
+                Err(error) => panic!("failed to read the reqwest request head: {error}"),
+            }
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .expect("the loopback response is written");
+        String::from_utf8(head).expect("reqwest emitted an ASCII request head")
+    });
+
+    let context = context_with_endpoint(&format!("http://{address}"), None);
+    let identity = ClientActionIdentity::fixture();
+    let expected_headers: Vec<(String, String)> = identity
+        .headers()
+        .into_iter()
+        .filter(|(name, _)| {
+            [
+                ACTION_ID_HEADER,
+                CLIENT_FINGERPRINT_HEADER,
+                CLIENT_CLOCK_HEADER,
+            ]
+            .contains(&name.as_str())
+        })
+        .collect();
+    let request = prepare_request(
+        &RequestSpec::get("/admin/v1/status"),
+        &context,
+        None,
+        &identity,
+    )
+    .expect("the attributed request is prepared");
+    let transport = ReqwestTransport::new(&context).expect("the reqwest transport builds");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the local async runtime builds");
+    let response = runtime
+        .block_on(transport.execute(request))
+        .expect("the loopback response is classified");
+    assert_eq!(response.status, 200);
+
+    let head = server.join().expect("the loopback server did not panic");
+    assert!(
+        head.starts_with("GET /admin/v1/status HTTP/1.1\r\n"),
+        "the production transport sent an unexpected request: {head:?}"
+    );
+    assert!(
+        head.ends_with("\r\n\r\n"),
+        "the server did not receive a complete request head: {head:?}"
+    );
+    for (expected_name, expected_value) in expected_headers {
+        let actual = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(&expected_name)
+                .then_some(value.trim_start())
+        });
+        assert_eq!(
+            actual,
+            Some(expected_value.as_str()),
+            "the production reqwest adapter did not put {expected_name} on the wire: {head:?}"
+        );
+    }
 }
 
 #[test]
@@ -1456,8 +1567,9 @@ fn merged_pages_drop_every_per_page_cursor_key() {
     }
 }
 
-/// The whole cross-crate guarantee of issue #548 is three words in
-/// `transport.rs`, and this is the test that holds them.
+/// The construction half of issue #548's cross-crate guarantee is three words
+/// in `transport.rs`, and this test holds them and the getter-only API around
+/// them.
 ///
 /// Pins: `pub(crate)` on every field of [`PreparedRequest`].
 ///
@@ -1466,9 +1578,11 @@ fn merged_pages_drop_every_per_page_cursor_key() {
 /// can write a `PreparedRequest { .. }` literal, or a functional update
 /// `PreparedRequest { headers: vec![], ..other }`, and hand it straight to
 /// `Transport::execute` with no identity anywhere in sight. Nothing else reds:
-/// the crate compiles, `every_registered_verb_carries_the_action_identity_on_the_wire`
+/// the crate compiles, `every_registered_verb_prepares_the_action_identity_for_transport`
 /// still passes (it goes through `prepare_request`), and the E0451 that was the
-/// enforcement simply stops being emitted.
+/// construction enforcement simply stops being emitted. This does not hold the
+/// adapter's header-copy loop; [`reqwest_transport_writes_the_identity_onto_the_socket`]
+/// does that against received bytes.
 ///
 /// It is a source scan because the property is *absence of an ability* in
 /// another crate. Rust has no way to assert "this literal does not compile"
@@ -1524,6 +1638,24 @@ fn the_prepared_request_fields_stay_closed_to_other_crates() {
         "PreparedRequest::{leaked:?} is visible outside this crate. A consumer can then build a \
          request with a struct literal or a `..other` update and execute it with no \
          ClientActionIdentity in hand, which is the entire compile-error argument for issue #548"
+    );
+
+    let impl_body = source
+        .split_once("impl PreparedRequest {")
+        .and_then(|(_, tail)| tail.split_once("\n}\n\n/// Build the absolute URL"))
+        .map(|(body, _)| body)
+        .expect("PreparedRequest's inherent impl has the expected boundary");
+    let public_methods: Vec<&str> = impl_body
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("pub fn "))
+        .filter_map(|declaration| declaration.split(['(', '<']).next())
+        .collect();
+    assert_eq!(
+        public_methods,
+        ["header", "method", "url", "headers", "body"],
+        "PreparedRequest's public API must stay getter-only. A constructor or mutator can let a \
+         consumer create or strip attribution while all fields remain pub(crate): \
+         {public_methods:?}"
     );
 }
 
@@ -1794,10 +1926,11 @@ fn the_contract_describes_the_fingerprint_field_set_the_code_renders() {
     let fingerprint_doc = description("ClientFingerprintHeader");
     for field in &blob_fields {
         assert!(
-            fingerprint_doc.contains(*field),
+            fingerprint_doc.contains(&format!("`{field}`")),
             "the contract's ClientFingerprintHeader description does not name the '{field}' \
-             field the client renders into the blob. A consumer typing against this contract \
-             reads the field list from here"
+             field as a delimited identifier. Bare substring matches let 'os' pass on 'most' \
+             and 'arch' pass on 'architecture'; a consumer typing against this contract reads \
+             the field list from here"
         );
     }
     // The field that is declared but deliberately kept OUT of the blob has to be

@@ -275,12 +275,12 @@ const MAX_PROBE_SEGMENTS: usize = 8;
 /// yesterday is followed today without anyone editing this file.
 ///
 /// **Why not a table, and why not descending.** `VerbDescriptor` carries no
-/// declared arity to read (issue #569 suggests one; adding the field touches
-/// every family in the crate, so it is not this slice), and the previous shape
+/// declared arity to read, and adding one would touch every family in the
+/// crate. The previous shape
 /// — try 3, then 2, then 1, then 0, take the first that builds — was wrong in
 /// two ways at once. It capped the search at three, so `asset-channels set`,
-/// which has required four segments since `5837c49` (#363), became
-/// unconstructable and killed all three whole-registry sweeps for four days.
+/// which already required four segments when the sweeps were added, made those
+/// new sweeps born red: they never successfully covered the full registry.
 /// And by descending it took the LONGEST arity a builder tolerates, which for
 /// the many builders that match `[a, b, ..]` means a request carrying junk
 /// trailing segments rather than the request the verb actually issues.
@@ -325,13 +325,13 @@ fn probe_spec(group: &str, verb: &str) -> (RequestSpec, Vec<String>) {
 /// Every verb in the registry can be turned into a request by the prober, and
 /// the prober's ceiling is not what decided that.
 ///
-/// **This is the guard whose absence made issue #569 a four-day outage.** The
-/// three whole-registry sweeps below each probe every verb, so any verb the
-/// prober cannot construct takes all three of them down — but they died on the
-/// first such verb, reporting a builder's usage string, and nothing said the
-/// failure was a *coverage* failure rather than an assertion failure. This test
-/// says exactly that, names every offending verb in one run rather than the
-/// first, and reds if the ceiling ever again becomes binding.
+/// The three whole-registry sweeps below each probe every verb, so any verb the
+/// prober cannot construct takes all three of them down. Their first descending
+/// implementation was added after a four-segment verb already existed and was
+/// therefore born red; it stopped at the first builder usage error without
+/// naming the failure as lost coverage. This guard says exactly that, names
+/// every offending verb in one run rather than the first, and reds if the
+/// ceiling ever becomes binding.
 ///
 /// Catches, by construction: lowering `MAX_PROBE_SEGMENTS` to 3 (the pre-fix
 /// value) reds this test naming `asset-channels set`; adding a verb whose
@@ -424,9 +424,9 @@ fn a_verb_the_prober_cannot_construct_fails_by_name() {
 }
 
 /// **The acceptance box.** Every verb in the registry — read and mutating,
-/// every one of them — carries `action_id`, the client fingerprint and the
-/// client's own unverified clock reading, because there is no other way for it
-/// to reach the wire (issue #548).
+/// every one of them — prepares `action_id`, the client fingerprint and the
+/// client's own unverified clock reading for the production transport (issue
+/// #548).
 ///
 /// Pins: `headers.extend(identity.headers())` in `transport::prepare_request`.
 ///
@@ -434,34 +434,21 @@ fn a_verb_the_prober_cannot_construct_fails_by_name() {
 /// only some verbs — this enumerates the whole registry rather than a fixture,
 /// so a family added tomorrow is covered the day it is registered.
 ///
-/// It is necessary and **not sufficient**, which is why it is not the whole
-/// enforcement: a test enumerating today's verbs cannot speak for a verb written
-/// tomorrow. That guarantee is structural and lives in the types —
-/// `prepare_request` takes `&ClientActionIdentity` as a required argument, and
-/// `PreparedRequest`'s fields are `pub(crate)`, so a consumer crate cannot build
-/// a request at all without one. This test covers the residual runtime question:
-/// that the chokepoint is really on the path every registered verb takes.
+/// It is necessary and **not sufficient**. The getter-only `PreparedRequest`
+/// API and its crate-private fields prevent a consumer from constructing or
+/// stripping headers before `Transport::execute`; this sweep proves each
+/// registered verb uses that preparation path. Neither proves that an adapter
+/// copies the prepared headers onto a socket. The production adapter's residual
+/// runtime question is held by
+/// `transport_test::reqwest_transport_writes_the_identity_onto_the_socket`.
 ///
-/// # What this test is currently worth, stated plainly
-///
-/// **It has never run.** `ferrogate-control-plane-client` was selected by no CI
-/// workflow until #561 landed the coverage gate, and the first run showed this
-/// sweep red on `main`: [`probe_spec`] guesses id-segment arities downward from
-/// three, and `asset-channels set` — registered 2026-07-23 by #363 — needs four.
-/// The sweep panics at its `expect("probe request")` before it asserts anything
-/// about a header. That is **#569**, it is a defect in the probe helper and not
-/// in the chokepoint, and it is being fixed separately; nothing here should be
-/// read as evidence until it is.
-///
-/// So the acceptance box "every registered verb carries the action identity" is
-/// **discharged by the structural argument above, not by this test**: no
-/// expression outside this crate yields a `PreparedRequest` at all, and the one
-/// function inside it that does takes the identity as a required argument. A
-/// reviewer should weigh the compile error, and treat this sweep as a backstop
-/// that has not yet fired — worth having for the day a verb finds some other
-/// route to the wire, but not a green this issue may lean on today.
+/// The crate has had a dedicated CI slice since its original name in #360. The
+/// ascending `0..=MAX_PROBE_SEGMENTS` implementation landed in `77c921e` before
+/// this documentation and replaced every descending/`expect("probe request")`
+/// call. Evidence for the full claim is therefore deliberately composite:
+/// registry sweep, construction guard, and the independent reqwest wire test.
 #[test]
-fn every_registered_verb_carries_the_action_identity_on_the_wire() {
+fn every_registered_verb_prepares_the_action_identity_for_transport() {
     let registry = full_registry();
     let context = test_context();
     let identity = ClientActionIdentity::fixture();

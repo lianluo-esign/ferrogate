@@ -39,11 +39,10 @@
 /// direct dependency of this crate. Both are on the list for that reason.
 ///
 /// **Assembled at run time, from halves.** The walks below cover this file too,
-/// and a needle written as one literal would make this list its own violation —
-/// which is exactly the pressure that produces a `*_test.rs` exemption, and an
-/// exemption for test files exempts the code most likely to normalise the
-/// defect. Splitting the string is the cheaper answer and costs nothing a reader
-/// has to remember.
+/// and a needle written as one literal would make this list its own violation.
+/// Positive controls live in `clock_guard_fixtures.txt`, which is deliberately
+/// not a shipped Rust module: those lines are independent of these needles, so
+/// mutating a needle cannot mutate its own test input.
 fn clock_reads() -> [String; 5] {
     [
         format!("{}{}", "SystemTime", "::now()"),
@@ -130,13 +129,20 @@ fn walk_modules(root: &std::path::Path, mut visit: impl FnMut(&str, &str, &str))
 /// client crate does not need this: it asserts a non-empty expected set.
 #[test]
 fn the_matcher_itself_detects_a_clock_read() {
-    for needle in clock_reads() {
-        let line = format!("        let stamped = {needle}.something();");
+    let fixture_lines: Vec<&str> = include_str!("clock_guard_fixtures.txt").lines().collect();
+    let needles = clock_reads();
+    assert_eq!(
+        fixture_lines.len(),
+        needles.len() + 1,
+        "the fixture must contain one independent line per clock spelling and one forged \
+         ServerIssuedClientSentAt"
+    );
+    for (needle, line) in needles.into_iter().zip(&fixture_lines) {
         assert_eq!(
-            clock_read_in(&line).as_deref(),
+            clock_read_in(line).as_deref(),
             Some(needle.as_str()),
-            "the clock matcher no longer recognises '{needle}'; the guards below would then be \
-             green over a tree they cannot see"
+            "the clock matcher no longer recognises '{needle}' in the independent fixture \
+             {line:?}; the guards below would then be green over a tree they cannot see"
         );
     }
     assert_eq!(
@@ -241,15 +247,13 @@ fn no_ferrogate_cli_module_mints_a_client_sent_at() {
         "expected the whole crate's src/ tree, scanned only {files_scanned} files in {}",
         source_dir.display()
     );
-    // The matcher's control. The expected set here is empty by design, so the
-    // floor above proves the walk and nothing yet proves the needle. What can be
-    // shown is that it *discriminates*: it matches the opening of a struct
-    // literal and not a mention of the type in a field declaration or a path.
-    // Assembled the same way as `needle`, so a change to one is a change to both.
-    let forged = format!(
-        "        let f = {}{} issued_at_unix: 0, }};",
-        "ServerIssuedClientSentAt", " {"
-    );
+    // The positive fixture is independent of `needle` and kept outside the
+    // scanned `.rs` tree. A mutation of the detector therefore cannot rewrite
+    // its own haystack and stay green.
+    let forged = include_str!("clock_guard_fixtures.txt")
+        .lines()
+        .last()
+        .expect("the fixture has a forged literal line");
     assert!(
         forged.contains(&needle),
         "the needle no longer matches the construction it exists to find: {forged}"

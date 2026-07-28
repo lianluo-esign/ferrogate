@@ -146,13 +146,17 @@ with its authority.
 
 ## Coverage, and its edge
 
-Two code paths put bytes on the wire, and both require an action identity as a
-compile-time argument:
+Two originating code paths put bytes on the wire. Both require an action
+identity while building the request, and both production adapters have a
+loopback test over the bytes received from a socket:
 
 * `ferrogate ctl ...` and `ferrogate ops ...` go through the typed client's
   `prepare_request`, which takes a `&ClientActionIdentity` and is the only
-  function that materializes a request. A new verb cannot omit the attribution,
-  because it cannot build a request at all without one.
+  function that materializes a request. A new verb cannot omit the attribution
+  while building the request, because it cannot obtain a `PreparedRequest`
+  without one. `reqwest_transport_writes_the_identity_onto_the_socket` separately
+  proves that the production adapter copies those prepared headers onto the
+  wire; the compile-time argument alone does not prove adapter behavior.
 * `ferrogate assets ...` and `ferrogate plans ...` predate the typed client and
   drive a hand-rolled raw-TCP HTTP client; its `send_request` takes the same
   required argument, for the same reason. Between them that is seven requests —
@@ -178,19 +182,22 @@ chokepoints, and are named here rather than left to be discovered:
 * `ferrogate storage migrate-to-supabase` talks to PostgreSQL, not HTTP, and
   carries no header at all.
 
-Inside `ferrogate-cli` the set is closed and checked: a test
+Inside `ferrogate-cli` the known set is checked: a test
 (`every_outbound_http_call_goes_through_an_attributed_chokepoint`) holds an
 allow-list of every raw socket **and every `reqwest` client** that crate
-constructs, so a fourth hand-rolled client there fails the suite. `reqwest` is
-scanned because it is already a declared dependency of `ferrogate-cli`, which
-made it a bypass needing no manifest change; a client from some other crate would
-require a `Cargo.toml` edit, which is a review event.
+constructs directly, including `reqwest` imports and common `TcpStream` aliases,
+so a fourth hand-rolled client there fails the suite. This is a lexical
+tripwire, not Rust name resolution: a client re-exported by another already
+linked crate can evade it. The two loopback tests are the behavioral evidence
+for the actual production chokepoints; the source census makes a new direct
+bypass conspicuous rather than pretending to prove all future Rust names.
 
 ## Where this is held by a test, and where it is only written down
 
 | claim | held by |
 |---|---|
-| every `ctl`/`ops` request carries the identity | a compile error — `prepare_request` takes a `&ClientActionIdentity` |
+| every registered `ctl`/`ops` request prepares the identity | `every_registered_verb_prepares_the_action_identity_for_transport` plus the closed, getter-only `PreparedRequest` API |
+| the production `ctl`/`ops` adapter writes the prepared identity onto the socket | `reqwest_transport_writes_the_identity_onto_the_socket`, against a loopback listener |
 | the raw-TCP client writes the identity onto the socket | `send_request_writes_the_identity_onto_the_socket`, against a loopback listener |
 | no fourth HTTP client appears in `ferrogate-cli` | `every_outbound_http_call_goes_through_an_attributed_chokepoint` |
 | no local clock reaches the audit instant | two source guards, one per crate |

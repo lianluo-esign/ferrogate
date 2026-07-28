@@ -61,3 +61,11 @@ sha2 = { workspace = true }
 
 [features]
 default = []
+
+[dev-dependencies]
+# The production transport is async and the workspace intentionally disables
+# reqwest's implicit rustls provider. Its loopback wire test therefore installs
+# the same provider as the CLI entrypoint and drives the future on a local
+# runtime; neither dependency is part of the published client surface.
+rustls = { workspace = true, features = ["ring"] }
+tokio = { workspace = true }
