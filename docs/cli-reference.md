@@ -6157,6 +6157,7 @@ Options:
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
 - `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
 ##### `ferrogate ctl wallets charge`
@@ -6185,6 +6186,7 @@ Options:
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
 - `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
 ##### `ferrogate ctl wallets ledger`
@@ -6401,6 +6403,7 @@ Options:
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
 - `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
 #### `ferrogate ctl usage`
@@ -7008,6 +7011,7 @@ Options:
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
 - `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
 #### `ferrogate ctl drain`
@@ -7073,6 +7077,7 @@ Options:
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
 - `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
 #### `ferrogate ctl gateway-configs`
