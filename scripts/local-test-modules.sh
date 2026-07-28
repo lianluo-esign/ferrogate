@@ -170,11 +170,12 @@ run_cli_tooling() {
   # `.rs` lines across 53 files at `4c2ba43`, of which 11,024 across 26
   # `*_test.rs` files are test code and 9,937 across 27 files are not -- the
   # first published figure attached "of hermetic client tests" to the whole-
-  # crate count, which is the crate's size, not its suite's. Nor is the 9,937
-  # production: 26 of those 27 files carry an inline `#[cfg(test)] mod` block
-  # too (all but `lib.rs`), so it is an upper bound on production and the true
-  # test share is above 53%. Reproduce the whole-crate number at the ref rather
-  # than in the working tree, which is not the same thing:
+  # crate count, which is the crate's size, not its suite's. The dedicated test
+  # files are therefore 52.6% of the crate by lines (11,024 / 20,961). The other
+  # 27 files contain the `#[path = "*_test.rs"] mod ...;` declarations that wire
+  # those same files in, not additional inline test bodies: none contains a
+  # `#[test]`, so those declaration lines are not counted twice. Reproduce the
+  # whole-crate number at the ref rather than in the working tree:
   #   git ls-tree -r --name-only 4c2ba43 -- \
   #     crates/ferrogate-control-plane-client | grep '\.rs$' \
   #     | xargs -I{} git show 4c2ba43:{} | wc -l

@@ -11,14 +11,15 @@
 //!
 //! # What this crate is for
 //!
-//! `ferrogate-cli` grew to **154,389 lines across 201 files -- 37.0% of the
+//! `ferrogate-cli` grew to **154,329 lines across 200 files -- 36.97% of the
 //! 417,477 lines under `crates/`** because it was bin-only and therefore had no
-//! API boundary that anything could violate. Measured at **`3348868`** (#553
-//! stage 1, the commit that gave it a `lib.rs`, i.e. the last tree before
-//! anything moved) over `crates/ferrogate-cli/src`, with the ref-pinned command
-//! at the head of the next section. This file previously said "154,329 lines
-//! across 200 files -- 42%" with no ref attached; that was the one figure here
-//! nobody could re-derive, and it does not reproduce at the natural anchor.
+//! API boundary that anything could violate. Measured at **`6145c07`**, the
+//! founding measurement already recorded on issue #553, over
+//! `crates/ferrogate-cli/src`, with the ref-pinned command at the head of the
+//! next section. The old 154,329/200 count was reproducible; only its attached
+//! "42%" was false. Stage 1 (`3348868`) was already the first move: adding the
+//! library boundary changed the tree to 154,389 lines across 201 files, so it
+//! is not the pre-move anchor.
 //! Stage 1 of issue #553 gave it a `lib.rs`; stage 2
 //! created this crate and moved eleven leaf subsystems into it; stage 3a moved
 //! the operator-facing configuration out to `ferrogate-config`. Stage 3b, the

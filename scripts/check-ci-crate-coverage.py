@@ -10,9 +10,10 @@
 
 Two ways an invocation runs nothing, and this gate refuses both.
 
-**No slice names the crate (#561).** `ferrogate-gateway` -- 136,681 lines, 1,070
-test attributes, the largest crate in the workspace -- was compiled by CI and
-executed by no job, for as long as it had existed. Nothing noticed, because
+**No slice names the crate (#561).** At `8c62886`, `ferrogate-gateway` was
+137,062 lines with 1,073 test attributes, the largest crate in the workspace.
+It had been compiled by CI and executed by no job for as long as it had existed.
+Nothing noticed, because
 nothing was looking. `ferrogate-secrets`, `ferrogate-payments` and
 `ferrogate-cloudflare` were in the same state, and `scripts/local-test-modules.sh`
 had drifted away from the workflow matrices on top of that, so a contributor
@@ -40,7 +41,7 @@ against the test paths its `-p` crates actually contain, and a filter that
 matches none of them is an error. A test path here means a `#[test]` function's
 full `module::path::fn_name` and nothing else: a filter naming a MODULE resolves
 through the tests beneath it (`config::tests` through
-`config::tests::rejects_an_unknown_key`), because libtest matches substrings and
+`config::tests::default_config_uses_localhost_8080`), because libtest matches substrings and
 a module with tests under it is a prefix of each of their paths. Module paths
 are deliberately not candidates in their own right -- admitting them let a
 filter resolve against a module whose only test file had been moved away, which
@@ -53,7 +54,9 @@ accepted by this gate as soon as any test anywhere in `ferrogate-cli` matches
 Pairing filters with the targets a selector leaves live would need cargo's own
 target resolution; what is here is a floor. `--test`/`--bin`/`--bench` selectors
 are NOT themselves checked: cargo already fails loudly on a target name that
-does not exist, which is why the same three moves did not break those.
+does not exist, which is why the same three moves did not break those. Libtest's
+`--exact` IS modelled: with it, the positional filter must equal a reconstructed
+test path rather than merely occur inside one.
 
 Carving out a new crate now fails here until someone points a slice at it. The
 gate checks two independent surfaces --
@@ -117,15 +120,14 @@ filters -- three in the workflows, three in the local runner -- are on literal
 lines and are checked.
 
 Filters are matched as substrings of a reconstructed `module::path::fn_name`,
-the same way libtest matches them. The reconstruction reads rustfmt indentation
-rather than counting braces, so a stray `{` in data -- the JSON these tests are
-full of -- cannot shift a module boundary. What it does NOT survive is a line
-that literally reads `mod name {` inside a raw string or a `/* */` block: that
-is read as a module and opens one. Zero instances across the 706 `.rs` files
-under `crates/` at `4c2ba43`, `cargo fmt --all -- --check` is a gate so the
-indentation it depends on holds, and the failure direction is a wrong module
-prefix rather than a missed test -- but it is a parser, not a compiler, and the
-claim is that narrow.
+the same way libtest matches them. Before the reconstruction reads rustfmt
+indentation, a lexical pass masks ordinary/raw strings, line comments and
+nested block comments. That boundary matters in the shipped tree:
+`ferrogate-gateway/src/lifecycle.rs` has a column-zero TOML line inside an
+`r#"..."#` fixture under `mod tests`; reading the data as Rust used to pop the
+module and invent 15 paths libtest never prints. The scanner is deliberately
+still smaller than a Rust parser, but string/comment contents cannot open or
+close indentation scopes.
 """
 
 from __future__ import annotations
@@ -217,6 +219,11 @@ CARGO_VALUE_FLAGS = frozenset(
 )
 # `#[test]`, `#[tokio::test]`, `#[tokio::test(flavor = "...")]`, `#[rstest]`.
 TEST_ATTRIBUTE = re.compile(r"^\s*#\[(?:[a-z_]+::)*(?:test|rstest)[\]\(]")
+# Kept separate from `TEST_ATTRIBUTE` so widening the parser to every attribute
+# cannot widen its own completeness oracle in sympathy.
+CANONICAL_TEST_ATTRIBUTE = re.compile(
+    r"^\s*#\[(?:[a-z_]+::)*(?:test|rstest)[\]\(]"
+)
 # `mod name {` -- an inline module. A `mod name;` declaration adds no nesting to
 # the file it appears in; the declared file supplies its own prefix from its
 # path, so only the braced form is tracked.
@@ -231,6 +238,8 @@ MODULE_DECLARATION = re.compile(
 FUNCTION_DECLARATION = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z0-9_]+)"
 )
+RAW_STRING_OPEN = re.compile(r"(?:br|cr|r)(?P<hashes>#{0,255})\"")
+MIN_RECONSTRUCTED_PERCENT = 90
 
 
 def matrix_key(key: str) -> re.Pattern[str]:
@@ -574,8 +583,8 @@ def command_lines(text: str) -> list[str]:
     return folded
 
 
-def cargo_test_name_filters(command: str) -> tuple[set[str], set[str]]:
-    """`(packages, positional name filters)` for one literal `cargo test`.
+def cargo_test_name_filters(command: str) -> tuple[set[str], set[str], bool]:
+    """`(packages, positional name filters, exact)` for one literal test.
 
     Tokenized with `shlex`, not `str.split`, because `-- --skip 'issue #563
     fixture'` is ONE argument to libtest and splitting it on whitespace turns
@@ -591,15 +600,19 @@ def cargo_test_name_filters(command: str) -> tuple[set[str], set[str]]:
         # this command runs. Reported as a filter that resolves to nothing
         # rather than skipped, because "the gate could not parse it" and "the
         # gate approved it" must not look the same.
-        return set(), {remainder.strip()}
+        return set(), {remainder.strip()}, False
     packages: set[str] = set()
     filters: set[str] = set()
+    exact = False
     skip_next = False
     for position, token in enumerate(tokens):
         if skip_next:
             skip_next = False
             continue
         flag, _, inline = token.partition("=")
+        if flag == "--exact":
+            exact = True
+            continue
         if flag in CARGO_VALUE_FLAGS:
             if inline:
                 if flag in ("-p", "--package"):
@@ -613,7 +626,115 @@ def cargo_test_name_filters(command: str) -> tuple[set[str], set[str]]:
             # `--` itself, and every boolean flag on either side of it.
             continue
         filters.add(token)
-    return packages, filters
+    return packages, filters, exact
+
+
+def rust_code_lines(text: str) -> list[str]:
+    """Mask Rust strings and comments without moving the remaining columns.
+
+    The path reconstruction needs only item-shaped code and indentation. Keeping
+    a full-width mask means the caller can still measure indentation, while a
+    column-zero line inside a raw string cannot look like a sibling Rust item.
+    Block comments are nested because Rust block comments are nested.
+    """
+    result: list[str] = []
+    raw_terminator: str | None = None
+    quoted_string = False
+    block_comment_depth = 0
+
+    for source in text.splitlines():
+        code = [" "] * len(source)
+        index = 0
+        while index < len(source):
+            if raw_terminator is not None:
+                end = source.find(raw_terminator, index)
+                if end < 0:
+                    index = len(source)
+                    continue
+                index = end + len(raw_terminator)
+                raw_terminator = None
+                continue
+
+            if quoted_string:
+                if source[index] == "\\":
+                    index += 2
+                elif source[index] == '"':
+                    quoted_string = False
+                    index += 1
+                else:
+                    index += 1
+                continue
+
+            if block_comment_depth:
+                if source.startswith("/*", index):
+                    block_comment_depth += 1
+                    index += 2
+                elif source.startswith("*/", index):
+                    block_comment_depth -= 1
+                    index += 2
+                else:
+                    index += 1
+                continue
+
+            if source.startswith("//", index):
+                break
+            if source.startswith("/*", index):
+                block_comment_depth = 1
+                index += 2
+                continue
+
+            raw = RAW_STRING_OPEN.match(source, index)
+            if raw is not None and (
+                index == 0 or not (source[index - 1].isalnum() or source[index - 1] == "_")
+            ):
+                raw_terminator = '"' + raw.group("hashes")
+                index = raw.end()
+                continue
+
+            if source[index] == '"':
+                quoted_string = True
+                index += 1
+                continue
+
+            # A lifetime has no closing quote. A character literal does, and
+            # masking it prevents `//` or `/*` inside the literal becoming a
+            # comment opener without misreading `'static`.
+            if source[index] == "'":
+                end = index + 1
+                escaped = False
+                while end < len(source):
+                    character = source[end]
+                    if character == "'" and not escaped:
+                        index = end + 1
+                        break
+                    if character == "\\" and not escaped:
+                        escaped = True
+                    else:
+                        escaped = False
+                    end += 1
+                else:
+                    code[index] = source[index]
+                    index += 1
+                continue
+
+            code[index] = source[index]
+            index += 1
+        result.append("".join(code))
+    return result
+
+
+def canonical_test_attribute_count(directory: pathlib.Path) -> int:
+    """Independent per-crate count used to bound path reconstruction loss."""
+    count = 0
+    for path in directory.rglob("*.rs"):
+        if not path.is_file():
+            continue
+        count += sum(
+            1
+            for line in rust_code_lines(path.read_text(encoding="utf-8", errors="replace"))
+            if CANONICAL_TEST_ATTRIBUTE.match(line)
+        )
+    return count
 
 
 def module_prefix(relative: pathlib.PurePosixPath) -> list[str] | None:
@@ -669,17 +790,18 @@ def crate_test_paths(directory: pathlib.Path) -> set[str]:
     Dropping them loses nothing, because libtest matches a filter as a
     SUBSTRING of the full path: a module that does have tests beneath it is a
     prefix -- therefore a substring -- of each of their paths, so `config::tests`
-    still resolves through `config::tests::rejects_an_unknown_key`. Rejecting
+    still resolves through `config::tests::default_config_uses_localhost_8080`.
+    Rejecting
     the module path when no test lies beneath it and admitting it when one does
     are the same rule as simply not admitting module paths at all, and the
     second is the one that cannot be got wrong. All three filters live at
     `77c921e` keep many candidates under this rule: `governed_decision` 18,
     `config::tests` 27, `config::validation_tests` 193.
 
-    Nesting is read from rustfmt indentation, not from brace counting: `cargo
-    fmt --all -- --check` is a gate in this repo, so indentation is reliable,
-    while a `{` inside one of the JSON fixtures these tests are full of would
-    walk a brace counter straight off the end.
+    Nesting is read from rustfmt indentation, not from brace counting. A lexical
+    mask first removes strings and comments while preserving columns; without
+    it, the column-zero TOML inside `lifecycle.rs`'s raw-string fixture popped
+    `mod tests` and fabricated 15 paths without that segment.
     """
     files = sorted(path for path in directory.rglob("*.rs") if path.is_file())
     relatives = {path: pathlib.PurePosixPath(path.relative_to(directory).as_posix()) for path in files}
@@ -696,10 +818,17 @@ def crate_test_paths(directory: pathlib.Path) -> set[str]:
         for path in files:
             if path not in prefixes:
                 continue
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            source_lines = path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+            lines = rust_code_lines("\n".join(source_lines))
             pending_path: str | None = None
-            for line in lines:
-                attribute = PATH_ATTRIBUTE.match(line)
+            for source_line, line in zip(source_lines, lines):
+                attribute = (
+                    PATH_ATTRIBUTE.match(source_line)
+                    if line.lstrip().startswith("#[path")
+                    else None
+                )
                 if attribute is not None:
                     pending_path = attribute.group(1)
                     continue
@@ -719,7 +848,7 @@ def crate_test_paths(directory: pathlib.Path) -> set[str]:
     for path, prefix in prefixes.items():
         stack: list[tuple[int, str]] = []
         is_test = False
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in rust_code_lines(path.read_text(encoding="utf-8", errors="replace")):
             if not line.strip():
                 continue
             indent = len(line) - len(line.lstrip())
@@ -749,18 +878,19 @@ def unmatched_name_filters(
     regions: list[tuple[str, str]],
     packages: dict[str, str],
     root: pathlib.Path,
-) -> tuple[list[str], int, int, int]:
+) -> tuple[list[str], int, int, int, dict[str, tuple[int, int]]]:
     """Filters selecting no test, filters checked, templated lines skipped, and
     the number of test paths those filters were resolved against.
 
-    The last two numbers exist because this half of the gate is invisible when
-    it finds nothing, in two independent ways, and neither shows up in the exit
-    code. A refactor that stopped recognizing `cargo test` lines at all would
+    The last numbers exist because this half of the gate is invisible when it
+    finds nothing in independent ways, and neither shows up in the exit code. A
+    refactor that stopped recognizing `cargo test` lines at all would
     print the same success line as a clean tree -- `checked` makes "checked
     nothing" and "checked everything" different outputs. And a `crate_test_paths`
     that stopped RECONSTRUCTING tests would leave the filters checked against an
-    empty set; the fourth number is the floor under that, pinned in the suite
-    against the real tree so it cannot silently collapse.
+    empty set; the fourth number reports the total, while the fifth keeps each
+    parsed crate's count beside an independent canonical-attribute count. The
+    per-crate comparison prevents one healthy crate masking another's loss.
 
     A crate that reconstructs to zero test paths is called out by name rather
     than left to surface as "matches no test", because the two have opposite
@@ -768,6 +898,7 @@ def unmatched_name_filters(
     pointed at the wrong crate. #553 was the second and was read as neither.
     """
     known: dict[str, set[str]] = {}
+    attribute_counts: dict[str, int] = {}
     failures: list[str] = []
     checked = 0
     skipped = 0
@@ -778,7 +909,7 @@ def unmatched_name_filters(
             if "${{" in command:
                 skipped += 1
                 continue
-            selected, filters = cargo_test_name_filters(command)
+            selected, filters, exact = cargo_test_name_filters(command)
             if not filters:
                 continue
             named = [name for name in selected if name in packages]
@@ -793,6 +924,9 @@ def unmatched_name_filters(
             for name in named:
                 if name not in known:
                     known[name] = crate_test_paths(root / packages[name])
+                    attribute_counts[name] = canonical_test_attribute_count(
+                        root / packages[name]
+                    )
                     if not known[name]:
                         failures.append(
                             f"  {label}: `{command.strip()}` filters on "
@@ -804,16 +938,44 @@ def unmatched_name_filters(
                             "name it, or the reconstruction in `crate_test_paths` "
                             "has broken and this gate is checking an empty set."
                         )
+                    else:
+                        attributes = attribute_counts[name]
+                        minimum = max(
+                            1,
+                            (attributes * MIN_RECONSTRUCTED_PERCENT + 99) // 100,
+                        )
+                        if len(known[name]) < minimum or len(known[name]) > attributes:
+                            failures.append(
+                                f"  {label}: `{command.strip()}` filters on {name} "
+                                f"({packages[name]}), where this gate reconstructed "
+                                f"{len(known[name])} test paths from {attributes} canonical "
+                                "test attributes. Per-crate reconstruction must recover at "
+                                f"least {MIN_RECONSTRUCTED_PERCENT}% and cannot invent more "
+                                "paths than attributes; another crate's tests cannot hide "
+                                "this crate's parser loss or over-count."
+                            )
                 reachable |= known[name]
             for name_filter in sorted(filters):
                 checked += 1
-                if not any(name_filter in candidate for candidate in reachable):
+                if not any(
+                    candidate == name_filter if exact else name_filter in candidate
+                    for candidate in reachable
+                ):
                     failures.append(
                         f"  {label}: `cargo test {' '.join('-p ' + n for n in sorted(named))} "
-                        f"{name_filter}` matches no test in "
+                        f"{name_filter}{' -- --exact' if exact else ''}` matches no test in "
                         f"{', '.join(sorted(named))}"
                     )
-    return failures, checked, skipped, sum(len(paths) for paths in known.values())
+    reconstruction = {
+        name: (len(paths), attribute_counts[name]) for name, paths in known.items()
+    }
+    return (
+        failures,
+        checked,
+        skipped,
+        sum(len(paths) for paths in known.values()),
+        reconstruction,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -854,9 +1016,13 @@ def main(argv: list[str] | None = None) -> int:
             shell_reachable_text(strip_comments(runner_text), arguments.local_runner),
         )
     )
-    empty_filters, checked_filters, templated, discovered = unmatched_name_filters(
-        regions, packages, root
-    )
+    (
+        empty_filters,
+        checked_filters,
+        templated,
+        discovered,
+        reconstruction,
+    ) = unmatched_name_filters(regions, packages, root)
 
     missing_ci = sorted(name for name in packages if name not in in_ci)
     missing_local = sorted(name for name in packages if name not in in_local)
@@ -908,6 +1074,14 @@ def main(argv: list[str] | None = None) -> int:
         f"against {discovered} reconstructed test path(s); "
         f"{templated} matrix-templated line(s) skipped"
     )
+    if reconstruction:
+        print(
+            "per-crate reconstruction (paths/canonical attributes): "
+            + ", ".join(
+                f"{name}={paths}/{attributes}"
+                for name, (paths, attributes) in sorted(reconstruction.items())
+            )
+        )
     return 0
 
 

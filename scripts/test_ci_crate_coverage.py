@@ -19,8 +19,10 @@ blind to it by construction -- every one of those invocations names its crate
 correctly -- which is why it survived four review rounds in
 `governed-decision-conformance.yml`.
 
-Ten mutations of `check-ci-crate-coverage.py` were APPLIED and this suite re-run
-against each, rather than argued for in prose (#500):
+At `8c62886`, ten mutations of `check-ci-crate-coverage.py` were applied and the
+then-current suite was re-run against each, rather than argued for in prose
+(#500). The counts below are that commit's record, not a claim that later tests
+have been mutation-run:
 
     TEST_ATTRIBUTE -> `if False`                        caught (11 tests)
     INLINE_MODULE -> None                               caught (3)
@@ -44,6 +46,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shlex
 import subprocess
 import tempfile
 import textwrap
@@ -784,7 +787,7 @@ class CiCrateCoverageTests(unittest.TestCase):
         instance of this defect (`rust-quality.yml`, against a `ferrogate-cli`
         whose `config` module had moved to `ferrogate-config`). It must keep
         resolving on a tree where it is correct, and it does so through the test
-        path `config::tests::rejects_an_unknown_key`, of which it is a prefix
+        path `config::tests::default_config_uses_localhost_8080`, of which it is a prefix
         and therefore a substring -- the same rule libtest uses.
 
         Pins the `paths.add(...)` in the `FUNCTION_DECLARATION` arm and
@@ -795,7 +798,8 @@ class CiCrateCoverageTests(unittest.TestCase):
         it cannot pin a module-path candidate, because there are none any more.
         The previous version of this docstring claimed both, and the reviewer
         showed that neither mutation reddened it: with substring matching,
-        `config::tests` is inside `config::tests::rejects_an_unknown_key`
+        `config::tests` is inside
+        `config::tests::default_config_uses_localhost_8080`
         whether or not the module path is a candidate.
         `test_an_inline_test_module_is_part_of_the_path` and its two neighbours
         pin the reconstruction instead."""
@@ -805,7 +809,7 @@ class CiCrateCoverageTests(unittest.TestCase):
             """,
             "src/config/tests.rs": """
                 #[test]
-                fn rejects_an_unknown_key() {}
+                fn default_config_uses_localhost_8080() {}
             """,
         }
         result = self.run_checker(
@@ -845,6 +849,9 @@ class CiCrateCoverageTests(unittest.TestCase):
             "src/server/rbac_test.rs": """
                 #[test]
                 fn root_may_read_every_tenant() {}
+
+                #[inline]
+                pub fn governed_decision_helper() {}
             """,
         }
         result = self.run_checker(
@@ -982,6 +989,40 @@ class CiCrateCoverageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("resolved 2 name filter(s)", result.stdout)
 
+    def test_column_zero_raw_string_data_cannot_close_the_lifecycle_test_module(self) -> None:
+        """Regression for the shipped `ferrogate-gateway/src/lifecycle.rs` case.
+
+        Its `mod tests` opens at column zero, then a TOML fixture contains
+        `listen = ...` at column zero. Indentation-only parsing popped `tests`
+        there and invented `lifecycle::read_pid_file_accepts_numeric_pid`, a
+        path libtest never prints, for each of the 15 later tests. The fixture
+        keeps the same boundary and one of those real function names."""
+        sources = {
+            "src/lifecycle.rs": "mod tests {\n"
+            "    #[test]\n"
+            "    fn check_prints_the_tenancy_posture() {\n"
+            "        let _config = r#\"\n"
+            "listen = \"127.0.0.1:8080\"\n"
+            "\n"
+            "[tenancy]\n"
+            "implicit_platform_operator = true\n"
+            "\"#;\n"
+            "    }\n"
+            "\n"
+            "    #[test]\n"
+            "    fn read_pid_file_accepts_numeric_pid() {}\n"
+            "}\n",
+        }
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={"ferrogate-gateway": sources},
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway "
+            "lifecycle::tests::read_pid_file_accepts_numeric_pid\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ferrogate-gateway=2/2", result.stdout)
+
     def test_a_crate_that_reconstructs_no_test_is_named_as_that(self) -> None:
         """A filtered `cargo test` against a crate this parser finds no test in
 
@@ -1058,6 +1099,41 @@ class CiCrateCoverageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_an_integration_target_is_a_crate_root_not_a_module(self) -> None:
+        """Pins `module_prefix`'s top-level `tests/*.rs` branch.
+
+        Returning the target stem would approve `smoke::integration_case`, but
+        libtest prints only `integration_case` inside that integration target."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={
+                "ferrogate-gateway": {
+                    "tests/smoke.rs": "#[test]\nfn integration_case() {}\n"
+                }
+            },
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway "
+            "smoke::integration_case\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("matches no test in ferrogate-gateway", result.stderr)
+
+    def test_a_src_bin_target_is_a_crate_root_not_a_module(self) -> None:
+        """Pins `module_prefix`'s top-level `src/bin/*.rs` branch."""
+        result = self.run_checker(
+            members=["ferrogate-gateway"],
+            sources={
+                "ferrogate-gateway": {
+                    "src/bin/worker.rs": "#[test]\nfn binary_root_case() {}\n"
+                }
+            },
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-gateway "
+            "worker::binary_root_case\n",
+            local_runner="cargo test -p ferrogate-gateway\n",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("matches no test in ferrogate-gateway", result.stderr)
+
     def test_a_test_target_selector_is_not_a_name_filter(self) -> None:
         """`--test agentic_lite` is a TARGET, and cargo already errors on a
 
@@ -1087,6 +1163,33 @@ class CiCrateCoverageTests(unittest.TestCase):
             local_runner="cargo test -p ferrogate-cli\n",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exact_requires_the_full_libtest_path(self) -> None:
+        """Substring matching is wrong once libtest receives `--exact`."""
+        sources = {
+            "src/config/tests.rs": """
+                #[test]
+                fn default_config_uses_localhost_8080() {}
+            """,
+        }
+        partial = self.run_checker(
+            members=["ferrogate-config"],
+            sources={"ferrogate-config": sources},
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-config "
+            "config::tests -- --exact\n",
+            local_runner="cargo test -p ferrogate-config\n",
+        )
+        self.assertEqual(partial.returncode, 1, partial.stdout)
+        self.assertIn("matches no test in ferrogate-config", partial.stderr)
+
+        full = self.run_checker(
+            members=["ferrogate-config"],
+            sources={"ferrogate-config": sources},
+            ci_workflow="jobs:\n  t:\n    run: cargo test -p ferrogate-config "
+            "config::tests::default_config_uses_localhost_8080 -- --exact\n",
+            local_runner="cargo test -p ferrogate-config\n",
+        )
+        self.assertEqual(full.returncode, 0, full.stderr)
 
     def test_a_backslash_continued_command_is_read_as_one_command(self) -> None:
         """`scripts/local-test-modules.sh` splits its longest invocation across
@@ -1155,7 +1258,16 @@ class CiCrateCoverageTests(unittest.TestCase):
         the same number. Break `command_lines`, `cargo_test_name_filters` or
         the `cargo test` scan and the reported count drops while the gate still
         exits 0; that is the shape #553 shipped, one level up."""
-        takes_a_value = {"-p", "--test", "--bin", "--bench", "--example", "--features"}
+        takes_a_value = {
+            "-p",
+            "--test",
+            "--bin",
+            "--bench",
+            "--example",
+            "--features",
+            "--skip",
+            "--test-threads",
+        }
         expected = 0
         for relative in (
             ".github/workflows/governed-decision-conformance.yml",
@@ -1171,7 +1283,7 @@ class CiCrateCoverageTests(unittest.TestCase):
                     if skip:
                         skip = False
                     elif token == "--":
-                        break  # everything after belongs to libtest
+                        continue  # libtest can still receive its filter after this marker
                     elif token in takes_a_value:
                         skip = True
                     elif not token.startswith("-"):
@@ -1243,6 +1355,48 @@ class CiCrateCoverageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"{expected} matrix-templated line(s) skipped", result.stdout)
 
+    @staticmethod
+    def matrix_value_name_filters(value: str) -> set[str]:
+        """Independent cargo/libtest token scan for one matrix `args:` value."""
+        takes_a_value = {
+            "-p",
+            "--package",
+            "--test",
+            "--bin",
+            "--bench",
+            "--example",
+            "--features",
+            "-F",
+            "--skip",
+            "--test-threads",
+        }
+        filters: set[str] = set()
+        skip = False
+        for token in shlex.split(value):
+            if skip:
+                skip = False
+                continue
+            flag, _, inline = token.partition("=")
+            if flag in takes_a_value:
+                skip = not bool(inline)
+                continue
+            if token.startswith("-"):
+                # `--` switches consumers but does not end positional
+                # arguments: a bare word after it is still libtest's filter.
+                continue
+            filters.add(token)
+        return filters
+
+    def test_matrix_value_scan_sees_a_filter_after_double_dash(self) -> None:
+        self.assertEqual(
+            self.matrix_value_name_filters("-- --nocapture governed_decision"),
+            {"governed_decision"},
+        )
+        self.assertEqual(
+            self.matrix_value_name_filters("-- --skip governed_decision"),
+            set(),
+        )
+
     def test_no_matrix_value_list_hides_a_positional_filter(self) -> None:
         """The teeth behind the count above. A skipped line is only harmless
 
@@ -1262,18 +1416,6 @@ class CiCrateCoverageTests(unittest.TestCase):
         this repository's workflows rather than of the gate; if it ever reds,
         the answer is to teach `unmatched_name_filters` to pair `args:` with
         `package:` through a real YAML parse, not to delete the case."""
-        takes_a_value = {
-            "-p",
-            "--package",
-            "--test",
-            "--bin",
-            "--bench",
-            "--example",
-            "--features",
-            "-F",
-            "--skip",
-            "--test-threads",
-        }
         scanned = 0
         for name, text in self.reachable_workflow_texts().items():
             keys = set()
@@ -1310,44 +1452,56 @@ class CiCrateCoverageTests(unittest.TestCase):
                             break
                         value += " " + following.strip()
                 scanned += 1
-                skip = False
-                for token in value.split():
-                    if skip:
-                        skip = False
-                    elif token == "--":
-                        break
-                    elif token in takes_a_value:
-                        skip = True
-                    else:
-                        self.assertTrue(
-                            token.startswith("-"),
-                            f"{name}: matrix `{match.group(2)}` value `{value}` "
-                            f"carries the positional filter `{token}`, which the "
-                            "coverage gate skips and therefore cannot resolve",
-                        )
+                filters = self.matrix_value_name_filters(value)
+                self.assertFalse(
+                    filters,
+                    f"{name}: matrix `{match.group(2)}` value `{value}` carries "
+                    f"the positional filter(s) {sorted(filters)}, which the "
+                    "coverage gate skips and therefore cannot resolve",
+                )
         # And the scan has to have found the values, not zero of them.
         self.assertGreaterEqual(scanned, 30, "matrix values read")
 
-    def test_the_real_repository_reconstructs_a_floor_of_test_paths(self) -> None:
-        """`crate_test_paths` can break in the quiet direction: return fewer
+    def test_the_real_repository_reconstructs_every_named_crate_independently(self) -> None:
+        """A healthy crate cannot donate its test count to a broken neighbour.
 
-        paths, or none, and every filter it then fails to match reports as the
-        filter's fault. On a clean tree it returns them all and nothing says how
-        many, so `TEST_ATTRIBUTE` -> `if False` left all 30 tests green before
-        this floor existed.
-
-        1,417 at `77c921e` -- 1,073 in `ferrogate-gateway` and 344 in
-        `ferrogate-config`, the two crates the three live filters name -- and
-        the floor is set well under that so ordinary churn does not move it. Any
-        mutation that stops the reconstruction discovering tests drops this to
-        near zero and reds here even where a filter still happens to match."""
+        The old `>= 1200` assertion summed gateway and config, so gateway could
+        lose 200 paths while config kept the total above the floor. Recount the
+        canonical attributes independently, then require exact per-crate
+        agreement with the gate's diagnostics. The runtime gate allows a small
+        churn margin, but this repository fixture does not."""
         result = subprocess.run(
             ["python3", str(CHECKER)], text=True, capture_output=True, check=False
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        match = re.search(r"against (\d+) reconstructed test path\(s\)", result.stdout)
-        self.assertIsNotNone(match, result.stdout)
-        self.assertGreaterEqual(int(match.group(1)), 1200, result.stdout)
+        line = next(
+            (
+                line
+                for line in result.stdout.splitlines()
+                if line.startswith("per-crate reconstruction ")
+            ),
+            None,
+        )
+        self.assertIsNotNone(line, result.stdout)
+        reported = {
+            name: (int(paths), int(attributes))
+            for name, paths, attributes in re.findall(
+                r"([A-Za-z0-9_-]+)=(\d+)/(\d+)", line or ""
+            )
+        }
+        for crate in ("ferrogate-config", "ferrogate-gateway"):
+            expected = 0
+            for path in (ROOT / "crates" / crate).rglob("*.rs"):
+                expected += sum(
+                    1
+                    for source_line in path.read_text(encoding="utf-8").splitlines()
+                    if re.match(
+                        r"^\s*#\[(?:[a-z_]+::)*(?:test|rstest)[\]\(]",
+                        source_line,
+                    )
+                )
+            self.assertIn(crate, reported, result.stdout)
+            self.assertEqual(reported[crate], (expected, expected), result.stdout)
 
 
 if __name__ == "__main__":

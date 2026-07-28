@@ -39,13 +39,13 @@
 //! service (`ferrogate-cli`'s `admin_api.rs`) is an authenticated reverse
 //! proxy that calls `ferrogate_gateway::auth::authenticate_admin_gate` at the
 //! edge and leaves the gateway as the single enforcement authority for tenant
-//! scoping, so it never asks the scope question itself. On the current tree
+//! scoping, so it never asks the scope question itself. At **`21f1495`**
 //! `CallerScope` is `pub(crate)` and every one of its uses is inside
 //! `ferrogate-gateway`: **35 occurrences in code across 7 files (39 counting
 //! `UNSCOPED_TENANT_ID`, across 8), and 12 gateway files mention it at all.**
 //! The only file outside the gateway that names it is this paragraph. (An
 //! earlier draft said "~25 uses across 11 files"; the numbers here were
-//! re-counted on this tree with comments stripped, because the whole point of
+//! counted at that ref with comments stripped, because the whole point of
 //! writing them down is that a future reader re-checks them.) Moving the type
 //! here would make it `pub` for zero external
 //! readers while separating it from its only producer

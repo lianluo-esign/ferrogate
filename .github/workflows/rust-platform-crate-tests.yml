@@ -6,7 +6,8 @@
 # crate test CI (issue #561).
 
 # The crates this workflow runs were, until #561, compiled by CI and executed by
-# no job at all: ferrogate-gateway (136k lines, 1,067 tests, the largest crate in
+# no job at all: ferrogate-gateway (137,062 lines and 1,073 test attributes at
+# `8c62886`, the largest crate in
 # the workspace, holding auth_test.rs, server/rbac_test.rs, auth_admission_test.rs
 # and tenant_scope_reads_fault.rs), agent-worker (342 tests), and the
 # secrets/payments/cloudflare/sync-bridge crates. `cargo check` compiled them, so
@@ -44,9 +45,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 1,067 passed / 0 failed / 0 ignored / 0 filtered out, 1.3s of test
-          # time after the crate builds. The four `--skip` filters this slice
-          # carried are gone with #563: their shared fixture
+          # The whole crate runs unfiltered. At `8c62886` it carries 1,073 test
+          # attributes; the previous "1,067 passed" comment predated six tests
+          # and was no longer a result for this tree. The four `--skip` filters
+          # this slice carried are gone with #563: their shared fixture
           # `signed_snapshot_test_api_key` now declares `organization_id`, so the
           # `Config::validate()` refusal #540 added no longer fires on it and the
           # whole crate runs unfiltered.
