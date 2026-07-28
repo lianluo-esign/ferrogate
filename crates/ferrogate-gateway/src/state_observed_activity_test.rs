@@ -12,6 +12,7 @@
 use super::*;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use async_trait::async_trait;
 use ferrogate_cloudflare::d1::D1Client;
 use ferrogate_cloudflare::{
     Clock, CloudflareClient, CloudflareConfig, CloudflareError, D1ProxyClient, EnvTokenResolver,
-    HttpRequest, HttpTransport, RetryPolicy,
+    HttpRequest, HttpResponse, HttpTransport, RetryPolicy,
 };
 use ferrogate_core::TenantContext;
 use ferrogate_storage::{
@@ -28,6 +29,7 @@ use ferrogate_storage::{
 
 const PRIVATE_BACKEND_DIAGNOSTIC: &str =
     "connect failed: https://account-secret.example/db/tenant-private-uuid";
+const PRIVATE_PROXY_BASE: &str = "https://account-secret.example/d1";
 
 struct ImmediateClock;
 
@@ -36,22 +38,79 @@ impl Clock for ImmediateClock {
     async fn sleep(&self, _duration: Duration) {}
 }
 
-struct FailingPresenceTransport;
+struct FailingPresenceTransport {
+    request_log_json: String,
+    presence_read_attempts: AtomicUsize,
+}
+
+impl FailingPresenceTransport {
+    fn new(request_log: &StoredRequestLog) -> Self {
+        Self {
+            request_log_json: serde_json::to_string(request_log).expect("serialize request log"),
+            presence_read_attempts: AtomicUsize::new(0),
+        }
+    }
+}
 
 #[async_trait]
 impl HttpTransport for FailingPresenceTransport {
     async fn execute(
         &self,
-        _request: HttpRequest,
+        request: HttpRequest,
     ) -> Result<ferrogate_cloudflare::HttpResponse, CloudflareError> {
-        Err(CloudflareError::Transport(
-            PRIVATE_BACKEND_DIAGNOSTIC.to_string(),
-        ))
+        let body: serde_json::Value = request
+            .body
+            .as_deref()
+            .and_then(|body| serde_json::from_slice(body).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let sql = body
+            .get("sql")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let is_presence_window_read = request.url.starts_with(PRIVATE_PROXY_BASE)
+            && sql.contains("FROM observed_agent_presence")
+            && sql.contains("last_seen_at_unix >= ?");
+        if is_presence_window_read {
+            self.presence_read_attempts.fetch_add(1, Ordering::SeqCst);
+            return Err(CloudflareError::Transport(
+                PRIVATE_BACKEND_DIAGNOSTIC.to_string(),
+            ));
+        }
+
+        let rows = if sql.contains("SELECT request_json AS document_json FROM request_logs") {
+            serde_json::json!([{ "document_json": self.request_log_json.clone() }])
+        } else {
+            serde_json::json!([])
+        };
+        let query_result = serde_json::json!({
+            "results": rows,
+            "success": true,
+            "meta": { "changes": 0 }
+        });
+        let result = if request.url.starts_with(PRIVATE_PROXY_BASE) {
+            query_result
+        } else {
+            serde_json::json!([query_result])
+        };
+        Ok(HttpResponse {
+            status: 200,
+            retry_after: None,
+            body: serde_json::json!({
+                "success": true,
+                "errors": [],
+                "messages": [],
+                "result": result
+            })
+            .to_string()
+            .into_bytes(),
+        })
     }
 }
 
-fn state_with_failing_presence_store() -> AppState {
-    let transport = Arc::new(FailingPresenceTransport);
+fn state_with_failing_presence_store(
+    request_log: &StoredRequestLog,
+) -> (AppState, Arc<FailingPresenceTransport>) {
+    let transport = Arc::new(FailingPresenceTransport::new(request_log));
     let rest_client = D1Client::new(Arc::new(CloudflareClient::from_parts(
         CloudflareConfig::new("account-private", "plaintext-rest-token"),
         Arc::new(EnvTokenResolver::from_process_env()),
@@ -63,8 +122,8 @@ fn state_with_failing_presence_store() -> AppState {
         },
     )));
     let proxy_client = D1ProxyClient::new(
-        "https://account-secret.example/d1",
-        transport,
+        PRIVATE_PROXY_BASE,
+        transport.clone(),
         Arc::new(EnvTokenResolver::from_process_env()),
         "plaintext-proxy-token",
     );
@@ -77,8 +136,9 @@ fn state_with_failing_presence_store() -> AppState {
     )
     .with_proxy_client(proxy_client);
     let repositories = Arc::new(RuntimeStorageRepositories::cloudflare_d1(store, 16));
-    AppState::try_new_with_repositories(Config::default(), repositories, false)
-        .expect("app state with failing D1 presence store")
+    let state = AppState::try_new_with_repositories(Config::default(), repositories, false)
+        .expect("app state with selectively failing D1 presence store");
+    (state, transport)
 }
 
 fn recent_request_log(
@@ -182,17 +242,17 @@ fn repeated_requests_for_one_key_coalesce_into_a_single_presence_row() {
 
 #[test]
 fn failed_presence_read_is_unknown_and_redacts_backend_diagnostic() {
-    let state = state_with_failing_presence_store();
     let stale = now_unix_seconds().expect("clock").saturating_sub(3_600);
-    state.record_request_log(recent_request_log(
-        "req-presence-failure",
-        "tenant-a",
-        "key-1",
-        stale,
-    ));
+    let request_log = recent_request_log("req-presence-failure", "tenant-a", "key-1", stale);
+    let (state, transport) = state_with_failing_presence_store(&request_log);
 
     let report = state.observed_agent_activity(Some("tenant-a"));
 
+    assert_eq!(
+        transport.presence_read_attempts.load(Ordering::SeqCst),
+        1,
+        "the fixture must fail the exact presence-window read once",
+    );
     assert_eq!(report.presence_feed.status, "unavailable");
     assert!(report.presence_feed.rows_may_be_incomplete);
     assert_eq!(
