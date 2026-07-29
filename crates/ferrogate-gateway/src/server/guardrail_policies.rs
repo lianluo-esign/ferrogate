@@ -488,14 +488,14 @@ impl FerroGateway {
             Err(error) => return write_guardrail_error(session, ctx, error).await,
         }
         let actor = auth.api_key_id.as_deref().unwrap_or("platform_operator");
-        match self.state.activate_guardrail_policy_revision(
+        match self.state.activate_guardrail_policy_revision_with_evidence(
             policy_id,
             revision,
             actor,
             now_unix_seconds(),
             rollback,
         ) {
-            Ok(reload) => {
+            Ok(activation) => {
                 let action = if rollback {
                     "guardrail.policy_rollback"
                 } else {
@@ -516,8 +516,9 @@ impl FerroGateway {
                         "object": "guardrail_policy_binding",
                         "policy_id": policy_id,
                         "active_revision": revision,
+                        "previous_active_revision": activation.previous_active_revision,
                         "rollback": rollback,
-                        "reload": reload,
+                        "reload": activation.reload,
                     }),
                     &ctx.request_id,
                 )

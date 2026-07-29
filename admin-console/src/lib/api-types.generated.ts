@@ -7388,6 +7388,7 @@ export interface components {
             object: "guardrail_policy_binding";
             policy_id: string;
             active_revision: number;
+            previous_active_revision: number | null;
             rollback: boolean;
             reload: Record<string, never>;
         };

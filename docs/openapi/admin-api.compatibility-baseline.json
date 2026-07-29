@@ -21495,6 +21495,7 @@
           "object",
           "policy_id",
           "active_revision",
+          "previous_active_revision",
           "rollback",
           "reload"
         ],
@@ -21508,6 +21509,13 @@
           },
           "active_revision": {
             "type": "integer",
+            "minimum": 1
+          },
+          "previous_active_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1
           },
           "rollback": {

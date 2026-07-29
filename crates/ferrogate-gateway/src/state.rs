@@ -370,6 +370,12 @@ pub(crate) struct RuntimeReloadResult {
     pub(crate) reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct GuardrailPolicyActivationResult {
+    pub(crate) reload: RuntimeReloadResult,
+    pub(crate) previous_active_revision: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct RuntimeReloadPlan {
     pub(crate) mode: &'static str,
@@ -540,6 +546,8 @@ impl SharedAppState {
         })
     }
 
+    #[cfg(test)]
+    #[cfg(test)]
     pub(crate) fn activate_guardrail_policy_revision(
         &self,
         policy_id: &str,
@@ -548,6 +556,25 @@ impl SharedAppState {
         updated_at_unix: u64,
         rollback_only: bool,
     ) -> anyhow::Result<RuntimeReloadResult> {
+        Ok(self
+            .activate_guardrail_policy_revision_with_evidence(
+                policy_id,
+                revision,
+                actor,
+                updated_at_unix,
+                rollback_only,
+            )?
+            .reload)
+    }
+
+    pub(crate) fn activate_guardrail_policy_revision_with_evidence(
+        &self,
+        policy_id: &str,
+        revision: u32,
+        actor: &str,
+        updated_at_unix: u64,
+        rollback_only: bool,
+    ) -> anyhow::Result<GuardrailPolicyActivationResult> {
         let active = self.current();
         let stored = active
             .repositories
@@ -566,6 +593,10 @@ impl SharedAppState {
             updated_at_unix,
             rollback_only,
         )?;
+        let previous_active_revision = transition
+            .previous
+            .as_ref()
+            .and_then(|binding| binding.active_revision);
         let result = self.reload_process_local((*active.config).clone());
         if !result.committed {
             active.repositories.restore_guardrail_policy_binding(
@@ -582,7 +613,10 @@ impl SharedAppState {
             );
         }
         self.signal_binding_change_to_peers();
-        Ok(result)
+        Ok(GuardrailPolicyActivationResult {
+            reload: result,
+            previous_active_revision,
+        })
     }
 
     pub(crate) fn archive_guardrail_policy_revision(

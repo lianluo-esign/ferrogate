@@ -214,6 +214,13 @@ pub mod absence_codes {
     pub const RESOURCE_HAS_NO_REVISIONS: &str = "resource_has_no_revisions";
     /// The family is revisioned but the response body named no revision.
     pub const RESPONSE_CARRIES_NO_REVISION: &str = "response_carries_no_revision";
+    /// The family is revisioned, but the response body did not carry the
+    /// server-derived revision needed for a safe reversal command.
+    pub const RESPONSE_CARRIES_NO_ROLLBACK_TARGET: &str =
+        "response_carries_no_rollback_target_revision";
+    /// The binding response identified the same active revision before and
+    /// after the mutation, so the rollback verb has no distinct target.
+    pub const NO_DISTINCT_PRIOR_REVISION: &str = "no_distinct_prior_revision_to_restore";
     /// The created revision is the first in its chain: there is no earlier
     /// revision to restore, so reversal is an archive, not a rollback.
     pub const NO_PRIOR_REVISION: &str = "no_prior_revision_to_restore";
@@ -1409,13 +1416,21 @@ pub struct RevisionedFamily {
     /// created revision is the first in its chain and there is nothing to roll
     /// back *to*. Takes the chain id plus the revision as a second segment.
     pub archive_verb: &'static str,
-    /// Response fields naming the revision number, in priority order.
+    /// Response fields naming a newly materialized revision document.
     ///
     /// `guardrail-policies create` and `create-revision` return the immutable
-    /// revision document (`revision`), while `activate` and `rollback` return
-    /// the binding they changed (`active_revision`). Both identify the revision
-    /// needed to derive a reversal pointer from the same family.
+    /// revision document (`revision`), so their reversal can be derived from
+    /// the append-only chain. `activate` and `rollback` return a mutable
+    /// binding (`active_revision`), which is the changed object version but not
+    /// evidence that the previous active revision was `active_revision - 1`.
     pub revision_keys: &'static [&'static str],
+    /// Response fields naming the binding's live revision after activation or
+    /// rollback.
+    pub active_revision_keys: &'static [&'static str],
+    /// Response fields naming the binding's live revision before activation or
+    /// rollback. This is server-derived rollback evidence; clients must not
+    /// fabricate it by decrementing `active_revision`.
+    pub restores_revision_keys: &'static [&'static str],
     /// Response field naming the chain id, when it differs from `id`.
     pub chain_id_keys: &'static [&'static str],
 }
@@ -1451,7 +1466,9 @@ pub const REVISIONED_FAMILIES: &[RevisionedFamily] = &[RevisionedFamily {
     group: "guardrail-policies",
     rollback_verb: "rollback",
     archive_verb: "archive",
-    revision_keys: &["revision", "active_revision"],
+    revision_keys: &["revision"],
+    active_revision_keys: &["active_revision"],
+    restores_revision_keys: &["previous_active_revision"],
     chain_id_keys: &["policy_id", "id"],
 }];
 
@@ -2025,7 +2042,12 @@ impl<'a> MutationPlan<'a> {
         let Some(body) = body else {
             return Attested::absent(missing_code, missing_detail);
         };
-        let Some(revision) = envelope_scalar(body, family.revision_keys) else {
+        let document_revision = envelope_scalar(body, family.revision_keys);
+        let active_revision = envelope_scalar(body, family.active_revision_keys);
+        let Some(revision) = document_revision
+            .clone()
+            .or_else(|| active_revision.clone())
+        else {
             return Attested::absent(
                 absence_codes::RESPONSE_CARRIES_NO_REVISION,
                 "the response named no revision, so the reversal target cannot be derived \
@@ -2038,6 +2060,43 @@ impl<'a> MutationPlan<'a> {
         let chain_id = envelope_scalar(body, family.chain_id_keys)
             .or_else(|| self.resource_id.clone())
             .unwrap_or_default();
+
+        if let Some(restores_revision) = envelope_scalar(body, family.restores_revision_keys) {
+            if restores_revision == revision {
+                return Attested::absent(
+                    absence_codes::NO_DISTINCT_PRIOR_REVISION,
+                    "the server reported the same active revision before and after the binding \
+                     mutation, so the rollback verb has no distinct revision to restore",
+                );
+            }
+            return Attested::present(RollbackPointer {
+                command: vec![
+                    "ctl".to_string(),
+                    self.group.clone(),
+                    family.rollback_verb.to_string(),
+                    chain_id,
+                    "--data".to_string(),
+                    format!("{{\"revision\":{restores_revision}}}"),
+                ],
+                created_revision: Attested::present(revision.clone()),
+                restores_revision: Attested::present(restores_revision.clone()),
+                note: format!(
+                    "the server reported revision {restores_revision} as the previous active \
+                     binding, so reversing revision {revision} means promoting it with `{}`",
+                    family.rollback_verb
+                ),
+            });
+        }
+
+        if active_revision.is_some() {
+            return Attested::absent(
+                absence_codes::RESPONSE_CARRIES_NO_ROLLBACK_TARGET,
+                "the binding response named the new active_revision but no \
+                 previous_active_revision, so a safe reversal command cannot be derived \
+                 without a follow-up read",
+            );
+        }
+
         let previous = revision
             .parse::<u64>()
             .ok()
