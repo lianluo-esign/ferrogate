@@ -186,6 +186,16 @@ fn endpoint_capabilities_and_context_limit_filter_fail_closed() {
         route_exclusion_reasons(&route(&[], Some(2048)), &bounded, &HashSet::new())[0].code(),
         "context_window_too_small"
     );
+    let undeclared = route_exclusion_reasons(&route(&[], None), &bounded, &HashSet::new());
+    assert_eq!(
+        undeclared,
+        [ModelRouteExclusionReason::ContextWindowUndeclared { required: 4096 }]
+    );
+    assert_eq!(undeclared[0].code(), "context_window_undeclared");
+    assert_eq!(
+        undeclared[0].detail(),
+        "required_context_window=4096;declared_context_window=none"
+    );
     assert!(route_exclusion_reasons(&route(&[], Some(4096)), &bounded, &HashSet::new()).is_empty());
 }
 
