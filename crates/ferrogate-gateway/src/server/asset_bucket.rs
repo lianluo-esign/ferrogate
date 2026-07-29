@@ -3202,7 +3202,8 @@ mod tests {
     /// R2 at all, so neither the host-shape nor the `region = auto` rule ran.
     #[test]
     fn r2_validation_and_the_runtime_signer_agree_on_every_endpoint() {
-        // (endpoint, detected as R2, accepted by the strict guard, signed host)
+        // (endpoint, detected as R2, accepted by the strict guard, signed host
+        // when the runtime can build one)
         let cases: &[(&str, bool, bool, &str)] = &[
             (
                 "https://abc123def456.r2.cloudflarestorage.com",
@@ -3316,9 +3317,32 @@ mod tests {
 
         for (endpoint, targets_r2, well_formed, signed_host) in cases {
             let bucket = r2_client(endpoint);
-            let (scheme, host) = bucket
-                .scheme_and_host()
-                .unwrap_or_else(|error| panic!("{endpoint}: {error}"));
+            let (scheme, host) = match bucket.scheme_and_host() {
+                Ok(parts) => parts,
+                Err(error) => {
+                    assert!(
+                        !well_formed,
+                        "{endpoint}: a well-formed R2 endpoint must be runtime-signable: {error}"
+                    );
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("must not contain a query or fragment suffix"),
+                        "{endpoint}: runtime rejected the endpoint before signing for an unexpected reason: {error}"
+                    );
+                    assert_eq!(
+                        endpoint_targets_r2(endpoint),
+                        *targets_r2,
+                        "{endpoint}: R2 detection disagrees with the table"
+                    );
+                    assert_eq!(
+                        parse_r2_endpoint(endpoint).is_some(),
+                        *well_formed,
+                        "{endpoint}: the strict R2 guard disagrees with the table"
+                    );
+                    continue;
+                }
+            };
             assert_eq!(
                 &host, signed_host,
                 "{endpoint}: the signer's host header drifted"
