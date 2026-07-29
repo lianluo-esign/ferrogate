@@ -100,6 +100,19 @@ fn build_http_request_injects_auth_and_apikey_headers() {
     assert_eq!(request.body, r#"{"amount":10}"#);
 }
 
+fn assert_no_secret_or_prefix(rendered: &str, secret: &str, label: &str) {
+    assert!(
+        !rendered.contains(secret),
+        "{label} leaked completely into Debug: {rendered}"
+    );
+    for prefix_len in [4usize, 8, 16] {
+        assert!(
+            !rendered.contains(&secret[..prefix_len]),
+            "{label} leaked a {prefix_len}-char credential prefix into Debug: {rendered}"
+        );
+    }
+}
+
 #[test]
 fn function_credential_debug_redacts_bearer_and_apikey() {
     const BEARER: &str = "supabase-edge-bearer-token-debug-canary";
@@ -107,16 +120,7 @@ fn function_credential_debug_redacts_bearer_and_apikey() {
     let rendered = format!("{:?}", FunctionCredential::scoped_token(BEARER, APIKEY));
 
     for secret in [BEARER, APIKEY] {
-        assert!(
-            !rendered.contains(secret),
-            "FunctionCredential Debug leaked credential material: {rendered}"
-        );
-        for prefix_len in [4usize, 8, 16] {
-            assert!(
-                !rendered.contains(&secret[..prefix_len]),
-                "FunctionCredential Debug leaked a {prefix_len}-char credential prefix: {rendered}"
-            );
-        }
+        assert_no_secret_or_prefix(&rendered, secret, "FunctionCredential");
     }
     assert!(
         rendered.contains("bearer_token: \"<redacted>\""),
@@ -131,6 +135,42 @@ fn function_credential_debug_redacts_bearer_and_apikey() {
         rendered.contains(&format!("apikey_len: {}", APIKEY.len())),
         "{rendered}"
     );
+}
+
+#[test]
+fn edge_function_http_request_debug_redacts_resolved_header_credentials() {
+    const BEARER: &str = "zzedgebearer-token-debug-canary";
+    const APIKEY: &str = "qqedgeproject-key-debug-canary";
+    let invocation = SupabaseEdgeFunctionInvocation::post(target(), r#"{"amount":10}"#);
+    let request = invocation
+        .build_http_request(&FunctionCredential::scoped_token(BEARER, APIKEY))
+        .unwrap();
+    let rendered = format!("{request:?}");
+
+    assert!(
+        rendered.contains("EdgeFunctionHttpRequest"),
+        "Debug should still name the request type for triage: {rendered}"
+    );
+    assert!(rendered.contains("method: \"POST\""), "{rendered}");
+    assert!(
+        rendered.contains("url: \"https://abcdefgh.supabase.co/functions/v1/charge-credits\""),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("header_names: [\"apikey\", \"authorization\", \"content-type\"]"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("body_len: 13"), "{rendered}");
+    assert!(
+        !rendered.contains("headers:"),
+        "Debug must expose header names only, never header values: {rendered}"
+    );
+    assert!(
+        !rendered.contains("body:"),
+        "Debug must expose body_len only, never the body: {rendered}"
+    );
+    assert_no_secret_or_prefix(&rendered, BEARER, "EdgeFunctionHttpRequest bearer token");
+    assert_no_secret_or_prefix(&rendered, APIKEY, "EdgeFunctionHttpRequest apikey");
 }
 
 #[test]
