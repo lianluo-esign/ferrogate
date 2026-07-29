@@ -424,7 +424,7 @@ fn organization_id_expands_the_caddyfile_environment_reference_spellings() {
     let missing = parse_caddyfile(
         &format!(
             "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            \
-             organization_id {{$${ENV_NAME}}}\n        }}\n    }}\n}}\n"
+             organization_id {{${ENV_NAME}}}\n        }}\n    }}\n}}\n"
         ),
         "Ferrogate/Caddyfile",
     )
@@ -439,7 +439,7 @@ fn organization_id_expands_the_caddyfile_environment_reference_spellings() {
     let empty = parse_caddyfile(
         &format!(
             "\n:8080 {{\n    ai_gateway {{\n        api_key k {{\n            key s\n            \
-             organization_id {{$${ENV_NAME}}}\n        }}\n    }}\n}}\n"
+             organization_id {{${ENV_NAME}}}\n        }}\n    }}\n}}\n"
         ),
         "Ferrogate/Caddyfile",
     )
