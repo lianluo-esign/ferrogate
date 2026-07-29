@@ -336,11 +336,10 @@ percent = 10
 
     for raw in templates {
         let error = Config::from_toml_str(raw).expect_err("unknown capability must fail closed");
+        let error = format!("{error:#}");
         assert!(
-            error
-                .to_string()
-                .contains("unknown variant `unknown_feature`"),
-            "unexpected parse error: {error:#}"
+            error.contains("unknown variant `unknown_feature`"),
+            "unexpected parse error: {error}"
         );
     }
 }
