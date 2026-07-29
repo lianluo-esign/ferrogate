@@ -219,10 +219,43 @@ impl FerroGateway {
                     Err(()) => return Ok(()),
                 };
                 let now = now_unix_seconds();
-                let id = payload
-                    .id
-                    .filter(|id| !id.trim().is_empty())
+                let supplied_id = payload.id.filter(|id| !id.trim().is_empty());
+                let id = supplied_id
+                    .clone()
                     .unwrap_or_else(|| next_hierarchy_id("tenant"));
+                if let Some(id) = supplied_id.as_deref() {
+                    match state.get_tenant_account(id).await {
+                        Ok(Some(_)) => {
+                            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                                ctx,
+                                &auth,
+                                "tenant_account.create",
+                                id,
+                                "rejected",
+                                format!("tenant account {id} already exists"),
+                            ));
+                            return write_json_error(
+                                session,
+                                StatusCode::CONFLICT,
+                                "tenant_account_already_exists",
+                                format!("tenant account {id} already exists"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 let name = match payload.name.filter(|name| !name.trim().is_empty()) {
                     Some(name) => name,
                     None => {

@@ -302,6 +302,33 @@ impl FerroGateway {
         if let Err(error) = authorize_tenant_scope(&auth, &schedule.tenant_id) {
             return write_auth_error(session, ctx, error).await;
         }
+        if path_id.is_none() {
+            match state.admin_get_agent_schedule(&schedule.schedule_id).await {
+                Ok(Some(_)) => {
+                    let message = format!("agent schedule {} already exists", schedule.schedule_id);
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "agent_schedule.upsert",
+                        &schedule.schedule_id,
+                        "rejected",
+                        message.clone(),
+                    ));
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "agent_schedule_already_exists",
+                        message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return storage_error(session, ctx, error.to_string()).await;
+                }
+            }
+        }
         if let Err(error) =
             require_agent_schedule_tenancy(&state, &schedule, existing.as_ref()).await
         {
