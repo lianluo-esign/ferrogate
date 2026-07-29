@@ -334,7 +334,7 @@ impl Config {
 ///
 /// Semantic 2 deliberately stays permissive; see
 /// [`Self::require_registered_tenant`] for why the two are not siblings.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenancyConfig {
     /// Whether a key that declares neither `organization_id` nor
@@ -392,19 +392,6 @@ pub struct TenancyConfig {
     /// tenants exist.
     #[serde(default)]
     pub require_registered_tenant: bool,
-}
-
-impl Default for TenancyConfig {
-    fn default() -> Self {
-        Self {
-            // #540. NOT `true`: an omitted config field must not grant platform
-            // root. `Config::validate` refuses a static key that relies on the
-            // old answer and names the two ways to fix it, so this is a stop at
-            // the restart, not a silent downgrade of a running data plane.
-            implicit_platform_operator: false,
-            require_registered_tenant: false,
-        }
-    }
 }
 
 /// Time-based agent schedule triggers (#246). The scheduler is a control-plane
