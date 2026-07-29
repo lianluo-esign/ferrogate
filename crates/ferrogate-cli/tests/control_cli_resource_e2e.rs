@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ----- process helpers -------------------------------------------------------
 
@@ -65,13 +65,19 @@ fn http_response(status: u16, reason: &str, headers: &[(&str, &str)], body: &str
     response
 }
 
-/// A loopback server that records the request line (`METHOD PATH`) of every
-/// connection and replies with a fixed response. Returns the base URL plus a
-/// handle to the captured request lines, so a test can assert the generic
-/// dispatch built the right method + path.
+#[derive(Clone)]
+struct CapturedRequest {
+    line: String,
+    raw: String,
+}
+
+/// A loopback server that records every non-preflight request and replies with a
+/// fixed response. The shared Control Plane client performs an action-time
+/// `/healthz` preflight before ordinary API requests; the mock satisfies that
+/// handshake but deliberately does not count it as a resource dispatch.
 struct MockServer {
     base_url: String,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<CapturedRequest>>>,
 }
 
 impl MockServer {
@@ -80,7 +86,16 @@ impl MockServer {
             .lock()
             .unwrap()
             .last()
-            .cloned()
+            .map(|request| request.line.clone())
+            .unwrap_or_default()
+    }
+
+    fn last_raw_request(&self) -> String {
+        self.requests
+            .lock()
+            .unwrap()
+            .last()
+            .map(|request| request.raw.clone())
             .unwrap_or_default()
     }
 
@@ -97,9 +112,15 @@ fn spawn_mock(response: String) -> MockServer {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            if let Some(line) = read_request_line(&mut stream) {
-                sink.lock().unwrap().push(line);
+            let Some(request) = read_http_request(&mut stream) else {
+                continue;
+            };
+            if request.line == "GET /healthz" {
+                let _ = stream.write_all(action_time_response(&request.raw).as_bytes());
+                let _ = stream.flush();
+                continue;
             }
+            sink.lock().unwrap().push(request);
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
         }
@@ -110,20 +131,72 @@ fn spawn_mock(response: String) -> MockServer {
     }
 }
 
-/// Read the first request line, e.g. `GET /admin/v1/virtual-keys/vk-1 HTTP/1.1`,
-/// and return the `METHOD PATH` portion.
-fn read_request_line(stream: &mut TcpStream) -> Option<String> {
+fn action_time_response(request: &str) -> String {
+    let action_id = header_value(request, "x-ferrogate-action-id").unwrap_or("fgact_missing");
+    let issued_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = format!("v1;issued_at={issued_at};ttl=300;action_id={action_id};sig=mock");
+    http_response(
+        200,
+        "OK",
+        &[
+            ("content-type", "application/json"),
+            ("x-ferrogate-time-token", &token),
+        ],
+        "{}",
+    )
+}
+
+fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// Read a complete HTTP request and return both its `METHOD PATH` line and raw
+/// bytes. The raw capture is needed for headers such as `Accept`, while existing
+/// tests keep asserting the stable line via `last_request()`.
+fn read_http_request(stream: &mut TcpStream) -> Option<CapturedRequest> {
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .ok();
+    let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
-    let read = stream.read(&mut buffer).ok()?;
-    let text = String::from_utf8_lossy(&buffer[..read]);
-    let first_line = text.lines().next()?;
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next()?;
-    let path = parts.next()?;
-    Some(format!("{method} {path}"))
+    loop {
+        let read = stream.read(&mut buffer).ok()?;
+        if read == 0 {
+            return None;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let body_start = header_end + 4;
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        if request.len() < body_start + content_length {
+            continue;
+        }
+        let raw = String::from_utf8_lossy(&request).into_owned();
+        let first_line = raw.lines().next()?;
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next()?;
+        let path = parts.next()?;
+        return Some(CapturedRequest {
+            line: format!("{method} {path}"),
+            raw,
+        });
+    }
 }
 
 // ----- #361 IAM: list JSON round trip + captured request ---------------------
@@ -474,6 +547,319 @@ fn billing_usage_reports_json_round_trip() {
     assert_eq!(mock.last_request(), "GET /admin/v1/usage-reports");
     let body: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
     assert_eq!(body["data"][0]["total_tokens"], 1000);
+}
+
+#[test]
+fn request_logs_export_writes_single_record_bytes_without_implicit_newline() {
+    let home = tempfile::tempdir().unwrap();
+    let body = r#"{"id":"one"}"#;
+    let mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[
+            ("content-type", "application/x-ndjson"),
+            ("x-request-id", "rid-export-one"),
+            ("x-trace-id", "trace-export-one"),
+        ],
+        body,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "request-logs",
+            "export",
+            "--endpoint",
+            &mock.base_url,
+            "--filter",
+            "request_id=req_1",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        output.stdout.as_slice(),
+        body.as_bytes(),
+        "raw export stdout must be byte-for-byte and must not append a newline"
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("request-id: rid-export-one"),
+        "request id must stay diagnostic on stderr: {err}"
+    );
+    assert!(
+        err.contains("trace-id: trace-export-one"),
+        "trace id must stay diagnostic on stderr: {err}"
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("rid-export-one") && !out.contains("trace-export-one"),
+        "correlation ids must not corrupt export stdout: {out}"
+    );
+    let request = mock.last_request();
+    assert!(
+        request.starts_with("GET /admin/v1/request-log-exports?"),
+        "export path with query: {request}"
+    );
+    assert!(
+        request.contains("request_id=req_1"),
+        "filter query: {request}"
+    );
+    assert_eq!(
+        header_value(&mock.last_raw_request(), "accept"),
+        Some("application/x-ndjson"),
+        "raw export must request NDJSON"
+    );
+}
+
+#[test]
+fn request_logs_export_writes_multi_record_ndjson_bytes_exactly() {
+    let home = tempfile::tempdir().unwrap();
+    let body = "{\"id\":\"one\"}\n{\"id\":\"two\"}";
+    let mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/x-ndjson")],
+        body,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "request-logs",
+            "export",
+            "--endpoint",
+            &mock.base_url,
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        output.stdout.as_slice(),
+        body.as_bytes(),
+        "multi-record NDJSON must bypass structured JSON decoding and rendering"
+    );
+    assert_eq!(
+        header_value(&mock.last_raw_request(), "accept"),
+        Some("application/x-ndjson")
+    );
+}
+
+#[test]
+fn request_logs_export_refuses_structured_rendering_flags_before_transport() {
+    let output_home = tempfile::tempdir().unwrap();
+    let output_mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/x-ndjson")],
+        r#"{"id":"unused"}"#,
+    ));
+
+    let output_flag = base_cmd(output_home.path())
+        .args([
+            "ctl",
+            "request-logs",
+            "export",
+            "--endpoint",
+            &output_mock.base_url,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output_flag), 2, "stderr: {}", stderr(&output_flag));
+    assert!(
+        stderr(&output_flag).contains("--output does not apply"),
+        "raw export must reject structured rendering: {}",
+        stderr(&output_flag)
+    );
+    assert!(
+        stdout(&output_flag).trim().is_empty(),
+        "usage failure must not write stdout"
+    );
+    assert_eq!(
+        output_mock.request_count(),
+        0,
+        "--output refusal must happen before transport"
+    );
+
+    let all_pages_home = tempfile::tempdir().unwrap();
+    let all_pages_mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/x-ndjson")],
+        r#"{"id":"unused"}"#,
+    ));
+
+    let all_pages_flag = base_cmd(all_pages_home.path())
+        .args([
+            "ctl",
+            "request-logs",
+            "export",
+            "--endpoint",
+            &all_pages_mock.base_url,
+            "--all-pages",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        code(&all_pages_flag),
+        2,
+        "stderr: {}",
+        stderr(&all_pages_flag)
+    );
+    assert!(
+        stderr(&all_pages_flag).contains("--all-pages does not apply"),
+        "raw export must reject list walking: {}",
+        stderr(&all_pages_flag)
+    );
+    assert!(
+        stdout(&all_pages_flag).trim().is_empty(),
+        "usage failure must not write stdout"
+    );
+    assert_eq!(
+        all_pages_mock.request_count(),
+        0,
+        "--all-pages refusal must happen before transport"
+    );
+}
+
+#[test]
+fn request_logs_export_keeps_typed_error_envelope_on_raw_path() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = spawn_mock(http_response(
+        408,
+        "Request Timeout",
+        &[
+            ("content-type", "application/json"),
+            ("x-trace-id", "trace-export-timeout"),
+        ],
+        r#"{"error":{"message":"export timed out","type":"ferrogate_error","code":"request_timeout","request_id":"rid-export-timeout"}}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "request-logs",
+            "export",
+            "--endpoint",
+            &mock.base_url,
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 6, "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).trim().is_empty(),
+        "raw error responses must not be written as export data"
+    );
+    let err = stderr(&output);
+    assert!(err.contains("export timed out"), "message surfaced: {err}");
+    assert!(
+        err.contains("code: request_timeout"),
+        "code surfaced: {err}"
+    );
+    assert!(
+        err.contains("request-id: rid-export-timeout"),
+        "request id surfaced: {err}"
+    );
+    assert!(
+        err.contains("trace-id: trace-export-timeout"),
+        "trace id surfaced: {err}"
+    );
+    assert_eq!(
+        header_value(&mock.last_raw_request(), "accept"),
+        Some("application/x-ndjson"),
+        "even failing raw exports use the raw Accept header"
+    );
+}
+
+#[test]
+fn billing_events_replay_confirmation_blocks_and_yes_sends_once() {
+    let blocked_home = tempfile::tempdir().unwrap();
+    let blocked_mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"billing_outbox_dead_letter_replay","report_id":"rpt_42","replayed":true}"#,
+    ));
+
+    let blocked = base_cmd(blocked_home.path())
+        .stdin(Stdio::null())
+        .args([
+            "ctl",
+            "billing-events",
+            "replay",
+            "rpt_42",
+            "--endpoint",
+            &blocked_mock.base_url,
+            "--non-interactive",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&blocked), 2, "stderr: {}", stderr(&blocked));
+    let blocked_err = stderr(&blocked);
+    assert!(
+        blocked_err.contains("requires confirmation") && blocked_err.contains("--yes"),
+        "replay refusal must name the explicit acknowledgement: {blocked_err}"
+    );
+    assert!(
+        stdout(&blocked).trim().is_empty(),
+        "blocked replay must not emit a receipt"
+    );
+    assert_eq!(
+        blocked_mock.request_count(),
+        0,
+        "unacknowledged replay must not reach transport"
+    );
+
+    let yes_home = tempfile::tempdir().unwrap();
+    let yes_mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"billing_outbox_dead_letter_replay","report_id":"rpt_42","replayed":true}"#,
+    ));
+
+    let sent = base_cmd(yes_home.path())
+        .stdin(Stdio::null())
+        .args([
+            "ctl",
+            "billing-events",
+            "replay",
+            "rpt_42",
+            "--endpoint",
+            &yes_mock.base_url,
+            "--non-interactive",
+            "--yes",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&sent), 0, "stderr: {}", stderr(&sent));
+    assert_eq!(yes_mock.request_count(), 1, "--yes must send one replay");
+    assert_eq!(
+        yes_mock.last_request(),
+        "POST /admin/v1/billing-outbox-dead-letters/rpt_42/replay"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_str(stdout(&sent).trim()).unwrap_or_else(|error| {
+            panic!(
+                "stdout must be a JSON replay receipt ({error}): {}",
+                stdout(&sent)
+            )
+        });
+    assert_eq!(receipt["object"], "mutation_receipt", "{receipt}");
+    assert_eq!(receipt["verb"], "replay", "{receipt}");
+    assert_eq!(receipt["response"]["replayed"], true, "{receipt}");
+    assert_eq!(receipt["response"]["report_id"], "rpt_42", "{receipt}");
 }
 
 #[test]

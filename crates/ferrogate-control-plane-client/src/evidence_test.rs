@@ -14,7 +14,7 @@ use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::CommandGroup;
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
-use crate::error::{CliResult, ExitClass};
+use crate::error::{CliError, CliResult, ExitClass};
 use crate::output::OutputFormat;
 use crate::registry_helpers::ResourceInput;
 use crate::resource::ListParams;
@@ -162,6 +162,13 @@ fn request_log_list_and_export_map_to_distinct_endpoints() {
     let export = build_request_logs("export", &ResourceInput::new()).unwrap();
     assert_eq!(export.method, Method::GET);
     assert_eq!(export.path, "/admin/v1/request-log-exports");
+
+    let descriptor = RequestLogsGroup.descriptor();
+    let export_verb = descriptor.verb("export").unwrap();
+    assert_eq!(
+        export_verb.raw_response_media_type(),
+        Some("application/x-ndjson")
+    );
 }
 
 #[test]
@@ -208,27 +215,39 @@ fn audit_and_activity_map_to_their_collections_with_pagination() {
 }
 
 #[test]
-fn export_preserves_correlation_ids_from_the_response() {
-    // The export/read responses carry request/trace ids the investigation needs;
-    // classify must surface them for audit attribution rather than dropping them.
+fn export_send_raw_preserves_body_bytes_accept_header_and_correlation_ids() {
+    // The export path is load-bearing: successful NDJSON is an artifact, not a
+    // structured API document. Replacing `send_raw` with `send` would either
+    // reject multi-record NDJSON or rewrite the bytes before the CLI can pipe
+    // them to stdout.
     let export = build_request_logs("export", &ResourceInput::new()).unwrap();
-    let seen: Seen = Arc::new(Mutex::new(None));
-    let transport = FakeTransport {
-        response: RawResponse {
-            status: 200,
-            headers: vec![
-                ("x-request-id".to_string(), "req-evidence-1".to_string()),
-                ("x-trace-id".to_string(), "trace-evidence-1".to_string()),
-            ],
-            body: b"{\"a\":1}\n{\"b\":2}".to_vec(),
-        },
-        seen: seen.clone(),
-    };
-    let client =
-        ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
-    let response = block_on(client.send(&export)).unwrap();
-    assert_eq!(response.request_id.as_deref(), Some("req-evidence-1"));
-    assert_eq!(response.trace_id.as_deref(), Some("trace-evidence-1"));
+    for body in [
+        b"{\"id\":\"one\"}".as_slice(),
+        b"{\"id\":\"one\"}\n{\"id\":\"two\"}".as_slice(),
+    ] {
+        let seen: Seen = Arc::new(Mutex::new(None));
+        let transport = FakeTransport {
+            response: RawResponse {
+                status: 200,
+                headers: vec![
+                    ("x-request-id".to_string(), "req-evidence-1".to_string()),
+                    ("x-trace-id".to_string(), "trace-evidence-1".to_string()),
+                ],
+                body: body.to_vec(),
+            },
+            seen: seen.clone(),
+        };
+        let client =
+            ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
+        let response = block_on(client.send_raw(&export, "application/x-ndjson")).unwrap();
+        assert_eq!(response.body, body, "raw export body changed");
+        assert_eq!(response.request_id.as_deref(), Some("req-evidence-1"));
+        assert_eq!(response.trace_id.as_deref(), Some("trace-evidence-1"));
+
+        let prepared = seen.lock().unwrap();
+        let prepared = prepared.as_ref().unwrap();
+        assert_eq!(prepared.header("accept"), Some("application/x-ndjson"));
+    }
 }
 
 #[test]
@@ -253,6 +272,15 @@ fn export_timeout_maps_to_transport_class_without_false_success() {
     );
     let client =
         ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
-    let error = block_on(client.send(&spec)).unwrap_err();
+    let error = block_on(client.send_raw(&spec, "application/x-ndjson")).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Transport);
+    match error {
+        CliError::Api(api) => {
+            assert_eq!(api.http_status, 408);
+            assert_eq!(api.code, "request_timeout");
+            assert_eq!(api.message, "export timed out");
+            assert_eq!(api.request_id.as_deref(), Some("fgadm-to"));
+        }
+        other => panic!("raw export errors must stay typed API envelopes: {other}"),
+    }
 }
