@@ -17,7 +17,10 @@ import { describe, expect, it } from "vitest";
 // Vitest runs with `admin-console/` as its root, so the gateway source sits one
 // directory up. Reading it (rather than a checked-in copy) is the whole point:
 // there is no second artifact to forget to update.
-const SOURCE = resolve(process.cwd(), "../crates/ferrogate-cli/src/gateway/admin_overview.rs");
+const SOURCE = resolve(
+  process.cwd(),
+  "../crates/ferrogate-gateway/src/server/admin_overview.rs",
+);
 
 /**
  * The serialized shape `src/lib/overview.ts` mirrors. Keys are Rust struct

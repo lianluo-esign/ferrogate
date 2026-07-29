@@ -22,7 +22,7 @@ import { describe, expect, it } from "vitest";
 
 // Vitest runs with `admin-console/` as its root, so the gateway sources sit one
 // directory up.
-const GATEWAY = resolve(process.cwd(), "../crates/ferrogate-cli/src/gateway");
+const GATEWAY = resolve(process.cwd(), "../crates/ferrogate-gateway/src/server");
 const SITE_DOMAINS = resolve(GATEWAY, "site_domains.rs");
 const VERIFICATION = resolve(GATEWAY, "site_domain_verification.rs");
 const STORAGE_STATE = resolve(

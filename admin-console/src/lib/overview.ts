@@ -454,7 +454,7 @@ const HEALTHY_WORKER_STATUSES = new Set(["registered", "online"]);
 
 /**
  * Substrings that mark a status as known-unhealthy. Mirrors the gateway's own
- * `is_worker_pressure_status` (crates/ferrogate-cli/src/gateway/
+ * `is_worker_pressure_status` (crates/ferrogate-gateway/src/server/
  * admin_overview.rs), which raises the `self_hosted_workers_unhealthy` alert.
  */
 const WORKER_PRESSURE_NEEDLES = [

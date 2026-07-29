@@ -165,9 +165,7 @@ describe("putPresignedObject (#368 bound direct upload)", () => {
   function stubRequestAcceptsSignal() {
     vi.stubGlobal(
       "Request",
-      class {
-        constructor(_input: string, _init?: RequestInit) {}
-      },
+      class {},
     );
   }
 

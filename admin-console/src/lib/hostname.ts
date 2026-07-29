@@ -1,5 +1,5 @@
 // Client-side mirror of the gateway's site-domain hostname validation
-// (crates/ferrogate-cli/src/gateway/site_domains.rs :: validate_site_domain_hostname
+// (crates/ferrogate-gateway/src/server/site_domains.rs :: validate_site_domain_hostname
 // + routing::normalize_host, #265). The backend is authoritative; this only
 // gives immediate, matching feedback in the bind form so an operator sees why
 // a hostname is rejected before the POST round-trips. Keep the two in sync.

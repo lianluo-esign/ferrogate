@@ -1202,11 +1202,8 @@ describe("AssetsPage presigned upload cancellation", () => {
       "Request",
       class extends NativeRequest {
         constructor(input: RequestInfo | URL, init?: RequestInit) {
-          try {
-            super(input, init);
-          } catch (error) {
-            if (!init?.signal) throw error;
-            super(input, { ...init, signal: undefined });
+          super(input, init?.signal ? { ...init, signal: undefined } : init);
+          if (init?.signal) {
             Object.defineProperty(this, "signal", { value: init.signal });
           }
         }

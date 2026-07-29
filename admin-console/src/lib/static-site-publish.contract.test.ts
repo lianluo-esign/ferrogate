@@ -26,7 +26,7 @@ import { ZIP_MAGIC } from "@/lib/zip-archive";
 
 // Vitest runs with `admin-console/` as its root, so the gateway sources sit one
 // directory up.
-const SITES = resolve(process.cwd(), "../crates/ferrogate-cli/src/gateway/sites.rs");
+const SITES = resolve(process.cwd(), "../crates/ferrogate-gateway/src/server/sites.rs");
 
 /** The `serde_json::json!({ … })` literal the site-publish success path writes,
  * located by the discriminator itself so an unrelated literal cannot match. */
