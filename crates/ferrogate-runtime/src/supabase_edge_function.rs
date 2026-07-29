@@ -58,12 +58,24 @@ pub struct SupabaseEdgeFunctionInvocation {
 
 /// The built, ready-to-send HTTP request. `headers` values that carry secrets are
 /// filled from the *resolved* key at build time; the struct is never logged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EdgeFunctionHttpRequest {
     pub method: String,
     pub url: String,
     pub headers: BTreeMap<String, String>,
     pub body: String,
+}
+
+impl fmt::Debug for EdgeFunctionHttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names: Vec<&str> = self.headers.keys().map(String::as_str).collect();
+        f.debug_struct("EdgeFunctionHttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("header_names", &header_names)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 /// The credential the gateway injects when it executes an edge-function call.
