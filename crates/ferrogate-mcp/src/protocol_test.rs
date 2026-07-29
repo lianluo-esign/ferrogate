@@ -76,6 +76,12 @@ fn http_downgrade_requires_an_eligible_status_without_a_modern_error() {
         http_legacy_downgrade_reason(400, Some(&method_not_found)),
         Some(McpProtocolDowngradeReason::Http400UnrecognizedResponse)
     );
+    assert_eq!(
+        http_legacy_downgrade_reason(404, Some(&method_not_found)),
+        None,
+        "Streamable HTTP uses the 404 plus JSON-RPC method-not-found pair as \
+         modern protocol evidence, so it must not downgrade to initialize"
+    );
     let malformed = serde_json::json!({"error": {"code": -32022}});
     assert_eq!(
         http_legacy_downgrade_reason(400, Some(&malformed)),

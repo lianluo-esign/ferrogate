@@ -462,6 +462,40 @@ fn malformed_discovery_success_fails_without_legacy_fallback() {
 }
 
 #[test]
+fn http_404_method_not_found_is_modern_evidence_and_never_initializes() {
+    let reply = error_json_response(
+        "404 Not Found",
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#,
+    );
+    let mut error = String::new();
+    let requests = capture_http_exchange(vec![reply], |endpoint| {
+        let mut config = test_config("srv");
+        config.url = Some(endpoint);
+        config.timeout_ms = 30_000;
+        let mut client = HttpMcpClient::new(&config).unwrap();
+        error = client.negotiate().unwrap_err().to_string();
+    });
+
+    assert_eq!(
+        requests.len(),
+        1,
+        "a structured modern 404 must not trigger a legacy initialize retry"
+    );
+    let discovery = request_json(&requests[0]);
+    assert_eq!(discovery["method"], "server/discover");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request_json(request)["method"] == "initialize"),
+        "the removed initialize flow must not be injected into a modern HTTP origin"
+    );
+    assert!(
+        error.contains("HTTP 404 with JSON-RPC error code -32601"),
+        "{error}"
+    );
+}
+
+#[test]
 fn http_recognized_modern_error_never_falls_back_to_initialize() {
     let reply = error_json_response(
         "400 Bad Request",
