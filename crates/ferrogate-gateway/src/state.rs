@@ -547,7 +547,6 @@ impl SharedAppState {
     }
 
     #[cfg(test)]
-    #[cfg(test)]
     pub(crate) fn activate_guardrail_policy_revision(
         &self,
         policy_id: &str,
