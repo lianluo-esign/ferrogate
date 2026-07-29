@@ -549,7 +549,7 @@ done
 #    The allowlist is the only way a match can be dropped, so it is the only
 #    place a real key could hide. It used to be scoped to <label, file>, which
 #    means a real key pasted ANYWHERE in an allowlisted file scanned clean --
-#    and both allowlisted files are credential tests, the likeliest place for
+#    and the allowlisted files are credential tests, the likeliest place for
 #    someone to paste a live value while debugging. It is now scoped to one
 #    line, pinned by SHA-256 of that line's content.
 #

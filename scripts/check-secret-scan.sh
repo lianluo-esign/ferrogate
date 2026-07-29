@@ -111,7 +111,7 @@ root_dir="$PWD"
 #
 # An entry exempts ONE LINE, pinned by the SHA-256 of the matched line's own
 # content -- not the file (#566). A file-scoped exemption means a real key
-# pasted anywhere in an allowlisted file scans clean, and the two files here are
+# pasted anywhere in an allowlisted file scans clean, and these files are
 # credential tests, exactly where a real value is most likely to be pasted by
 # mistake. The digest is over the line's text only, so the entry survives the
 # line moving and dies the moment its content changes.
@@ -132,6 +132,7 @@ secret_scan_allowlist=(
   $'GitHub token\tcrates/ferrogate-runtime/src/coding_agent/materialize_test.rs\t316f47ed71425cec4cab1629059b6d69d36ec7e20e291f6d4be41073f3650e00\tsynthetic bare-token literal asserting CredentialReference::parse rejects inline credentials'
   $'GitHub token\tworkers/agent-gateway/test/git-credential-leak.test.ts\t0196265512882027f8b3308963f78177c1ea15c154b0eab71a3cf5c29622b816\tsynthetic token the leak test asserts never reaches an upstream request'
   $'private key material\tworkers/agent-gateway/vitest.config.ts\t4bfc0a278b803710d04c8af4b9949dd730d00088d60f0e3104995fbf7e4315c0\tPEM header of the test-only signing key whose body reads "not-a-real-key-tests-never-sign"'
+  $'private key material\tcrates/ferrogate-gateway/src/responses_debug_test.rs\tebb27e87fa1a0035eead647c6a0a848272fecfab7349fb8840057a86906cd94f\tsynthetic PEM header used by debug redaction tests to prove show-once client private keys do not leak through Debug'
 )
 allowlist_hits=()
 for _ in "${secret_scan_allowlist[@]}"; do allowlist_hits+=(0); done
@@ -197,7 +198,7 @@ fi
 
 # The allowlist pins each reviewed exemption to one line by SHA-256 (#566), so
 # without a digest tool the scan could only choose between granting every
-# exemption unchecked and reporting three known-good lines as findings. Both are
+# exemption unchecked and reporting known-good lines as findings. Both are
 # wrong. `--list-files` exits above because listing tracked inputs does not read
 # or grant an allowlist entry and therefore does not require a digest backend.
 secret_scan_digest_cmd=()
