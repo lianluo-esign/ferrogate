@@ -399,11 +399,14 @@ impl FerroGateway {
             Err(error) => return storage_error(session, ctx, error.to_string()).await,
         }
 
-        // A hostname points at exactly one site. Re-binding within the same
-        // tenant is an update. A hostname held by ANOTHER tenant is a conflict
-        // ONLY when that tenant has actually PROVEN ownership (#488): an
-        // unverified claim is a land-grab, not a right, and must not go on
-        // defending the squatter against the real owner.
+        // A hostname points at exactly one tenant's site. Re-binding within
+        // the same tenant is an update; binding a hostname currently held by
+        // another tenant is a conflict. #547: the old "allow a challenge
+        // against an unproven incumbent" path returned a 2xx with a response
+        // body for a binding row it deliberately did not write. #575 then made
+        // the final write itself reject a different current tenant, so the
+        // honest API contract is to refuse the non-holder before issuing a
+        // new proof row.
         let now = now_unix_seconds();
         let existing = match state.get_site_domain(&hostname).await {
             Ok(existing) => existing,
@@ -411,30 +414,15 @@ impl FerroGateway {
         };
         if let Some(existing) = existing.as_ref() {
             if existing.tenant_id != tenant_id {
-                // Fail closed: if the incumbent's proof cannot be read, do NOT
-                // assume it is unproven and hand the hostname over.
-                let holder_proven = match state
-                    .get_site_domain_verification(&existing.tenant_id, &hostname)
-                    .await
-                {
-                    Ok(Some(verification)) => verification.serves(now),
-                    Ok(None) => false,
-                    Err(error) => return storage_error(session, ctx, error.to_string()).await,
-                };
-                if holder_proven {
-                    let message = reject(format!(
-                        "hostname {hostname} is bound by another tenant with a verified \
-                         DNS ownership proof"
-                    ));
-                    return write_json_error(
-                        session,
-                        StatusCode::CONFLICT,
-                        "site_domain_conflict",
-                        message,
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
+                let message = reject(format!("hostname {hostname} is bound by another tenant"));
+                return write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "site_domain_conflict",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
             }
         }
 
@@ -475,13 +463,10 @@ impl FerroGateway {
             return storage_error(session, ctx, message).await;
         }
 
-        // The servable binding row is written when the caller already holds the
-        // hostname here (unbound, or its own). Taking it over from another
-        // tenant's unverified claim requires completing the challenge --
-        // `POST /admin/v1/site-domains/{hostname}/verify`.
-        let holds_binding = existing
-            .as_ref()
-            .is_none_or(|existing| existing.tenant_id == tenant_id);
+        // The servable binding row is written for the hostname the caller
+        // already holds here (unbound, or its own). The storage-level claim is
+        // still required: another tenant can win between the preflight read
+        // above and this write.
         let domain = StoredSiteDomain {
             hostname: hostname.clone(),
             tenant_id: tenant_id.clone(),
@@ -492,45 +477,37 @@ impl FerroGateway {
                 .map_or(now, |existing| existing.created_at_unix),
             updated_at_unix: now,
         };
-        let mut binding_written = false;
-        let domain = if holds_binding {
-            match state.claim_site_domain(domain).await {
-                Ok(claimed) => {
-                    binding_written = true;
-                    claimed
-                }
-                Err(StorageError::Conflict(_)) => {
-                    let message = reject(format!("hostname {hostname} is bound by another tenant"));
-                    return write_json_error(
-                        session,
-                        StatusCode::CONFLICT,
-                        "site_domain_conflict",
-                        message,
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                        ctx,
-                        &auth,
-                        "site_domain.bind",
-                        &hostname,
-                        "rejected",
-                        message.clone(),
-                    ));
-                    return storage_error(session, ctx, message).await;
-                }
+        let domain = match state.claim_site_domain(domain).await {
+            Ok(claimed) => claimed,
+            Err(StorageError::Conflict(_)) => {
+                let message = reject(format!("hostname {hostname} is bound by another tenant"));
+                return write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "site_domain_conflict",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
             }
-        } else {
-            domain
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "site_domain.bind",
+                    &hostname,
+                    "rejected",
+                    message.clone(),
+                ));
+                return storage_error(session, ctx, message).await;
+            }
         };
 
         // #488: an unproven hostname must NOT enter the ACME order set. That is
         // both the certificate-issuance rate-limit pollution the issue calls
         // out and a second place an unowned hostname would become real.
-        let acme = if proven && binding_written {
+        let acme = if proven {
             self.refresh_acme_after_domain_change(&state, &hostname, true)
         } else {
             self.site_domain_acme_state(&state)
@@ -544,7 +521,7 @@ impl FerroGateway {
             "committed",
             format!(
                 "custom domain {hostname} bound to site {tenant_id}/{site} \
-                 (verification_state={}, serving={proven}, binding_written={binding_written}, \
+                 (verification_state={}, serving={proven}, binding_written=true, \
                  acme_enabled={}, reload_triggered={})",
                 admin_verification.state, acme.enabled, acme.reload_triggered
             ),
