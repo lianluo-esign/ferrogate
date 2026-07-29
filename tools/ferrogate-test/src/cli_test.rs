@@ -100,6 +100,29 @@ fn lifecycle_tenancy_is_a_deterministic_local_scenario() {
 }
 
 #[test]
+fn lifecycle_tenancy_postgres_uses_a_local_postgres_dsn() {
+    let cli = Cli::try_parse_from([
+        "ferrogate-test",
+        "lifecycle-tenancy-postgres",
+        "--postgres-dsn",
+        "host=127.0.0.1 port=5432 user=postgres dbname=ferrogate sslmode=disable",
+    ])
+    .unwrap();
+    let Commands::LifecycleTenancyPostgres(args) = cli.command else {
+        panic!("expected lifecycle-tenancy-postgres command");
+    };
+    assert_eq!(
+        args.local.ferrogate_bin,
+        PathBuf::from("target/debug/ferrogate")
+    );
+    assert_eq!(
+        args.postgres_dsn,
+        "host=127.0.0.1 port=5432 user=postgres dbname=ferrogate sslmode=disable"
+    );
+    assert_eq!(args.postgres_tls_mode, "disable");
+}
+
+#[test]
 fn lifecycle_tenancy_supabase_uses_live_schema_controls() {
     let cli = Cli::try_parse_from([
         "ferrogate-test",

@@ -6,7 +6,7 @@
 
 use crate::{
     assertions::list_contains,
-    cli::SupabaseLiveRestartArgs,
+    cli::{PostgresLifecycleArgs, SupabaseLiveRestartArgs},
     constants::{ADMIN_AUTH, JSON_CONTENT},
     storage::{
         supabase_live_tls_mode, ControlPlaneRestartStorage, PostgresRestartTls, TursoRestartHarness,
@@ -15,6 +15,27 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use serde_json::json;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) fn run_lifecycle_tenancy_postgres(args: &PostgresLifecycleArgs) -> Result<()> {
+    let dsn = args.postgres_dsn.trim();
+    if dsn.is_empty() {
+        bail!("--postgres-dsn must not be empty");
+    }
+
+    let storage = ControlPlaneRestartStorage::Postgres {
+        dsn,
+        tls: PostgresRestartTls {
+            mode: postgres_tls_mode(&args.postgres_tls_mode)?,
+            ca_cert_path: args.postgres_tls_ca_cert_path.as_deref(),
+        },
+    };
+    let fixture = LiveLifecycleFixture::new(&local_postgres_run_id()?);
+
+    run_lifecycle_tenancy_durable(&args.local.ferrogate_bin, storage, &fixture)?;
+    println!("lifecycle-tenancy-postgres scenario passed");
+    Ok(())
+}
 
 pub(crate) fn run_lifecycle_tenancy_supabase(args: &SupabaseLiveRestartArgs) -> Result<()> {
     let dsn = args.supabase_dsn.trim();
@@ -34,25 +55,55 @@ pub(crate) fn run_lifecycle_tenancy_supabase(args: &SupabaseLiveRestartArgs) -> 
     };
     let fixture = LiveLifecycleFixture::new(schema.run_id());
 
-    {
-        let case = TursoRestartHarness::start(&args.local.ferrogate_bin, storage, false, false)?;
-        case.expect_storage_status()?;
-        fixture.bootstrap(&case)?;
-        fixture.expect_models(&case, &fixture.client_auth())?;
-
-        fixture.set_tenant_status(&case, "suspended")?;
-        fixture.expect_models_rejected(&case, &fixture.client_auth(), "tenancy_suspended")?;
-        fixture.expect_suspended_attach_rejected(&case)?;
-
-        fixture.set_tenant_status(&case, "active")?;
-        fixture.expect_models(&case, &fixture.client_auth())?;
-        let fresh_secret = fixture.create_fresh_key(&case)?;
-        fixture.expect_models(&case, &format!("Authorization: Bearer {fresh_secret}"))?;
-    }
+    run_lifecycle_tenancy_durable(&args.local.ferrogate_bin, storage, &fixture)?;
 
     schema.finish()?;
     println!("lifecycle-tenancy-supabase scenario passed");
     Ok(())
+}
+
+fn run_lifecycle_tenancy_durable(
+    ferrogate_bin: &std::path::Path,
+    storage: ControlPlaneRestartStorage<'_>,
+    fixture: &LiveLifecycleFixture,
+) -> Result<()> {
+    let case = TursoRestartHarness::start(ferrogate_bin, storage, false, false)?;
+    case.expect_storage_status()?;
+    fixture.bootstrap(&case)?;
+    fixture.expect_models(&case, &fixture.client_auth())?;
+
+    fixture.set_tenant_status(&case, "suspended")?;
+    fixture.expect_models_rejected(&case, &fixture.client_auth(), "tenancy_suspended")?;
+    fixture.expect_suspended_attach_rejected(&case)?;
+
+    fixture.set_tenant_status(&case, "active")?;
+    fixture.expect_models(&case, &fixture.client_auth())?;
+    let fresh_secret = fixture.create_fresh_key(&case)?;
+    fixture.expect_models(&case, &format!("Authorization: Bearer {fresh_secret}"))
+}
+
+fn postgres_tls_mode(mode: &str) -> Result<&'static str> {
+    match mode.trim() {
+        "disable" => Ok("disable"),
+        "prefer" => Ok("prefer"),
+        "require" => Ok("require"),
+        "verify_ca" | "verify-ca" => Ok("verify_ca"),
+        "verify_full" | "verify-full" => Ok("verify_full"),
+        other => bail!(
+            "--postgres-tls-mode must be disable, prefer, require, verify_ca, or verify_full, got {other}"
+        ),
+    }
+}
+
+fn local_postgres_run_id() -> Result<String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?;
+    Ok(format!(
+        "pg_{}_{}",
+        elapsed.as_secs(),
+        elapsed.subsec_nanos()
+    ))
 }
 
 struct LiveLifecycleFixture {
@@ -68,12 +119,12 @@ impl LiveLifecycleFixture {
     fn new(run_id: &str) -> Self {
         let slug = run_id.replace('_', "-");
         Self {
-            tenant_id: format!("life-tenant-{run_id}"),
+            tenant_id: format!("life-tenant-{slug}"),
             tenant_slug: format!("life-tenant-{slug}"),
-            project_id: format!("life-project-{run_id}"),
-            workspace_id: format!("life-workspace-{run_id}"),
-            client_id: format!("life-client-{run_id}"),
-            client_secret: format!("life-client-secret-{run_id}"),
+            project_id: format!("life-project-{slug}"),
+            workspace_id: format!("life-workspace-{slug}"),
+            client_id: format!("life-client-{slug}"),
+            client_secret: format!("life-client-secret-{slug}"),
         }
     }
 

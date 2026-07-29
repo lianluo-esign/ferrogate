@@ -62,7 +62,7 @@ use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use function_egress_cloudflare::run_function_egress_cloudflare_api;
 use guardrails::run_guardrail_supabase;
-use lifecycle_tenancy::run_lifecycle_tenancy_supabase;
+use lifecycle_tenancy::{run_lifecycle_tenancy_postgres, run_lifecycle_tenancy_supabase};
 use managed_action_project::run_managed_action_project;
 use mcp_candidate_official::run_mcp_candidate_client_official;
 use mcp_identity::run_mcp_identity_supabase;
@@ -105,6 +105,7 @@ fn main() -> Result<()> {
         managed_action_project: run_managed_action_project,
         observed_activity_d1_failure: run_observed_activity_d1_failure,
         lifecycle_tenancy: run_lifecycle_tenancy,
+        lifecycle_tenancy_postgres: run_lifecycle_tenancy_postgres,
         lifecycle_tenancy_supabase: run_lifecycle_tenancy_supabase,
         cli_mutation_receipt: run_cli_mutation_receipt,
         supabase_restart: run_supabase_restart,

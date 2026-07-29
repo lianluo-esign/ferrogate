@@ -66,6 +66,8 @@ pub(crate) enum Commands {
     ObservedActivityD1Failure(LocalArgs),
     /// Prove tenancy lifecycle gates request-time and attach-time runtime paths (#514).
     LifecycleTenancy(LocalArgs),
+    /// Prove tenancy lifecycle gates through a caller-supplied local PostgreSQL DSN (#514).
+    LifecycleTenancyPostgres(PostgresLifecycleArgs),
     /// Prove tenancy lifecycle gates against a real live Supabase schema (#514).
     LifecycleTenancySupabase(SupabaseLiveRestartArgs),
     /// Run the #505 CLI mutation decision-receipt E2E: dry-run issues nothing,
@@ -182,6 +184,25 @@ pub(crate) struct SupabaseLiveRestartArgs {
 }
 
 #[derive(Debug, Args, Clone)]
+pub(crate) struct PostgresLifecycleArgs {
+    #[command(flatten)]
+    pub(crate) local: LocalArgs,
+    /// Local PostgreSQL DSN for durable lifecycle coverage.
+    #[arg(
+        long,
+        env = "FERROGATE_POSTGRES_DSN",
+        default_value = "host=127.0.0.1 port=5432 user=postgres password=postgres dbname=ferrogate sslmode=disable"
+    )]
+    pub(crate) postgres_dsn: String,
+    /// PostgreSQL TLS mode for the local DSN.
+    #[arg(long, env = "FERROGATE_POSTGRES_TLS_MODE", default_value = "disable")]
+    pub(crate) postgres_tls_mode: String,
+    /// Optional root CA path when the local PostgreSQL DSN requires TLS verification.
+    #[arg(long, env = "FERROGATE_POSTGRES_TLS_CA_CERT_PATH")]
+    pub(crate) postgres_tls_ca_cert_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
 pub(crate) struct SupabaseLiveToken4aiProviderArgs {
     #[command(flatten)]
     pub(crate) supabase: SupabaseLiveRestartArgs,
@@ -258,6 +279,7 @@ pub(crate) struct Dispatch {
     pub(crate) managed_action_project: fn(&LocalArgs) -> Result<()>,
     pub(crate) observed_activity_d1_failure: fn(&LocalArgs) -> Result<()>,
     pub(crate) lifecycle_tenancy: fn(&LocalArgs) -> Result<()>,
+    pub(crate) lifecycle_tenancy_postgres: fn(&PostgresLifecycleArgs) -> Result<()>,
     pub(crate) lifecycle_tenancy_supabase: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) cli_mutation_receipt: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_restart: fn(&LocalArgs) -> Result<()>,
@@ -284,7 +306,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, mcp-candidate-client-official (locked official npm opponent), cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-buffer-admission, asset-registry-api, agent-jobs-api, managed-action-project, observed-activity-d1-failure, lifecycle-tenancy, lifecycle-tenancy-supabase (live Supabase required), cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, worker-release"
+                "local: admin-api, auth-api, gateway-api, mcp-candidate-client-official (locked official npm opponent), cloudflare-secret-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), admin-console-roles-supabase (live Supabase required), ci, x402-paid-egress-chain, function-egress-cloudflare-api, static-site-api, asset-presign-api, asset-buffer-admission, asset-registry-api, agent-jobs-api, managed-action-project, observed-activity-d1-failure, lifecycle-tenancy, lifecycle-tenancy-postgres, lifecycle-tenancy-supabase (live Supabase required), cli-mutation-receipt, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, worker-release"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -320,6 +342,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::ManagedActionProject(args) => (dispatch.managed_action_project)(&args),
         Commands::ObservedActivityD1Failure(args) => (dispatch.observed_activity_d1_failure)(&args),
         Commands::LifecycleTenancy(args) => (dispatch.lifecycle_tenancy)(&args),
+        Commands::LifecycleTenancyPostgres(args) => (dispatch.lifecycle_tenancy_postgres)(&args),
         Commands::LifecycleTenancySupabase(args) => (dispatch.lifecycle_tenancy_supabase)(&args),
         Commands::CliMutationReceipt(args) => (dispatch.cli_mutation_receipt)(&args),
         Commands::SupabaseRestart(args) => (dispatch.supabase_restart)(&args),
