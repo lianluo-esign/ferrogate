@@ -282,18 +282,19 @@ shim is not something FerroGate must invent — it is a **documented first-class
 platform feature**: *Outbound Workers*.
 
 **Mechanism (verified).** The container makes a plain HTTP request to a
-virtual hostname (e.g. `http://my.kv/some-key`); a static `outboundByHost`
-handler (or catch-all `outbound`) on the Container class intercepts it and runs
-**inside the Workers runtime, outside the container sandbox**, receiving `env`
-with "access to every binding declared in your Wrangler configuration" — KV,
-R2, D1, DOs "and others". "No SDK or client library is required inside the
-container." HTTPS interception is opt-in (`interceptHttps` + trusting an
-ephemeral CA at `/etc/cloudflare/certs/cloudflare-containers-ca.crt`); handlers
-only ever see ports 80/443. Zero-trust credential injection is supported: "no
-token is ever passed into the sandbox" — the handler attaches credentials
-Worker-side and secret rotation applies immediately without restart. Inbound
-direction: the fronting Worker/DO reaches the container via
-`fetch()`/`containerFetch()` on `defaultPort`.
+virtual hostname (e.g. `http://my.kv/some-key`); an `outboundByHost` handler
+table (or catch-all `outbound`) registered on the Container class intercepts it
+and runs **inside the Workers runtime, outside the container sandbox**,
+receiving `env` with "access to every binding declared in your Wrangler
+configuration" — KV, R2, D1, DOs "and others". "No SDK or client library is
+required inside the container." HTTPS interception is opt-in (`interceptHttps`
++ trusting an ephemeral CA at
+`/etc/cloudflare/certs/cloudflare-containers-ca.crt`); handlers only ever see
+ports 80/443. Zero-trust credential injection is supported: "no token is ever
+passed into the sandbox" — the handler attaches credentials Worker-side and
+secret rotation applies immediately without restart. Inbound direction: the
+fronting Worker/DO reaches the container via `fetch()`/`containerFetch()` on
+`defaultPort`.
 
 **Version gates — two of them, do not conflate.** The *base* outbound-Worker
 feature (`outbound`/`outboundByHost` over plain HTTP, handler running in the
@@ -589,32 +590,36 @@ export class FerroGateContainer extends Container {
     FERROGATE_POC_PG_DSN: "<external Postgres DSN, tls_mode=require>",
     FERROGATE_POC_PROVIDER_KEY: "<upstream provider API key>",
   };
-
-  static outboundByHost = {
-    // P7a — bindingless liveness probe. Touches no binding, so it can only
-    // ever answer one question: "is outbound interception installed?".
-    "cf-selftest.internal": async () =>
-      new Response("outbound-intercept-ok", { status: 200 }),
-    // P7b — the real binding probe. Every failure path returns a distinct
-    // status so a red P7 names its own cause instead of implying "the shim
-    // is broken".
-    "cf-kv.internal": async (request: Request, env: Env) => {
-      if (!env.POC_KV) {
-        // [[kv_namespaces]] missing from wrangler.toml — config gap, NOT a
-        // platform gap. Reaching this line already proves the shim works.
-        return new Response("POC_KV binding not declared", { status: 501 });
-      }
-      const key = new URL(request.url).pathname.slice(1);
-      const value = await env.POC_KV.get(key);
-      // Do not `new Response(value)` directly: KV returns null on a miss and
-      // `new Response(null)` is a 200 with an empty body, so a miss would be
-      // indistinguishable from a successful read of an empty value.
-      return value === null
-        ? new Response(`kv miss for key: ${key}`, { status: 404 })
-        : new Response(value, { status: 200 });
-    },
-  };
 }
+
+// Use assignment, not a static class field. The package implements this as an
+// inherited static setter; an ES2022 class field shadows that setter and leaves
+// the runtime registry empty, so P7 false-negatives with a DNS or network error
+// even though the sample type-checks.
+FerroGateContainer.outboundByHost = {
+  // P7a — bindingless liveness probe. Touches no binding, so it can only
+  // ever answer one question: "is outbound interception installed?".
+  "cf-selftest.internal": async () =>
+    new Response("outbound-intercept-ok", { status: 200 }),
+  // P7b — the real binding probe. Every failure path returns a distinct
+  // status so a red P7 names its own cause instead of implying "the shim
+  // is broken".
+  "cf-kv.internal": async (request: Request, env: Env) => {
+    if (!env.POC_KV) {
+      // [[kv_namespaces]] missing from wrangler.toml — config gap, NOT a
+      // platform gap. Reaching this line already proves the shim works.
+      return new Response("POC_KV binding not declared", { status: 501 });
+    }
+    const key = new URL(request.url).pathname.slice(1);
+    const value = await env.POC_KV.get(key);
+    // Do not `new Response(value)` directly: KV returns null on a miss and
+    // `new Response(null)` is a 200 with an empty body, so a miss would be
+    // indistinguishable from a successful read of an empty value.
+    return value === null
+      ? new Response(`kv miss for key: ${key}`, { status: 404 })
+      : new Response(value, { status: 200 });
+  },
+};
 
 export default {
   async fetch(request: Request, env: Env) {
@@ -628,6 +633,10 @@ export default {
 ```sh
 grep -q 'export { ContainerProxy }' src/index.ts \
   || { echo "P3 is missing the ContainerProxy re-export; P7 would false-negative"; exit 1; }
+grep -Eq '^FerroGateContainer[.]outboundByHost[[:space:]]*=' src/index.ts \
+  || { echo "P3 must assign FerroGateContainer.outboundByHost after the class; a static class field shadows the SDK setter"; exit 1; }
+! grep -Eq '^[[:space:]]*static[[:space:]]+outboundByHost' src/index.ts \
+  || { echo "P3 uses static outboundByHost; ES2022 class fields bypass the SDK registry setter"; exit 1; }
 ```
 
 **P4 — deploy.** `npx wrangler deploy` (Workers Paid). Expected: image pushed
@@ -693,12 +702,18 @@ curl -sS -w ' [%{http_code}]\n' http://cf-selftest.internal/ping
 # expect: outbound-intercept-ok [200]
 ```
 
-**P7b — does the container actually reach a binding?** Seed the **remote**
-namespace first; a local-only write leaves the deployed Worker reading an empty
-namespace and P7b returns 404 for the wrong reason:
+**P7b — does the container actually reach a binding?** First, on the host, from
+the Worker project directory, seed the **remote** namespace; a local-only write
+leaves the deployed Worker reading an empty namespace and P7b returns 404 for
+the wrong reason:
 
 ```sh
 npx wrangler kv key put hello world --binding POC_KV --remote
+```
+
+Then, in the container shell opened above:
+
+```sh
 curl -sS -w ' [%{http_code}]\n' http://cf-kv.internal/hello
 # expect: world [200]
 ```
@@ -707,13 +722,13 @@ curl -sS -w ' [%{http_code}]\n' http://cf-kv.internal/hello
 
 | P7a | P7b | Diagnosis |
 |---|---|---|
-| no response from the handler (curl error, hang, or DNS failure) | — | **Interception is not installed. This is not evidence against the shim.** Check, in order: (1) `export { ContainerProxy };` present in `src/index.ts`; (2) `@cloudflare/containers` ≥ 0.3.0 actually installed; (3) the class carrying `outboundByHost` is the one named by `class_name` in `wrangler.toml`; (4) the deploy actually shipped (`wrangler deployments list`). |
+| no response from the handler (curl error, hang, or DNS failure) | — | **Interception is not installed. This is not evidence against the shim.** Check, in order: (1) `export { ContainerProxy };` present in `src/index.ts`; (2) `@cloudflare/containers` ≥ 0.3.0 actually installed; (3) the class carrying `outboundByHost` is the one named by `class_name` in `wrangler.toml`; (4) `outboundByHost` is assigned after the class, not declared as a static class field; (5) the deploy actually shipped (`wrangler deployments list`). |
 | `outbound-intercept-ok [200]` | `POC_KV binding not declared [501]` | Shim works. `[[kv_namespaces]]` is missing from `wrangler.toml` — P3 config gap, not a platform gap. |
 | `outbound-intercept-ok [200]` | `kv miss for key: hello [404]` | Shim **and** binding work. The key was never written to the namespace the deployed Worker reads: re-run `kv key put` with `--remote` and the matching `--binding`. |
 | `outbound-intercept-ok [200]` | `world [200]` | **Pass.** Binding access from inside the container, no token in the sandbox — §6's recommendation is empirically backed. |
 
 Only the last row is a pass; only the first row is evidence about the platform,
-and only after all four of its checks are ruled out. CF does **not** document
+and only after all five of its checks are ruled out. CF does **not** document
 what a container observes when a virtual hostname is *not* intercepted (DNS
 failure vs. refused connection vs. egress denial), which is precisely why P7a is
 specified as "reaches the handler / does not" rather than by error string —
