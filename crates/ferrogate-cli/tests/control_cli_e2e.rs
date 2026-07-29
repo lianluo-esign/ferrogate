@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const STATUS_BODY: &str = concat!(
     "{\"service\":\"ferrogate\",\"version\":\"",
@@ -31,6 +31,9 @@ const STATUS_BODY: &str = concat!(
     "\"routes\":1,\"enabled_routes\":1,\"upstreams\":1,\"enabled_upstreams\":1,",
     "\"api_keys\":1,\"tools\":0,\"auth_required\":true}"
 );
+const ACTION_ID_HEADER: &str = "x-ferrogate-action-id";
+const CLIENT_CLOCK_HEADER: &str = "x-ferrogate-client-clock-unverified";
+const TIME_TOKEN_HEADER: &str = "x-ferrogate-time-token";
 
 // ----- process helpers -------------------------------------------------------
 
@@ -76,6 +79,47 @@ fn http_response(status: u16, reason: &str, headers: &[(&str, &str)], body: &str
     response
 }
 
+fn action_time_response(request: &str) -> Option<String> {
+    if !is_action_time_preflight(request) {
+        return None;
+    }
+    let action_id = header_value(request, ACTION_ID_HEADER)?;
+    let issued_at = header_value(request, CLIENT_CLOCK_HEADER)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(current_unix_seconds);
+    let token = format!("v1;issued_at={issued_at};ttl=300;action_id={action_id};sig=test");
+    Some(http_response(
+        200,
+        "OK",
+        &[
+            ("content-type", "application/json"),
+            (TIME_TOKEN_HEADER, token.as_str()),
+        ],
+        r#"{"status":"ok"}"#,
+    ))
+}
+
+fn is_action_time_preflight(request: &str) -> bool {
+    request
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("GET /healthz "))
+}
+
+fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().skip(1).find_map(|line| {
+        let (header, value) = line.split_once(':')?;
+        header.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Spawn a loopback server that replies with `response` to every connection.
 /// Returns the `http://127.0.0.1:PORT` base URL. The thread is detached and
 /// dies when the test process exits.
@@ -85,8 +129,9 @@ fn spawn_http(response: String) -> String {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            drain_request(&mut stream);
-            let _ = stream.write_all(response.as_bytes());
+            let request = drain_request(&mut stream);
+            let reply = action_time_response(&request).unwrap_or_else(|| response.clone());
+            let _ = stream.write_all(reply.as_bytes());
             let _ = stream.flush();
         }
     });
@@ -102,7 +147,12 @@ fn spawn_slow_http(response: String, delay: Duration) -> String {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            drain_request(&mut stream);
+            let request = drain_request(&mut stream);
+            if let Some(reply) = action_time_response(&request) {
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+                continue;
+            }
             thread::sleep(delay);
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
@@ -111,12 +161,13 @@ fn spawn_slow_http(response: String, delay: Duration) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-fn drain_request(stream: &mut TcpStream) {
+fn drain_request(stream: &mut TcpStream) -> String {
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .ok();
     let mut buffer = [0_u8; 4096];
-    let _ = stream.read(&mut buffer);
+    let read = stream.read(&mut buffer).unwrap_or(0);
+    String::from_utf8_lossy(&buffer[..read]).into_owned()
 }
 
 // ----- TLS mock --------------------------------------------------------------
@@ -151,8 +202,10 @@ fn spawn_tls(response: String) -> u16 {
             };
             let mut tls = rustls::StreamOwned::new(connection, stream);
             let mut buffer = [0_u8; 2048];
-            let _ = tls.read(&mut buffer);
-            let _ = tls.write_all(response.as_bytes());
+            let read = tls.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let reply = action_time_response(&request).unwrap_or_else(|| response.clone());
+            let _ = tls.write_all(reply.as_bytes());
             let _ = tls.flush();
         }
     });
@@ -597,6 +650,11 @@ fn spawn_paged_http(pages: Vec<(u64, String)>) -> String {
             let mut buffer = [0_u8; 4096];
             let read = stream.read(&mut buffer).unwrap_or(0);
             let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            if let Some(reply) = action_time_response(&request) {
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+                continue;
+            }
             let offset = request
                 .split_whitespace()
                 .nth(1)
@@ -771,6 +829,11 @@ fn ctl_list_sort_flag_reaches_the_server() {
             let mut buffer = [0_u8; 4096];
             let read = stream.read(&mut buffer).unwrap_or(0);
             let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            if let Some(reply) = action_time_response(&request) {
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+                continue;
+            }
             let _ = sender.send(request);
             let response = http_response(
                 200,
@@ -1018,8 +1081,10 @@ fn spawn_tls_signed_by_private_ca(response: String) -> (String, u16) {
             };
             let mut tls = rustls::StreamOwned::new(connection, stream);
             let mut buffer = [0_u8; 2048];
-            let _ = tls.read(&mut buffer);
-            let _ = tls.write_all(response.as_bytes());
+            let read = tls.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let reply = action_time_response(&request).unwrap_or_else(|| response.clone());
+            let _ = tls.write_all(reply.as_bytes());
             let _ = tls.flush();
         }
     });
@@ -1154,7 +1219,13 @@ fn ctl_all_pages_on_a_cursor_endpoint_refuses_after_one_page() {
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .ok();
             let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            if let Some(reply) = action_time_response(&request) {
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+                continue;
+            }
             let _ = sender.send(());
             // A cursor page: no total, no usable offset — the server ignores
             // offset/limit entirely, so every request returns this same page.
@@ -1233,7 +1304,13 @@ fn ctl_all_pages_on_an_offset_blind_endpoint_refuses_after_one_page() {
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .ok();
             let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            if let Some(reply) = action_time_response(&request) {
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+                continue;
+            }
             let _ = sender.send(());
             // The offset in the request is ignored outright: no `total`, no
             // `offset`, no `limit` — just the same full page, every time.

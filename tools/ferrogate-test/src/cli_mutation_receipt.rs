@@ -58,6 +58,7 @@ const TOKEN_ENV_VAR: &str = "FERROGATE_RECEIPT_E2E_TOKEN";
 const POLICY_ID: &str = "receipt-e2e-policy";
 const TENANT: &str = "org_receipt_e2e";
 const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
+const CLIENT_ACTION_TIME_SIGNING_KEY: &str = "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=";
 
 pub(crate) fn run_cli_mutation_receipt(args: &LocalArgs) -> Result<()> {
     if !args.ferrogate_bin.exists() {
@@ -84,6 +85,23 @@ pub(crate) fn run_cli_mutation_receipt(args: &LocalArgs) -> Result<()> {
         home,
     };
 
+    // --- #360: status read through the shared Control Plane API client. ---
+    //
+    // The loopback CLI E2E tests prove rendering, precedence, TLS, and exit
+    // classes against mocks. This is the live-process half: the shipped binary
+    // performs an authenticated `ops status` read through the standalone admin
+    // API before any mutation path is exercised.
+    let status = cli.json(&["ops", "status"])?;
+    if status["service"] != "ferrogate" {
+        bail!("`ferrogate ops status` did not read the live gateway status: {status}");
+    }
+    if status["auth_required"] != Value::Bool(true) {
+        bail!("`ferrogate ops status` did not use the authenticated admin surface: {status}");
+    }
+    if status["cluster"]["ready"] != Value::Bool(true) {
+        bail!("`ferrogate ops status` did not observe a ready live cluster: {status}");
+    }
+
     // --- Setup: a policy chain with two revisions, created through the CLI. ---
     let create = cli.json(&[
         "ctl",
@@ -94,6 +112,22 @@ pub(crate) fn run_cli_mutation_receipt(args: &LocalArgs) -> Result<()> {
     ])?;
     assert_is_receipt(&create, "guardrail-policies create")?;
     assert_audit_id_gap(&create, "guardrail-policies create")?;
+
+    // Rollback is intentionally stricter than "activate any lower number": the
+    // target revision must already be archived. Activate revision 1 first so the
+    // later promotion to revision 2 archives a real predecessor.
+    let activate_first = cli.json(&[
+        "ctl",
+        "guardrail-policies",
+        "activate",
+        POLICY_ID,
+        "--data",
+        r#"{"revision":1}"#,
+    ])?;
+    assert_is_receipt(&activate_first, "guardrail-policies activate revision 1")?;
+    if active_revision(&gateway_addr)? != "1" {
+        bail!("activating the first guardrail revision did not make revision 1 live");
+    }
 
     let second = cli.json(&[
         "ctl",
@@ -544,6 +578,10 @@ impl GatewayGuard {
             .args(["run", "--config"])
             .arg(config_path)
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+            .env(
+                "FERROGATE_CLIENT_ACTION_TIME_SIGNING_KEY",
+                CLIENT_ACTION_TIME_SIGNING_KEY,
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(
