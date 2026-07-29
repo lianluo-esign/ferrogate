@@ -4,7 +4,11 @@
 // Created: 2026-07-10
 // description: Live fixed-API contract enforcement coverage for issue #203.
 
-use crate::{cli::LocalArgs, constants::ADMIN_AUTH, local::LocalHarness};
+use crate::{
+    cli::LocalArgs,
+    constants::{ADMIN_AUTH, JSON_CONTENT},
+    local::LocalHarness,
+};
 use anyhow::Result;
 
 pub(crate) fn run_api_contract(args: &LocalArgs) -> Result<()> {
@@ -29,6 +33,7 @@ pub(crate) fn run_api_contract(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    assert_duplicate_create_conflicts(&case)?;
     case.expect_json("GET", "/v1/prompts/foo/custom", &[], "", 200, |body| {
         assert_eq!(body["id"], "chatcmpl_ferrogate_test");
         Ok(())
@@ -106,4 +111,118 @@ pub(crate) fn run_api_contract(args: &LocalArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// #577 API-contract coverage: collection POST creates are insert-only for the
+/// tenant-account and agent-schedule surfaces. Removing either existence check
+/// makes the duplicate request return 201/overwrite instead of the typed 409,
+/// and the read-back equality assertions below go red if the old row mutates.
+fn assert_duplicate_create_conflicts(case: &LocalHarness) -> Result<()> {
+    case.expect_json(
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"contract-dup-tenant","name":"Contract duplicate tenant","slug":"contract-dup-tenant"}"#,
+        201,
+        |body| {
+            assert_eq!(body["tenant"]["id"], "contract-dup-tenant");
+            Ok(())
+        },
+    )?;
+    let mut original_tenant = serde_json::Value::Null;
+    case.expect_json(
+        "GET",
+        "/admin/v1/tenant-accounts/contract-dup-tenant",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            original_tenant = body["tenant"].clone();
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"contract-dup-tenant","name":"Replacement tenant","slug":"replacement-tenant","status":"suspended","plan_id":"free"}"#,
+        409,
+        |body| {
+            assert_eq!(body["error"]["code"], "tenant_account_already_exists");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/tenant-accounts/contract-dup-tenant",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["tenant"], original_tenant);
+            Ok(())
+        },
+    )?;
+
+    case.expect_json(
+        "POST",
+        "/admin/v1/projects",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"contract-dup-project","tenant_id":"contract-dup-tenant","name":"Contract duplicate project","slug":"contract-dup-project"}"#,
+        201,
+        |_| Ok(()),
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/workspaces",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"contract-dup-workspace","project_id":"contract-dup-project","name":"Contract duplicate workspace","slug":"contract-dup-workspace"}"#,
+        201,
+        |_| Ok(()),
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-schedules",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"contract-dup-schedule","tenant_id":"contract-dup-tenant","workspace_id":"contract-dup-workspace","name":"Contract duplicate schedule","spec_kind":"interval","interval_secs":3600,"target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"contract-original-workload"}}"#,
+        201,
+        |body| {
+            assert_eq!(body["agent_schedule"]["id"], "contract-dup-schedule");
+            Ok(())
+        },
+    )?;
+    let mut original_schedule = serde_json::Value::Null;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-schedules/contract-dup-schedule",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            original_schedule = body["agent_schedule"].clone();
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-schedules",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"contract-dup-schedule","tenant_id":"contract-dup-tenant","workspace_id":"contract-dup-workspace","name":"Replacement schedule","spec_kind":"interval","interval_secs":60,"target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"contract-replacement-workload"}}"#,
+        409,
+        |body| {
+            assert_eq!(body["error"]["code"], "agent_schedule_already_exists");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-schedules/contract-dup-schedule",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["agent_schedule"], original_schedule);
+            Ok(())
+        },
+    )
 }

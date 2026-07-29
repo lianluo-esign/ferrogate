@@ -92,6 +92,43 @@ platform_operator = true
         );
     }
 
+    let original_tenant = response_json(&admin(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenant-accounts/tenant-conflict",
+        "",
+    ))["tenant"]
+        .clone();
+    let duplicate_tenant = admin(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        r#"{"id":"tenant-conflict","name":"Replacement tenant","slug":"replacement-tenant","status":"suspended","plan_id":"free"}"#,
+    );
+    assert_conflict(&duplicate_tenant, "tenant_account_already_exists");
+    let tenant_after_duplicate = response_json(&admin(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenant-accounts/tenant-conflict",
+        "",
+    ))["tenant"]
+        .clone();
+    assert_eq!(
+        tenant_after_duplicate, original_tenant,
+        "duplicate tenant-account POST must not mutate the existing row"
+    );
+    let updated_tenant = admin(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-conflict",
+        r#"{"name":"Tenant updated by PATCH"}"#,
+    );
+    assert_status(&updated_tenant, 200, "tenant PATCH remains the update path");
+    assert_eq!(
+        response_json(&updated_tenant)["tenant"]["name"],
+        "Tenant updated by PATCH"
+    );
+
     let created_key = admin(
         &gateway_addr,
         "POST",
@@ -153,6 +190,76 @@ platform_operator = true
     assert_eq!(
         original_workspace["workspace"]["project_id"],
         "project-original"
+    );
+
+    let created_schedule = admin(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/agent-schedules",
+        r#"{"id":"schedule-original","tenant_id":"tenant-conflict","workspace_id":"workspace-destination","name":"Original schedule","spec_kind":"interval","interval_secs":3600,"target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"original-workload"}}"#,
+    );
+    assert_status(&created_schedule, 201, "schedule setup");
+    let original_schedule = response_json(&admin(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-schedules/schedule-original",
+        "",
+    ))["agent_schedule"]
+        .clone();
+    let fire_history_before_duplicate = response_json(&admin(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-schedules/schedule-original/fires",
+        "",
+    ))["data"]
+        .clone();
+    assert_eq!(
+        fire_history_before_duplicate.as_array().map(Vec::len),
+        Some(0)
+    );
+    let duplicate_schedule = admin(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/agent-schedules",
+        r#"{"id":"schedule-original","tenant_id":"tenant-conflict","workspace_id":"workspace-original","name":"Replacement schedule","spec_kind":"interval","interval_secs":60,"target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"replacement-workload"}}"#,
+    );
+    assert_conflict(&duplicate_schedule, "agent_schedule_already_exists");
+    let schedule_after_duplicate = response_json(&admin(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-schedules/schedule-original",
+        "",
+    ))["agent_schedule"]
+        .clone();
+    assert_eq!(
+        schedule_after_duplicate, original_schedule,
+        "duplicate agent-schedule POST must not mutate the existing row"
+    );
+    let fire_history_after_duplicate = response_json(&admin(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-schedules/schedule-original/fires",
+        "",
+    ))["data"]
+        .clone();
+    assert_eq!(
+        fire_history_after_duplicate, fire_history_before_duplicate,
+        "duplicate agent-schedule POST must not alter dispatch/fire state"
+    );
+    let patched_schedule = admin(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/agent-schedules/schedule-original",
+        r#"{"enabled":false}"#,
+    );
+    assert_status(
+        &patched_schedule,
+        200,
+        "agent schedule PATCH remains the update path",
+    );
+    assert_eq!(
+        response_json(&patched_schedule)["agent_schedule"]["enabled"],
+        false
     );
 
     assert_status(
