@@ -12,7 +12,7 @@ use crate::{
     fixtures::{
         auth_service_config, blocking_stdio_mcp_script, local_gateway_config, LocalGatewayConfig,
     },
-    http::{free_addr, http_request_addr},
+    http::{free_addr, http_request_addr, HttpResponse},
     mocks::{
         spawn_local_provider_upstream, spawn_mock_agent_server, spawn_mock_billing_server,
         spawn_mock_mcp_server, spawn_mock_otlp_server, MockBillingServer, MockOtlpServer,
@@ -492,7 +492,6 @@ impl LocalHarness {
             );
         }
 
-        let gateway_addr = free_addr()?;
         let provider_stop = Arc::new(AtomicBool::new(false));
         let (provider_addr, provider) =
             spawn_local_provider_upstream(expected_provider_requests, provider_stop.clone())
@@ -514,6 +513,10 @@ impl LocalHarness {
         std::fs::write(&stdio_mcp_path, blocking_stdio_mcp_script())?;
         let observability =
             spawn_mock_otlp_server().context("start observability provider mock")?;
+        // Allocate the gateway port after every bind(:0) mock in this process.
+        // Otherwise one of those mocks can be handed the just-released gateway
+        // port before the child process binds it (#444).
+        let gateway_addr = free_addr()?;
         let config_path = dir.path().join("ferrogate.toml");
         let gateway_config = if let Some(template) = config_template {
             const LISTEN_MARKER: &str = "__FERROGATE_TEST_LISTEN__";
@@ -611,7 +614,7 @@ impl LocalHarness {
                 );
             }
             match http_request_addr(&self.gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
+                Ok(response) if healthz_identifies_ferrogate(&response) => return Ok(()),
                 Ok(response) => last = response.raw,
                 Err(error) => last = error.to_string(),
             }
@@ -870,6 +873,16 @@ impl LocalHarness {
     }
 }
 
+fn healthz_identifies_ferrogate(response: &HttpResponse) -> bool {
+    if response.status != 200 {
+        return false;
+    }
+    let Ok(body) = serde_json::from_str::<Value>(&response.body) else {
+        return false;
+    };
+    body["service"] == "ferrogate" && body["status"] == "ok"
+}
+
 impl Drop for LocalHarness {
     fn drop(&mut self) {
         let _ = self.gateway.kill();
@@ -897,3 +910,7 @@ impl Drop for LocalHarness {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "local_test.rs"]
+mod local_test;
