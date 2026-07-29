@@ -1699,12 +1699,28 @@ impl AppState {
         run_id: &str,
         action: SelfHostedRunAction,
     ) -> Option<SelfHostedRunDispatch> {
+        self.durable_self_hosted_dispatch_record_for_run(run_id, action)
+            .map(|record| record.dispatch)
+    }
+
+    /// Durable, unacknowledged dispatch record for `run_id`/`action`.
+    ///
+    /// This is intentionally separate from [`AppState::self_hosted_dispatch_for_run`],
+    /// which is local-first for fast request paths. Cancel decisions need the
+    /// durable assignment state: a peer may have leased and persisted a
+    /// `StartRun` while this node still holds a stale unassigned copy restored
+    /// earlier. Treating that stale local copy as withdrawable would skip the
+    /// `CancelRun` the already-running peer needs.
+    pub(crate) fn durable_self_hosted_dispatch_record_for_run(
+        &self,
+        run_id: &str,
+        action: SelfHostedRunAction,
+    ) -> Option<SelfHostedRunQueueRecord> {
         ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
             .into_iter()
             .filter(|record| record.run_id == run_id && record.acknowledged_status.is_none())
             .filter_map(|record| self_hosted_queue_record_from_storage(record).ok())
-            .map(|record| record.dispatch)
-            .find(|dispatch| dispatch.action == action)
+            .find(|record| record.dispatch.action == action)
     }
 
     /// Drop ONE dispatch from this process's lease queue AND from the durable

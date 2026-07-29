@@ -1179,22 +1179,40 @@ fn cancel_agent_job_in_runtime(
             run.id
         ));
     }
-    let Some(start) = state.self_hosted_dispatch_for_run(&run.id, SelfHostedRunAction::StartRun)
+    let durable_start =
+        state.durable_self_hosted_dispatch_record_for_run(&run.id, SelfHostedRunAction::StartRun);
+    let Some(start) = durable_start
+        .as_ref()
+        .map(|record| record.dispatch.clone())
+        .or_else(|| state.self_hosted_dispatch_for_run(&run.id, SelfHostedRunAction::StartRun))
     else {
         return Ok(false);
     };
     let start_dispatch_id = start.dispatch_id.clone();
-    // Node-local AND atomic on purpose (#551). Node-local because
-    // `self_hosted_dispatch_for_run` above may have resolved `start` out of the
-    // durable table, and a durable row is evidence that SOME node may hold the
-    // dispatch, not that this one does. Atomic because the poll seam shares
-    // this lock: asking "is it unleased?" and then withdrawing under a second
-    // acquisition let a worker lease it in between with no `cancel_run` ever
-    // minted for it -- the exact "a cancelled job's runtime is never told"
-    // defect, narrowed to a race. A lost race reports `false` and falls through
-    // to the `cancel_run` below, which is the right remedy for the holder that
-    // won it.
-    if state.withdraw_unleased_self_hosted_dispatch(&start_dispatch_id) {
+    let durable_start_is_assigned = durable_start
+        .as_ref()
+        .and_then(|record| record.assigned_worker_id.as_deref())
+        .is_some();
+    // Node-local AND atomic on purpose (#551). Node-local because the start
+    // lookup may have resolved `start` out of the durable table, and a durable
+    // row is evidence that SOME node may hold the dispatch, not that this one
+    // does. Atomic because the poll seam shares this lock: asking "is it
+    // unleased?" and then withdrawing under a second acquisition let a worker
+    // lease it in between with no `cancel_run` ever minted for it -- the exact
+    // "a cancelled job's runtime is never told" defect, narrowed to a race. A
+    // lost race reports `false` and falls through to the `cancel_run` below,
+    // which is the right remedy for the holder that won it.
+    //
+    // The durable assignment state is the tie-breaker (#502 review rework).
+    // A peer can lease the durable row after this node restored an unassigned
+    // copy into its local queue. In that case this node's copy is stale:
+    // withdrawing it would mint no `cancel_run`, while the peer is already
+    // executing. Once the durable row is assigned, cancellation must leave
+    // runtime evidence for the holder instead of trusting the stale local
+    // withdrawal.
+    if !durable_start_is_assigned
+        && state.withdraw_unleased_self_hosted_dispatch(&start_dispatch_id)
+    {
         return Ok(false);
     }
     let cancel = SelfHostedRunDispatch {
