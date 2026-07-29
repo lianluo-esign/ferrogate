@@ -23,6 +23,7 @@ use super::*;
 /// is what a control-plane store minted before the field existed.
 fn seed_legacy_undeclared_durable_key(node: &SharedAppState, id: &str) {
     let document = serde_json::json!({
+        // #540-undeclared-on-purpose: pre-#515 durable control-plane row.
         "id": id,
         "name": "Minted before #515",
         "key": format!("{id}-secret"),

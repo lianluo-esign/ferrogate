@@ -229,10 +229,11 @@ const UNMARKED_EXEMPTIONS: &[(&str, &str, usize, Exemption, &str)] = &[
 const MAX_KNOWN_UNDECLARED_DEBT: usize = 5;
 
 /// Directories the walk never enters: build output, vendored third-party
-/// sources, dependency trees, and sibling agent worktrees under `.claude/`.
+/// sources, dependency trees, and sibling agent worktrees.
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     ".claude",
+    ".worktrees",
     "target",
     "vendor",
     "node_modules",
