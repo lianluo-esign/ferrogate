@@ -40,14 +40,15 @@ FerroGate does not use the billing prompt estimate for this decision. Instead,
 it treats the accepted request JSON's UTF-8 byte length as a
 conservative input-token upper bound and adds the serialized upper bound of any
 gateway-injected tools. When the caller declares an output maximum, that exact
-value is added; when it does not, the input bound remains the minimum required
-context instead of disabling the check. This is deliberately stricter than
-provider-specific token estimates: ordinary text input tokens consume at least
-one byte, while the complete JSON envelope also covers structural message
-framing. A declared route with no `context_window`, or one smaller than that
-conservative total, is excluded before strategy ordering or dispatch. The
-fully undeclared legacy chat exemption described above remains narrow and does
-not turn a partial declaration into an optimistic match.
+value is added; when it does not, the non-zero input bound remains the minimum
+required context instead of disabling the check. A zero computed total is treated
+as no context-window requirement rather than an undeclared-window failure. This
+is deliberately stricter than provider-specific token estimates: ordinary text
+input tokens consume at least one byte, while the complete JSON envelope also
+covers structural message framing. A declared route with no `context_window`, or
+one smaller than that conservative total, is excluded before strategy ordering
+or dispatch. The fully undeclared legacy chat exemption described above remains
+narrow and does not turn a partial declaration into an optimistic match.
 
 Image input is different: a short remote URL does not reveal media size or
 dimensions, and compressed inline bytes do not provide a provider-neutral image

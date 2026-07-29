@@ -94,10 +94,11 @@ impl ModelRouteRequirements {
             let input_tokens =
                 request_input_token_upper_bound.saturating_add(injected_tool_token_upper_bound);
             requirements.input_token_upper_bound = Some(input_tokens);
-            requirements.required_context_window = Some(
-                input_tokens
-                    .saturating_add(requirements.explicit_output_tokens.unwrap_or_default()),
-            );
+            let required_context_window = input_tokens
+                .saturating_add(requirements.explicit_output_tokens.unwrap_or_default());
+            if required_context_window > 0 {
+                requirements.required_context_window = Some(required_context_window);
+            }
         }
         requirements.allow_undeclared_capabilities =
             matches!(
