@@ -973,3 +973,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_scheduler_lifecycle_test.rs"]
+mod state_scheduler_lifecycle_test;

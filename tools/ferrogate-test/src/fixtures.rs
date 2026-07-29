@@ -22,6 +22,10 @@ pub(crate) struct LocalGatewayConfig<'a> {
     /// Optional secret reference for the primary OpenAI provider. When absent,
     /// the ordinary `FERROGATE_PROVIDER_SECRET` fixture remains in use.
     pub(crate) primary_provider_secret_ref: Option<&'a str>,
+    /// Optional scheduler tick for scenarios that need the background schedule
+    /// sweeper. Omitted by default so ordinary local scenarios do not inherit
+    /// time-based work.
+    pub(crate) scheduler_tick_interval_secs: Option<u64>,
 }
 
 pub(crate) fn local_gateway_config(config: LocalGatewayConfig<'_>) -> String {
@@ -73,6 +77,18 @@ timeout_millis = 1000
             )
         })
         .unwrap_or_default();
+    let scheduler = config
+        .scheduler_tick_interval_secs
+        .map(|tick| {
+            format!(
+                r#"
+[scheduler]
+enabled = true
+tick_interval_secs = {tick}
+"#
+            )
+        })
+        .unwrap_or_default();
     let billing_service = config
         .billing_service_addr
         .map(|billing_addr| {
@@ -112,6 +128,7 @@ counter_backend = "local"
 {observability}
 {auth_service}
 {billing_service}
+{scheduler}
 
 [telemetry]
 service_name = "ferrogate-test"

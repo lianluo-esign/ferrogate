@@ -19,7 +19,11 @@ use anyhow::{Context, Result};
 use ferrogate_runtime::{
     SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
 };
-use std::{cell::RefCell, thread, time::Duration};
+use std::{
+    cell::RefCell,
+    thread,
+    time::{Duration, Instant},
+};
 
 pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let case = LocalHarness::start(&args.ferrogate_bin, 7)?;
@@ -2438,6 +2442,9 @@ fn assert_api_key_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
 /// so its refusal also proves the resolver walks to the tenant instead of
 /// trusting only ids present on the credential.
 fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
+    let lifecycle_worker_id = RefCell::new(String::new());
+    let lifecycle_worker_secret = RefCell::new(String::new());
+
     case.expect_json(
         "POST",
         "/admin/v1/tenant-accounts",
@@ -2472,12 +2479,58 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     )?;
     case.expect_json(
         "POST",
+        "/admin/v1/self-hosted-workers",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "tenant": {
+            "organization_id": "org_demo",
+            "project_id": "project_gateway",
+            "api_key_id": "key_admin"
+          },
+          "workspace_id": "lifecycle-workspace",
+          "worker_name": "lifecycle-worker",
+          "identity_fingerprint": "sha256:lifecycle-worker",
+          "identity_expires_at_unix": 9999999999,
+          "orchestration_enabled": true,
+          "capability_envelope_json": "{\"frameworks\":[\"native-harness\"],\"capabilities\":[\"shell\"]}"
+        }"#,
+        201,
+        |body| {
+            let worker_id = body["worker"]["id"]
+                .as_str()
+                .context("lifecycle worker id should be present")?;
+            lifecycle_worker_id.replace(worker_id.to_string());
+            let transport_token_secret = body["transport_token_secret"]
+                .as_str()
+                .context("lifecycle worker transport secret should be present")?;
+            lifecycle_worker_secret.replace(transport_token_secret.to_string());
+            assert_eq!(body["worker"]["workspace_id"], "lifecycle-workspace");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
         "/admin/v1/agent-schedules",
         &[ADMIN_AUTH, JSON_CONTENT],
         r#"{"id":"lifecycle-schedule","tenant_id":"org_demo","workspace_id":"lifecycle-workspace","name":"Lifecycle schedule","spec_kind":"interval","interval_secs":3600,"target_kind":"self_hosted_dispatch","target":{}}"#,
         201,
         |body| {
             assert_eq!(body["agent_schedule"]["enabled"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-schedules",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-execution-schedule","tenant_id":"org_demo","workspace_id":"lifecycle-workspace","name":"Lifecycle execution schedule","spec_kind":"interval","interval_secs":2,"target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"lifecycle-execution-workload"}}"#,
+        201,
+        |body| {
+            assert_eq!(body["agent_schedule"]["enabled"], true);
+            assert_eq!(
+                body["agent_schedule"]["target"]["workload_ref"],
+                "lifecycle-execution-workload"
+            );
             Ok(())
         },
     )?;
@@ -2616,6 +2669,34 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
             assert_eq!(body["error"]["code"], "tenancy_suspended");
             Ok(())
         },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-schedules/lifecycle-schedule/run-now",
+        &[ADMIN_AUTH],
+        "",
+        202,
+        |body| {
+            assert_eq!(body["fire"]["outcome"], "error");
+            assert!(body["fire"]["dispatch_id"].is_null());
+            assert!(body["fire"]["run_id"].is_null());
+            let detail = body["fire"]["detail"]
+                .as_str()
+                .context("run-now lifecycle refusal should record detail")?;
+            assert!(detail.starts_with("tenancy_suspended"), "{detail}");
+            Ok(())
+        },
+    )?;
+    expect_lifecycle_worker_poll_has_no_work(
+        case,
+        &lifecycle_worker_id.borrow(),
+        &lifecycle_worker_secret.borrow(),
+    )?;
+    wait_for_schedule_lifecycle_fire(case, "lifecycle-execution-schedule", "tenancy_suspended")?;
+    expect_lifecycle_worker_poll_has_no_work(
+        case,
+        &lifecycle_worker_id.borrow(),
+        &lifecycle_worker_secret.borrow(),
     )?;
 
     case.expect_json(
@@ -2786,15 +2867,93 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-schedules/lifecycle-schedule/run-now",
+        &[ADMIN_AUTH],
+        "",
+        202,
+        |body| {
+            assert_eq!(body["fire"]["outcome"], "dispatched");
+            assert!(!body["fire"]["dispatch_id"].is_null());
+            assert!(body["fire"]["run_id"].is_null());
+            Ok(())
+        },
+    )?;
 
     Ok(())
 }
 
 pub(crate) fn run_lifecycle_tenancy(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start(&args.ferrogate_bin, 2)?;
+    let case = LocalHarness::start_with_scheduler(&args.ferrogate_bin, 2, 1)?;
     assert_lifecycle_tenancy_enforcement(&case)?;
     println!("lifecycle-tenancy scenario passed");
     Ok(())
+}
+
+fn expect_lifecycle_worker_poll_has_no_work(
+    case: &LocalHarness,
+    worker_id: &str,
+    transport_secret: &str,
+) -> Result<()> {
+    case.expect_text(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_poll_body_for_scope(
+            "org_demo",
+            "lifecycle-workspace",
+            worker_id,
+            "sha256:lifecycle-worker",
+            transport_secret,
+        ),
+        204,
+        |body| {
+            assert!(body.is_empty(), "empty worker poll must return no body");
+            Ok(())
+        },
+    )
+}
+
+fn wait_for_schedule_lifecycle_fire(
+    case: &LocalHarness,
+    schedule_id: &str,
+    expected_code: &str,
+) -> Result<()> {
+    let path = format!("/admin/v1/agent-schedules/{schedule_id}/fires");
+    let started = Instant::now();
+    let mut last_body = String::new();
+    while started.elapsed() < Duration::from_secs(8) {
+        let response = http_request_addr(&case.gateway_addr, "GET", &path, &[ADMIN_AUTH], "")?;
+        if response.status != 200 {
+            anyhow::bail!(
+                "GET {path} expected 200, got {}: {}",
+                response.status,
+                response.raw
+            );
+        }
+        let body: serde_json::Value = serde_json::from_str(&response.body)
+            .with_context(|| format!("parse schedule fire history for {schedule_id}"))?;
+        last_body = response.body;
+        if let Some(fire) = body["data"]
+            .as_array()
+            .and_then(|fires| fires.iter().find(|fire| fire["schedule_id"] == schedule_id))
+        {
+            assert_eq!(fire["outcome"], "error");
+            assert!(fire["dispatch_id"].is_null());
+            assert!(fire["run_id"].is_null());
+            let detail = fire["detail"]
+                .as_str()
+                .context("background lifecycle refusal should record detail")?;
+            assert!(
+                detail.starts_with(expected_code),
+                "expected {expected_code}, got {detail}"
+            );
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    anyhow::bail!("timed out waiting for lifecycle fire {schedule_id}; last body: {last_body}")
 }
 
 pub(crate) fn run_auth_api(args: &AuthArgs) -> Result<()> {

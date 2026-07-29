@@ -356,6 +356,7 @@ struct LocalHarnessOptions<'a> {
     billing_service_addr: Option<&'a str>,
     provider_secret_binding: Option<ProviderSecretBinding<'a>>,
     config_template: Option<&'a str>,
+    scheduler_tick_interval_secs: Option<u64>,
 }
 
 pub(crate) struct LocalHarness {
@@ -412,6 +413,21 @@ impl LocalHarness {
             LocalHarnessOptions {
                 billing: Some(billing),
                 include_agent: true,
+                ..LocalHarnessOptions::default()
+            },
+        )
+    }
+
+    pub(crate) fn start_with_scheduler(
+        ferrogate_bin: &Path,
+        expected_provider_requests: usize,
+        tick_interval_secs: u64,
+    ) -> Result<Self> {
+        Self::start_inner(
+            ferrogate_bin,
+            expected_provider_requests,
+            LocalHarnessOptions {
+                scheduler_tick_interval_secs: Some(tick_interval_secs),
                 ..LocalHarnessOptions::default()
             },
         )
@@ -484,6 +500,7 @@ impl LocalHarness {
             billing_service_addr,
             provider_secret_binding,
             config_template,
+            scheduler_tick_interval_secs,
         } = options;
         if !ferrogate_bin.exists() {
             bail!(
@@ -538,6 +555,7 @@ impl LocalHarness {
                 primary_provider_secret_ref: provider_secret_binding
                     .as_ref()
                     .map(|binding| binding.secret_ref),
+                scheduler_tick_interval_secs,
             })
         };
         std::fs::write(&config_path, gateway_config)?;
