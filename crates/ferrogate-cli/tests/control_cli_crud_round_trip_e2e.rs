@@ -47,6 +47,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use ferrogate_control_plane_client::action_identity::{
+    ACTION_ID_HEADER, CLIENT_CLOCK_HEADER, TIME_TOKEN_HEADER,
+};
 use serde_json::{json, Value};
 
 // ----- process helpers -------------------------------------------------------
@@ -119,6 +122,7 @@ fn assert_ok(output: &Output, leg: &str) {
 struct RecordedRequest {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     body: String,
 }
 
@@ -132,6 +136,13 @@ impl RecordedRequest {
     fn json(&self) -> Value {
         serde_json::from_str(&self.body)
             .unwrap_or_else(|error| panic!("request body must be JSON ({error}): {}", self.body))
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 }
 
@@ -164,16 +175,49 @@ impl MockServer {
 
 /// A scripted reply: HTTP status, reason phrase, correlation id, and document.
 fn reply(status: u16, reason: &str, request_id: &str, body: &Value) -> String {
+    reply_with_headers(status, reason, request_id, &[], body)
+}
+
+fn reply_with_headers(
+    status: u16,
+    reason: &str,
+    request_id: &str,
+    headers: &[(&str, String)],
+    body: &Value,
+) -> String {
     let body = body.to_string();
+    let mut rendered_headers = String::new();
+    for (name, value) in headers {
+        rendered_headers.push_str(name);
+        rendered_headers.push_str(": ");
+        rendered_headers.push_str(value);
+        rendered_headers.push_str("\r\n");
+    }
     format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          content-type: application/json\r\n\
          x-request-id: {request_id}\r\n\
+         {rendered_headers}\
          \r\n\
          {body}",
         body.len()
+    )
+}
+
+fn time_token_reply(request: &RecordedRequest) -> String {
+    let action_id = request.header(ACTION_ID_HEADER).unwrap_or_else(|| {
+        panic!("time-token challenge carried no {ACTION_ID_HEADER}: {request:?}")
+    });
+    let issued_at = request.header(CLIENT_CLOCK_HEADER).unwrap_or("1800000000");
+    let token = format!("v1;issued_at={issued_at};ttl=300;action_id={action_id};sig=test");
+    reply_with_headers(
+        200,
+        "OK",
+        "rid-time-token",
+        &[(TIME_TOKEN_HEADER, token)],
+        &json!({"status": "ok"}),
     )
 }
 
@@ -200,10 +244,16 @@ fn spawn_mock(script: Vec<String>) -> MockServer {
         let mut script = script.into_iter();
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            if let Some(request) = read_request(&mut stream) {
-                sink.lock().unwrap().push(request);
-            }
-            let response = script.next().unwrap_or_else(unscripted_reply);
+            let response = if let Some(request) = read_request(&mut stream) {
+                if request.method == "GET" && request.path == "/healthz" {
+                    time_token_reply(&request)
+                } else {
+                    sink.lock().unwrap().push(request);
+                    script.next().unwrap_or_else(unscripted_reply)
+                }
+            } else {
+                unscripted_reply()
+            };
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
         }
@@ -243,7 +293,20 @@ fn read_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
         let mut parts = head.lines().next()?.split_whitespace();
         let method = parts.next()?.to_string();
         let path = parts.next()?.to_string();
-        return Some(RecordedRequest { method, path, body });
+        let headers = head
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_string(), value.trim().to_string()))
+            })
+            .collect();
+        return Some(RecordedRequest {
+            method,
+            path,
+            headers,
+            body,
+        });
     }
     None
 }

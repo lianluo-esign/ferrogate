@@ -100,7 +100,8 @@ hold.
 
 The audit instant is **server-issued or the API request is not sent**. The CLI
 never fills it from its own clock, and there is no code path from the local
-clock into that field.
+clock into that field. A receipt that cannot attest a server-issued instant uses
+the absence code `no_server_issued_time_token`, not a client-clock fallback.
 
 Before the first API request of a logical action, the CLI sends one safe
 `GET /healthz` challenge with the same `x-ferrogate-action-id` and fingerprint.

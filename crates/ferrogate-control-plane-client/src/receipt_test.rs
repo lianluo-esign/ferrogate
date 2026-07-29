@@ -624,7 +624,7 @@ fn every_registered_verb_prepares_the_action_identity_for_transport() {
 /// held". It cannot — it takes the dry-run arm and asserts `REQUEST_NOT_SENT`,
 /// a different arm and a different code from the one that mutation lives in.
 /// That claim now belongs to
-/// [`an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in`],
+/// [`a_sent_receipt_with_no_token_refuses_to_stand_the_local_clock_in`],
 /// which takes the arm that actually runs.
 #[test]
 fn a_receipt_reports_the_action_id_and_refuses_to_invent_a_client_sent_at() {
@@ -782,10 +782,9 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
     assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
 }
 
-/// A first-request mutation that really was sent, by a
-/// client holding no server time token, reports `client_sent_at: null` with
-/// [`absence_codes::NO_SERVER_TIME_TOKEN`] — and the local clock does not stand
-/// in for it.
+/// A sent receipt with no presented server time token reports
+/// `client_sent_at: null` with [`absence_codes::NO_SERVER_TIME_TOKEN`] — and
+/// the local clock does not stand in for it.
 ///
 /// Pins: the `(true, None)` arm of `MutationPlan::client_identity`
 /// (`receipt.rs`, `Attested::absent(absence_codes::NO_SERVER_TIME_TOKEN, …)`).
@@ -812,16 +811,18 @@ fn an_executed_mutation_reports_the_server_instant_it_presented() {
 /// * the `SystemTime::now()` source guard passes, because the mutation adds no
 ///   clock read — it launders one the identity already took.
 ///
-/// Every current mutating verb is the first request of its action, so the
-/// response token arrives too late to describe that request. This arm had zero assertions —
-/// `git grep NO_SERVER_TIME_TOKEN` returned the constant, the prose, and one
-/// production use.
+/// The transport now obtains an action-bound token with a safe preflight before
+/// it sends a mutation, so this branch is an invariant guard rather than the
+/// normal first-request path. Testing it through `ControlPlaneClient::send`
+/// would be a lie: a compliant client refuses to send the effect request when
+/// preflight cannot produce a token. The receipt projection is the branch that
+/// needs pinning.
 ///
 /// `absent_reason.code` is what is asserted, not just `value.is_none()`: the
 /// mutation above produces a *plausible* instant, so only the code can tell
 /// "the server issued none" from "nothing was sent" from a silently filled one.
 #[test]
-fn an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in() {
+fn a_sent_receipt_with_no_token_refuses_to_stand_the_local_clock_in() {
     let registry = full_registry();
     let verb = registry.resolve("projects", "create").expect("registered");
     let RenderGate::Receipt(renderer) = verb.render_gate() else {
@@ -829,20 +830,6 @@ fn an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in() {
     };
     let (spec, segments) = probe_spec("projects", "create");
     let identity = ClientActionIdentity::fixture();
-    assert!(
-        identity.server_issued_time().is_none(),
-        "the premise of this test is a first request holding no token"
-    );
-
-    // No `issuing_time_token`: the request-under-test has no prior response to
-    // harvest from, regardless of what this response would issue.
-    let transport = std::sync::Arc::new(RecordingTransport::with_body(r#"{"id":"proj_1"}"#));
-    let client = ControlPlaneClient::new(
-        test_context(),
-        None,
-        std::sync::Arc::clone(&transport),
-        identity.clone(),
-    );
     let plan = MutationPlan::new(
         renderer,
         "projects",
@@ -853,19 +840,13 @@ fn an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in() {
         false,
     )
     .expect("plan");
-    let report = block_on(plan.execute(&client));
-    let receipt = report
-        .output()
-        .receipt()
-        .expect("a mutating verb returns a receipt");
-
-    // The request really left: without this the assertions below would also
-    // hold on a plan that never sent anything, which is the other arm.
-    assert_eq!(
-        transport.request_count(),
-        1,
-        "this must be the SENT arm, not the dry-run one"
-    );
+    let response = ApiResponse {
+        status: 201,
+        request_id: Some("fgadm-receipt-1".to_string()),
+        trace_id: Some("trace-receipt-1".to_string()),
+        body: serde_json::json!({"id": "proj_1"}),
+    };
+    let receipt = plan.build_receipt(verb, Executed::Applied(&response), None);
     assert_eq!(receipt.outcome, MutationOutcome::Applied);
 
     assert_eq!(
@@ -889,10 +870,7 @@ fn an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in() {
     // that no other field carries that number is made against the JSON.
     let clock = receipt.client_identity.client_clock_unverified_unix;
     assert_eq!(clock, identity.client_clock().unverified_unix_seconds());
-    let json = render_output(OutputFormat::Json, report.output(), |_| {
-        unreachable!("a receipt never routes through the bare-body projection")
-    })
-    .expect("json");
+    let json = serde_json::to_string(&receipt).expect("receipt serializes");
     assert_eq!(
         json.matches(&clock.to_string()).count(),
         1,
@@ -1039,7 +1017,7 @@ fn validate_refuses_a_client_fingerprint_dressed_up_as_an_action_fingerprint() {
 ///
 /// Catches: a second construction site anywhere in `ferrogate-control-plane-client` —
 /// which is exactly the shape of the surviving mutation in
-/// [`an_executed_mutation_with_no_token_refuses_to_stand_the_local_clock_in`],
+/// [`a_sent_receipt_with_no_token_refuses_to_stand_the_local_clock_in`],
 /// and of any future "just fill it in from the clock, it is only a fallback".
 ///
 /// It is a source scan and not a value assertion for the same reason the
@@ -1697,6 +1675,45 @@ fn first_revision_reversal_is_an_archive_not_a_rollback() {
     );
 }
 
+/// The live Admin API response for `guardrail-policies activate` is the binding
+/// document, not the immutable revision document:
+/// `{"object":"guardrail_policy_binding","policy_id":...,"active_revision":...}`.
+/// The receipt still owes a rollback pointer for the guardrail family, so
+/// `active_revision` is a revision identifier for this response shape.
+#[test]
+fn guardrail_binding_response_yields_a_rollback_pointer() {
+    let report = execute_against(
+        "guardrail-policies",
+        "activate",
+        &["gp_1".to_string()],
+        200,
+        r#"{"object":"guardrail_policy_binding","policy_id":"gp_1","active_revision":2,"rollback":false,"reload":{"status":"applied"}}"#,
+    );
+    let receipt = report.output().receipt().expect("receipt");
+
+    assert_eq!(receipt.target.object_version.value.as_deref(), Some("2"));
+    let pointer = receipt
+        .rollback
+        .value
+        .as_ref()
+        .expect("active guardrail binding has a rollback pointer");
+    assert_eq!(
+        pointer.command,
+        vec![
+            "ctl".to_string(),
+            "guardrail-policies".to_string(),
+            "rollback".to_string(),
+            "gp_1".to_string(),
+            "--data".to_string(),
+            "{\"revision\":1}".to_string(),
+        ],
+        "the pointer must be derived from policy_id + active_revision in the binding response"
+    );
+    assert_eq!(pointer.created_revision.value.as_deref(), Some("2"));
+    assert_eq!(pointer.restores_revision.value.as_deref(), Some("1"));
+    assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+}
+
 /// The canonical target's JSON is byte-stable in the exact shape the runtime
 /// `CanonicalCapabilityTarget::Network` variant emits, and the fingerprint
 /// follows the `canonical_target_sha256` contract. Cross-crate byte equality
@@ -1982,7 +1999,7 @@ fn rollback_pointer_argv_round_trips_through_every_familys_own_builder() {
             200,
             &format!(
                 r#"{{"object":"revision","resource":{{"id":"chain-1","policy_id":"chain-1","{}":4}}}}"#,
-                family.revision_key
+                family.revision_keys[0]
             ),
         );
         let pointer = mid
@@ -2024,7 +2041,7 @@ fn rollback_pointer_argv_round_trips_through_every_familys_own_builder() {
             200,
             &format!(
                 r#"{{"object":"revision","resource":{{"id":"chain-2","policy_id":"chain-2","{}":1}}}}"#,
-                family.revision_key
+                family.revision_keys[0]
             ),
         );
         let pointer = first

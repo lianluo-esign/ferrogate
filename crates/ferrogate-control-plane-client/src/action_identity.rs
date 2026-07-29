@@ -1019,18 +1019,30 @@ impl ClientActionIdentity {
         })
     }
 
-    /// A fixed identity for in-crate unit tests.
+    /// A fixed, server-timed identity for in-crate unit tests.
     ///
     /// `#[cfg(test)]`, so it exists only while compiling this crate's own test
-    /// target and cannot weaken the guarantee for any consumer: `ferrogate-cli`
-    /// still has exactly one way to build an identity.
+    /// target and cannot weaken the guarantee for any consumer. Most unit
+    /// tests assert request/receipt behavior below the time-token challenge, so
+    /// the fixture starts with a valid token for its fixed action id instead of
+    /// forcing every fake transport to script `/healthz`.
     #[cfg(test)]
     pub fn fixture() -> ClientActionIdentity {
+        let action_id = ActionId(format!(
+            "{ACTION_ID_PREFIX}{}",
+            "0".repeat(ACTION_ID_HEX_LEN)
+        ));
+        let clock = ClientClockReading::from_unix_seconds(1_800_000_000);
+        let token = format!(
+            "v1;issued_at={};ttl=300;action_id={};sig=fixture",
+            clock.unverified_unix_seconds(),
+            action_id
+        );
+        let server_time = ServerIssuedTime::parse(&token)
+            .and_then(|time| time.accept_for(&action_id, &clock))
+            .expect("the fixed test token is bound to the fixed action");
         ClientActionIdentity {
-            action_id: ActionId(format!(
-                "{ACTION_ID_PREFIX}{}",
-                "0".repeat(ACTION_ID_HEX_LEN)
-            )),
+            action_id,
             fingerprint: ClientFingerprint {
                 cli_version: crate::version::CLI_VERSION.to_string(),
                 os: std::env::consts::OS.to_string(),
@@ -1040,8 +1052,8 @@ impl ClientActionIdentity {
                 host_label: None,
                 reported_ip: None,
             },
-            clock: ClientClockReading::from_unix_seconds(1_800_000_000),
-            server_time: Arc::new(Mutex::new(None)),
+            clock,
+            server_time: Arc::new(Mutex::new(Some(server_time))),
         }
     }
 

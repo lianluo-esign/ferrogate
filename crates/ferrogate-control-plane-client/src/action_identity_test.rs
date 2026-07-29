@@ -1191,8 +1191,9 @@ fn the_opt_in_variables_are_documented_where_an_operator_will_find_them() {
              flag, so the generated cli-reference.md will never mention it either"
         );
     }
-    assert!(prose.contains("server validates its HMAC signature"));
-    assert!(prose.contains("server's own receive clock"));
+    let prose_lower = prose.to_ascii_lowercase();
+    assert!(prose_lower.contains("server validates the echoed token's hmac signature"));
+    assert!(prose_lower.contains("ttl against its own receive clock"));
     assert!(
         PAGE.contains(crate::receipt::absence_codes::NO_SERVER_TIME_TOKEN),
         "the page must name the absence code an operator will actually see on a receipt"

@@ -992,6 +992,14 @@ impl Transport for std::sync::Arc<ScriptedTransport> {
     }
 }
 
+fn time_token_for(identity: &ClientActionIdentity, sig: &str) -> String {
+    let issued_at = identity.client_clock().unverified_unix_seconds();
+    format!(
+        "v1;issued_at={issued_at};ttl=300;action_id={};sig={sig}",
+        identity.action_id()
+    )
+}
+
 /// Pins: `headers.extend(identity.headers())` in `prepare_request`, and the
 /// three header names it emits (issue #548).
 ///
@@ -1041,16 +1049,38 @@ fn every_page_of_an_all_pages_walk_carries_one_action_id() {
     let context = context_with_endpoint("https://prod.example.com", None);
     let identity = ClientActionIdentity::mint(&context, &FingerprintEnv::default()).unwrap();
     let expected = identity.action_id().as_str().to_string();
-    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
-        r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":3,"offset":0,"limit":2}"#,
-        r#"{"object":"list","data":[{"id":"c"}],"total":3,"offset":2,"limit":2}"#,
+    let token = time_token_for(&identity, "preflight");
+    let transport = std::sync::Arc::new(ScriptedTransport::with_headers(vec![
+        (
+            r#"{"status":"ok"}"#,
+            vec![(TIME_TOKEN_HEADER, token.as_str())],
+        ),
+        (
+            r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":3,"offset":0,"limit":2}"#,
+            vec![],
+        ),
+        (
+            r#"{"object":"list","data":[{"id":"c"}],"total":3,"offset":2,"limit":2}"#,
+            vec![],
+        ),
     ]));
     let client =
         ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport), identity);
     block_on(client.send_all_pages(&RequestSpec::get("/admin/v1/tenants"), 2)).unwrap();
 
     let seen = transport.seen.lock().unwrap();
-    assert_eq!(seen.len(), 2, "the fixture walks two pages");
+    assert_eq!(
+        seen.len(),
+        3,
+        "one safe time-token challenge plus the two walked pages"
+    );
+    assert!(
+        seen[0].url.ends_with("/healthz"),
+        "the first request obtains the action-bound time token"
+    );
+    assert_eq!(seen[0].header(TIME_TOKEN_HEADER), None);
+    assert_eq!(seen[1].header(TIME_TOKEN_HEADER), Some(token.as_str()));
+    assert_eq!(seen[2].header(TIME_TOKEN_HEADER), Some(token.as_str()));
     for request in seen.iter() {
         assert_eq!(
             request.header(ACTION_ID_HEADER),
@@ -1071,23 +1101,27 @@ fn every_page_of_an_all_pages_walk_carries_one_action_id() {
     );
 }
 
-/// Pins: `ControlPlaneClient::harvest_time_token` and the piggy-back design.
+/// Pins: `ControlPlaneClient::ensure_server_time` plus response-token refresh.
 ///
-/// Catches: deleting the harvest call (the second request would carry no token,
-/// so the echo assertion reds); and any preflight implementation, since the
-/// request count is asserted to equal the number of logical calls — a
-/// `POST /v1/audit/time-token` before each action would make it three, not two.
+/// Catches: deleting the mandatory safe challenge (the first business request
+/// would carry no token), deleting the refresh harvest (the second business
+/// request would keep the preflight token), or challenging before every logical
+/// call (the request count would exceed three).
 #[test]
 fn a_time_token_is_harvested_from_one_response_and_echoed_on_the_next_request() {
     let context = context_with_endpoint("https://prod.example.com", None);
     let identity = ClientActionIdentity::mint(&context, &FingerprintEnv::default()).unwrap();
-    let issued_at = identity.client_clock().unverified_unix_seconds();
-    let token = format!(
-        "v1;issued_at={issued_at};ttl=300;action_id={};sig=deadbeef",
-        identity.action_id()
-    );
+    let initial = time_token_for(&identity, "preflight");
+    let refresh = time_token_for(&identity, "refresh");
     let transport = std::sync::Arc::new(ScriptedTransport::with_headers(vec![
-        (r#"{"ok":true}"#, vec![(TIME_TOKEN_HEADER, token.as_str())]),
+        (
+            r#"{"status":"ok"}"#,
+            vec![(TIME_TOKEN_HEADER, initial.as_str())],
+        ),
+        (
+            r#"{"ok":true}"#,
+            vec![(TIME_TOKEN_HEADER, refresh.as_str())],
+        ),
         (r#"{"ok":true}"#, vec![]),
     ]));
     let client =
@@ -1099,18 +1133,23 @@ fn a_time_token_is_harvested_from_one_response_and_echoed_on_the_next_request() 
     let seen = transport.seen.lock().unwrap();
     assert_eq!(
         seen.len(),
-        2,
-        "two logical calls must cost two requests: the token is piggy-backed, never preflighted"
+        3,
+        "one safe time-token challenge plus two logical calls"
     );
     assert_eq!(
         seen[0].header(TIME_TOKEN_HEADER),
         None,
-        "the first request of an invocation has nothing to echo yet"
+        "the challenge has no prior token to echo"
     );
     assert_eq!(
         seen[1].header(TIME_TOKEN_HEADER),
-        Some(token.as_str()),
-        "the harvested token is echoed verbatim on the next request of the same action"
+        Some(initial.as_str()),
+        "the first business request echoes the action-bound preflight token"
+    );
+    assert_eq!(
+        seen[2].header(TIME_TOKEN_HEADER),
+        Some(refresh.as_str()),
+        "the harvested refresh token is echoed verbatim on the next request of the same action"
     );
 }
 
@@ -1125,8 +1164,13 @@ fn a_time_token_bound_to_another_action_is_never_echoed() {
     let context = context_with_endpoint("https://prod.example.com", None);
     let identity = ClientActionIdentity::mint(&context, &FingerprintEnv::default()).unwrap();
     let issued_at = identity.client_clock().unverified_unix_seconds();
+    let initial = time_token_for(&identity, "preflight");
     let foreign = format!("v1;issued_at={issued_at};ttl=300;action_id=fgact_other;sig=deadbeef");
     let transport = std::sync::Arc::new(ScriptedTransport::with_headers(vec![
+        (
+            r#"{"status":"ok"}"#,
+            vec![(TIME_TOKEN_HEADER, initial.as_str())],
+        ),
         (
             r#"{"ok":true}"#,
             vec![(TIME_TOKEN_HEADER, foreign.as_str())],
@@ -1140,7 +1184,14 @@ fn a_time_token_bound_to_another_action_is_never_echoed() {
     block_on(client.send(&spec)).unwrap();
 
     let seen = transport.seen.lock().unwrap();
-    assert_eq!(seen[1].header(TIME_TOKEN_HEADER), None);
+    assert_eq!(seen.len(), 3, "challenge plus two logical calls");
+    assert_eq!(seen[1].header(TIME_TOKEN_HEADER), Some(initial.as_str()));
+    assert_eq!(
+        seen[2].header(TIME_TOKEN_HEADER),
+        Some(initial.as_str()),
+        "a refused refresh must leave the previously accepted token intact"
+    );
+    assert_ne!(seen[2].header(TIME_TOKEN_HEADER), Some(foreign.as_str()));
 }
 
 /// The walk visits every page and loses no row. This is the caller `next_page`

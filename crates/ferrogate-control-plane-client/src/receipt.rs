@@ -1409,8 +1409,13 @@ pub struct RevisionedFamily {
     /// created revision is the first in its chain and there is nothing to roll
     /// back *to*. Takes the chain id plus the revision as a second segment.
     pub archive_verb: &'static str,
-    /// Response field naming the revision number.
-    pub revision_key: &'static str,
+    /// Response fields naming the revision number, in priority order.
+    ///
+    /// `guardrail-policies create` and `create-revision` return the immutable
+    /// revision document (`revision`), while `activate` and `rollback` return
+    /// the binding they changed (`active_revision`). Both identify the revision
+    /// needed to derive a reversal pointer from the same family.
+    pub revision_keys: &'static [&'static str],
     /// Response field naming the chain id, when it differs from `id`.
     pub chain_id_keys: &'static [&'static str],
 }
@@ -1446,7 +1451,7 @@ pub const REVISIONED_FAMILIES: &[RevisionedFamily] = &[RevisionedFamily {
     group: "guardrail-policies",
     rollback_verb: "rollback",
     archive_verb: "archive",
-    revision_key: "revision",
+    revision_keys: &["revision", "active_revision"],
     chain_id_keys: &["policy_id", "id"],
 }];
 
@@ -1472,7 +1477,13 @@ pub fn revisioned_family(group: &str) -> Option<&'static RevisionedFamily> {
 /// `object_version_prefers_the_most_specific_key` pins it.
 const AUDIT_ID_KEYS: &[&str] = &["audit_id", "audit_event_id", "audit_log_id"];
 const APPROVAL_ID_KEYS: &[&str] = &["approval_id", "tool_approval_id"];
-const OBJECT_VERSION_KEYS: &[&str] = &["revision", "version", "etag", "updated_at_unix"];
+const OBJECT_VERSION_KEYS: &[&str] = &[
+    "revision",
+    "active_revision",
+    "version",
+    "etag",
+    "updated_at_unix",
+];
 /// Keys naming the object a mutation addressed, in priority order.
 const RESOURCE_ID_KEYS: &[&str] = &["id", "policy_id"];
 
@@ -1821,8 +1832,8 @@ impl<'a> MutationPlan<'a> {
                     Some(body) => Attested::or_absent(
                         envelope_scalar(body, OBJECT_VERSION_KEYS),
                         absence_codes::NO_OBJECT_VERSION,
-                        "the response document named no revision, version, or etag for the \
-                         changed object",
+                        "the response document named no revision, active_revision, version, or \
+                         etag for the changed object",
                     ),
                     None => Attested::absent(missing_code, missing_detail),
                 },
@@ -2014,7 +2025,7 @@ impl<'a> MutationPlan<'a> {
         let Some(body) = body else {
             return Attested::absent(missing_code, missing_detail);
         };
-        let Some(revision) = envelope_scalar(body, &[family.revision_key]) else {
+        let Some(revision) = envelope_scalar(body, family.revision_keys) else {
             return Attested::absent(
                 absence_codes::RESPONSE_CARRIES_NO_REVISION,
                 "the response named no revision, so the reversal target cannot be derived \
