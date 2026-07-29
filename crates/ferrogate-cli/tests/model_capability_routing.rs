@@ -71,6 +71,10 @@ impl ObservedUpstream {
             .into_inner()
             .unwrap()
     }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
 }
 
 fn read_json_request(stream: &mut TcpStream) -> Value {
@@ -147,7 +151,7 @@ name = "tool-model"
 provider = "incompatible"
 provider_model = "tool-model"
 routing_strategy = "lowest_cost"
-capabilities = ["chat"]
+capabilities = ["chat", "vision"]
 context_window = 8192
 input_price_per_1m = 0.01
 output_price_per_1m = 0.01
@@ -155,7 +159,7 @@ output_price_per_1m = 0.01
 [[models.fallbacks]]
 provider = "compatible"
 provider_model = "tool-model"
-capabilities = ["chat", "tools"]
+capabilities = ["chat", "tools", "vision"]
 context_window = 32768
 input_price_per_1m = 10.0
 output_price_per_1m = 10.0
@@ -315,11 +319,21 @@ platform_operator = true
         "{rejected_investigation}"
     );
 
+    let context_prompt = format!("CONTEXT_PROMPT_SECRET{}", "x".repeat(8_192));
     let context_request = json!({
         "model": "tool-model",
         "messages": [{
             "role": "user",
-            "content": format!("CONTEXT_PROMPT_SECRET{}", "x".repeat(8_192))
+            "content": context_prompt.clone()
+        }],
+        "max_completion_tokens": 1
+    });
+    let expected_context_request = json!({
+        "model": "tool-model",
+        "stream": false,
+        "messages": [{
+            "role": "user",
+            "content": context_prompt
         }],
         "max_completion_tokens": 1
     });
@@ -381,10 +395,152 @@ platform_operator = true
         "{context_investigation}"
     );
 
+    let no_output_prompt = format!("NO_OUTPUT_PROMPT_SECRET{}", "y".repeat(40_000));
+    let no_output_request = json!({
+        "model": "tool-model",
+        "messages": [{
+            "role": "user",
+            "content": no_output_prompt
+        }]
+    });
+    let compatible_before_no_output = compatible.request_count();
+    let no_output_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer route-secret",
+            "Content-Type: application/json",
+        ],
+        &no_output_request.to_string(),
+    );
+    assert!(
+        no_output_response.contains("400 Bad Request"),
+        "{no_output_response}"
+    );
+    let no_output_request_id = response_header(&no_output_response, "x-request-id");
+    let no_output_investigation_response = http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={no_output_request_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    let no_output_investigation = response_json(&no_output_investigation_response);
+    let no_output_events = no_output_investigation["audit_events"].as_array().unwrap();
+    let no_output_exclusions = no_output_events
+        .iter()
+        .filter(|event| {
+            event["action"] == "model_route.excluded"
+                && event["outcome"] == "context_window_too_small"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(no_output_exclusions.len(), 2, "{no_output_investigation}");
+    assert!(no_output_exclusions.iter().any(|event| event["target"]
+        .as_str()
+        .unwrap()
+        .contains("provider=incompatible;provider_model=tool-model")));
+    assert!(no_output_exclusions.iter().any(|event| event["target"]
+        .as_str()
+        .unwrap()
+        .contains("provider=compatible;provider_model=tool-model")));
+    let no_output_message = no_output_exclusions[0]["message"].as_str().unwrap();
+    assert!(no_output_message.contains("input_token_upper_bound="));
+    assert!(no_output_message.contains("explicit_output_tokens=none"));
+    assert!(no_output_message.contains("required_context_window="));
+    assert!(
+        !no_output_events
+            .iter()
+            .any(|event| event["action"] == "model_route.selected"),
+        "{no_output_investigation}"
+    );
+    assert!(
+        !no_output_investigation
+            .to_string()
+            .contains("NO_OUTPUT_PROMPT_SECRET"),
+        "{no_output_investigation}"
+    );
+    assert_eq!(compatible.request_count(), compatible_before_no_output);
+    assert_eq!(incompatible.request_count(), 0);
+
+    let image_request = json!({
+        "model": "tool-model",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "IMAGE_PROMPT_SECRET"},
+                {"type": "image_url", "image_url": {"url": "https://example.test/IMAGE_PROMPT_SECRET.png"}}
+            ]
+        }]
+    });
+    let compatible_before_image = compatible.request_count();
+    let image_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer route-secret",
+            "Content-Type: application/json",
+        ],
+        &image_request.to_string(),
+    );
+    assert!(
+        image_response.contains("400 Bad Request"),
+        "{image_response}"
+    );
+    let image_request_id = response_header(&image_response, "x-request-id");
+    let image_investigation_response = http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={image_request_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    let image_investigation = response_json(&image_investigation_response);
+    let image_events = image_investigation["audit_events"].as_array().unwrap();
+    let image_exclusions = image_events
+        .iter()
+        .filter(|event| {
+            event["action"] == "model_route.excluded"
+                && event["outcome"] == "media_context_unbounded"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(image_exclusions.len(), 2, "{image_investigation}");
+    assert!(image_exclusions.iter().any(|event| event["target"]
+        .as_str()
+        .unwrap()
+        .contains("provider=incompatible;provider_model=tool-model")));
+    assert!(image_exclusions.iter().any(|event| event["target"]
+        .as_str()
+        .unwrap()
+        .contains("provider=compatible;provider_model=tool-model")));
+    for exclusion in image_exclusions {
+        let message = exclusion["message"].as_str().unwrap();
+        assert!(message.contains("media_kind=image"));
+        assert!(message.contains("provider_neutral_token_upper_bound=unavailable"));
+        assert!(message.contains("input_token_upper_bound=none"));
+        assert!(message.contains("required_context_window=none"));
+        assert!(message.contains("unbounded_media_context=true"));
+    }
+    assert!(
+        !image_events
+            .iter()
+            .any(|event| event["action"] == "model_route.selected"),
+        "{image_investigation}"
+    );
+    assert!(
+        !image_investigation
+            .to_string()
+            .contains("IMAGE_PROMPT_SECRET"),
+        "{image_investigation}"
+    );
+    assert_eq!(compatible.request_count(), compatible_before_image);
+    assert_eq!(incompatible.request_count(), 0);
+
     let compatible_requests = compatible.finish();
     let incompatible_requests = incompatible.finish();
     assert_eq!(incompatible_requests, Vec::<Value>::new());
-    assert_eq!(compatible_requests, [request, context_request]);
+    assert_eq!(compatible_requests, [request, expected_context_request]);
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();

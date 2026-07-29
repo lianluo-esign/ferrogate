@@ -66,15 +66,10 @@ fn request_features_become_exact_typed_requirements() {
             ModelCapability::StructuredOutput,
         ]
     );
-    assert_eq!(
-        requirements.input_token_upper_bound,
-        Some(conservative_input_token_upper_bound(&body))
-    );
+    assert_eq!(requirements.input_token_upper_bound, None);
     assert_eq!(requirements.explicit_output_tokens, Some(4096));
-    assert_eq!(
-        requirements.required_context_window,
-        Some(conservative_input_token_upper_bound(&body) + 4096)
-    );
+    assert_eq!(requirements.required_context_window, None);
+    assert!(requirements.unbounded_media_context);
 }
 
 #[test]
@@ -104,7 +99,7 @@ fn every_missing_requirement_produces_a_stable_exclusion_reason() {
             "missing_capability",
             "missing_capability",
             "missing_capability",
-            "context_window_undeclared",
+            "media_context_unbounded",
         ]
     );
     let missing = reasons
@@ -124,6 +119,35 @@ fn every_missing_requirement_produces_a_stable_exclusion_reason() {
             ModelCapability::StructuredOutput,
         ]
     );
+}
+
+#[test]
+fn media_input_excludes_even_a_declared_vision_route() {
+    let requirements = ModelRouteRequirements::from_request(
+        ModelEndpointKind::ChatCompletions,
+        &json!({
+            "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}]}],
+        }),
+        false,
+        0,
+        0,
+    );
+
+    assert_eq!(requirements.input_token_upper_bound, None);
+    assert_eq!(requirements.required_context_window, None);
+    assert!(requirements.unbounded_media_context);
+    assert!(matches!(
+        route_exclusion_reasons(
+            &route(
+                &[ModelCapability::Chat, ModelCapability::Vision],
+                Some(32_768)
+            ),
+            &requirements,
+            &HashSet::new()
+        )
+        .as_slice(),
+        [ModelRouteExclusionReason::MediaContextUnbounded]
+    ));
 }
 
 #[test]
