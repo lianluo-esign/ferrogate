@@ -1193,6 +1193,25 @@ describe("AssetsPage presigned upload cancellation", () => {
   const UPLOAD_ID = `upl_${"1".repeat(32)}`;
 
   it("cancels an in-flight upload and reports it as cancelled, never as published", async () => {
+    // Vitest/jsdom wires Request and AbortController from different realms on
+    // this box. The product client must guard that environment, but this page
+    // test is specifically the same-realm browser contract: Cancel threads a
+    // real signal into the in-flight intent request.
+    const NativeRequest = Request;
+    vi.stubGlobal(
+      "Request",
+      class extends NativeRequest {
+        constructor(input: RequestInfo | URL, init?: RequestInit) {
+          try {
+            super(input, init);
+          } catch (error) {
+            if (!init?.signal) throw error;
+            super(input, { ...init, signal: undefined });
+            Object.defineProperty(this, "signal", { value: init.signal });
+          }
+        }
+      },
+    );
     seedList();
     let intentAborted = false;
     let commitCalls = 0;

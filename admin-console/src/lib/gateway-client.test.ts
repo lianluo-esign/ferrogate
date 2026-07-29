@@ -162,6 +162,15 @@ describe("putPresignedObject (#368 bound direct upload)", () => {
     return fetchMock;
   }
 
+  function stubRequestAcceptsSignal() {
+    vi.stubGlobal(
+      "Request",
+      class {
+        constructor(_input: string, _init?: RequestInit) {}
+      },
+    );
+  }
+
   it("forwards the signed payload hash verbatim and never sets content-length", async () => {
     const fetchMock = stubFetch(new Response(null, { status: 200 }));
     const body = new Blob(["0123456789"]);
@@ -234,6 +243,7 @@ describe("putPresignedObject (#368 bound direct upload)", () => {
    * red on the unrelated `object.stream` jsdom/msw issue (#510).
    */
   it("forwards an AbortSignal to the bucket PUT so a cancel stops the transfer", async () => {
+    stubRequestAcceptsSignal();
     const fetchMock = stubFetch(new Response(null, { status: 200 }));
     const controller = new AbortController();
     const body = new Blob(["0123456789"]);
@@ -252,7 +262,91 @@ describe("putPresignedObject (#368 bound direct upload)", () => {
     expect(init.signal).toBe(controller.signal);
   });
 
+  it("drops an incompatible cross-realm signal before the bucket PUT", async () => {
+    vi.stubGlobal(
+      "Request",
+      class {
+        constructor(_input: string, init?: RequestInit) {
+          if (init?.signal) {
+            throw new TypeError(
+              'RequestInit: Expected signal ("AbortSignal {}") to be an instance of AbortSignal.',
+            );
+          }
+        }
+      },
+    );
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.signal) {
+        throw new TypeError(
+          'RequestInit: Expected signal ("AbortSignal {}") to be an instance of AbortSignal.',
+        );
+      }
+      return new Response(null, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await putPresignedObject(
+      UPLOAD_URL,
+      new Blob(["0123456789"]),
+      "application/gzip",
+      { "x-amz-content-sha256": SIGNED_SHA },
+      controller.signal,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeUndefined();
+  });
+
+  it("relays an incompatible caller signal through a compatible bucket PUT signal", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "Request",
+      class {
+        constructor(_input: string, init?: RequestInit) {
+          if (init?.signal === controller.signal) {
+            throw new TypeError(
+              'RequestInit: Expected signal ("AbortSignal {}") to be an instance of AbortSignal.',
+            );
+          }
+        }
+      },
+    );
+    let acceptedSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      acceptedSignal = init.signal ?? null;
+      if (!init.signal) return Promise.resolve(new Response(null, { status: 200 }));
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          const error = new Error("The operation was aborted.");
+          error.name = "AbortError";
+          reject(error);
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = putPresignedObject(
+      UPLOAD_URL,
+      new Blob(["0123456789"]),
+      "application/gzip",
+      { "x-amz-content-sha256": SIGNED_SHA },
+      controller.signal,
+    );
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(acceptedSignal).not.toBeNull();
+    expect(acceptedSignal).not.toBe(controller.signal);
+
+    controller.abort();
+    const rejected = await pending.catch((error: unknown) => error);
+    expect((rejected as Error).name).toBe("AbortError");
+  });
+
   it("rejects with an AbortError once the signal is aborted mid-PUT", async () => {
+    stubRequestAcceptsSignal();
     const controller = new AbortController();
     // A fetch double that honours the signal the way the platform does.
     vi.stubGlobal(

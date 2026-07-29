@@ -201,49 +201,89 @@ function buildUrl(path: string, query?: GatewayRequestOptions["query"]): string 
   return url.toString();
 }
 
+interface CompatibleFetchSignal {
+  signal: AbortSignal | undefined;
+  cleanup: () => void;
+}
+
+function canPassSignalToFetch(signal: AbortSignal): boolean {
+  try {
+    new Request("data:,", { signal });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function compatibleFetchSignal(signal: AbortSignal | undefined): CompatibleFetchSignal {
+  const noop = () => {};
+  if (!signal) return { signal: undefined, cleanup: noop };
+
+  // Embedded/test DOMs can expose Request and AbortSignal from different
+  // realms. Browsers accept this path; incompatible realms must not turn
+  // an otherwise valid request into a synchronous TypeError.
+  if (canPassSignalToFetch(signal)) return { signal, cleanup: noop };
+
+  const controller = new AbortController();
+  const relayAbort = () => controller.abort();
+  let relaying = false;
+  if (signal.aborted) {
+    relayAbort();
+  } else {
+    signal.addEventListener("abort", relayAbort, { once: true });
+    relaying = true;
+  }
+
+  if (canPassSignalToFetch(controller.signal)) {
+    return {
+      signal: controller.signal,
+      cleanup: () => {
+        if (relaying) signal.removeEventListener("abort", relayAbort);
+      },
+    };
+  }
+
+  if (relaying) signal.removeEventListener("abort", relayAbort);
+  return { signal: undefined, cleanup: noop };
+}
+
 async function gatewayRequest<T>(
   path: string,
   init: RequestInit,
   apiKey: string,
   options?: GatewayRequestOptions,
 ): Promise<T> {
-  let signal = options?.signal;
-  if (signal) {
-    try {
-      // Embedded/test DOMs can expose Request and AbortSignal from different
-      // realms. Browsers accept this path; incompatible realms must not turn
-      // an otherwise valid Admin API request into a synchronous TypeError.
-      new Request("data:,", { signal });
-    } catch {
-      signal = undefined;
+  const fetchSignal = compatibleFetchSignal(options?.signal);
+  try {
+    const response = await fetch(buildUrl(path, options?.query), {
+      ...init,
+      signal: fetchSignal.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        ...init.headers,
+      },
+    });
+
+    if (response.status === 204) {
+      return undefined as T;
     }
+
+    const body = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      const errorBody = body as ApiErrorBody | null;
+      throw new ApiError(
+        response.status,
+        errorBody?.error?.code ?? "unknown_error",
+        errorBody?.error?.message ?? response.statusText,
+      );
+    }
+
+    return body as T;
+  } finally {
+    fetchSignal.cleanup();
   }
-  const response = await fetch(buildUrl(path, options?.query), {
-    ...init,
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      ...init.headers,
-    },
-  });
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  const body = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    const errorBody = body as ApiErrorBody | null;
-    throw new ApiError(
-      response.status,
-      errorBody?.error?.code ?? "unknown_error",
-      errorBody?.error?.message ?? response.statusText,
-    );
-  }
-
-  return body as T;
 }
 
 export function gatewayGet<T>(
@@ -417,20 +457,25 @@ export async function putPresignedObject(
     if (BROWSER_FORBIDDEN_UPLOAD_HEADERS.has(lower)) continue;
     headers[name] = value;
   }
-  const response = await fetch(uploadUrl, {
-    method: "PUT",
-    headers,
-    body,
-    signal,
-  });
-  if (!response.ok) {
-    const detail = (await response.text().catch(() => "")).trim();
-    throw new PresignedUploadRejectedError(
-      response.status,
-      detail !== ""
-        ? `${response.status} ${response.statusText}: ${detail}`
-        : `${response.status} ${response.statusText}`,
-    );
+  const fetchSignal = compatibleFetchSignal(signal);
+  try {
+    const response = await fetch(uploadUrl, {
+      method: "PUT",
+      headers,
+      body,
+      signal: fetchSignal.signal,
+    });
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => "")).trim();
+      throw new PresignedUploadRejectedError(
+        response.status,
+        detail !== ""
+          ? `${response.status} ${response.statusText}: ${detail}`
+          : `${response.status} ${response.statusText}`,
+      );
+    }
+  } finally {
+    fetchSignal.cleanup();
   }
 }
 
