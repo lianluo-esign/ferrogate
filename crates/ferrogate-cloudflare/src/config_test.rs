@@ -56,3 +56,32 @@ fn config_round_trips_through_serde() {
     let back: CloudflareConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(cfg, back);
 }
+
+#[test]
+fn debug_redacts_default_and_tenant_token_values() {
+    const DEFAULT_TOKEN: &str = "cf-default-inline-token-debug-canary";
+    const TENANT_TOKEN: &str = "cf-tenant-inline-token-debug-canary";
+    let mut cfg = CloudflareConfig::new("acct-1", DEFAULT_TOKEN);
+    cfg.tenant_tokens
+        .insert("tenant-a".to_string(), TENANT_TOKEN.to_string());
+    cfg.r2_s3_endpoint = Some("https://r2.example.test".to_string());
+
+    let rendered = format!("{cfg:?}");
+    for secret in [DEFAULT_TOKEN, TENANT_TOKEN] {
+        assert!(
+            !rendered.contains(secret),
+            "CloudflareConfig Debug leaked token material: {rendered}"
+        );
+        for prefix_len in [4usize, 8, 16] {
+            assert!(
+                !rendered.contains(&secret[..prefix_len]),
+                "CloudflareConfig Debug leaked a {prefix_len}-char token prefix: {rendered}"
+            );
+        }
+    }
+    assert!(rendered.contains("CloudflareConfig"), "{rendered}");
+    assert!(rendered.contains("account_id: \"acct-1\""), "{rendered}");
+    assert!(rendered.contains("api_token: \"<redacted>\""), "{rendered}");
+    assert!(rendered.contains("tenant-a"), "{rendered}");
+    assert!(rendered.contains("https://r2.example.test"), "{rendered}");
+}

@@ -17,7 +17,7 @@
 //! allowlist, mints a scoped token, calls [`SupabaseEdgeFunctionInvocation::build_http_request`],
 //! and executes the result through the gateway's TLS egress executor.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
@@ -73,10 +73,21 @@ pub struct EdgeFunctionHttpRequest {
 /// call (#118). `apikey` is the project `apikey` header value. Modeling both
 /// lets a scoped-token credential carry the (public) project anon key as its
 /// apikey while the bearer is a narrowly-scoped JWT. Never logged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FunctionCredential {
     pub bearer_token: String,
     pub apikey: String,
+}
+
+impl fmt::Debug for FunctionCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FunctionCredential")
+            .field("bearer_token", &"<redacted>")
+            .field("bearer_token_len", &self.bearer_token.len())
+            .field("apikey", &"<redacted>")
+            .field("apikey_len", &self.apikey.len())
+            .finish()
+    }
 }
 
 impl FunctionCredential {

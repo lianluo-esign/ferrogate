@@ -101,6 +101,39 @@ fn build_http_request_injects_auth_and_apikey_headers() {
 }
 
 #[test]
+fn function_credential_debug_redacts_bearer_and_apikey() {
+    const BEARER: &str = "supabase-edge-bearer-token-debug-canary";
+    const APIKEY: &str = "supabase-edge-apikey-debug-canary";
+    let rendered = format!("{:?}", FunctionCredential::scoped_token(BEARER, APIKEY));
+
+    for secret in [BEARER, APIKEY] {
+        assert!(
+            !rendered.contains(secret),
+            "FunctionCredential Debug leaked credential material: {rendered}"
+        );
+        for prefix_len in [4usize, 8, 16] {
+            assert!(
+                !rendered.contains(&secret[..prefix_len]),
+                "FunctionCredential Debug leaked a {prefix_len}-char credential prefix: {rendered}"
+            );
+        }
+    }
+    assert!(
+        rendered.contains("bearer_token: \"<redacted>\""),
+        "{rendered}"
+    );
+    assert!(rendered.contains("apikey: \"<redacted>\""), "{rendered}");
+    assert!(
+        rendered.contains(&format!("bearer_token_len: {}", BEARER.len())),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("apikey_len: {}", APIKEY.len())),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn build_http_request_rejects_empty_resolved_key_and_bad_method() {
     let invocation = SupabaseEdgeFunctionInvocation::post(target(), "{}");
     assert_eq!(

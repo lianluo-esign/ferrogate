@@ -6,7 +6,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    env, fs,
+    env, fmt, fs,
     io::ErrorKind,
     net::{IpAddr, TcpStream, ToSocketAddrs},
     path::PathBuf,
@@ -1398,7 +1398,7 @@ impl SharedAppState {
 
 const MCP_IDENTITY_ERROR_AUDIT_MAX_IN_FLIGHT: usize = 8;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     cluster_identity: Arc<ClusterIdentity>,
@@ -1479,6 +1479,22 @@ pub(crate) struct AppState {
     /// propagates on the next `/admin/v1/config/reload`, mirroring how every
     /// other config field already picks up changes.
     resolved_provider_secrets: Arc<HashMap<String, String>>,
+}
+
+impl fmt::Debug for AppState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AppState")
+            .field("providers", &self.providers.len())
+            .field("upstreams", &self.upstreams.len())
+            .field("runtime_routes", &self.runtime_routes.len())
+            .field("runtime_upstreams", &self.runtime_upstreams.len())
+            .field("models", &self.config.models.len())
+            .field("provider_circuits", &self.provider_circuits.len())
+            .field("guardrail_policies", &self.guardrail_policies.len())
+            .field("mcp_servers", &self.config.mcp_servers.len())
+            .field("resolved_provider_secrets", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Outcome of [`AppState::check_network_access`]: `Allowed` lets the request
@@ -7572,3 +7588,7 @@ mod state_workers_ai_llama_guard_test;
 #[cfg(test)]
 #[path = "state_tenant_identity_test.rs"]
 mod state_tenant_identity_test;
+
+#[cfg(test)]
+#[path = "state_debug_test.rs"]
+mod state_debug_test;

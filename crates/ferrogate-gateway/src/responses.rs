@@ -13,6 +13,7 @@ use ferrogate_runtime::SelfHostedWorkerIdentity;
 use ferrogate_storage::{AssetVisibility, StoredAsset};
 use std::{
     collections::{BTreeMap, VecDeque},
+    fmt,
     future::Future,
     io::Read,
     sync::{Arc, Mutex, OnceLock},
@@ -352,7 +353,7 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationRequest {
     pub(crate) capability_envelope_json: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
     pub(crate) object: &'static str,
     pub(crate) worker: AdminSelfHostedWorkerRecord,
@@ -370,10 +371,21 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
     pub(crate) client_certificate: Option<AdminSelfHostedWorkerClientCertificate>,
 }
 
+impl fmt::Debug for AdminSelfHostedWorkerRegistrationResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdminSelfHostedWorkerRegistrationResponse")
+            .field("object", &self.object)
+            .field("worker", &self.worker)
+            .field("transport_token_secret", &"<redacted>")
+            .field("client_certificate", &self.client_certificate)
+            .finish()
+    }
+}
+
 /// A freshly-minted self-hosted worker client certificate, returned exactly once
 /// (at registration or identity rotation). The private key is never persisted
 /// server-side; only the fingerprint is retained for revocation (issue #249).
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AdminSelfHostedWorkerClientCertificate {
     /// SPIFFE URI SAN the leaf binds to
     /// (`spiffe://ferrogate/self-hosted/{tenant}/{workspace}/{worker}/{token}`).
@@ -391,6 +403,19 @@ pub(crate) struct AdminSelfHostedWorkerClientCertificate {
     pub(crate) not_after_unix: u64,
 }
 
+impl fmt::Debug for AdminSelfHostedWorkerClientCertificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdminSelfHostedWorkerClientCertificate")
+            .field("spiffe_id", &self.spiffe_id)
+            .field("certificate_pem_len", &self.certificate_pem.len())
+            .field("private_key_pem", &"<redacted>")
+            .field("fingerprint", &self.fingerprint)
+            .field("serial", &self.serial)
+            .field("not_after_unix", &self.not_after_unix)
+            .finish()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AdminSelfHostedWorkerRotateRequest {
@@ -399,7 +424,7 @@ pub(crate) struct AdminSelfHostedWorkerRotateRequest {
     pub(crate) identity_expires_at_unix: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AdminSelfHostedWorkerRotateResponse {
     pub(crate) object: &'static str,
     pub(crate) worker: AdminSelfHostedWorkerRecord,
@@ -414,6 +439,26 @@ pub(crate) struct AdminSelfHostedWorkerRotateResponse {
     pub(crate) previous_identity_fingerprint: String,
     pub(crate) previous_identity_expires_at_unix: Option<u64>,
     pub(crate) rotated_at_unix: Option<u64>,
+}
+
+impl fmt::Debug for AdminSelfHostedWorkerRotateResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdminSelfHostedWorkerRotateResponse")
+            .field("object", &self.object)
+            .field("worker", &self.worker)
+            .field("transport_token_secret", &"<redacted>")
+            .field("client_certificate", &self.client_certificate)
+            .field(
+                "previous_identity_fingerprint",
+                &self.previous_identity_fingerprint,
+            )
+            .field(
+                "previous_identity_expires_at_unix",
+                &self.previous_identity_expires_at_unix,
+            )
+            .field("rotated_at_unix", &self.rotated_at_unix)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1415,12 +1460,26 @@ pub(crate) struct AdminVirtualApiKeyCreateRequest {
 
 /// `secret` is populated only in the response to create/rotate; every other
 /// read of a virtual key (list/get/enable/disable/revoke) omits it.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AdminVirtualApiKeyMutationResponse {
     pub(crate) object: &'static str,
     pub(crate) key: AdminVirtualApiKey,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) secret: Option<String>,
+}
+
+impl fmt::Debug for AdminVirtualApiKeyMutationResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secret = self
+            .secret
+            .as_ref()
+            .map(|secret| format!("<redacted:{} bytes>", secret.len()));
+        f.debug_struct("AdminVirtualApiKeyMutationResponse")
+            .field("object", &self.object)
+            .field("key", &self.key)
+            .field("secret", &secret)
+            .finish()
+    }
 }
 
 /// A quota/rate-limit policy at one scope (tenant/project/workspace/key) in
@@ -2669,3 +2728,7 @@ mod cache_tests {
         assert_eq!(parse_http_date(&formatted), Some(1_700_000_000));
     }
 }
+
+#[cfg(test)]
+#[path = "responses_debug_test.rs"]
+mod responses_debug_test;

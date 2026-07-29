@@ -12,7 +12,7 @@
 //! decoded here), optional per-tenant token overrides, and the three Cloudflare
 //! base URLs with sensible defaults. It performs no I/O.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ pub fn default_ai_gateway_base_url() -> String {
 /// Absent from the parent config = Cloudflare disabled. When present it is
 /// validated (see the CLI's `validate_cloudflare`) for account-id/token
 /// presence and URL well-formedness.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CloudflareConfig {
     /// Cloudflare account id (the `{account_id}` path segment).
     pub account_id: String,
@@ -40,11 +40,12 @@ pub struct CloudflareConfig {
     /// (`env://VAR` or an inline plaintext token; `cf://` is rejected — see
     /// [`crate::resolver`] for why that is a permanent crate boundary).
     ///
-    /// This is a **reference, not the secret itself**: this struct derives
-    /// `Debug + Serialize`, so a caller that stores a resolved token here
-    /// makes it printable and serializable. Producers must pass a reference —
-    /// `ferrogate_secrets::CfSecretsStoreConfig` holds `api_token_ref` for
-    /// exactly this reason.
+    /// This is a **reference, not the secret itself**: this struct still
+    /// serializes the field because it is the config wire shape, so a caller
+    /// that stores a resolved token here can persist it. `Debug` is
+    /// hand-written to make that mistake non-printable (#492), but producers
+    /// must still pass a reference — `ferrogate_secrets::CfSecretsStoreConfig`
+    /// holds `api_token_ref` for exactly this reason.
     pub api_token: String,
 
     /// Optional per-tenant token references, keyed by tenant id. A request
@@ -66,6 +67,20 @@ pub struct CloudflareConfig {
     /// [`r2_s3_endpoint`](Self::r2_s3_endpoint).
     #[serde(default)]
     pub r2_s3_endpoint: Option<String>,
+}
+
+impl fmt::Debug for CloudflareConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tenant_token_ids: Vec<&str> = self.tenant_tokens.keys().map(String::as_str).collect();
+        f.debug_struct("CloudflareConfig")
+            .field("account_id", &self.account_id)
+            .field("api_token", &"<redacted>")
+            .field("tenant_token_ids", &tenant_token_ids)
+            .field("api_base_url", &self.api_base_url)
+            .field("ai_gateway_base_url", &self.ai_gateway_base_url)
+            .field("r2_s3_endpoint", &self.r2_s3_endpoint)
+            .finish()
+    }
 }
 
 impl CloudflareConfig {

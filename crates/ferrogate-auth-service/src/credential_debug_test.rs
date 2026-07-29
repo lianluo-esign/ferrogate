@@ -278,6 +278,17 @@ fn http_request_debug_never_prints_the_body_bytes() {
         !rendered.contains(&decimal_byte_run(PASSWORD)),
         "admin password leaked into HttpRequest Debug as raw bytes: {rendered}"
     );
+    for prefix_len in [4usize, 8, 16] {
+        let prefix = &PASSWORD[..prefix_len];
+        assert!(
+            !rendered.contains(prefix),
+            "a {prefix_len}-char admin password prefix leaked into HttpRequest Debug as plaintext: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&decimal_byte_run(prefix)),
+            "a {prefix_len}-char admin password prefix leaked into HttpRequest Debug as raw bytes: {rendered}"
+        );
+    }
     assert!(
         !rendered.contains("body:"),
         "HttpRequest Debug must expose only body_len, never the body: {rendered}"
@@ -338,6 +349,17 @@ fn http_request_debug_never_prints_the_query_string() {
         !rendered.contains("oauth-authorization-code-value"),
         "OAuth authorization code leaked into HttpRequest Debug: {rendered}"
     );
+    for prefix_len in [4usize, 8, 16] {
+        let prefix = &"oauth-authorization-code-value"[..prefix_len];
+        assert!(
+            !rendered.contains(prefix),
+            "a {prefix_len}-char OAuth authorization-code prefix leaked into HttpRequest Debug: {rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains("code="),
+        "HttpRequest Debug must expose only query_len, never the query string: {rendered}"
+    );
     assert!(
         rendered.contains(&format!("query_len: {}", CALLBACK_QUERY.len())),
         "{rendered}"
@@ -368,6 +390,17 @@ fn http_response_debug_never_prints_a_minted_scim_token() {
         !rendered.contains(&decimal_byte_run(SCIM_TOKEN)),
         "minted SCIM token leaked into HttpResponse Debug as raw bytes: {rendered}"
     );
+    for prefix_len in [4usize, 8, 16] {
+        let prefix = &SCIM_TOKEN[..prefix_len];
+        assert!(
+            !rendered.contains(prefix),
+            "a {prefix_len}-char minted SCIM token prefix leaked into HttpResponse Debug as plaintext: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&decimal_byte_run(prefix)),
+            "a {prefix_len}-char minted SCIM token prefix leaked into HttpResponse Debug as raw bytes: {rendered}"
+        );
+    }
     assert!(
         !rendered.contains("body:"),
         "HttpResponse Debug must expose only body_len, never the body: {rendered}"
