@@ -5,9 +5,9 @@
 // description: Docker-free E2E coverage for the #368 size+checksum-bound
 // presigned staging upload path (gate-owned harness growth).
 
-//! End-to-end proof, over a REAL gateway process and a REAL SigV4-verifying
-//! S3-compatible bucket, of the two #368 acceptance boxes that had no runnable
-//! harness scenario:
+//! End-to-end proof, over a REAL gateway process and a checksum-enforcing
+//! local SigV4 bucket double, of the two #368 acceptance boxes that had no
+//! runnable harness scenario:
 //!
 //! * **The intent's contract is enforced, not advisory.** The upload intent
 //!   returns `required_headers` / `max_object_bytes` / `upload_protocol` /
@@ -24,7 +24,10 @@
 //!
 //! The bucket mock verifies every request's SigV4 independently of the gateway
 //! (it holds only the shared secret) and refuses anything that does not verify
-//! with a 403, exactly as an S3-compatible service does.
+//! with a 403. It also re-hashes the body against `x-amz-content-sha256`, which
+//! is the behavior this harness needs for bucket-boundary byte-substitution
+//! coverage. Live Supabase Storage parity remains the separate env-gated probe
+//! in `supabase_storage_s3_live.rs`.
 //!
 //! No load, stress or sustained-throughput traffic: the scenario issues a few
 //! dozen small requests against a local mock, and never touches Supabase.
@@ -750,10 +753,12 @@ fn handle_bucket_connection(mut stream: TcpStream, state: Arc<Mutex<BucketState>
     }
 }
 
-/// Recomputes the signature the way an S3-compatible service does. For a bound
-/// presigned upload the declared length and checksum are ALSO checked against
-/// the bytes actually received, which is what makes "wrong size" and "wrong
-/// checksum" bucket-boundary rejections rather than gateway-side ones.
+/// Recomputes the presigned signature with the S3-compatible
+/// UNSIGNED-PAYLOAD canonical line. For a bound presigned upload the
+/// declared length and checksum are ALSO checked against the bytes actually
+/// received, which is what makes "wrong size" and "wrong checksum"
+/// bucket-boundary rejections in this local harness rather than gateway-side
+/// ones.
 fn verify_sigv4(request: &RawRequest, path: &str, query: Option<&str>) -> Result<()> {
     let host = request.headers.get("host").context("missing Host")?;
     let credentials = AwsCredentials {

@@ -328,12 +328,13 @@ fn verify_sigv4(request: &RawHttpRequest, path: &str, query: Option<&str>) -> Re
         let signed_headers = raw_query_value(query, "X-Amz-SignedHeaders")
             .ok_or_else(|| "missing X-Amz-SignedHeaders".to_string())?;
         let expected = match signed_headers {
-            // #368: a bound upload URL. The bucket recomputes the signature
-            // over the headers the client ACTUALLY sent, and (like AWS S3
-            // for a concrete x-amz-content-sha256) verifies the received
-            // bytes against the declared hash + length. A request that
-            // omits a signed header, lies about size/checksum, or carries
-            // different bytes therefore never verifies.
+            // #368: a bound upload URL. The bucket recomputes the presigned
+            // signature over the headers the client ACTUALLY sent (with the
+            // canonical payload line left as UNSIGNED-PAYLOAD) and, like a
+            // checksum-enforcing bucket, verifies the received bytes against
+            // the declared hash + length. A request that omits a signed
+            // header, lies about size/checksum, or carries different bytes
+            // is refused before the gateway's commit-time checks run.
             "content-length%3Bhost%3Bx-amz-content-sha256" => {
                 let declared_length = request
                     .headers

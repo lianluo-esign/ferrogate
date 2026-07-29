@@ -21,14 +21,17 @@
 //
 // #368: the presigned staging PUT is *bound* to the declared size +
 // SHA-256. `content-length` and `x-amz-content-sha256` are SigV4 signed
-// headers of the presigned URL (payload hash = the declared checksum, not
-// UNSIGNED-PAYLOAD), and the intent response returns the exact
-// `required_headers` the client must send verbatim -- so an upload whose
-// size or bytes differ from what the gateway approved is rejected at the
-// bucket boundary itself, and staging capacity can no longer be burned
-// beyond the approved object. Scope: a single PUT only -- multipart
-// uploads are out of scope (the per-object ceiling keeps single-PUT
-// objects within what S3-compatible services accept in one request).
+// headers of the presigned URL while the canonical payload-hash line remains
+// UNSIGNED-PAYLOAD for Supabase Storage S3 compatibility. The intent response
+// returns the exact `required_headers` the client must send verbatim -- so an
+// upload whose declared size or checksum header differs from what the gateway
+// approved is rejected at the bucket boundary itself, and staging capacity can
+// no longer be burned beyond the approved object. Same-size byte substitution
+// is additionally refused by buckets that re-hash the body against
+// `x-amz-content-sha256`; the gateway still performs commit-time body
+// verification before publication. Scope: a single PUT only -- multipart
+// uploads are out of scope (the per-object ceiling keeps single-PUT objects
+// within what S3-compatible services accept in one request).
 //
 // #368 orphan/abort: an intent that is never uploaded can be released
 // explicitly through `POST /v1/assets/presign/abort/...`, which *attempts*

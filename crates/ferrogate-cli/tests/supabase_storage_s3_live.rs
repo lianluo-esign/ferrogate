@@ -206,8 +206,8 @@ async fn supabase_storage_s3_accepts_the_bound_presigned_put_this_gateway_issues
         "#368 acceptance box 3: the size+checksum-bound presigned PUT this gateway hands to \
          clients must verify against Supabase Storage's S3 compatibility layer, but the honest, \
          contract-following upload was refused as a signature mismatch (HTTP {bound_status}) \
-         while the unbound control was accepted ({control_code}). Supabase computes the \
-         presigned canonical request with the payload-hash line pinned to UNSIGNED-PAYLOAD, so \
-         a concrete SHA-256 on that line can never verify there: {bound_body}"
+         while the unbound control was accepted ({control_code}). The bound presign must keep \
+         the canonical payload-hash line at UNSIGNED-PAYLOAD and bind size/checksum through \
+         signed headers Supabase accepts: {bound_body}"
     );
 }

@@ -269,12 +269,13 @@ pub struct PresignRequest<'a> {
 
 /// The payload constraints a *bound* presigned upload commits to (issue
 /// #368): the exact `Content-Length` and hex SHA-256 the gateway approved
-/// at upload-intent time. Both become SigV4 *signed headers* and the
-/// canonical request's payload-hash line uses the declared SHA-256 instead
-/// of `UNSIGNED-PAYLOAD`, so changing the declared size, omitting a
-/// required header, or uploading different bytes each produces a different
-/// canonical request -- and therefore a signature the bucket's independent
-/// recomputation rejects at its own boundary.
+/// at upload-intent time. Both become SigV4 *signed headers*. The presigned
+/// canonical request's payload-hash line remains `UNSIGNED-PAYLOAD`, which
+/// is the shape Supabase Storage's S3 compatibility layer accepts for
+/// presigned requests. Changing the declared size or checksum header still
+/// changes the canonical request and invalidates the signature; uploading
+/// different bytes with the original checksum header is rejected only by
+/// backends that re-hash the body against `x-amz-content-sha256`.
 #[derive(Clone, Copy)]
 pub struct PresignBoundPayload<'a> {
     /// Exact byte count of the payload the holder is authorized to upload.
@@ -286,9 +287,10 @@ pub struct PresignBoundPayload<'a> {
 /// A bound presigned upload (issue #368): the signed query string plus the
 /// exact request headers the holder MUST send verbatim on the direct PUT.
 /// The headers are part of the SigV4 `SignedHeaders` set, so they are not
-/// advisory -- a request that omits or alters any of them (or whose actual
-/// bytes hash differently than the signed `x-amz-content-sha256`) fails
-/// signature verification at the bucket.
+/// advisory -- a request that omits or alters any of them fails signature
+/// verification at the bucket. Backends that enforce `x-amz-content-sha256`
+/// against the received body also reject same-size byte substitution before
+/// storing bytes.
 pub struct BoundPresignedUpload {
     /// Full canonical query string with `X-Amz-Signature` appended; the
     /// caller assembles `scheme://host{path}?{query}`.
@@ -310,8 +312,9 @@ pub struct BoundPresignedUpload {
 /// string with `X-Amz-Signature` appended; the caller assembles
 /// `scheme://host{path}?{returned}`.
 ///
-/// For uploads prefer [`presign_query_bound`] (issue #368), which binds the
-/// signature to a declared size + checksum instead of `UNSIGNED-PAYLOAD`.
+/// For uploads prefer [`presign_query_bound`] (issue #368), which keeps the
+/// presigned payload line S3-compatible while binding the signature to a
+/// declared size + checksum through signed headers.
 pub fn presign_query(request: &PresignRequest<'_>, credentials: &AwsCredentials) -> String {
     presign_query_internal(
         request,
@@ -323,14 +326,12 @@ pub fn presign_query(request: &PresignRequest<'_>, credentials: &AwsCredentials)
 
 /// Same as [`presign_query`], but *bound* to a declared payload (issue
 /// #368): `content-length` and `x-amz-content-sha256` join `host` in the
-/// SigV4 `SignedHeaders` set, and the canonical request's payload-hash line
-/// carries the declared hex SHA-256 instead of `UNSIGNED-PAYLOAD`. The
-/// binding lives in the signature itself, so it holds for any S3-compatible
-/// verifier regardless of whether that service additionally re-hashes the
-/// received bytes (AWS S3 does for a concrete `x-amz-content-sha256`;
-/// Supabase Storage's S3 compat verifies the SigV4 signed-header set --
-/// either way a mismatched size or checksum can no longer produce an
-/// acceptable request).
+/// SigV4 `SignedHeaders` set, while the canonical request's payload-hash
+/// line stays `UNSIGNED-PAYLOAD`. Supabase Storage accepts this presigned
+/// shape and still verifies the signed-header set. A changed size or changed
+/// checksum header therefore cannot verify; same-size byte substitution is
+/// refused only by a backend that compares the received body to the signed
+/// `x-amz-content-sha256` header.
 pub fn presign_query_bound(
     request: &PresignRequest<'_>,
     credentials: &AwsCredentials,
@@ -345,7 +346,7 @@ pub fn presign_query_bound(
         ("host", request.host.to_string()),
         ("x-amz-content-sha256", content_sha256.clone()),
     ];
-    let query = presign_query_internal(request, credentials, &signed_headers, &content_sha256);
+    let query = presign_query_internal(request, credentials, &signed_headers, "UNSIGNED-PAYLOAD");
     BoundPresignedUpload {
         query,
         required_headers: vec![
@@ -849,16 +850,18 @@ mod tests {
         assert!(query.contains("X-Amz-Security-Token=temp%2Ftoken%2Bvalue"));
     }
 
-    /// Recomputes the SigV4 signature exactly the way an S3-compatible
-    /// bucket does for a *received* presigned request (#368): rebuild the
+    /// Recomputes the SigV4 signature the way a Supabase-compatible S3
+    /// verifier does for a *received* presigned request (#368): rebuild the
     /// canonical query from the presented `X-Amz-*` parameters (minus the
     /// signature), take each header named in `X-Amz-SignedHeaders` from the
     /// headers the client actually sent (a missing one is an immediate
-    /// rejection -- the canonical request cannot even be reconstructed),
-    /// and derive the payload-hash line from the *actual* received bytes
-    /// when `x-amz-content-sha256` is signed (AWS S3's behavior for a
-    /// concrete payload hash). Returns `(recomputed, presented)` so tests
-    /// can assert mismatches, or `Err` for structurally rejected requests.
+    /// rejection -- the canonical request cannot even be reconstructed), and
+    /// keep the presigned canonical request's payload-hash line at
+    /// `UNSIGNED-PAYLOAD`. When `x-amz-content-sha256` is a signed header this
+    /// verifier also checks the received bytes against that header, modelling
+    /// checksum-enforcing S3 backends such as AWS S3. Returns `(recomputed,
+    /// presented)` so tests can assert signature mismatches, or `Err` for
+    /// structurally rejected requests / payload checksum mismatches.
     fn bucket_recompute_signature(
         method: &str,
         path: &str,
@@ -904,24 +907,27 @@ mod tests {
             .to_string();
 
         let mut canonical_headers = String::new();
+        let mut signed_content_sha256 = None;
         for name in signed_header_names.split(';') {
             let value = sent_headers
                 .iter()
                 .find(|(sent, _)| sent.eq_ignore_ascii_case(name))
                 .map(|(_, value)| *value)
                 .ok_or_else(|| format!("required signed header {name} was not sent"))?;
+            if name == "x-amz-content-sha256" {
+                signed_content_sha256 = Some(value.trim().to_string());
+            }
             canonical_headers.push_str(&format!("{name}:{}\n", value.trim()));
         }
-        // For a concrete signed payload hash the bucket hashes the bytes it
-        // actually received; only UNSIGNED-PAYLOAD skips that.
-        let payload_hash = if signed_header_names
-            .split(';')
-            .any(|h| h == "x-amz-content-sha256")
-        {
-            hex_sha256(actual_body)
-        } else {
-            "UNSIGNED-PAYLOAD".to_string()
-        };
+        if let Some(declared) = signed_content_sha256 {
+            let actual = hex_sha256(actual_body);
+            if actual != declared {
+                return Err(format!(
+                    "payload checksum mismatch: header {declared}, actual {actual}"
+                ));
+            }
+        }
+        let payload_hash = "UNSIGNED-PAYLOAD";
 
         let canonical_request = format!(
             "{method}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_header_names}\n{payload_hash}",
@@ -985,9 +991,10 @@ mod tests {
     }
 
     /// Asserts a received request is NOT acceptable to a bucket-side
-    /// verifier: either it is structurally rejected (missing signed header)
-    /// or its independently recomputed signature mismatches the presented
-    /// one (canonical request differs).
+    /// verifier: either it is structurally rejected (missing signed header),
+    /// its independently recomputed signature mismatches the presented one
+    /// (canonical request differs), or a checksum-enforcing backend rejects
+    /// the bytes against the signed `x-amz-content-sha256` header.
     fn assert_bucket_rejects(
         query: &str,
         sent_headers: &[(&str, &str)],
@@ -1010,8 +1017,10 @@ mod tests {
 
     #[test]
     fn bound_presign_verifies_end_to_end_when_size_checksum_and_headers_match() {
-        // #368: both sides recompute the same canonical request when the
-        // holder sends exactly the declared size, checksum header, and bytes.
+        // #368/#368 gate bounce: both sides recompute the same Supabase-
+        // compatible presigned canonical request (UNSIGNED-PAYLOAD line)
+        // when the holder sends exactly the declared size, checksum header,
+        // and bytes.
         let body = b"the exact approved staging payload";
         let sha = hex_sha256(body);
         let credentials = bound_test_credentials();
@@ -1201,9 +1210,9 @@ mod tests {
     #[test]
     fn bound_presign_rejects_a_replay_with_different_bytes() {
         // A replay sends the ORIGINAL signed headers verbatim but different
-        // bytes. The bucket derives the payload-hash line from the received
-        // bytes, so the canonical request differs and the signature fails --
-        // the replayed capability cannot smuggle new content.
+        // bytes. The presigned canonical request still uses UNSIGNED-PAYLOAD,
+        // but a checksum-enforcing bucket compares the received body to the
+        // signed x-amz-content-sha256 header and rejects before storing.
         let body = b"the exact approved staging payload";
         let sha = hex_sha256(body);
         let request = bound_test_request();

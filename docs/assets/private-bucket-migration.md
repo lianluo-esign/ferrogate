@@ -306,11 +306,19 @@ tenant's per-object ceiling and cumulative quota, so a client can fail fast.
 
 The presigned `PUT` authorization is **bound** to the declared content length
 and payload checksum. `content-length` and `x-amz-content-sha256` are SigV4
-`SignedHeaders` of `upload_url`, and the canonical request's payload-hash line
-carries the declared SHA-256 rather than `UNSIGNED-PAYLOAD`. Changing either
-value, or omitting either header, invalidates the signature: the bucket rejects
-the request with `403` **before** storing bytes. This is bucket-enforced, not a
-commit-time admission control.
+`SignedHeaders` of `upload_url`. The canonical request's payload-hash line
+remains `UNSIGNED-PAYLOAD`, because Supabase Storage's S3 compatibility layer
+accepts that presigned shape. Changing either signed header value, or omitting
+either header, invalidates the signature: the bucket rejects the request with
+`403` **before** storing bytes. This is bucket-enforced, not a commit-time
+admission control.
+
+Byte substitution is a separate backend guarantee: a same-length upload that
+keeps the original signed headers is refused at the bucket boundary only if the
+backend re-hashes the body against `x-amz-content-sha256`. AWS S3 does this.
+Supabase Storage support must be claimed only after the bounded live
+`supabase_storage_s3_live` probe is run with real S3 access keys. FerroGate
+still re-hashes the staged object at commit time before publishing it.
 
 Integrators must therefore:
 

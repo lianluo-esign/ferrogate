@@ -899,13 +899,14 @@ impl AssetBucketClient {
     /// Issues a short-TTL SigV4 query-string presigned upload URL (issue
     /// #259), *bound* to the declared payload size + SHA-256 (issue #368):
     /// `content-length` and `x-amz-content-sha256` are SigV4 signed headers
-    /// and the canonical request's payload-hash line carries the declared
-    /// checksum instead of `UNSIGNED-PAYLOAD`. The holder PUTs the object
-    /// bytes straight to the bucket (bypassing the gateway hot path) but
-    /// MUST send `required_headers` verbatim -- changing the size, the
-    /// checksum, or the bytes invalidates the upload authorization at the
-    /// bucket boundary itself, before the gateway's commit-time
-    /// verification ever runs.
+    /// while the canonical request's payload-hash line remains
+    /// `UNSIGNED-PAYLOAD` for Supabase Storage S3 compatibility. The holder
+    /// PUTs the object bytes straight to the bucket (bypassing the gateway hot
+    /// path) but MUST send `required_headers` verbatim -- changing the declared
+    /// size or checksum invalidates the upload authorization at the bucket
+    /// boundary itself, before the gateway's commit-time verification ever
+    /// runs. Same-size byte substitution is additionally refused by backends
+    /// that re-hash the body against `x-amz-content-sha256`.
     pub(crate) fn presign_put(
         &self,
         key: &str,
