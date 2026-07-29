@@ -78,6 +78,20 @@ assert_path_filter "scripts/test-check-workers.sh"
 assert_path_filter "scripts/node-env.sh"
 assert_path_filter ".github/workflows/workers.yml"
 
+workers_gate_invocations="$(awk '
+  /^jobs:$/ { in_jobs = 1; next }
+  in_jobs && /^  [A-Za-z0-9_-]+:$/ {
+    in_workers = ($0 == "  workers:")
+    next
+  }
+  in_workers && $0 == "        run: ./scripts/check-workers.sh" {
+    count++
+  }
+  END { print count + 0 }
+' "$workflow")"
+[ "$workers_gate_invocations" -eq 1 ] \
+  || fail "Workers workflow must invoke ./scripts/check-workers.sh exactly once in jobs.workers (found $workers_gate_invocations)"
+
 # Drive the real gate against a hermetic Worker tree. npm records commands and
 # materializes only the binaries an install would supply; no package manager,
 # TypeScript compiler, Vitest runner, network, or workerd process is invoked.
