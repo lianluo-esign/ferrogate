@@ -15,6 +15,9 @@
 // API-visible mutation + audit evidence through a live standalone Control Plane
 // API) is deliberately NOT covered here — it is the test gate's job.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -26,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ----- process helpers -------------------------------------------------------
 
 fn base_cmd(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    let mut command = support::ferrogate_command();
     for var in [
         "FERROGATE_ENDPOINT",
         "FERROGATE_CONTEXT",

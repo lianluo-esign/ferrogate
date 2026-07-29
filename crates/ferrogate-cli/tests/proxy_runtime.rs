@@ -37,9 +37,7 @@ mod support;
 /// `GatewayProcess` guard below still runs on the ordinary path; this covers the
 /// paths that run no destructor at all.
 fn ferrogate() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
-    support::reap_with_test(&mut command);
-    command
+    support::ferrogate_command()
 }
 
 struct ListenerReservation {

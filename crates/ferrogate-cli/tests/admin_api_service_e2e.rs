@@ -69,9 +69,7 @@ fn start_admin_api(config: &std::path::Path) -> Child {
 /// long-lived listeners like the gateway itself, and their cleanup is the same
 /// easily-skipped `kill()` statement.
 fn ferrogate() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
-    support::reap_with_test(&mut command);
-    command
+    support::ferrogate_command()
 }
 
 /// Same key roster as `write_config`, but wired through the CANONICAL
@@ -474,7 +472,7 @@ fn admin_api_refuses_to_start_without_a_credential_source() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    let output = support::ferrogate_command()
         .args([
             "admin-api",
             "serve",
@@ -764,7 +762,7 @@ platform_operator = true
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    let output = support::ferrogate_command()
         .args([
             "control-api",
             "serve",

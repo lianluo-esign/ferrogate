@@ -10,8 +10,6 @@
 
 mod support;
 
-use std::process::Command;
-
 use support::{free_addr, http_request, start_gateway, wait_for_gateway};
 
 fn write_config(path: &std::path::Path, gateway_addr: &str) {
@@ -34,7 +32,7 @@ platform_operator = true
 }
 
 fn run_cli(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    support::ferrogate_command()
         .args(args)
         .output()
         .expect("failed to run the ferrogate CLI binary")

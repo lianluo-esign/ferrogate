@@ -1266,7 +1266,7 @@ platform_operator = true
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    let output = support::ferrogate_command()
         .args(["check", "--config", config.to_str().unwrap()])
         .output()
         .unwrap();
@@ -2924,7 +2924,7 @@ platform_operator = true
         ),
     )
     .unwrap();
-    let file_reload = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    let file_reload = support::ferrogate_command()
         .args([
             "reload",
             "--config",
@@ -4345,7 +4345,7 @@ platform_operator = true
     )
     .unwrap();
 
-    let reload = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    let reload = support::ferrogate_command()
         .args([
             "reload",
             "--config",

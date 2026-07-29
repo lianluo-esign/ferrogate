@@ -15,6 +15,9 @@
 // standalone Control Plane API) is deliberately NOT covered here — it is the
 // test gate's job.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -38,7 +41,7 @@ const TIME_TOKEN_HEADER: &str = "x-ferrogate-time-token";
 // ----- process helpers -------------------------------------------------------
 
 fn base_cmd(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    let mut command = support::ferrogate_command();
     // Isolate from any FERROGATE_* the runner's environment may carry so the
     // precedence tests below control every input explicitly.
     for var in [

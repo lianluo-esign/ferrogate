@@ -4,6 +4,9 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
+#[cfg(target_os = "linux")]
+use std::cell::RefCell;
+
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -12,6 +15,14 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+#[cfg(target_os = "linux")]
+const TEST_GUARDIAN_FD_ENV: &str = "FERROGATE_TEST_GUARDIAN_FD";
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    static TEST_GUARDIAN_FDS: RefCell<Vec<std::os::fd::OwnedFd>> = RefCell::new(Vec::new());
+}
 
 pub fn free_addr() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -22,11 +33,24 @@ pub fn start_gateway(config: &std::path::Path) -> Child {
     start_gateway_with_env(config, &[])
 }
 
+/// Constructs the real `ferrogate` binary command for integration tests.
+///
+/// Every test-spawned `ferrogate` process goes through this helper so #568's
+/// death-signal arming, inherited test guardian, and once-per-binary backlog
+/// sweep cannot be bypassed by a custom spawner.
+pub fn ferrogate_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    reap_with_test(&mut command);
+    inherit_test_guardian(&mut command);
+    sweep_orphaned_gateways_once();
+    command
+}
+
 /// Start a gateway with extra environment variables. Used by tests that need to
 /// select an env-configured seam backend in the child process (e.g. the #488
 /// site-domain zone-file DNS resolver).
 pub fn start_gateway_with_env(config: &std::path::Path, env: &[(&str, &str)]) -> Child {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    let mut command = ferrogate_command();
     command
         .args(["run", "--config", config.to_str().unwrap()])
         .stdout(Stdio::null())
@@ -34,8 +58,6 @@ pub fn start_gateway_with_env(config: &std::path::Path, env: &[(&str, &str)]) ->
     for (key, value) in env {
         command.env(key, value);
     }
-    reap_with_test(&mut command);
-    sweep_orphaned_gateways_once();
     command.spawn().unwrap()
 }
 
@@ -54,7 +76,7 @@ fn sweep_orphaned_gateways_once() {
         // was reparented seconds ago may belong to a sibling suite that is at
         // this instant tearing itself down, and killing it would land as that
         // suite's flake. A real backlog entry is minutes to hours old.
-        let swept = sweep_orphaned_gateways(Duration::from_secs(120));
+        let swept = sweep_orphaned_gateways(automatic_sweep_min_age());
         if !swept.is_empty() {
             eprintln!(
                 "#568: reaped {} orphaned gateway(s): {swept:?}",
@@ -62,6 +84,14 @@ fn sweep_orphaned_gateways_once() {
             );
         }
     });
+}
+
+fn automatic_sweep_min_age() -> Duration {
+    std::env::var("FERROGATE_TEST_ORPHAN_SWEEP_MIN_AGE_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(120))
 }
 
 /// Kills every `ferrogate run --config /tmp/.tmp*` process that has already been
@@ -85,16 +115,54 @@ pub fn sweep_orphaned_gateways(min_age: Duration) -> Vec<u32> {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
+        let Some(pidfd) = open_pidfd(pid) else {
+            continue;
+        };
         if !is_orphaned_test_gateway(pid) || process_age(pid).is_none_or(|age| age < min_age) {
             continue;
         }
-        // SAFETY: plain kill(2) with a signal that has no handler and a pid this
-        // process has just classified from /proc.
-        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+        if pidfd_send_sigkill(&pidfd) {
             killed.push(pid);
         }
     }
     killed
+}
+
+#[cfg(target_os = "linux")]
+struct PidFd(std::os::fd::OwnedFd);
+
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: u32) -> Option<PidFd> {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: pidfd_open(2) is a pure kernel open by numeric pid. A failure
+    // means this kernel or this pid cannot provide a stable process reference,
+    // so the sweep fails closed and does not signal anything.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: fd was just returned by pidfd_open and is uniquely owned here.
+    Some(PidFd(unsafe {
+        std::os::fd::OwnedFd::from_raw_fd(fd as i32)
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_send_sigkill(pidfd: &PidFd) -> bool {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: pidfd_send_signal(2) sends SIGKILL through the stable pidfd held
+    // since before classification. A recycled numeric pid cannot be signalled.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.0.as_raw_fd(),
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        ) == 0
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -254,6 +322,54 @@ pub fn reap_with_test(command: &mut Command) {
 /// See the Linux implementation for why this cannot be provided portably.
 #[cfg(not(target_os = "linux"))]
 pub fn reap_with_test(_command: &mut Command) {}
+
+#[cfg(target_os = "linux")]
+fn inherit_test_guardian(command: &mut Command) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills two fresh descriptors owned by this process. O_CLOEXEC
+    // is cleared only on the read side below so the child and any grandchild can
+    // observe EOF when the test thread drops the write end.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        panic!(
+            "#568: failed to create ferrogate test guardian pipe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    // SAFETY: both fds were just returned by pipe2 and are uniquely owned here.
+    let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    clear_cloexec(read.as_raw_fd());
+    command.env(TEST_GUARDIAN_FD_ENV, read.as_raw_fd().to_string());
+    TEST_GUARDIAN_FDS.with(|held| {
+        let mut held = held.borrow_mut();
+        held.push(read);
+        held.push(write);
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inherit_test_guardian(_command: &mut Command) {}
+
+#[cfg(target_os = "linux")]
+fn clear_cloexec(fd: i32) {
+    // SAFETY: fcntl is operating on a live fd we just created.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        panic!(
+            "#568: failed to read guardian fd flags: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    // SAFETY: fcntl is operating on a live fd we just created.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } != 0 {
+        panic!(
+            "#568: failed to clear guardian fd close-on-exec: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
 
 /// Suites that boot through [`start_ready_gateway`] never call this directly,
 /// so it is dead code in those test binaries.

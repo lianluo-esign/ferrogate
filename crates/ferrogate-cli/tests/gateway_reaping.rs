@@ -77,6 +77,63 @@ fn inner_spawn_then_hang() {
     std::thread::sleep(Duration::from_secs(600));
 }
 
+#[test]
+#[ignore = "fixture: driven by graceful_upgrade_replacement_leaves_no_gateway_behind"]
+fn inner_graceful_upgrade_then_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    let pid_file = dir.path().join("ferrogate.pid");
+    let upgrade_sock = dir.path().join("ferrogate_upgrade.sock");
+    let gateway_addr = support::free_addr();
+    write_graceful_upgrade_config(&config, &gateway_addr, &pid_file, &upgrade_sock);
+
+    let mut old_gateway = support::start_gateway(&config);
+    support::wait_for_gateway(&gateway_addr);
+    let old_pid = old_gateway.id();
+    write_graceful_upgrade_config(&config, &gateway_addr, &pid_file, &upgrade_sock);
+
+    let reload = support::ferrogate_command()
+        .args([
+            "reload",
+            "--config",
+            config.to_str().unwrap(),
+            "--graceful-upgrade",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reload.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&reload.stderr)
+    );
+
+    let new_pid = wait_for_pid_file_to_change(&pid_file, old_pid);
+    println!("{PID_MARKER}{new_pid}");
+    std::io::stdout().flush().unwrap();
+
+    let _ = old_gateway.wait();
+    panic!("#568 fixture: upgraded gateway must not outlive the test that spawned reload");
+}
+
+fn wait_for_pid_file_to_change(path: &std::path::Path, old_pid: u32) -> u32 {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let pid = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok());
+        if let Some(pid) = pid {
+            if pid != old_pid && gateway_process_alive(pid) {
+                return pid;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "pid file {} did not change from old pid {old_pid}",
+        path.display()
+    );
+}
+
 /// Re-invocation of this very test binary, running one fixture and nothing else.
 fn inner_harness(fixture: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -176,4 +233,56 @@ fn sigkilled_test_binary_leaves_no_gateway_behind() {
         "gateway {pid} outlived the SIGKILLed test binary that spawned it \
          (now parented to {orphaned_to:?}); this is the #568 leak"
     );
+}
+
+#[test]
+fn graceful_upgrade_replacement_leaves_no_gateway_behind() {
+    let mut harness = inner_harness("inner_graceful_upgrade_then_panic")
+        .spawn()
+        .unwrap();
+    let pid = read_reported_pid(harness.stdout.take().unwrap());
+    let status = harness.wait().unwrap();
+    assert!(
+        !status.success(),
+        "fixture was supposed to panic, so its harness must report failure"
+    );
+
+    let gone = wait_until_gone(pid, Duration::from_secs(15));
+    let orphaned_to = parent_pid(pid);
+    kill_survivor(pid);
+    assert!(
+        gone,
+        "graceful-upgrade replacement gateway {pid} outlived the panicking test \
+         that spawned reload (now parented to {orphaned_to:?}); this is the \
+         #568 grandchild leak"
+    );
+}
+
+fn write_graceful_upgrade_config(
+    path: &std::path::Path,
+    gateway_addr: &str,
+    pid_file: &std::path::Path,
+    upgrade_sock: &std::path::Path,
+) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[auth]
+disabled = true
+
+[reliability]
+graceful_shutdown_grace_period_secs = 1
+graceful_shutdown_timeout_secs = 1
+graceful_upgrade_pid_file = "{}"
+graceful_upgrade_sock = "{}"
+graceful_upgrade_sock_retries = 8
+"#,
+            pid_file.display(),
+            upgrade_sock.display()
+        ),
+    )
+    .unwrap();
 }

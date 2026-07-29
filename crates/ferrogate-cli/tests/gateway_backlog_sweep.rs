@@ -126,6 +126,40 @@ fn sweep_leaves_an_orphan_younger_than_the_floor_alone() {
     );
 }
 
+#[test]
+fn sweep_leaves_operator_config_orphans_out_of_range() {
+    let _serial = serialised();
+    let dir = unique_operator_config_dir();
+    let config = dir.join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        support::minimal_listening_config(&support::free_addr()),
+    )
+    .unwrap();
+    let orphan = orphan_reparented_to_init(&config);
+
+    assert!(
+        !support::is_orphaned_test_gateway(orphan),
+        "operator-style config path {} was classified as a test gateway",
+        config.display()
+    );
+
+    std::thread::sleep(FIXTURE_AGE);
+    let swept = support::sweep_orphaned_gateways(FIXTURE_AGE);
+    let survived = gateway_process_alive(orphan);
+    kill_survivor(orphan);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        !swept.contains(&orphan),
+        "sweep claimed an operator-config gateway outside the /tmp/.tmp* test fixture path: {swept:?}"
+    );
+    assert!(
+        survived,
+        "sweep killed an orphaned gateway whose config path was not a tempfile test fixture"
+    );
+}
+
 /// Starts a gateway through a shell that exits immediately, so the kernel
 /// reparents it -- the way the real backlog arises. Returns its pid once that
 /// has actually happened.
@@ -157,6 +191,19 @@ fn orphan_reparented_to_init(config: &std::path::Path) -> u32 {
         "fixture orphan {pid} is not running"
     );
     pid
+}
+
+fn unique_operator_config_dir() -> std::path::PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "ferrogate-operator-568-{}-{now}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    dir
 }
 
 fn wait_until_gone(pid: u32, limit: Duration) -> bool {

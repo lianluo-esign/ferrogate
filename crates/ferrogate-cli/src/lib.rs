@@ -76,6 +76,9 @@ use ferrogate_gateway::{
     service_storage::{build_supabase_repositories, SupabaseConnection},
 };
 
+#[cfg(target_os = "linux")]
+const TEST_GUARDIAN_FD_ENV: &str = "FERROGATE_TEST_GUARDIAN_FD";
+
 /// The binary's entire behaviour, moved here from `main()` verbatim (#553
 /// stage 1).
 ///
@@ -89,6 +92,7 @@ use ferrogate_gateway::{
 pub fn run() -> AnyResult<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     init_tracing();
+    install_test_guardian();
 
     // Build the full command surface: the derived `ferrogate` tree plus the
     // generic Control Plane API resource families (#361–#365), whose entire
@@ -244,6 +248,56 @@ pub fn run() -> AnyResult<()> {
         // (issue #365). Additive and side-effect-free: writes to stdout only.
         Commands::Completions(args) => completions::execute(args.shell),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn install_test_guardian() {
+    let Ok(raw_fd) = std::env::var(TEST_GUARDIAN_FD_ENV) else {
+        return;
+    };
+    let Ok(fd) = raw_fd.parse::<libc::c_int>() else {
+        return;
+    };
+    if fd < 0 {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("ferrogate-test-guardian".into())
+        .spawn(move || watch_test_guardian(fd));
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_test_guardian() {}
+
+#[cfg(target_os = "linux")]
+fn watch_test_guardian(fd: libc::c_int) {
+    let mut byte = [0_u8; 1];
+    loop {
+        // SAFETY: fd is inherited from tests/support and remains open for the
+        // process lifetime. Reading one byte blocks until the spawning test
+        // thread exits and closes the write end.
+        let read = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+        if read == 0 {
+            kill_self_for_lost_test_guardian();
+        }
+        if read < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            kill_self_for_lost_test_guardian();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_self_for_lost_test_guardian() -> ! {
+    // SAFETY: process-directed SIGKILL is deliberate test-only cleanup for a
+    // ferrogate process whose spawning test thread is gone.
+    unsafe {
+        libc::kill(libc::getpid(), libc::SIGKILL);
+    }
+    std::process::abort();
 }
 
 /// Default log filter used when `RUST_LOG` is not set. Pingora's own crates

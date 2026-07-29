@@ -6,8 +6,11 @@
 
 use std::process::Command;
 
+#[allow(dead_code)]
+mod support;
+
 fn ferrogate() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    support::ferrogate_command()
 }
 
 #[test]

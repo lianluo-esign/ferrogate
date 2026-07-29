@@ -195,7 +195,7 @@ organization_id = "org_cli_e2e"
 }
 
 fn run_cli(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    support::ferrogate_command()
         .args(args)
         .output()
         .expect("failed to run the ferrogate CLI binary")

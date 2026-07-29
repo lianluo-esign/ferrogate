@@ -23,9 +23,7 @@ mod support;
 /// Pre-armed so a gateway started here dies with its test even when the test
 /// panics past the `kill()` line or the harness is SIGKILLed (#568).
 fn ferrogate() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
-    support::reap_with_test(&mut command);
-    command
+    support::ferrogate_command()
 }
 
 fn free_addr() -> String {

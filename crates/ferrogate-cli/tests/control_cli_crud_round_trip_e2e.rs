@@ -39,6 +39,9 @@
 // is answered with a loud 500, so a CLI that issues an extra request - or skips
 // one - fails rather than silently reusing a stale reply.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -57,7 +60,7 @@ use serde_json::{json, Value};
 /// Run the real binary with a pristine environment: no ambient endpoint,
 /// context, tenant, or timeout can leak in from the developer's shell.
 fn base_cmd(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    let mut command = support::ferrogate_command();
     for var in [
         "FERROGATE_ENDPOINT",
         "FERROGATE_CONTEXT",

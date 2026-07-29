@@ -32,7 +32,7 @@ mod support;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -105,7 +105,7 @@ impl CliRun {
 /// says so on stderr (`context::unhonored_scope_notice`).
 fn run_ctl(endpoint: &str, token: &str, tenant: Option<&str>, args: &[&str]) -> CliRun {
     let home = tempfile::tempdir().unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    let mut command = support::ferrogate_command();
     for var in [
         "FERROGATE_ENDPOINT",
         "FERROGATE_CONTEXT",
