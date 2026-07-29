@@ -35,6 +35,41 @@ impl D1ControlPlaneStore {
         .map(|_| ())
     }
 
+    pub(super) async fn claim_site_domain_async(
+        &self,
+        domain: StoredSiteDomain,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        let hostname = domain.hostname.clone();
+        let result = self
+            .execute_control(
+                "INSERT INTO site_domains \
+                 (hostname, tenant_id, site, created_at_unix, updated_at_unix) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (hostname) DO UPDATE SET \
+                 site = excluded.site, updated_at_unix = excluded.updated_at_unix \
+                 WHERE site_domains.tenant_id = excluded.tenant_id",
+                vec![
+                    domain.hostname,
+                    domain.tenant_id,
+                    domain.site,
+                    domain.created_at_unix.to_string(),
+                    domain.updated_at_unix.to_string(),
+                ],
+            )
+            .await?;
+        if result.changes() == 0 {
+            return Err(StorageError::Conflict(
+                SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string(),
+            ));
+        }
+        self.get_site_domain_async(&hostname).await?.ok_or_else(|| {
+            StorageError::Runtime(format!(
+                "cloudflare d1: site domain {hostname} claim succeeded but row could not be \
+                 reloaded"
+            ))
+        })
+    }
+
     pub(super) async fn get_site_domain_async(
         &self,
         hostname: &str,

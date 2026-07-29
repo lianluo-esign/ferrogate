@@ -1934,6 +1934,13 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         self.upsert_site_domain_async(domain).await
     }
 
+    async fn claim_site_domain(
+        &self,
+        domain: StoredSiteDomain,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        self.claim_site_domain_async(domain).await
+    }
+
     async fn get_site_domain(
         &self,
         hostname: &str,

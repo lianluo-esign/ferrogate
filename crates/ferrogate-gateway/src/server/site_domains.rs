@@ -23,10 +23,9 @@
 //   * binding an unbound hostname issues a challenge and returns 202 instead of
 //     making the hostname servable, so an unowned FQDN never lands in the ACME
 //     order set (the failed-order rate-limit pollution the issue calls out);
-//   * a hostname whose only claim is another tenant's UNVERIFIED binding is no
-//     longer defended by the 409 -- the tenant that actually owns the domain
-//     can raise its own challenge and take the binding over by proving control.
-//     A hostname backed by a LIVE proof still conflicts.
+//   * final binding writes are a storage-level conditional claim (#575): create
+//     if absent, replace only inside the same tenant, and reject a different
+//     current tenant even if an earlier preflight read was stale.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,7 +33,7 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 
-use ferrogate_storage::{StoredSiteDomain, StoredSiteDomainVerification};
+use ferrogate_storage::{StorageError, StoredSiteDomain, StoredSiteDomainVerification};
 
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
@@ -493,25 +492,45 @@ impl FerroGateway {
                 .map_or(now, |existing| existing.created_at_unix),
             updated_at_unix: now,
         };
-        if holds_binding {
-            if let Err(error) = state.upsert_site_domain(domain.clone()).await {
-                let message = error.to_string();
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                    ctx,
-                    &auth,
-                    "site_domain.bind",
-                    &hostname,
-                    "rejected",
-                    message.clone(),
-                ));
-                return storage_error(session, ctx, message).await;
+        let mut binding_written = false;
+        let domain = if holds_binding {
+            match state.claim_site_domain(domain).await {
+                Ok(claimed) => {
+                    binding_written = true;
+                    claimed
+                }
+                Err(StorageError::Conflict(_)) => {
+                    let message = reject(format!("hostname {hostname} is bound by another tenant"));
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "site_domain_conflict",
+                        message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "site_domain.bind",
+                        &hostname,
+                        "rejected",
+                        message.clone(),
+                    ));
+                    return storage_error(session, ctx, message).await;
+                }
             }
-        }
+        } else {
+            domain
+        };
 
         // #488: an unproven hostname must NOT enter the ACME order set. That is
         // both the certificate-issuance rate-limit pollution the issue calls
         // out and a second place an unowned hostname would become real.
-        let acme = if proven && holds_binding {
+        let acme = if proven && binding_written {
             self.refresh_acme_after_domain_change(&state, &hostname, true)
         } else {
             self.site_domain_acme_state(&state)
@@ -525,7 +544,7 @@ impl FerroGateway {
             "committed",
             format!(
                 "custom domain {hostname} bound to site {tenant_id}/{site} \
-                 (verification_state={}, serving={proven}, binding_written={holds_binding}, \
+                 (verification_state={}, serving={proven}, binding_written={binding_written}, \
                  acme_enabled={}, reload_triggered={})",
                 admin_verification.state, acme.enabled, acme.reload_triggered
             ),
@@ -772,9 +791,27 @@ impl FerroGateway {
                         .map_or(now, |existing| existing.created_at_unix),
                     updated_at_unix: now,
                 };
-                if let Err(error) = state.upsert_site_domain(domain.clone()).await {
-                    return storage_error(session, ctx, error.to_string()).await;
-                }
+                let domain = match state.claim_site_domain(domain).await {
+                    Ok(claimed) => claimed,
+                    Err(StorageError::Conflict(_)) => {
+                        audit(
+                            "rejected",
+                            format!(
+                                "site-domain claim for {hostname} rejected after DNS proof \
+                                 because the current binding belongs to another tenant"
+                            ),
+                        );
+                        return write_json_error(
+                            session,
+                            StatusCode::CONFLICT,
+                            "site_domain_conflict",
+                            format!("hostname {hostname} is bound by another tenant"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => return storage_error(session, ctx, error.to_string()).await,
+                };
                 let acme = self.refresh_acme_after_domain_change(&state, &hostname, true);
                 audit(
                     "committed",

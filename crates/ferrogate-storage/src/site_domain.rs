@@ -37,6 +37,9 @@ fn site_domain_from_row(row: &PostgresRow) -> StoredSiteDomain {
 
 const SITE_DOMAIN_COLUMNS: &str = "hostname, tenant_id, site, created_at_unix, updated_at_unix";
 
+pub const SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE: &str =
+    "site domain hostname is already claimed by another tenant";
+
 impl PostgresControlPlaneStore {
     fn site_domain_operation(&self, name: &'static str) -> StorageOperation {
         StorageOperation::new(name, self.async_pool.statement_timeout())
@@ -82,6 +85,54 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
         Ok(())
+    }
+
+    pub(super) async fn claim_site_domain(
+        &self,
+        domain: &StoredSiteDomain,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        let operation = self.site_domain_operation("claim site domain");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // The mutation itself is one guarded upsert: create if absent, update
+        // only when the current row still belongs to this tenant. The
+        // transaction exists only to pin `search_path` for the configured
+        // schema (#239), matching the rest of this module.
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
+            .query_opt(
+                &format!(
+                    "INSERT INTO site_domains \
+                     (hostname, tenant_id, site, created_at_unix, updated_at_unix) \
+                     VALUES ($1, $2, $3, $4, $5) \
+                     ON CONFLICT (hostname) DO UPDATE SET \
+                         site = EXCLUDED.site, \
+                         updated_at_unix = EXCLUDED.updated_at_unix \
+                     WHERE site_domains.tenant_id = EXCLUDED.tenant_id \
+                     RETURNING {SITE_DOMAIN_COLUMNS}"
+                ),
+                &[
+                    &domain.hostname,
+                    &domain.tenant_id,
+                    &domain.site,
+                    &domain.created_at_unix,
+                    &domain.updated_at_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        row.as_ref()
+            .map(site_domain_from_row)
+            .ok_or_else(|| StorageError::Conflict(SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string()))
     }
 
     pub(super) async fn get_site_domain(
@@ -179,6 +230,22 @@ impl RuntimeControlPlaneState {
         self.site_domains.insert(domain.hostname.clone(), domain);
     }
 
+    pub(super) fn claim_site_domain(
+        &mut self,
+        mut domain: StoredSiteDomain,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        if let Some(existing) = self.site_domains.get(&domain.hostname) {
+            if existing.tenant_id != domain.tenant_id {
+                return Err(StorageError::Conflict(
+                    SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string(),
+                ));
+            }
+            domain.created_at_unix = existing.created_at_unix;
+        }
+        self.site_domains.insert(domain.hostname.clone(), domain.clone());
+        Ok(domain)
+    }
+
     pub(super) fn get_site_domain(&self, hostname: &str) -> Option<StoredSiteDomain> {
         self.site_domains.get(hostname)
     }
@@ -202,6 +269,13 @@ impl RuntimeControlPlaneState {
 impl RuntimeStorageRepositories {
     pub async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError> {
         self.control_plane.store().upsert_site_domain(domain).await
+    }
+
+    pub async fn claim_site_domain(
+        &self,
+        domain: StoredSiteDomain,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        self.control_plane.store().claim_site_domain(domain).await
     }
 
     pub async fn get_site_domain(

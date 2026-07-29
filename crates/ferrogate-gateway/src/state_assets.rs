@@ -292,14 +292,15 @@ impl AppState {
             .await
     }
 
-    /// Binds (or re-binds) a custom hostname to a `{tenant}/{site}` static
-    /// site (#265). The caller audits the change via the admin audit-event
-    /// path and normalizes/validates the hostname first.
-    pub(crate) async fn upsert_site_domain(
+    /// Conditionally claims a custom hostname for a static site (#575). This
+    /// returns the storage error directly so callers can preserve a
+    /// cross-tenant claim conflict as 409 instead of collapsing it into generic
+    /// storage unavailability.
+    pub(crate) async fn claim_site_domain(
         &self,
         domain: ferrogate_storage::StoredSiteDomain,
-    ) -> anyhow::Result<()> {
-        Ok(self.repositories.upsert_site_domain(domain).await?)
+    ) -> Result<ferrogate_storage::StoredSiteDomain, StorageError> {
+        self.repositories.claim_site_domain(domain).await
     }
 
     pub(crate) async fn get_site_domain(

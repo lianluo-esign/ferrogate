@@ -250,7 +250,7 @@ pub use agent_schedule::{
 };
 
 mod site_domain;
-pub use site_domain::StoredSiteDomain;
+pub use site_domain::{StoredSiteDomain, SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE};
 
 // #488: DNS-TXT ownership proof gating whether a bound custom hostname may
 // actually serve. A `StoredSiteDomain` records intent; this records evidence.
