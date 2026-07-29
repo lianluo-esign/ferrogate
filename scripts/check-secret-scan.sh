@@ -20,7 +20,8 @@
 #
 #   scripts/check-secret-scan.sh                 # scan this checkout
 #   scripts/check-secret-scan.sh --root DIR      # scan another git checkout
-#   scripts/check-secret-scan.sh --list-files    # print the resolved scan list
+#   scripts/check-secret-scan.sh --list-files    # print tracked authored inputs
+#   scripts/check-secret-scan.sh --list-scannable-files  # print scanner inputs
 #   scripts/check-secret-scan.sh --list-allowlist  # print the reviewed exceptions
 #
 # Engine equivalence: rg is invoked with --line-number --no-heading and no
@@ -44,6 +45,7 @@ set -euo pipefail
 
 root_dir=""
 list_files_only=0
+list_scannable_files_only=0
 list_allowlist_only=0
 scanning_this_repo=1
 
@@ -55,6 +57,7 @@ print_help() {
     '  scripts/check-secret-scan.sh' \
     '  scripts/check-secret-scan.sh --root DIR' \
     '  scripts/check-secret-scan.sh --list-files' \
+    '  scripts/check-secret-scan.sh --list-scannable-files' \
     '  scripts/check-secret-scan.sh --list-allowlist'
 }
 
@@ -68,6 +71,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --list-files)
       list_files_only=1
+      shift
+      ;;
+    --list-scannable-files)
+      list_scannable_files_only=1
       shift
       ;;
     --list-allowlist)
@@ -300,6 +307,11 @@ for scan_path in "${tracked_secret_scan_files[@]}"; do
   done
   [[ "$scan_path_is_reviewed_binary" -eq 0 ]] && scannable_scan_files+=("$scan_path")
 done
+
+if [[ "$list_scannable_files_only" -eq 1 ]]; then
+  printf '%s\n' "${scannable_scan_files[@]}"
+  exit 0
+fi
 
 echo "==> high-confidence secret scan (engine: $secret_scan_engine)"
 echo "secret scan coverage: ${#scannable_scan_files[@]}/${#tracked_secret_scan_files[@]} tracked files are line-scannable"

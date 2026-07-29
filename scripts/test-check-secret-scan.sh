@@ -446,6 +446,7 @@ fi
 # ---------------------------------------------------------------------------
 reachability_target="admin-console/src/pages/assets.tsx"
 scan_list="$("$script" --list-files 2>/dev/null)"
+scannable_scan_list="$("$script" --list-scannable-files 2>/dev/null)"
 if grep -qxF "$reachability_target" <<<"$scan_list"; then
   pass "scan file list includes $reachability_target"
 else
@@ -497,15 +498,36 @@ fi
 # Assert the reported count against an independently derived Git list instead
 # of against a literal or the script's own --list-files output. A mutation that
 # narrows the product list therefore cannot narrow the expected count with it.
-reported_scanned="$(printf '%s' "$self_out" | grep -oE '[0-9]+ tracked files are line-scannable' | grep -oE '^[0-9]+' | head -1)"
+reported_coverage="$(printf '%s' "$self_out" |
+  sed -n 's/^secret scan coverage: \([0-9][0-9]*\)\/\([0-9][0-9]*\) tracked files are line-scannable$/\1 \2/p' |
+  head -1)"
+reported_line_scannable="${reported_coverage%% *}"
+reported_tracked="${reported_coverage##* }"
 expected_scanned="$(git -C "$root" ls-files -- ':!:Cargo.lock' | wc -l | tr -d ' ')"
-if [[ -z "$reported_scanned" ]]; then
+if [[ -z "$reported_coverage" ]]; then
   fail "scan reports its coverage instead of staying silent" "$self_out"
-elif [[ "$reported_scanned" -ne "$expected_scanned" ]]; then
-  fail "the scan covers every independently enumerated authored file" \
-    "reported ${reported_scanned}; git independently enumerated ${expected_scanned} excluding only root Cargo.lock"
+elif [[ "$reported_tracked" -ne "$expected_scanned" ]]; then
+  fail "the scan reports the independently enumerated tracked-file denominator" \
+    "reported ${reported_tracked}; git independently enumerated ${expected_scanned} excluding only root Cargo.lock"
 else
-  pass "scan reports exact coverage of all ${expected_scanned} authored files"
+  pass "scan reports exact tracked-file denominator of ${expected_scanned} authored files"
+fi
+
+expected_scannable_scan_list="$(git -C "$root" ls-files -- ':!:Cargo.lock' | LC_ALL=C sort)"
+actual_scannable_scan_list="$(printf '%s\n' "$scannable_scan_list" | LC_ALL=C sort)"
+if [[ "$actual_scannable_scan_list" == "$expected_scannable_scan_list" ]]; then
+  pass "scan exposes the exact line-scannable corpus handed to the scanner"
+else
+  fail "scan exposes the exact line-scannable corpus handed to the scanner" \
+    "$(diff <(printf '%s\n' "$expected_scannable_scan_list") <(printf '%s\n' "$actual_scannable_scan_list") | head -20)"
+fi
+
+expected_line_scannable="$(printf '%s\n' "$expected_scannable_scan_list" | sed '/^$/d' | wc -l | tr -d ' ')"
+if [[ "$reported_line_scannable" -ne "$expected_line_scannable" ]]; then
+  fail "the scan reports the real line-scannable scanner numerator" \
+    "reported ${reported_line_scannable}; independently verified ${expected_line_scannable}"
+else
+  pass "scan reports exact line-scannable scanner numerator of ${expected_line_scannable} files"
 fi
 
 for coverage_anchor in \
