@@ -8,7 +8,7 @@
 use super::*;
 
 use crate::auth::AuthError;
-use ferrogate_storage::{LifecycleSeam, TenancyRefs};
+use ferrogate_storage::{CreateIfAbsentOutcome, LifecycleSeam, TenancyRefs};
 
 impl AppState {
     pub(crate) async fn list_tenant_accounts(&self) -> anyhow::Result<Vec<StoredTenantAccount>> {
@@ -101,6 +101,13 @@ impl AppState {
         Ok(self.repositories.upsert_project(project).await?)
     }
 
+    pub(crate) async fn create_project_if_absent(
+        &self,
+        project: StoredProject,
+    ) -> anyhow::Result<CreateIfAbsentOutcome> {
+        Ok(self.repositories.create_project_if_absent(project).await?)
+    }
+
     /// Atomic reject-if-referenced project delete (issue #328, finding 4).
     /// Replaces the former separate list-children + `delete_project` round
     /// trips, closing the TOCTOU window where a workspace/key created
@@ -122,6 +129,16 @@ impl AppState {
 
     pub(crate) async fn upsert_workspace(&self, workspace: StoredWorkspace) -> anyhow::Result<()> {
         Ok(self.repositories.upsert_workspace(workspace).await?)
+    }
+
+    pub(crate) async fn create_workspace_if_absent(
+        &self,
+        workspace: StoredWorkspace,
+    ) -> anyhow::Result<CreateIfAbsentOutcome> {
+        Ok(self
+            .repositories
+            .create_workspace_if_absent(workspace)
+            .await?)
     }
 
     /// Atomic reject-if-referenced workspace delete (issue #328, finding 4).
@@ -306,6 +323,16 @@ impl AppState {
 
     pub(crate) async fn upsert_virtual_api_key(&self, key: StoredApiKey) -> anyhow::Result<()> {
         Ok(self.repositories.upsert_api_key_record(key).await?)
+    }
+
+    pub(crate) async fn create_virtual_api_key_if_absent(
+        &self,
+        key: StoredApiKey,
+    ) -> anyhow::Result<CreateIfAbsentOutcome> {
+        Ok(self
+            .repositories
+            .create_api_key_record_if_absent(key)
+            .await?)
     }
 
     // --- Multi-level quota/rate-limit policies (P1-3) ---

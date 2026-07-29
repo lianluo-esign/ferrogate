@@ -11,7 +11,45 @@
 use super::rows::*;
 use super::*;
 
+const API_KEY_RECORD_ID_CLAIM_KIND: &str = "api_key_record_id_claim";
+const PROJECT_ID_CLAIM_KIND: &str = "project_id_claim";
+const WORKSPACE_ID_CLAIM_KIND: &str = "workspace_id_claim";
+
 impl D1ControlPlaneStore {
+    async fn claim_core_entity_id(
+        &self,
+        kind: &str,
+        id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, StorageError> {
+        let database_id = self.control_database_id()?;
+        let document_json =
+            serialize_storage_document(&serde_json::json!({ "tenant_id": tenant_id }))?;
+        self.execute(
+            &database_id,
+            "INSERT INTO control_plane_resources \
+             (resource_kind, resource_id, document_json, revision, created_at_unix, \
+              updated_at_unix) \
+             VALUES (?, ?, ?, 1, unixepoch(), unixepoch()) \
+             ON CONFLICT (resource_kind, resource_id) DO NOTHING",
+            vec![kind.to_string(), id.to_string(), document_json],
+        )
+        .await
+        .map(|result| result.changes() > 0)
+    }
+
+    async fn release_core_entity_id_claim(&self, kind: &str, id: &str) -> Result<(), StorageError> {
+        let database_id = self.control_database_id()?;
+        self.execute(
+            &database_id,
+            "DELETE FROM control_plane_resources \
+             WHERE resource_kind = ? AND resource_id = ?",
+            vec![kind.to_string(), id.to_string()],
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub(super) async fn upsert_api_key_record_async(
         &self,
         api_key: StoredApiKey,
@@ -65,6 +103,73 @@ impl D1ControlPlaneStore {
         )
         .await
         .map(|_| ())
+    }
+
+    pub(super) async fn create_api_key_record_if_absent_async(
+        &self,
+        api_key: StoredApiKey,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        let id = api_key.id.clone();
+        let tenant_id = api_key.tenant_id.clone();
+        let database_id = self.database_for_tenant(&tenant_id)?;
+        let params = vec![
+            api_key.id.clone(),
+            api_key.workspace_id.clone(),
+            api_key.tenant_id.clone(),
+            api_key.project_id.clone(),
+            api_key.name.clone(),
+            api_key.key_prefix.clone(),
+            api_key.key_hash.clone(),
+            api_key.last4.clone(),
+            if api_key.enabled { "1" } else { "0" }.to_string(),
+            serialize_storage_document(&api_key.scopes)?,
+            serialize_storage_document(&api_key.allowed_models)?,
+            serialize_storage_document(&api_key.allowed_providers)?,
+            optional_number_param(api_key.monthly_token_budget),
+            optional_number_param(api_key.request_limit_per_minute),
+            api_key.created_at_unix.to_string(),
+            api_key.updated_at_unix.to_string(),
+            optional_number_param(api_key.rotated_at_unix),
+            optional_number_param(api_key.expires_at_unix),
+            optional_number_param(api_key.revoked_at_unix),
+        ];
+        if self.get_api_key_record_async(&id).await?.is_some() {
+            return Ok(CreateIfAbsentOutcome::AlreadyExists);
+        }
+        if !self
+            .claim_core_entity_id(API_KEY_RECORD_ID_CLAIM_KIND, &id, &tenant_id)
+            .await?
+        {
+            return Ok(CreateIfAbsentOutcome::AlreadyExists);
+        }
+        let inserted = match self
+            .execute(
+                &database_id,
+                "INSERT INTO api_keys \
+                 (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, \
+                  enabled, scopes_json, allowed_models_json, allowed_providers_json, \
+                  monthly_token_budget, request_limit_per_minute, created_at_unix, \
+                  updated_at_unix, rotated_at_unix, expires_at_unix, revoked_at_unix) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, \
+                  NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, '')) \
+                 ON CONFLICT (id) DO NOTHING",
+                params,
+            )
+            .await
+        {
+            Ok(result) => result.changes(),
+            Err(error) => {
+                let _ = self
+                    .release_core_entity_id_claim(API_KEY_RECORD_ID_CLAIM_KIND, &id)
+                    .await;
+                return Err(error);
+            }
+        };
+        Ok(if inserted > 0 {
+            CreateIfAbsentOutcome::Created
+        } else {
+            CreateIfAbsentOutcome::AlreadyExists
+        })
     }
 
     pub(super) async fn get_api_key_record_async(
@@ -197,6 +302,56 @@ impl D1ControlPlaneStore {
         .map(|_| ())
     }
 
+    pub(super) async fn create_project_if_absent_async(
+        &self,
+        project: StoredProject,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        let id = project.id.clone();
+        let tenant_id = project.tenant_id.clone();
+        let database_id = self.database_for_tenant(&tenant_id)?;
+        if self.get_project_async(&id).await?.is_some() {
+            return Ok(CreateIfAbsentOutcome::AlreadyExists);
+        }
+        if !self
+            .claim_core_entity_id(PROJECT_ID_CLAIM_KIND, &id, &tenant_id)
+            .await?
+        {
+            return Ok(CreateIfAbsentOutcome::AlreadyExists);
+        }
+        let inserted = match self
+            .execute(
+                &database_id,
+                "INSERT INTO projects \
+                 (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (id) DO NOTHING",
+                vec![
+                    project.id.clone(),
+                    project.tenant_id.clone(),
+                    project.name,
+                    project.slug,
+                    project.status,
+                    project.created_at_unix.to_string(),
+                    project.updated_at_unix.to_string(),
+                ],
+            )
+            .await
+        {
+            Ok(result) => result.changes(),
+            Err(error) => {
+                let _ = self
+                    .release_core_entity_id_claim(PROJECT_ID_CLAIM_KIND, &id)
+                    .await;
+                return Err(error);
+            }
+        };
+        Ok(if inserted > 0 {
+            CreateIfAbsentOutcome::Created
+        } else {
+            CreateIfAbsentOutcome::AlreadyExists
+        })
+    }
+
     pub(super) async fn get_project_async(
         &self,
         id: &str,
@@ -308,6 +463,59 @@ impl D1ControlPlaneStore {
         )
         .await
         .map(|_| ())
+    }
+
+    pub(super) async fn create_workspace_if_absent_async(
+        &self,
+        workspace: StoredWorkspace,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        let id = workspace.id.clone();
+        let tenant_id = workspace.tenant_id.clone();
+        let database_id = self.database_for_tenant(&tenant_id)?;
+        if self.get_workspace_async(&id).await?.is_some() {
+            return Ok(CreateIfAbsentOutcome::AlreadyExists);
+        }
+        if !self
+            .claim_core_entity_id(WORKSPACE_ID_CLAIM_KIND, &id, &tenant_id)
+            .await?
+        {
+            return Ok(CreateIfAbsentOutcome::AlreadyExists);
+        }
+        let inserted = match self
+            .execute(
+                &database_id,
+                "INSERT INTO workspaces \
+                 (id, project_id, tenant_id, name, slug, environment, status, created_at_unix, \
+                  updated_at_unix) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (id) DO NOTHING",
+                vec![
+                    workspace.id.clone(),
+                    workspace.project_id,
+                    workspace.tenant_id.clone(),
+                    workspace.name,
+                    workspace.slug,
+                    workspace.environment,
+                    workspace.status,
+                    workspace.created_at_unix.to_string(),
+                    workspace.updated_at_unix.to_string(),
+                ],
+            )
+            .await
+        {
+            Ok(result) => result.changes(),
+            Err(error) => {
+                let _ = self
+                    .release_core_entity_id_claim(WORKSPACE_ID_CLAIM_KIND, &id)
+                    .await;
+                return Err(error);
+            }
+        };
+        Ok(if inserted > 0 {
+            CreateIfAbsentOutcome::Created
+        } else {
+            CreateIfAbsentOutcome::AlreadyExists
+        })
     }
 
     pub(super) async fn get_workspace_async(

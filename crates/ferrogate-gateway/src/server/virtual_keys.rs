@@ -16,8 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ferrogate_auth_service::virtual_api_key_material;
 use ferrogate_core::TenantContext;
 use ferrogate_storage::{
-    DeleteProjectOutcome, DeleteWorkspaceOutcome, LifecycleStatus, StoredApiKey, StoredProject,
-    StoredTenantAccount, StoredWorkspace,
+    CreateIfAbsentOutcome, DeleteProjectOutcome, DeleteWorkspaceOutcome, LifecycleStatus,
+    StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace,
 };
 
 /// Validate and canonicalize a `status` field on a tenant-account / project /
@@ -972,31 +972,6 @@ impl FerroGateway {
                     .await;
                 }
                 let supplied_id = payload.id.filter(|id| !id.trim().is_empty());
-                if let Some(id) = supplied_id.as_deref() {
-                    match state.get_project(id).await {
-                        Ok(Some(_)) => {
-                            return write_json_error(
-                                session,
-                                StatusCode::CONFLICT,
-                                "project_already_exists",
-                                format!("project {id} already exists"),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            return write_json_error(
-                                session,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "storage_unavailable",
-                                error.to_string(),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        }
-                    }
-                }
                 if state
                     .get_tenant_account(&tenant_id)
                     .await
@@ -1082,8 +1057,8 @@ impl FerroGateway {
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
-                match state.upsert_project(project.clone()).await {
-                    Ok(()) => {
+                match state.create_project_if_absent(project.clone()).await {
+                    Ok(CreateIfAbsentOutcome::Created) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
                             &auth,
@@ -1098,6 +1073,16 @@ impl FerroGateway {
                         };
                         write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id)
                             .await
+                    }
+                    Ok(CreateIfAbsentOutcome::AlreadyExists) => {
+                        write_json_error(
+                            session,
+                            StatusCode::CONFLICT,
+                            "project_already_exists",
+                            format!("project {id} already exists"),
+                            &ctx.request_id,
+                        )
+                        .await
                     }
                     Err(error) => {
                         write_json_error(
@@ -1625,31 +1610,6 @@ impl FerroGateway {
                     .await;
                 }
                 let supplied_id = payload.id.filter(|id| !id.trim().is_empty());
-                if let Some(id) = supplied_id.as_deref() {
-                    match state.get_workspace(id).await {
-                        Ok(Some(_)) => {
-                            return write_json_error(
-                                session,
-                                StatusCode::CONFLICT,
-                                "workspace_already_exists",
-                                format!("workspace {id} already exists"),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            return write_json_error(
-                                session,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "storage_unavailable",
-                                error.to_string(),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        }
-                    }
-                }
                 // #514 attach-time seam: no new workspace under a suspended
                 // project, nor under an active project whose TENANT is
                 // suspended -- the chain is checked whole, shallowest first.
@@ -1725,8 +1685,8 @@ impl FerroGateway {
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
-                match state.upsert_workspace(workspace.clone()).await {
-                    Ok(()) => {
+                match state.create_workspace_if_absent(workspace.clone()).await {
+                    Ok(CreateIfAbsentOutcome::Created) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
                             &auth,
@@ -1741,6 +1701,16 @@ impl FerroGateway {
                         };
                         write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id)
                             .await
+                    }
+                    Ok(CreateIfAbsentOutcome::AlreadyExists) => {
+                        write_json_error(
+                            session,
+                            StatusCode::CONFLICT,
+                            "workspace_already_exists",
+                            format!("workspace {id} already exists"),
+                            &ctx.request_id,
+                        )
+                        .await
                     }
                     Err(error) => {
                         write_json_error(
@@ -2392,31 +2362,6 @@ impl FerroGateway {
             .await;
         }
         let supplied_id = payload.id.filter(|id| !id.trim().is_empty());
-        if let Some(id) = supplied_id.as_deref() {
-            match state.get_virtual_api_key(id).await {
-                Ok(Some(_)) => {
-                    return write_json_error(
-                        session,
-                        StatusCode::CONFLICT,
-                        "virtual_key_already_exists",
-                        format!("virtual key {id} already exists"),
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    return write_json_error(
-                        session,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "storage_unavailable",
-                        error.to_string(),
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-            }
-        }
         // #514 attach-time seam, the exact hole the live probe walked through:
         // "mint a NEW virtual key under the suspended chain -> 201 + live
         // secret". The whole resolved chain is checked, so suspending at ANY
@@ -2493,8 +2438,8 @@ impl FerroGateway {
             revoked_at_unix: None,
         };
 
-        match state.upsert_virtual_api_key(key.clone()).await {
-            Ok(()) => {
+        match state.create_virtual_api_key_if_absent(key.clone()).await {
+            Ok(CreateIfAbsentOutcome::Created) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
@@ -2512,6 +2457,16 @@ impl FerroGateway {
                     secret: Some(secret),
                 };
                 write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+            }
+            Ok(CreateIfAbsentOutcome::AlreadyExists) => {
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "virtual_key_already_exists",
+                    format!("virtual key {id} already exists"),
+                    &ctx.request_id,
+                )
+                .await
             }
             Err(error) => {
                 write_json_error(

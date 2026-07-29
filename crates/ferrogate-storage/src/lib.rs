@@ -29,11 +29,13 @@ use tokio_postgres::Row as PostgresRow;
 mod async_postgres;
 pub use async_postgres::PostgresPoolMetricsSnapshot;
 
+mod control_plane_create;
 mod control_plane_store;
 mod control_plane_store_d1;
 mod control_plane_store_memory;
 mod control_plane_store_postgres;
 mod postgres_row_mappers;
+pub use control_plane_create::CreateIfAbsentOutcome;
 use control_plane_store::MemoryControlPlaneStore;
 // Postgres `Row` -> `Stored*` projections extracted from this file (issues
 // #429/#433 modular-layout cap). Re-exported `pub(crate)` so every existing

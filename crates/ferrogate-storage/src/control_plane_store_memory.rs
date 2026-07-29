@@ -20,6 +20,15 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
         Ok(())
     }
 
+    async fn create_api_key_record_if_absent(
+        &self,
+        api_key: StoredApiKey,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.create_api_key_record_if_absent(api_key))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
     async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
         Ok(self
             .lock()
@@ -245,6 +254,15 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
         Ok(())
     }
 
+    async fn create_project_if_absent(
+        &self,
+        project: StoredProject,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.create_project_if_absent(project))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
     async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
         Ok(self
             .lock()
@@ -284,6 +302,15 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             control_plane.upsert_workspace(workspace);
         }
         Ok(())
+    }
+
+    async fn create_workspace_if_absent(
+        &self,
+        workspace: StoredWorkspace,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.create_workspace_if_absent(workspace))
+            .map_err(|_| poisoned_asset_repository_lock())
     }
 
     async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {

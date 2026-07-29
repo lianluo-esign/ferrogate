@@ -596,6 +596,13 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         self.upsert_api_key_record_async(api_key).await
     }
 
+    async fn create_api_key_record_if_absent(
+        &self,
+        api_key: StoredApiKey,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        self.create_api_key_record_if_absent_async(api_key).await
+    }
+
     async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
         self.get_api_key_record_async(id).await
     }
@@ -756,6 +763,13 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         self.upsert_project_async(project).await
     }
 
+    async fn create_project_if_absent(
+        &self,
+        project: StoredProject,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        self.create_project_if_absent_async(project).await
+    }
+
     async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
         self.get_project_async(id).await
     }
@@ -779,6 +793,13 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
         self.upsert_workspace_async(workspace).await
+    }
+
+    async fn create_workspace_if_absent(
+        &self,
+        workspace: StoredWorkspace,
+    ) -> Result<CreateIfAbsentOutcome, StorageError> {
+        self.create_workspace_if_absent_async(workspace).await
     }
 
     async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {

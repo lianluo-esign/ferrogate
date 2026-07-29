@@ -57,6 +57,10 @@ use super::*;
 #[async_trait::async_trait]
 pub(crate) trait ControlPlaneStore: Send + Sync {
     async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError>;
+    async fn create_api_key_record_if_absent(
+        &self,
+        api_key: StoredApiKey,
+    ) -> Result<CreateIfAbsentOutcome, StorageError>;
     async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError>;
     async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError>;
     async fn find_api_key_records_by_prefix(
@@ -130,6 +134,10 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
     ) -> Result<Option<StoredTenantAccount>, StorageError>;
     async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError>;
     async fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError>;
+    async fn create_project_if_absent(
+        &self,
+        project: StoredProject,
+    ) -> Result<CreateIfAbsentOutcome, StorageError>;
     async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError>;
     async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError>;
     async fn delete_project(&self, id: &str) -> Result<bool, StorageError>;
@@ -138,6 +146,10 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         id: &str,
     ) -> Result<DeleteProjectOutcome, StorageError>;
     async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError>;
+    async fn create_workspace_if_absent(
+        &self,
+        workspace: StoredWorkspace,
+    ) -> Result<CreateIfAbsentOutcome, StorageError>;
     async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError>;
     async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError>;
     async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError>;
