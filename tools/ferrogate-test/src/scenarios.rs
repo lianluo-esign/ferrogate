@@ -2523,14 +2523,17 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         "POST",
         "/admin/v1/agent-schedules",
         &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{"id":"lifecycle-execution-schedule","tenant_id":"org_demo","workspace_id":"lifecycle-workspace","name":"Lifecycle execution schedule","spec_kind":"interval","interval_secs":2,"target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"lifecycle-execution-workload"}}"#,
+        r#"{"id":"lifecycle-execution-schedule","tenant_id":"org_demo","workspace_id":"lifecycle-workspace","name":"Lifecycle execution schedule","spec_kind":"interval","interval_secs":2,"catchup_policy":"fire_once","target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"lifecycle-execution-workload"}}"#,
         201,
         |body| {
             // #578 review rework: run_lifecycle_tenancy starts with scheduler
             // disabled. This active-tenancy create proves attachment is valid,
             // but the schedule cannot mature until the scenario explicitly
-            // enables the scheduler after suspending the tenant.
+            // enables the scheduler after suspending the tenant. `fire_once`
+            // makes the background lifecycle-refusal proof deterministic even
+            // when setup takes longer than the first two-second slot.
             assert_eq!(body["agent_schedule"]["enabled"], true);
+            assert_eq!(body["agent_schedule"]["catchup_policy"], "fire_once");
             assert_eq!(
                 body["agent_schedule"]["target"]["workload_ref"],
                 "lifecycle-execution-workload"
