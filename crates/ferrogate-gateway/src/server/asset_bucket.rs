@@ -63,10 +63,9 @@ pub(crate) struct AssetBucketConfig {
     /// hash this client sends. `[asset_bucket]` targeting an R2 host is
     /// auto-detected and validated (see `validate_asset_bucket_r2`); no extra
     /// config marker is needed. An R2 endpoint must be the bare account host:
-    /// a `:port` or a path suffix is NOT ignored, because
-    /// `AssetBucketClient::scheme_and_host` folds it into the signed `host`
-    /// header, so the load-time guard rejects it (issue #485). NOTE: R2 buckets
-    /// are private by default -- for
+    /// a `:port` or a path suffix is NOT ignored, because R2 does not serve
+    /// account endpoints behind an extra base path (issue #485). NOTE: R2
+    /// buckets are private by default -- for
     /// *public* static serving you must attach a custom domain to the bucket
     /// (the `r2.dev` subdomain is rate-limited/dev-only); the gateway's
     /// presigned-GET path serves private objects without a public bucket.
@@ -79,6 +78,32 @@ pub(crate) struct AssetBucketConfig {
 
 pub(crate) struct AssetBucketClient {
     config: AssetBucketConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssetBucketEndpoint {
+    scheme: &'static str,
+    host: String,
+    base_path: String,
+}
+
+impl AssetBucketEndpoint {
+    fn object_path(&self, bucket: &str, key: &str) -> String {
+        self.prefixed_path(&format!("/{bucket}/{key}"))
+    }
+
+    fn bucket_path(&self, bucket: &str) -> String {
+        self.prefixed_path(&format!("/{bucket}"))
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}://{}{}", self.scheme, self.host, path)
+    }
+
+    fn prefixed_path(&self, suffix: &str) -> String {
+        debug_assert!(suffix.starts_with('/'));
+        format!("{}{}", self.base_path, suffix)
+    }
 }
 
 /// A bound presigned upload (issue #368): the URL plus the exact request
@@ -558,13 +583,13 @@ impl AssetBucketClient {
         body: Vec<u8>,
         content_type: &str,
     ) -> anyhow::Result<()> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
-        let signed = self.sign("PUT", &path, &host, &body);
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
+        let signed = self.sign("PUT", &path, &endpoint.host, &body);
         let client = provider_http_client()?;
         let mut request = client
-            .put(format!("{scheme}://{host}{path}"))
-            .header("host", host.clone())
+            .put(endpoint.url(&path))
+            .header("host", endpoint.host.clone())
             .header("x-amz-date", signed.x_amz_date.clone())
             .header("authorization", signed.authorization.clone())
             .header("content-type", content_type)
@@ -604,13 +629,13 @@ impl AssetBucketClient {
         key: &str,
         max_bytes: u64,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
-        let signed = self.sign("GET", &path, &host, b"");
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
+        let signed = self.sign("GET", &path, &endpoint.host, b"");
         let client = provider_http_client()?;
         let mut request = client
-            .get(format!("{scheme}://{host}{path}"))
-            .header("host", host.clone())
+            .get(endpoint.url(&path))
+            .header("host", endpoint.host.clone())
             .header("x-amz-date", signed.x_amz_date.clone())
             .header("authorization", signed.authorization.clone());
         if let Some(content_sha256) = &signed.x_amz_content_sha256 {
@@ -658,13 +683,13 @@ impl AssetBucketClient {
         &self,
         key: &str,
     ) -> anyhow::Result<Option<ObjectByteStream>> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
-        let signed = self.sign("GET", &path, &host, b"");
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
+        let signed = self.sign("GET", &path, &endpoint.host, b"");
         let client = provider_http_client()?;
         let mut request = client
-            .get(format!("{scheme}://{host}{path}"))
-            .header("host", host.clone())
+            .get(endpoint.url(&path))
+            .header("host", endpoint.host.clone())
             .header("x-amz-date", signed.x_amz_date.clone())
             .header("authorization", signed.authorization.clone());
         if let Some(content_sha256) = &signed.x_amz_content_sha256 {
@@ -698,8 +723,8 @@ impl AssetBucketClient {
         content_sha256_hex: &str,
         body: ObjectByteStream,
     ) -> anyhow::Result<()> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
         let timestamp_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
@@ -708,7 +733,7 @@ impl AssetBucketClient {
             &StreamedSigningRequest {
                 method: "PUT",
                 path: &path,
-                host: &host,
+                host: &endpoint.host,
                 region: &self.config.region,
                 service: "s3",
                 payload_sha256_hex: content_sha256_hex,
@@ -722,8 +747,8 @@ impl AssetBucketClient {
         );
         let client = provider_http_client()?;
         let mut request = client
-            .put(format!("{scheme}://{host}{path}"))
-            .header("host", host.clone())
+            .put(endpoint.url(&path))
+            .header("host", endpoint.host.clone())
             .header("x-amz-date", signed.x_amz_date.clone())
             .header("authorization", signed.authorization.clone())
             .header("content-type", content_type)
@@ -742,13 +767,13 @@ impl AssetBucketClient {
     }
 
     pub(crate) async fn delete_object(&self, key: &str) -> anyhow::Result<()> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
-        let signed = self.sign("DELETE", &path, &host, b"");
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
+        let signed = self.sign("DELETE", &path, &endpoint.host, b"");
         let client = provider_http_client()?;
         let mut request = client
-            .delete(format!("{scheme}://{host}{path}"))
-            .header("host", host.clone())
+            .delete(endpoint.url(&path))
+            .header("host", endpoint.host.clone())
             .header("x-amz-date", signed.x_amz_date.clone())
             .header("authorization", signed.authorization.clone());
         if let Some(content_sha256) = &signed.x_amz_content_sha256 {
@@ -772,13 +797,13 @@ impl AssetBucketClient {
     /// #259) uses this to gate the object's size against the registered
     /// intent *before* downloading it for the sha256 + supply-chain checks.
     pub(crate) async fn head_object(&self, key: &str) -> anyhow::Result<Option<u64>> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
-        let signed = self.sign("HEAD", &path, &host, b"");
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
+        let signed = self.sign("HEAD", &path, &endpoint.host, b"");
         let client = provider_http_client()?;
         let mut request = client
-            .head(format!("{scheme}://{host}{path}"))
-            .header("host", host.clone())
+            .head(endpoint.url(&path))
+            .header("host", endpoint.host.clone())
             .header("x-amz-date", signed.x_amz_date.clone())
             .header("authorization", signed.authorization.clone());
         if let Some(content_sha256) = &signed.x_amz_content_sha256 {
@@ -813,8 +838,8 @@ impl AssetBucketClient {
     pub(crate) async fn list_objects(
         &self,
     ) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = format!("/{}", self.config.bucket);
+        let endpoint = self.endpoint()?;
+        let path = endpoint.bucket_path(&self.config.bucket);
         let client = provider_http_client()?;
         let mut objects = Vec::new();
         let mut continuation_token: Option<String> = None;
@@ -834,7 +859,7 @@ impl AssetBucketClient {
                 &SigningRequest {
                     method: "GET",
                     path: &path,
-                    host: &host,
+                    host: &endpoint.host,
                     region: &self.config.region,
                     service: "s3",
                     body: b"",
@@ -848,8 +873,8 @@ impl AssetBucketClient {
                 &canonical_query,
             );
             let mut request = client
-                .get(format!("{scheme}://{host}{path}?{canonical_query}"))
-                .header("host", host.clone())
+                .get(format!("{}?{canonical_query}", endpoint.url(&path)))
+                .header("host", endpoint.host.clone())
                 .header("x-amz-date", signed.x_amz_date.clone())
                 .header("authorization", signed.authorization.clone());
             if let Some(content_sha256) = &signed.x_amz_content_sha256 {
@@ -889,13 +914,13 @@ impl AssetBucketClient {
         size_bytes: u64,
         content_sha256_hex: &str,
     ) -> anyhow::Result<PresignedUpload> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
         let bound = presign_sigv4_query_bound(
             &PresignRequest {
                 method: "PUT",
                 path: &path,
-                host: &host,
+                host: &endpoint.host,
                 region: &self.config.region,
                 service: "s3",
                 expires_secs,
@@ -912,7 +937,7 @@ impl AssetBucketClient {
             },
         );
         Ok(PresignedUpload {
-            url: format!("{scheme}://{host}{path}?{}", bound.query),
+            url: format!("{}?{}", endpoint.url(&path), bound.query),
             required_headers: bound.required_headers,
         })
     }
@@ -935,13 +960,13 @@ impl AssetBucketClient {
         expires_secs: u64,
         timestamp_unix: u64,
     ) -> anyhow::Result<String> {
-        let (scheme, host) = self.scheme_and_host()?;
-        let path = self.object_path(key);
+        let endpoint = self.endpoint()?;
+        let path = endpoint.object_path(&self.config.bucket, key);
         let query = presign_sigv4_query(
             &PresignRequest {
                 method,
                 path: &path,
-                host: &host,
+                host: &endpoint.host,
                 region: &self.config.region,
                 service: "s3",
                 expires_secs,
@@ -953,9 +978,10 @@ impl AssetBucketClient {
                 session_token: None,
             },
         );
-        Ok(format!("{scheme}://{host}{path}?{query}"))
+        Ok(format!("{}?{query}", endpoint.url(&path)))
     }
 
+    #[cfg(test)]
     fn object_path(&self, key: &str) -> String {
         format!("/{}/{key}", self.config.bucket)
     }
@@ -991,13 +1017,30 @@ impl AssetBucketClient {
 
     /// Extracts `(scheme, signed host)` from `config.endpoint` -- mirrors
     /// `bedrock.rs::extract_host`'s http-preserved-for-tests /
-    /// https-otherwise convention. The decomposition itself lives in
-    /// [`parse_endpoint`] because the config-load guards
-    /// (`validate_asset_bucket_r2`) must reason about the *same* value this
-    /// signs; issue #485 was two decompositions drifting apart.
+    /// https-otherwise convention. Path-prefixed S3 endpoints keep their base
+    /// path out of this value; the prefix is part of the canonical URI instead
+    /// (issue #573). The decomposition itself lives in [`parse_endpoint`]
+    /// because the config-load guards (`validate_asset_bucket_r2`) must reason
+    /// about the same endpoint this signs; issue #485 was two decompositions
+    /// drifting apart.
+    #[cfg(test)]
     fn scheme_and_host(&self) -> anyhow::Result<(&'static str, String)> {
+        let endpoint = self.endpoint()?;
+        Ok((endpoint.scheme, endpoint.host))
+    }
+
+    fn endpoint(&self) -> anyhow::Result<AssetBucketEndpoint> {
         let parts = parse_endpoint(&self.config.endpoint)?;
-        Ok((parts.scheme, parts.signing_host()))
+        anyhow::ensure!(
+            parts.path_prefix.is_empty() || parts.path_prefix.starts_with('/'),
+            "asset_bucket.endpoint {} must not contain a query or fragment suffix",
+            self.config.endpoint
+        );
+        Ok(AssetBucketEndpoint {
+            scheme: parts.scheme,
+            host: parts.signing_host(),
+            base_path: parts.path_prefix,
+        })
     }
 }
 

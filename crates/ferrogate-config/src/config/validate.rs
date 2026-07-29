@@ -201,8 +201,8 @@ impl Config {
     /// When the endpoint *is* R2 we enforce the two things a config load can
     /// prove and that R2 gets wrong most often:
     ///   1. the endpoint's *signed host* -- the literal value
-    ///      `AssetBucketClient::scheme_and_host` hands to the SigV4 signer --
-    ///      is the well-formed `<account_id>.r2.cloudflarestorage.com`
+    ///      `AssetBucketClient` hands to the SigV4 signer -- is the
+    ///      well-formed `<account_id>.r2.cloudflarestorage.com`
     ///      (optionally an `.eu.`/`.fedramp.` jurisdiction) with a single-label
     ///      account id and no `:port` or path suffix, and
     ///   2. `region` is `auto`.
@@ -213,7 +213,9 @@ impl Config {
     /// #485 was this guard using a *different*, more forgiving decomposition
     /// (port and path suffix silently dropped, host compared case-sensitively),
     /// so misconfigurations it was written to catch sailed through and
-    /// resurfaced as opaque R2 errors at request time.
+    /// resurfaced as opaque R2 errors at request time. #573 later split generic
+    /// S3 base-path prefixes out of the host header; R2 keeps rejecting such
+    /// prefixes because the account endpoint itself must be bare.
     ///
     /// Credential presence is already enforced by `validate_asset_bucket` when
     /// `enabled = true`, so it is not re-checked here. Live token/bucket
@@ -238,14 +240,17 @@ impl Config {
         if parse_r2_endpoint(endpoint).is_none() {
             let (display_endpoint, signed_host) = parse_endpoint(endpoint)
                 .map(|parts| {
-                    // Userinfo may contain a password. It is still retained in
-                    // the shared parse so the runtime and validator agree on
-                    // the malformed value, but diagnostics must not echo it.
+                    // Userinfo may contain a password. It is retained in the
+                    // shared parse so validation can detect the malformed
+                    // endpoint, but diagnostics must not echo it.
                     match parts.authority.rsplit_once('@') {
                         Some((_, host)) => {
                             let safe_host =
                                 format!("<redacted-userinfo>@{host}{}", parts.path_prefix);
-                            (format!("{}://{safe_host}", parts.scheme), safe_host)
+                            (
+                                format!("{}://{safe_host}", parts.scheme),
+                                parts.signing_host(),
+                            )
                         }
                         None => (endpoint.to_string(), parts.signing_host()),
                     }
@@ -257,7 +262,8 @@ impl Config {
                  https://<account_id>.r2.cloudflarestorage.com (optionally with an \
                  .eu./.fedramp. jurisdiction label); the account id must be a single DNS label and \
                  the endpoint must use https:// and carry no userinfo, port, path, query, or \
-                 fragment. The signer would sign `host: {signed_host}`, which R2 rejects"
+                 fragment. The runtime would send `host: {signed_host}`, which R2 rejects for \
+                 this endpoint shape"
             );
         }
         match bucket.region.as_deref() {

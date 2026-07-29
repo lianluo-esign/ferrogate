@@ -45,22 +45,22 @@ pub struct R2Endpoint {
 /// This type exists so the load-time guards and the runtime signer cannot
 /// disagree about what an endpoint *means*. Before #485 there were two
 /// independent decompositions -- a validation-only `endpoint_host()` that
-/// dropped the port and any path suffix, and
-/// `AssetBucketClient::scheme_and_host` which dropped neither -- so an
-/// endpoint the guard judged to be a clean R2 host could still sign a
-/// completely different `host` header. Both now go through
-/// [`parse_endpoint`], and the R2 guards are written against
-/// [`EndpointParts::signing_host`] (the literal value the signer signs), so a
-/// value the guard accepts is by construction the value the signer sends.
+/// dropped the port and any path suffix, and runtime request construction that
+/// dropped neither -- so an endpoint the guard judged to be a clean R2 host
+/// could still produce a different request target. Both now go through
+/// [`parse_endpoint`]. The runtime signs [`EndpointParts::signing_host`] as the
+/// `host` header and prepends [`EndpointParts::path_prefix`] to the canonical
+/// URI, while the R2 guards reject any R2 endpoint carrying such a prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointParts {
     /// `http` only for an explicit, case-insensitive `http://` endpoint (local
     /// mocks); `https` otherwise, matching `bedrock.rs::extract_host`'s
     /// convention.
     pub scheme: &'static str,
-    /// `[userinfo@]host[:port]`, ASCII-lowercased. Userinfo is retained because
-    /// it is part of the malformed value the runtime would sign; [`Self::host_name`]
-    /// excludes it when detecting R2 so validation can reject the endpoint.
+    /// `[userinfo@]host[:port]`, ASCII-lowercased. Userinfo is retained in the
+    /// parsed shape so validation can detect and reject malformed R2 endpoints;
+    /// [`Self::signing_host`] strips it because an HTTP `Host` header may carry
+    /// only `host[:port]`.
     /// DNS hostnames are case-insensitive, so normalizing here (rather than in
     /// each caller) makes the detector case-insensitive *and* guarantees the
     /// signer signs the same spelling the guard inspected.
@@ -74,20 +74,27 @@ pub struct EndpointParts {
 
 impl EndpointParts {
     /// The literal string the runtime puts in the signed `host` header and in
-    /// the authority position of every request URL it builds. For a
-    /// path-prefixed endpoint this deliberately includes the prefix, because
-    /// that is what the signer does today; the R2 guard rejects such an
-    /// endpoint precisely because this is not a bare R2 host.
+    /// the authority position of every request URL it builds: `host[:port]`,
+    /// with endpoint userinfo and any base-path prefix excluded.
+    ///
+    /// The base-path prefix belongs to the request URI and SigV4 canonical URI,
+    /// not to the signed `host` header. Supabase Storage documents endpoints of
+    /// the form `/storage/v1/s3`; folding that prefix into `host` produces an
+    /// illegal HTTP authority and signs a different resource than the one sent
+    /// on the wire.
     pub fn signing_host(&self) -> String {
-        format!("{}{}", self.authority, self.path_prefix)
+        self.authority
+            .rsplit_once('@')
+            .map_or(self.authority.as_str(), |(_, host)| host)
+            .to_string()
     }
 
     /// The bare DNS host: [`Self::authority`] with any `:port` removed.
     pub fn host_name(&self) -> &str {
-        // Userinfo is not a host. Keep it in `authority` because that is what
-        // the runtime would currently sign, but inspect the actual host so an
-        // R2-shaped endpoint is detected and rejected instead of bypassing the
-        // R2 load-time guard.
+        // Userinfo is not a host. Keep it in `authority` so validation can
+        // reject the malformed endpoint, but inspect the actual host so an
+        // R2-shaped endpoint is detected instead of bypassing the R2 load-time
+        // guard.
         let authority = self
             .authority
             .rsplit_once('@')
@@ -104,7 +111,7 @@ impl EndpointParts {
 }
 
 /// Decomposes `asset_bucket.endpoint` the way the runtime signer does. THE
-/// single source of truth for "what host will we sign?" -- see
+/// single source of truth for "what host and base path will we sign?" -- see
 /// [`EndpointParts`].
 pub fn parse_endpoint(endpoint: &str) -> anyhow::Result<EndpointParts> {
     let raw = endpoint.trim();
@@ -165,11 +172,11 @@ pub fn endpoint_targets_r2(endpoint: &str) -> bool {
 ///
 /// The port/path rejections are the #485 fix: R2 addresses buckets path-style
 /// off the account host, so anything beyond that host is not "ignored" by the
-/// runtime -- `AssetBucketClient::scheme_and_host` folds it into the signed
-/// `host` header and the request URL, which R2 rejects with an opaque error.
-/// `Some(_)` therefore carries a promise: reassembling the returned account id
-/// and jurisdiction reproduces [`EndpointParts::signing_host`] exactly (pinned
-/// by `r2_validation_and_the_runtime_signer_agree_on_every_endpoint`).
+/// runtime request path. R2 rejects any base path prefix with an opaque error,
+/// so the load-time guard rejects it first. `Some(_)` therefore carries a
+/// promise: reassembling the returned account id and jurisdiction reproduces
+/// [`EndpointParts::signing_host`] exactly and leaves
+/// [`EndpointParts::path_prefix`] empty.
 pub fn parse_r2_endpoint(endpoint: &str) -> Option<R2Endpoint> {
     let parts = parse_endpoint(endpoint).ok()?;
     if parts.scheme != "https" {
