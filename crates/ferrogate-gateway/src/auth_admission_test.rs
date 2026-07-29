@@ -175,10 +175,7 @@ fn bearer_headers(secret: &str) -> HeaderMap {
 #[test]
 fn durable_virtual_key_authenticates_ahead_of_yaml_fallback_and_carries_attribution() {
     let secret = "fg_live_e2e_0123456789abcdef";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-1", secret, |key| {
         key.allowed_models = vec!["fast-chat".into()];
         key.monthly_token_budget = Some(500);
@@ -244,10 +241,7 @@ fn yaml_key_carries_explicit_workspace_and_user_attribution() {
 fn durable_virtual_key_rotation_invalidates_previous_secret() {
     let old_secret = "fg_live_rotate_old_0123456789";
     let new_secret = "fg_live_rotate_new_9876543210";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-rotate", old_secret, |_| {});
 
     assert!(authenticate(
@@ -287,10 +281,7 @@ fn durable_virtual_key_rotation_invalidates_previous_secret() {
 
 #[test]
 fn durable_virtual_key_rejects_disabled_revoked_expired_and_exhausted_budget() {
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
 
     let disabled_secret = "fg_live_disabled_0123456789ab";
     seed_durable_virtual_key(&state, "vk-disabled", disabled_secret, |key| {
@@ -345,10 +336,7 @@ fn durable_virtual_key_rejects_disabled_revoked_expired_and_exhausted_budget() {
 #[test]
 fn durable_virtual_key_enforces_its_own_request_rate_limit() {
     let secret = "fg_live_rpm_0123456789abcdef01";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-rpm", secret, |key| {
         key.request_limit_per_minute = Some(1);
     });
@@ -364,10 +352,7 @@ fn quota_policy_disabled_at_any_scope_is_a_hard_deny() {
     use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
 
     let secret = "fg_live_quota_deny_0123456789ab";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-quota-deny", secret, |_| {});
     block_on(state.upsert_quota_policy(StoredQuotaPolicy {
         id: "tenant:tenant-1".into(),
@@ -399,10 +384,7 @@ fn quota_policy_rpm_composes_with_the_keys_own_limit_as_a_single_counter() {
     use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
 
     let secret = "fg_live_quota_rpm_0123456789ab";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     // Key's own RPM cap is generous (10); the tenant-level quota policy
     // is much tighter (1) and must be the one that actually governs.
     seed_durable_virtual_key(&state, "vk-quota-rpm", secret, |key| {
@@ -444,10 +426,7 @@ fn workspace_scoped_rpm_limit_is_shared_across_two_keys_under_the_workspace() {
     // its own request_limit_per_minute, and there is no tenant/project cap.
     let secret_a = "fg_live_ws_rpm_a_0123456789ab";
     let secret_b = "fg_live_ws_rpm_b_0123456789ab";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-ws-rpm-a", secret_a, |_| {});
     seed_durable_virtual_key(&state, "vk-ws-rpm-b", secret_b, |_| {});
     block_on(state.upsert_quota_policy(StoredQuotaPolicy {
@@ -510,10 +489,7 @@ fn broader_scope_rpm_cap_binds_even_when_a_key_sets_its_own_equal_limit() {
     // windows, so the aggregate still binds across keys.
     let secret_a = "fg_live_agg_rpm_a_0123456789ab";
     let secret_b = "fg_live_agg_rpm_b_0123456789ab";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     // Each key's own rpm limit EQUALS the aggregate cap (the pre-fix bypass).
     seed_durable_virtual_key(&state, "vk-agg-rpm-a", secret_a, |key| {
         key.request_limit_per_minute = Some(1);
@@ -574,10 +550,7 @@ fn key_level_rpm_limit_still_throttles_each_key_independently() {
     // remain fully independent -- exhausting key A must not throttle key B.
     let secret_a = "fg_live_key_rpm_a_0123456789ab";
     let secret_b = "fg_live_key_rpm_b_0123456789ab";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-key-rpm-a", secret_a, |key| {
         key.request_limit_per_minute = Some(1);
     });
@@ -625,10 +598,7 @@ fn workspace_scoped_tpm_window_is_one_shared_counter_across_two_keys() {
     // window -- exercising exactly the derivation the dispatch path uses.
     let secret_a = "fg_live_ws_tpm_a_0123456789ab";
     let secret_b = "fg_live_ws_tpm_b_0123456789ab";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-ws-tpm-a", secret_a, |_| {});
     seed_durable_virtual_key(&state, "vk-ws-tpm-b", secret_b, |_| {});
     block_on(state.upsert_quota_policy(StoredQuotaPolicy {
@@ -692,10 +662,7 @@ fn quota_policy_model_allowlist_intersects_with_the_keys_own_allowlist() {
     use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
 
     let secret = "fg_live_quota_models_0123456789";
-    let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
-        ..Config::default()
-    });
+    let state = AppState::new(Config::default());
     seed_durable_virtual_key(&state, "vk-quota-models", secret, |key| {
         key.allowed_models = vec!["fast-chat".into(), "smart-chat".into()];
     });
@@ -737,7 +704,6 @@ fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
 
     let secret = "fg_live_quota_budget_0123456789";
     let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
         providers: vec![Provider {
             region: None,
             aws_access_key_id: None,
@@ -855,7 +821,6 @@ fn tenant_scoped_monthly_budget_is_shared_across_two_keys_under_the_tenant() {
     let secret_a = "fg_live_tbudget_a_0123456789ab";
     let secret_b = "fg_live_tbudget_b_0123456789ab";
     let state = AppState::new(Config {
-        api_keys: vec![decoy_yaml_key()],
         providers: vec![Provider {
             region: None,
             aws_access_key_id: None,
