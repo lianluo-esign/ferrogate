@@ -132,8 +132,7 @@ pub fn parse_endpoint(endpoint: &str) -> anyhow::Result<EndpointParts> {
     // `?` and `#` terminate the authority just as `/` does. Keeping either in
     // the authority made an R2 hostname invisible to the detector while the
     // runtime still signed the entire malformed value.
-    let (authority, path_prefix) = match rest.find(|character| matches!(character, '/' | '?' | '#'))
-    {
+    let (authority, path_prefix) = match rest.find(['/', '?', '#']) {
         Some(index) => (&rest[..index], &rest[index..]),
         None => (rest, ""),
     };
