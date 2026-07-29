@@ -576,7 +576,7 @@ pub(super) fn now_unix_seconds() -> i64 {
 /// migration availability is not evidence that FerroGate may request a
 /// certificate for the hostname.
 pub(super) fn eligible_for_acme(record: &StoredSiteDomainVerification, now_unix: i64) -> bool {
-    record.effective_state(now_unix) == SiteDomainVerificationState::Verified
+    record.has_live_dns_ownership_proof(now_unix)
 }
 
 /// The bound hostnames that currently hold a LIVE ownership proof.

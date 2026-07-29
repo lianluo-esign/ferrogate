@@ -223,6 +223,15 @@ impl StoredSiteDomainVerification {
     pub fn serves(&self, now_unix: i64) -> bool {
         self.effective_state(now_unix).serves()
     }
+
+    /// Whether this row is a live DNS ownership proof as of `now_unix`.
+    ///
+    /// This is intentionally narrower than [`Self::serves`]: `grandfathered`
+    /// records preserve upgrade availability, but they are not evidence that the
+    /// tenant currently controls the hostname.
+    pub fn has_live_dns_ownership_proof(&self, now_unix: i64) -> bool {
+        self.effective_state(now_unix) == SiteDomainVerificationState::Verified
+    }
 }
 
 /// Composite in-memory identity for a verification row. Length-prefixed on the

@@ -95,14 +95,9 @@ impl D1ControlPlaneStore {
                         SELECT 1 FROM site_domain_verifications holder \
                         WHERE holder.tenant_id = site_domains.tenant_id \
                           AND holder.hostname = site_domains.hostname \
-                          AND ( \
-                              holder.state = 'grandfathered' \
-                              OR ( \
-                                  holder.state = 'verified' \
-                                  AND (holder.verification_expires_at_unix IS NULL \
-                                       OR holder.verification_expires_at_unix > ?) \
-                              ) \
-                          ) \
+                          AND holder.state = 'verified' \
+                          AND (holder.verification_expires_at_unix IS NULL \
+                               OR holder.verification_expires_at_unix > ?) \
                     )",
                 vec![
                     domain.hostname,

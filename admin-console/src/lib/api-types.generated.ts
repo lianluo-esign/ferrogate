@@ -18201,7 +18201,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Existing proven binding for the hostname updated (re-bound within the same tenant). Still serving; the ACME order set is unchanged. */
+            /** @description Existing servable binding for the hostname updated (re-bound within the same tenant). Still serving; ACME enrollment still requires a live `verified` ownership proof, not a `grandfathered` migration record. */
             200: {
                 headers: {
                     "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
@@ -18211,7 +18211,7 @@ export interface operations {
                     "application/json": components["schemas"]["AdminSiteDomainResponse"];
                 };
             };
-            /** @description Site domain bound and serving: a newly created binding whose ownership was already proven, so the hostname is in the ACME order set and serves immediately. */
+            /** @description Site domain bound and serving immediately. Only a live `verified` ownership proof enrolls the hostname in the ACME order set; a `grandfathered` migration record may keep serving but is not certificate-issuance proof. */
             201: {
                 headers: {
                     "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];

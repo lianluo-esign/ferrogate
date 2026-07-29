@@ -14,18 +14,19 @@
 // same listener-level graceful upgrade a scheduled renewal uses -- no
 // duplicate PKI path.
 //
-// #488 (security): a bind records INTENT, never ownership. Every servable path
-// here is now gated on a DNS-TXT ownership proof for the binding's
-// `(tenant, hostname)` (see `site_domain_verification.rs`):
+// #488 (security): a bind records INTENT, never ownership. New bindings only
+// serve after a DNS-TXT ownership proof for the binding's `(tenant, hostname)`;
+// pre-#488 bindings may carry an explicit grandfathered serving exception (see
+// `site_domain_verification.rs`):
 //   * the data-plane serve gate refuses a hostname whose proof is missing,
 //     pending, or expired -- and refuses it when the proof cannot be READ at
 //     all, so a store outage can never open the gate;
 //   * binding an unbound hostname issues a challenge and returns 202 instead of
 //     making the hostname servable, so an unowned FQDN never lands in the ACME
 //     order set (the failed-order rate-limit pollution the issue calls out);
-//   * final binding writes are a storage-level conditional claim (#575): create
-//     if absent, replace only inside the same tenant, and reject a different
-//     current tenant even if an earlier preflight read was stale.
+//   * verified ownership writes are a storage-level conditional claim (#575):
+//     create if absent, replace inside the same tenant, and reject a different
+//     current tenant only when that tenant holds a live DNS ownership proof.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,8 +40,9 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::route_groups::RequestParts;
 use super::site_domain_verification::{
-    challenge_record_name, challenge_txt_value, new_challenge_token, resolve_challenge,
-    reusable_on_rebind, AdminSiteDomainVerification, ChallengeOutcome, SiteDomainResolverBackend,
+    challenge_record_name, challenge_txt_value, eligible_for_acme, new_challenge_token,
+    resolve_challenge, reusable_on_rebind, AdminSiteDomainVerification, ChallengeOutcome,
+    SiteDomainResolverBackend,
 };
 use super::{FerroGateway, ProxyContext};
 use crate::auth::{authorize_tenant_scope, enforce_tenant_filter};
@@ -61,8 +63,9 @@ impl FerroGateway {
     /// control-plane store.
     ///
     /// #488: a binding alone is NOT sufficient. The hostname additionally needs
-    /// a live DNS-TXT ownership proof for the binding's tenant; a missing,
-    /// pending, or expired proof -- and an unreadable one -- all fail closed to
+    /// either a live DNS-TXT ownership proof for the binding's tenant or the
+    /// explicit `grandfathered` migration serving exception; a missing, pending,
+    /// or expired proof -- and an unreadable one -- all fail closed to
     /// `Ok(false)`, i.e. the tenant's site is not served on this hostname.
     pub(super) async fn try_custom_domain_site_serve(
         &self,
@@ -454,7 +457,8 @@ impl FerroGateway {
                 StoredSiteDomainVerification::pending(&tenant_id, &hostname, &site, token, now)
             }
         };
-        let proven = verification.serves(now);
+        let serving = verification.serves(now);
+        let live_ownership_proof = eligible_for_acme(&verification, now);
         if let Err(error) = state
             .upsert_site_domain_verification(verification.clone())
             .await
@@ -507,7 +511,7 @@ impl FerroGateway {
         // #488: an unproven hostname must NOT enter the ACME order set. That is
         // both the certificate-issuance rate-limit pollution the issue calls
         // out and a second place an unowned hostname would become real.
-        let acme = if proven {
+        let acme = if live_ownership_proof {
             self.refresh_acme_after_domain_change(&state, &hostname, true)
         } else {
             self.site_domain_acme_state(&state)
@@ -521,12 +525,12 @@ impl FerroGateway {
             "committed",
             format!(
                 "custom domain {hostname} bound to site {tenant_id}/{site} \
-                 (verification_state={}, serving={proven}, binding_written=true, \
-                 acme_enabled={}, reload_triggered={})",
-                admin_verification.state, acme.enabled, acme.reload_triggered
+                 (verification_state={}, serving={serving}, live_ownership_proof={}, \
+                 binding_written=true, acme_enabled={}, reload_triggered={})",
+                admin_verification.state, live_ownership_proof, acme.enabled, acme.reload_triggered
             ),
         ));
-        let terminal = site_domain_bind_status(proven, existing.is_some());
+        let terminal = site_domain_bind_status(serving, existing.is_some());
         write_json_response(
             session,
             terminal.status(),
@@ -717,17 +721,17 @@ impl FerroGateway {
                 };
                 if let Some(existing) = existing.as_ref() {
                     if existing.tenant_id != tenant_id {
-                        let holder_proven = match state
+                        let holder_has_live_dns_proof = match state
                             .get_site_domain_verification(&existing.tenant_id, &hostname)
                             .await
                         {
-                            Ok(Some(holder)) => holder.serves(now),
+                            Ok(Some(holder)) => eligible_for_acme(&holder, now),
                             Ok(None) => false,
                             Err(error) => {
                                 return storage_error(session, ctx, error.to_string()).await
                             }
                         };
-                        if holder_proven {
+                        if holder_has_live_dns_proof {
                             audit(
                                 "rejected",
                                 format!(
@@ -1045,13 +1049,18 @@ fn admin_site_domain(
 /// branch for the one case that matters -- a 2xx meaning "recorded but NOT
 /// serving".
 ///
-/// * `202 Accepted` -- ownership unproven. The binding is recorded, the
-///   hostname is deliberately kept OUT of the ACME order set (#488), and it
-///   will not answer traffic until `POST .../{hostname}/verify` succeeds.
-/// * `200 OK` -- an already-proven binding re-bound within the same tenant.
-/// * `201 Created` -- a new binding whose ownership was already proven.
-fn site_domain_bind_status(proven: bool, existing: bool) -> BindTerminal {
-    bind_terminal::BindTerminal::select(proven, existing)
+/// * `202 Accepted` -- ownership unproven and not serving. The binding is
+///   recorded, the hostname is deliberately kept OUT of the ACME order set
+///   (#488), and it will not answer traffic until
+///   `POST .../{hostname}/verify` succeeds.
+/// * `200 OK` -- an existing binding re-bound within the same tenant and still
+///   serving. A grandfathered record may satisfy this serving exception without
+///   becoming ACME-eligible ownership proof.
+/// * `201 Created` -- a new binding that is serving immediately. Only a live
+///   `verified` proof enrolls it in ACME; a `grandfathered` migration record is
+///   serving-only.
+fn site_domain_bind_status(serving: bool, existing: bool) -> BindTerminal {
+    bind_terminal::BindTerminal::select(serving, existing)
 }
 
 /// The bind handler's success status, constructible ONLY by
@@ -1106,8 +1115,8 @@ mod bind_terminal {
 
     impl BindTerminal {
         /// The three-way terminal. This is the ONLY constructor.
-        pub(super) fn select(proven: bool, existing: bool) -> BindTerminal {
-            BindTerminal(match (proven, existing) {
+        pub(super) fn select(serving: bool, existing: bool) -> BindTerminal {
+            BindTerminal(match (serving, existing) {
                 (false, _) => StatusCode::ACCEPTED,
                 (true, true) => StatusCode::OK,
                 (true, false) => StatusCode::CREATED,

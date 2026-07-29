@@ -147,10 +147,12 @@ impl PostgresControlPlaneStore {
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
         // Verification is the only path allowed to take over another tenant's
-        // unservable placeholder (#488/#575). Keep the takeover decision in
-        // the same guarded upsert as the write: if the current holder proves
-        // ownership between the handler's preflight read and this mutation, the
-        // WHERE clause observes that proof and returns a conflict.
+        // placeholder that lacks live DNS ownership proof (#488/#575).
+        // Grandfathered rows may preserve serving availability, but they are not
+        // proof. Keep the takeover decision in the same guarded upsert as the
+        // write: if the current holder proves ownership between the handler's
+        // preflight read and this mutation, the WHERE clause observes that proof
+        // and returns a conflict.
         let transaction = client.transaction().await.map_err(postgres_error)?;
         if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
             transaction
@@ -178,14 +180,9 @@ impl PostgresControlPlaneStore {
                             SELECT 1 FROM site_domain_verifications holder \
                             WHERE holder.tenant_id = site_domains.tenant_id \
                               AND holder.hostname = site_domains.hostname \
-                              AND ( \
-                                  holder.state = 'grandfathered' \
-                                  OR ( \
-                                      holder.state = 'verified' \
-                                      AND (holder.verification_expires_at_unix IS NULL \
-                                           OR holder.verification_expires_at_unix > $6) \
-                                  ) \
-                              ) \
+                              AND holder.state = 'verified' \
+                              AND (holder.verification_expires_at_unix IS NULL \
+                                   OR holder.verification_expires_at_unix > $6) \
                         ) \
                      RETURNING {SITE_DOMAIN_COLUMNS}"
                 ),
@@ -329,11 +326,13 @@ impl RuntimeControlPlaneState {
             } else {
                 let holder_key =
                     site_domain_verification_key(&existing.tenant_id, &existing.hostname);
-                let holder_serves = self
+                let holder_has_live_dns_proof = self
                     .site_domain_verifications
                     .get(&holder_key)
-                    .is_some_and(|verification| verification.serves(now_unix));
-                if holder_serves {
+                    .is_some_and(|verification| {
+                        verification.has_live_dns_ownership_proof(now_unix)
+                    });
+                if holder_has_live_dns_proof {
                     return Err(StorageError::Conflict(
                         SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string(),
                     ));
