@@ -18,7 +18,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -82,6 +82,10 @@ impl MockServer {
             .last()
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
     }
 }
 
@@ -501,6 +505,234 @@ fn operator_gateway_configs_list_table_output() {
         "table header: {out}"
     );
     assert!(out.contains("gw-default"), "table body: {out}");
+}
+
+#[test]
+fn guarded_wallet_adjust_without_ack_never_reaches_transport() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"wallet","tenant_id":"tenant-a"}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .stdin(Stdio::null())
+        .args([
+            "ctl",
+            "wallets",
+            "adjust",
+            "tenant-a",
+            "--data",
+            r#"{"delta_credits":-100}"#,
+            "--endpoint",
+            &mock.base_url,
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        code(&output),
+        2,
+        "unacknowledged guarded execution must fail as usage: {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("requires confirmation"),
+        "error names the confirmation requirement: {}",
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).trim().is_empty(),
+        "a refused mutation must not emit a receipt: {}",
+        stdout(&output)
+    );
+    assert_eq!(
+        mock.request_count(),
+        0,
+        "guarded mutation reached transport without --yes"
+    );
+}
+
+#[test]
+fn guarded_wallet_adjust_non_interactive_requires_yes_before_transport() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"wallet","tenant_id":"tenant-a"}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .stdin(Stdio::null())
+        .args([
+            "ctl",
+            "wallets",
+            "adjust",
+            "tenant-a",
+            "--data",
+            r#"{"delta_credits":-100}"#,
+            "--endpoint",
+            &mock.base_url,
+            "--non-interactive",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        code(&output),
+        2,
+        "non-interactive guarded mutation must fail as usage: {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("--yes"),
+        "non-interactive refusal points at explicit acknowledgement: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        mock.request_count(),
+        0,
+        "--non-interactive guarded mutation reached transport without --yes"
+    );
+}
+
+#[test]
+fn guarded_wallet_adjust_yes_reaches_transport_exactly_once() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[
+            ("content-type", "application/json"),
+            ("x-request-id", "rid-wallet-adjust"),
+        ],
+        r#"{"object":"wallet","tenant_id":"tenant-a","balance_credits":900}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .stdin(Stdio::null())
+        .args([
+            "ctl",
+            "wallets",
+            "adjust",
+            "tenant-a",
+            "--data",
+            r#"{"delta_credits":-100}"#,
+            "--endpoint",
+            &mock.base_url,
+            "--non-interactive",
+            "--yes",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(mock.request_count(), 1, "--yes must send one request");
+    assert_eq!(
+        mock.last_request(),
+        "POST /admin/v1/wallets/tenant-a/adjust"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_str(stdout(&output).trim()).unwrap_or_else(|error| {
+            panic!(
+                "stdout must be a JSON receipt ({error}): {}",
+                stdout(&output)
+            )
+        });
+    assert_eq!(receipt["object"], "mutation_receipt", "{receipt}");
+    assert_eq!(receipt["dry_run"], false, "{receipt}");
+    assert_eq!(receipt["response"]["balance_credits"], 900, "{receipt}");
+    assert!(
+        stderr(&output).contains("request-id: rid-wallet-adjust"),
+        "request id stays diagnostic: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn guarded_wallet_adjust_dry_run_sends_no_request() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"wallet","tenant_id":"tenant-a"}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .stdin(Stdio::null())
+        .args([
+            "ctl",
+            "wallets",
+            "adjust",
+            "tenant-a",
+            "--data",
+            r#"{"delta_credits":-100}"#,
+            "--endpoint",
+            &mock.base_url,
+            "--non-interactive",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(mock.request_count(), 0, "dry-run must not send");
+    let receipt: serde_json::Value =
+        serde_json::from_str(stdout(&output).trim()).unwrap_or_else(|error| {
+            panic!(
+                "stdout must be a JSON receipt ({error}): {}",
+                stdout(&output)
+            )
+        });
+    assert_eq!(receipt["object"], "mutation_receipt", "{receipt}");
+    assert_eq!(receipt["dry_run"], true, "{receipt}");
+    assert_eq!(
+        receipt["target"]["path"], "/admin/v1/wallets/tenant-a/adjust",
+        "{receipt}"
+    );
+}
+
+#[test]
+fn unguarded_mutation_still_sends_without_yes() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = spawn_mock(http_response(
+        201,
+        "Created",
+        &[("content-type", "application/json")],
+        r#"{"id":"vk-new","label":"ci"}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .stdin(Stdio::null())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "create",
+            "--data",
+            r#"{"label":"ci"}"#,
+            "--endpoint",
+            &mock.base_url,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        mock.request_count(),
+        1,
+        "ordinary unguarded mutations must not inherit the confirmation gate"
+    );
+    assert_eq!(mock.last_request(), "POST /admin/v1/virtual-keys");
 }
 
 // ----- error → exit-class ----------------------------------------------------

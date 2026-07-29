@@ -638,3 +638,56 @@ fn every_verb_in_the_shipping_tree_is_gated() {
     }
     assert!(gated > 200, "expected 200+ gated verbs, saw {gated}");
 }
+
+#[test]
+fn confirmation_required_metadata_set_is_exactly_the_guarded_operator_actions() {
+    let registry = registry();
+    let mut guarded = registry
+        .groups()
+        .iter()
+        .flat_map(|group| {
+            group
+                .verbs
+                .iter()
+                .filter(|verb| verb.requires_confirmation())
+                .map(|verb| format!("{} {}", group.name, verb.name))
+        })
+        .collect::<Vec<_>>();
+    guarded.sort();
+
+    assert_eq!(
+        guarded,
+        [
+            "billing-events replay",
+            "config reload",
+            "drain set",
+            "wallets adjust",
+            "wallets charge",
+        ],
+        "the command tree's --yes surface and the sending-side confirmation gate \
+         must agree on the exact guarded set"
+    );
+
+    let command = build_ctl_command(&registry);
+    for guarded_command in guarded {
+        let (group, verb) = guarded_command.split_once(' ').unwrap();
+        let matches = command
+            .clone()
+            .try_get_matches_from(["ctl", group, verb, "target-id", "--data", "{}", "--yes"])
+            .unwrap_or_else(|error| {
+                panic!("guarded command '{guarded_command}' did not expose --yes: {error}")
+            });
+        let confirmed = matches
+            .subcommand()
+            .unwrap()
+            .1
+            .subcommand()
+            .unwrap()
+            .1
+            .get_flag(CONFIRM_ARG);
+        assert!(
+            confirmed,
+            "guarded command '{guarded_command}' parsed --yes as false"
+        );
+    }
+}
