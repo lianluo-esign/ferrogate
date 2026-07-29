@@ -768,7 +768,7 @@ impl FerroGateway {
                         .map_or(now, |existing| existing.created_at_unix),
                     updated_at_unix: now,
                 };
-                let domain = match state.claim_site_domain(domain).await {
+                let domain = match state.claim_verified_site_domain(domain, now).await {
                     Ok(claimed) => claimed,
                     Err(StorageError::Conflict(_)) => {
                         audit(

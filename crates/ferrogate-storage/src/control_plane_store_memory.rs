@@ -1709,6 +1709,16 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .claim_site_domain(domain)
     }
 
+    async fn claim_verified_site_domain(
+        &self,
+        domain: StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
+            .claim_verified_site_domain(domain, now_unix)
+    }
+
     async fn get_site_domain(
         &self,
         hostname: &str,

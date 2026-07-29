@@ -70,6 +70,63 @@ impl D1ControlPlaneStore {
         })
     }
 
+    pub(super) async fn claim_verified_site_domain_async(
+        &self,
+        domain: StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        let hostname = domain.hostname.clone();
+        let result = self
+            .execute_control(
+                "INSERT INTO site_domains \
+                 (hostname, tenant_id, site, created_at_unix, updated_at_unix) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (hostname) DO UPDATE SET \
+                 tenant_id = excluded.tenant_id, \
+                 site = excluded.site, \
+                 created_at_unix = CASE \
+                     WHEN site_domains.tenant_id = excluded.tenant_id \
+                     THEN site_domains.created_at_unix \
+                     ELSE excluded.created_at_unix \
+                 END, \
+                 updated_at_unix = excluded.updated_at_unix \
+                 WHERE site_domains.tenant_id = excluded.tenant_id \
+                    OR NOT EXISTS ( \
+                        SELECT 1 FROM site_domain_verifications holder \
+                        WHERE holder.tenant_id = site_domains.tenant_id \
+                          AND holder.hostname = site_domains.hostname \
+                          AND ( \
+                              holder.state = 'grandfathered' \
+                              OR ( \
+                                  holder.state = 'verified' \
+                                  AND (holder.verification_expires_at_unix IS NULL \
+                                       OR holder.verification_expires_at_unix > ?) \
+                              ) \
+                          ) \
+                    )",
+                vec![
+                    domain.hostname,
+                    domain.tenant_id,
+                    domain.site,
+                    domain.created_at_unix.to_string(),
+                    domain.updated_at_unix.to_string(),
+                    now_unix.to_string(),
+                ],
+            )
+            .await?;
+        if result.changes() == 0 {
+            return Err(StorageError::Conflict(
+                SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string(),
+            ));
+        }
+        self.get_site_domain_async(&hostname).await?.ok_or_else(|| {
+            StorageError::Runtime(format!(
+                "cloudflare d1: verified site domain {hostname} claim succeeded but row could \
+                 not be reloaded"
+            ))
+        })
+    }
+
     pub(super) async fn get_site_domain_async(
         &self,
         hostname: &str,

@@ -1222,6 +1222,14 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
         PostgresControlPlaneStore::claim_site_domain(self, &domain).await
     }
 
+    async fn claim_verified_site_domain(
+        &self,
+        domain: StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        PostgresControlPlaneStore::claim_verified_site_domain(self, &domain, now_unix).await
+    }
+
     async fn get_site_domain(
         &self,
         hostname: &str,

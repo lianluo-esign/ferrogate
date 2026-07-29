@@ -1941,6 +1941,15 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         self.claim_site_domain_async(domain).await
     }
 
+    async fn claim_verified_site_domain(
+        &self,
+        domain: StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        self.claim_verified_site_domain_async(domain, now_unix)
+            .await
+    }
+
     async fn get_site_domain(
         &self,
         hostname: &str,

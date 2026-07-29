@@ -605,6 +605,11 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         &self,
         domain: StoredSiteDomain,
     ) -> Result<StoredSiteDomain, StorageError>;
+    async fn claim_verified_site_domain(
+        &self,
+        domain: StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError>;
     async fn get_site_domain(
         &self,
         hostname: &str,

@@ -10,8 +10,9 @@
 // the "one business entity per file" convention (mirrors `agent_schedule.rs`).
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
-    RuntimeStorageRepositories, StorageError, StorageOperation,
+    postgres_error, site_domain_verification_key, PostgresControlPlaneStore, PostgresRow,
+    Repository, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
+    StorageOperation,
 };
 
 /// One hostname -> static-site binding. `hostname` is stored normalized
@@ -135,6 +136,76 @@ impl PostgresControlPlaneStore {
             .ok_or_else(|| StorageError::Conflict(SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string()))
     }
 
+    pub(super) async fn claim_verified_site_domain(
+        &self,
+        domain: &StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        let operation = self.site_domain_operation("claim verified site domain");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Verification is the only path allowed to take over another tenant's
+        // unservable placeholder (#488/#575). Keep the takeover decision in
+        // the same guarded upsert as the write: if the current holder proves
+        // ownership between the handler's preflight read and this mutation, the
+        // WHERE clause observes that proof and returns a conflict.
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
+            .query_opt(
+                &format!(
+                    "INSERT INTO site_domains \
+                     (hostname, tenant_id, site, created_at_unix, updated_at_unix) \
+                     VALUES ($1, $2, $3, $4, $5) \
+                     ON CONFLICT (hostname) DO UPDATE SET \
+                         tenant_id = EXCLUDED.tenant_id, \
+                         site = EXCLUDED.site, \
+                         created_at_unix = CASE \
+                             WHEN site_domains.tenant_id = EXCLUDED.tenant_id \
+                             THEN site_domains.created_at_unix \
+                             ELSE EXCLUDED.created_at_unix \
+                         END, \
+                         updated_at_unix = EXCLUDED.updated_at_unix \
+                     WHERE site_domains.tenant_id = EXCLUDED.tenant_id \
+                        OR NOT EXISTS ( \
+                            SELECT 1 FROM site_domain_verifications holder \
+                            WHERE holder.tenant_id = site_domains.tenant_id \
+                              AND holder.hostname = site_domains.hostname \
+                              AND ( \
+                                  holder.state = 'grandfathered' \
+                                  OR ( \
+                                      holder.state = 'verified' \
+                                      AND (holder.verification_expires_at_unix IS NULL \
+                                           OR holder.verification_expires_at_unix > $6) \
+                                  ) \
+                              ) \
+                        ) \
+                     RETURNING {SITE_DOMAIN_COLUMNS}"
+                ),
+                &[
+                    &domain.hostname,
+                    &domain.tenant_id,
+                    &domain.site,
+                    &domain.created_at_unix,
+                    &domain.updated_at_unix,
+                    &now_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        row.as_ref()
+            .map(site_domain_from_row)
+            .ok_or_else(|| StorageError::Conflict(SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string()))
+    }
+
     pub(super) async fn get_site_domain(
         &self,
         hostname: &str,
@@ -247,6 +318,33 @@ impl RuntimeControlPlaneState {
         Ok(domain)
     }
 
+    pub(super) fn claim_verified_site_domain(
+        &mut self,
+        mut domain: StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        if let Some(existing) = self.site_domains.get(&domain.hostname) {
+            if existing.tenant_id == domain.tenant_id {
+                domain.created_at_unix = existing.created_at_unix;
+            } else {
+                let holder_key =
+                    site_domain_verification_key(&existing.tenant_id, &existing.hostname);
+                let holder_serves = self
+                    .site_domain_verifications
+                    .get(&holder_key)
+                    .is_some_and(|verification| verification.serves(now_unix));
+                if holder_serves {
+                    return Err(StorageError::Conflict(
+                        SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE.to_string(),
+                    ));
+                }
+            }
+        }
+        self.site_domains
+            .insert(domain.hostname.clone(), domain.clone());
+        Ok(domain)
+    }
+
     pub(super) fn get_site_domain(&self, hostname: &str) -> Option<StoredSiteDomain> {
         self.site_domains.get(hostname)
     }
@@ -277,6 +375,17 @@ impl RuntimeStorageRepositories {
         domain: StoredSiteDomain,
     ) -> Result<StoredSiteDomain, StorageError> {
         self.control_plane.store().claim_site_domain(domain).await
+    }
+
+    pub async fn claim_verified_site_domain(
+        &self,
+        domain: StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<StoredSiteDomain, StorageError> {
+        self.control_plane
+            .store()
+            .claim_verified_site_domain(domain, now_unix)
+            .await
     }
 
     pub async fn get_site_domain(

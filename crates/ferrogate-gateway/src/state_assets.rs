@@ -303,6 +303,20 @@ impl AppState {
         self.repositories.claim_site_domain(domain).await
     }
 
+    /// Verification-time hostname claim (#575). Unlike the bind path, a
+    /// completed DNS proof may take over another tenant's unservable placeholder
+    /// but must still fail closed if that tenant proves ownership before the
+    /// final write.
+    pub(crate) async fn claim_verified_site_domain(
+        &self,
+        domain: ferrogate_storage::StoredSiteDomain,
+        now_unix: i64,
+    ) -> Result<ferrogate_storage::StoredSiteDomain, StorageError> {
+        self.repositories
+            .claim_verified_site_domain(domain, now_unix)
+            .await
+    }
+
     pub(crate) async fn get_site_domain(
         &self,
         hostname: &str,
