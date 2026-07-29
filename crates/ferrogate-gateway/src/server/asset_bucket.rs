@@ -1776,6 +1776,14 @@ mod tests {
         })
     }
 
+    fn test_credentials(bucket: &AssetBucketClient) -> AwsCredentials {
+        AwsCredentials {
+            access_key_id: bucket.config.access_key_id.clone(),
+            secret_access_key: bucket.config.secret_access_key.clone(),
+            session_token: None,
+        }
+    }
+
     #[tokio::test]
     async fn put_object_sends_a_signed_path_style_request_with_the_body() {
         let (endpoint, captured) = spawn_bucket_mock("200 OK", b"");
@@ -1840,11 +1848,7 @@ mod tests {
                 .as_deref()
                 .expect("runtime sent x-amz-date"),
         );
-        let credentials = AwsCredentials {
-            access_key_id: bucket.config.access_key_id.clone(),
-            secret_access_key: bucket.config.secret_access_key.clone(),
-            session_token: None,
-        };
+        let credentials = test_credentials(&bucket);
         let fixed = sign_sigv4_with_content_hash_header(
             &SigningRequest {
                 method: "PUT",
@@ -2843,6 +2847,12 @@ mod tests {
         assert!(upload.url.starts_with(
             "https://project.supabase.co/storage/v1/s3/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0?"
         ));
+        assert_eq!(
+            upload.url.matches("/storage/v1/s3").count(),
+            1,
+            "the endpoint base path must be included exactly once in the presigned URL: {}",
+            upload.url
+        );
         // SigV4 query-string presign markers, bounded TTL, and a signature.
         assert!(upload.url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
         assert!(upload.url.contains("X-Amz-Expires=900"));
@@ -2958,6 +2968,92 @@ mod tests {
         assert!(request.path.starts_with("/ferrogate-assets?"));
         assert!(request.path.contains("list-type=2"));
         assert!(request.has_authorization);
+    }
+
+    #[tokio::test]
+    async fn path_prefixed_s3_endpoint_lists_with_prefixed_canonical_uri_and_host() {
+        let xml = "<?xml version=\"1.0\"?><ListBucketResult>\
+            <IsTruncated>false</IsTruncated>\
+            </ListBucketResult>";
+        let (endpoint, captured) = spawn_bucket_mock("200 OK", xml.as_bytes());
+        let endpoint_host = endpoint
+            .strip_prefix("http://")
+            .expect("mock endpoint is http")
+            .to_string();
+        let bucket = client(format!("{endpoint}/storage/v1/s3"));
+
+        let objects = bucket.list_objects().await.unwrap();
+        assert!(objects.is_empty());
+
+        let request = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.host.as_deref(), Some(endpoint_host.as_str()));
+        assert!(request.path.starts_with("/storage/v1/s3/ferrogate-assets?"));
+        assert!(request.path.contains("list-type=2"));
+        assert_eq!(
+            request.path.matches("/storage/v1/s3").count(),
+            1,
+            "the endpoint base path must be included exactly once in the LIST request target: {}",
+            request.path
+        );
+        assert!(request.has_authorization);
+
+        let (fixed_path, host) = {
+            let endpoint = bucket.endpoint().unwrap();
+            (
+                endpoint.bucket_path(&bucket.config.bucket),
+                endpoint.host.clone(),
+            )
+        };
+        let canonical_query = request
+            .path
+            .split_once('?')
+            .map(|(_, query)| query)
+            .expect("LIST request carries a query");
+        let timestamp_unix = sigv4_timestamp_unix(
+            request
+                .x_amz_date
+                .as_deref()
+                .expect("runtime sent x-amz-date"),
+        );
+        let credentials = test_credentials(&bucket);
+        let fixed = ferrogate_providers::sign_sigv4_with_content_hash_header_and_query(
+            &SigningRequest {
+                method: "GET",
+                path: &fixed_path,
+                host: &host,
+                region: &bucket.config.region,
+                service: "s3",
+                body: b"",
+                timestamp_unix,
+            },
+            &credentials,
+            canonical_query,
+        );
+        let old_host = format!("{endpoint_host}/storage/v1/s3");
+        let old_path = "/ferrogate-assets";
+        let old = ferrogate_providers::sign_sigv4_with_content_hash_header_and_query(
+            &SigningRequest {
+                method: "GET",
+                path: old_path,
+                host: &old_host,
+                region: &bucket.config.region,
+                service: "s3",
+                body: b"",
+                timestamp_unix,
+            },
+            &credentials,
+            canonical_query,
+        );
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(fixed.authorization.as_str())
+        );
+        assert_ne!(
+            request.authorization.as_deref(),
+            Some(old.authorization.as_str()),
+            "restoring the old LIST split would sign the prefix as Host and omit it from the canonical URI"
+        );
     }
 
     #[test]

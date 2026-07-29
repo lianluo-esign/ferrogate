@@ -242,7 +242,8 @@ impl RuntimeControlPlaneState {
             }
             domain.created_at_unix = existing.created_at_unix;
         }
-        self.site_domains.insert(domain.hostname.clone(), domain.clone());
+        self.site_domains
+            .insert(domain.hostname.clone(), domain.clone());
         Ok(domain)
     }
 
