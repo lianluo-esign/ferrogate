@@ -256,8 +256,8 @@ impl Config {
                  endpoint but is not of the form \
                  https://<account_id>.r2.cloudflarestorage.com (optionally with an \
                  .eu./.fedramp. jurisdiction label); the account id must be a single DNS label and \
-                 the endpoint must carry no userinfo, port, path, query, or fragment. The signer \
-                 would sign `host: {signed_host}`, which R2 rejects"
+                 the endpoint must use https:// and carry no userinfo, port, path, query, or \
+                 fragment. The signer would sign `host: {signed_host}`, which R2 rejects"
             );
         }
         match bucket.region.as_deref() {

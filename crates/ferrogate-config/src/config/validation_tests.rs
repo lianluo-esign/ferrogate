@@ -594,6 +594,22 @@ fn rejects_r2_asset_bucket_endpoint_with_a_port() {
     assert!(error.contains("Cloudflare R2 endpoint"), "{error}");
 }
 
+#[test]
+fn rejects_plaintext_r2_asset_bucket_endpoint() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint = Some("http://abc123def456.r2.cloudflarestorage.com".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field asset_bucket.endpoint"), "{error}");
+    assert!(error.contains("Cloudflare R2 endpoint"), "{error}");
+    assert!(error.contains("must use https://"), "{error}");
+    assert!(!error.contains("R2ACCESSKEYID"), "{error}");
+    assert!(!error.contains("FERROGATE_ASSET_BUCKET_SECRET"), "{error}");
+}
+
 /// Issue #485 item 4: the R2 rules must key off the same predicate the runtime
 /// builds the S3 client on. A disabled section never constructs a client, so a
 /// leftover R2 endpoint with a geographic region must not hard-fail the load.
@@ -638,6 +654,7 @@ fn r2_config_validation_matches_the_runtime_signed_host() {
         ("https://abc123def456.r2.cloudflarestorage.com/", true),
         ("https://ABC123DEF456.R2.CloudflareStorage.com", true),
         ("HTTPS://ABC123DEF456.R2.CloudflareStorage.com", true),
+        ("http://abc123def456.r2.cloudflarestorage.com", false),
         ("https://abc123def456.eu.r2.cloudflarestorage.com", true),
         ("https://abc123def456.r2.cloudflarestorage.com/x", false),
         ("https://abc123def456.r2.cloudflarestorage.com:8443", false),
@@ -665,13 +682,17 @@ fn r2_config_validation_matches_the_runtime_signed_host() {
             "{endpoint}: config validation disagrees with the table"
         );
         // Whatever the verdict, it must match what the production R2 parser
-        // says about the literal host the signer would send. Do not restate
+        // says about the literal scheme+host the runtime would use. Do not restate
         // the R2 account/jurisdiction grammar in this oracle.
-        let signed_host = parse_endpoint(endpoint).unwrap().signing_host();
-        let signs_bare_r2_host = parse_r2_endpoint(&format!("https://{signed_host}")).is_some();
+        let parts = parse_endpoint(endpoint).unwrap();
+        let signed_endpoint_is_valid_r2 =
+            parse_r2_endpoint(&format!("{}://{}", parts.scheme, parts.signing_host())).is_some();
         assert_eq!(
-            accepted, signs_bare_r2_host,
-            "{endpoint}: validation verdict disagrees with the signed host {signed_host}"
+            accepted,
+            signed_endpoint_is_valid_r2,
+            "{endpoint}: validation verdict disagrees with the signed endpoint {}://{}",
+            parts.scheme,
+            parts.signing_host()
         );
     }
 }
@@ -713,6 +734,17 @@ fn rejects_malformed_r2_asset_bucket_host() {
 #[test]
 fn non_r2_asset_bucket_is_unaffected_by_r2_region_rule() {
     let asset_bucket = enabled_asset_bucket(); // Supabase host, region us-east-1
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+#[test]
+fn plaintext_non_r2_asset_bucket_remains_available_for_local_s3() {
+    let mut asset_bucket = enabled_asset_bucket();
+    asset_bucket.endpoint = Some("http://127.0.0.1:9999".into());
     let config = Config {
         asset_bucket,
         ..Config::default()

@@ -158,8 +158,8 @@ pub fn endpoint_targets_r2(endpoint: &str) -> bool {
 /// `https://<account_id>.r2.cloudflarestorage.com` (optionally with a
 /// `.eu.` / `.fedramp.` jurisdiction label). Returns `None` when the host is
 /// not R2 *or* when the signer would not sign a bare R2 host for it: a
-/// malformed (empty / multi-label) account id, userinfo, a `:port`, or a URL
-/// suffix.
+/// plaintext scheme, malformed (empty / multi-label) account id, userinfo, a
+/// `:port`, or a URL suffix.
 /// The account id must be a single DNS label (no dots), matching R2's
 /// 32-hex-char account id.
 ///
@@ -172,6 +172,9 @@ pub fn endpoint_targets_r2(endpoint: &str) -> bool {
 /// by `r2_validation_and_the_runtime_signer_agree_on_every_endpoint`).
 pub fn parse_r2_endpoint(endpoint: &str) -> Option<R2Endpoint> {
     let parts = parse_endpoint(endpoint).ok()?;
+    if parts.scheme != "https" {
+        return None;
+    }
     // Anything the signer would append to the host is disqualifying.
     if !parts.path_prefix.is_empty() {
         return None;

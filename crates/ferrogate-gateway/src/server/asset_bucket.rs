@@ -2989,6 +2989,12 @@ mod tests {
                 "abc123def456.r2.cloudflarestorage.com",
             ),
             (
+                "http://abc123def456.r2.cloudflarestorage.com",
+                true,
+                false,
+                "abc123def456.r2.cloudflarestorage.com",
+            ),
+            (
                 "https://abc123def456.eu.r2.cloudflarestorage.com",
                 true,
                 true,
@@ -3063,7 +3069,7 @@ mod tests {
 
         for (endpoint, targets_r2, well_formed, signed_host) in cases {
             let bucket = r2_client(endpoint);
-            let (_scheme, host) = bucket
+            let (scheme, host) = bucket
                 .scheme_and_host()
                 .unwrap_or_else(|error| panic!("{endpoint}: {error}"));
             assert_eq!(
@@ -3082,14 +3088,15 @@ mod tests {
                 "{endpoint}: the strict R2 guard disagrees with the table"
             );
             // Ask the production parser whether the literal signed host is a
-            // valid R2 host. Restating the account/jurisdiction grammar here
-            // created a third policy implementation that could drift in lock
-            // step with the test while production remained wrong.
-            let signed_host_is_valid_r2 = parse_r2_endpoint(&format!("https://{host}"));
+            // valid R2 endpoint under the runtime scheme. Restating the
+            // account/jurisdiction grammar here created a third policy
+            // implementation that could drift in lock step with the test while
+            // production remained wrong.
+            let signed_host_is_valid_r2 = parse_r2_endpoint(&format!("{scheme}://{host}"));
             assert_eq!(
                 parsed.is_some(),
                 signed_host_is_valid_r2.is_some(),
-                "{endpoint}: validation verdict disagrees with the signed host {host}"
+                "{endpoint}: validation verdict disagrees with the signed endpoint {scheme}://{host}"
             );
         }
     }
