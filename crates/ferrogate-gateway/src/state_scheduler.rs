@@ -124,6 +124,29 @@ impl AppState {
         now: i64,
         correlation: Option<&ScheduleFireCorrelation<'_>>,
     ) -> ScheduleFireResult {
+        if let Err(error) = self
+            .repositories
+            .require_usable_tenancy(
+                ferrogate_storage::LifecycleSeam::Request,
+                ferrogate_storage::TenancyRefs::new(
+                    Some(&schedule.tenant_id),
+                    None,
+                    Some(&schedule.workspace_id),
+                ),
+            )
+            .await
+        {
+            let code = error.code();
+            let message = error.message();
+            warn!(
+                schedule_id = %schedule.schedule_id,
+                lifecycle_code = code,
+                lifecycle_message = %message,
+                "scheduler: refused agent schedule fire because tenancy lifecycle is inactive"
+            );
+            return ScheduleFireResult::error(format!("{code}: {message}"));
+        }
+
         match schedule.target_kind {
             ScheduleTargetKind::SelfHostedDispatch => {
                 let dispatch = match build_self_hosted_dispatch(schedule, slot, now, correlation) {
