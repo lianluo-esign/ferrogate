@@ -25,6 +25,7 @@ mod fixtures;
 mod function_egress_cloudflare;
 mod guardrails;
 mod http;
+mod lifecycle_tenancy;
 mod local;
 mod managed_action_project;
 mod mcp_candidate_official;
@@ -61,6 +62,7 @@ use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use function_egress_cloudflare::run_function_egress_cloudflare_api;
 use guardrails::run_guardrail_supabase;
+use lifecycle_tenancy::run_lifecycle_tenancy_supabase;
 use managed_action_project::run_managed_action_project;
 use mcp_candidate_official::run_mcp_candidate_client_official;
 use mcp_identity::run_mcp_identity_supabase;
@@ -68,6 +70,7 @@ use observed_activity_d1::run_observed_activity_d1_failure;
 use scenarios::{
     run_admin_api, run_auth_api, run_function_egress_api, run_gateway_api,
     run_gateway_billing_chain, run_gateway_external_auth_api, run_gateway_third_party_auth_api,
+    run_lifecycle_tenancy,
 };
 use static_site::run_static_site_api;
 use storage::{
@@ -101,6 +104,8 @@ fn main() -> Result<()> {
         agent_jobs: run_agent_jobs_api,
         managed_action_project: run_managed_action_project,
         observed_activity_d1_failure: run_observed_activity_d1_failure,
+        lifecycle_tenancy: run_lifecycle_tenancy,
+        lifecycle_tenancy_supabase: run_lifecycle_tenancy_supabase,
         cli_mutation_receipt: run_cli_mutation_receipt,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,

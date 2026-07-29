@@ -91,6 +91,31 @@ fn observed_activity_d1_failure_is_a_deterministic_local_scenario() {
 }
 
 #[test]
+fn lifecycle_tenancy_is_a_deterministic_local_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "lifecycle-tenancy"]).unwrap();
+    let Commands::LifecycleTenancy(args) = cli.command else {
+        panic!("expected lifecycle-tenancy command");
+    };
+    assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
+}
+
+#[test]
+fn lifecycle_tenancy_supabase_uses_live_schema_controls() {
+    let cli = Cli::try_parse_from([
+        "ferrogate-test",
+        "lifecycle-tenancy-supabase",
+        "--supabase-dsn",
+        "postgresql://unused",
+        "--keep-supabase-schema",
+    ])
+    .unwrap();
+    let Commands::LifecycleTenancySupabase(args) = cli.command else {
+        panic!("expected lifecycle-tenancy-supabase command");
+    };
+    assert!(args.keep_supabase_schema);
+}
+
+#[test]
 fn asset_buffer_admission_is_a_deterministic_local_scenario() {
     let cli = Cli::try_parse_from(["ferrogate-test", "asset-buffer-admission"]).unwrap();
     let Commands::AssetBufferAdmission(args) = cli.command else {

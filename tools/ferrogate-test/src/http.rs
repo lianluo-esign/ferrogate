@@ -54,6 +54,25 @@ pub(crate) fn http_request_addr(
     http_request_addr_after_write(addr, method, path, headers, body, || {})
 }
 
+pub(crate) fn http_request_addr_with_timeout(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+    response_timeout: Duration,
+) -> Result<HttpResponse> {
+    http_request_addr_after_write_with_timeout(
+        addr,
+        method,
+        path,
+        headers,
+        body,
+        || {},
+        response_timeout,
+    )
+}
+
 /// Binary-body variant of [`http_request_addr`] for payloads that are not
 /// valid UTF-8 (e.g. zip bundles pushed to the assets surface).
 pub(crate) fn http_request_addr_bytes(
@@ -85,7 +104,7 @@ pub(crate) fn http_request_addr_bytes(
         .flush()
         .with_context(|| format!("failed to flush request to {addr} for {method} {path}"))?;
 
-    let raw = read_http_response(&mut stream, addr, method, path)?;
+    let raw = read_http_response(&mut stream, addr, method, path, Duration::from_secs(60))?;
     let status = raw
         .lines()
         .next()
@@ -107,6 +126,26 @@ pub(crate) fn http_request_addr_after_write(
     body: &str,
     after_write: impl FnOnce(),
 ) -> Result<HttpResponse> {
+    http_request_addr_after_write_with_timeout(
+        addr,
+        method,
+        path,
+        headers,
+        body,
+        after_write,
+        Duration::from_secs(60),
+    )
+}
+
+fn http_request_addr_after_write_with_timeout(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+    after_write: impl FnOnce(),
+    response_timeout: Duration,
+) -> Result<HttpResponse> {
     let mut stream = TcpStream::connect(addr)
         .with_context(|| format!("failed to connect to {addr} for {method} {path}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -127,7 +166,7 @@ pub(crate) fn http_request_addr_after_write(
         .with_context(|| format!("failed to flush request to {addr} for {method} {path}"))?;
     after_write();
 
-    let raw = read_http_response(&mut stream, addr, method, path)?;
+    let raw = read_http_response(&mut stream, addr, method, path, response_timeout)?;
     let status = raw
         .lines()
         .next()
@@ -146,6 +185,7 @@ fn read_http_response(
     addr: &str,
     method: &str,
     path: &str,
+    response_timeout: Duration,
 ) -> Result<String> {
     let started = Instant::now();
     let mut raw = Vec::new();
@@ -165,7 +205,7 @@ fn read_http_response(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                if started.elapsed() > Duration::from_secs(60) {
+                if started.elapsed() > response_timeout {
                     bail!("timed out reading response from {addr} for {method} {path}");
                 }
                 thread::sleep(Duration::from_millis(25));

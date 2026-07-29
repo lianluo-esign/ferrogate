@@ -48,6 +48,8 @@ fn generated_schema_names_are_unique_valid_and_bounded() {
         LiveSupabaseScenario::McpIdentity,
         LiveSupabaseScenario::Compliance,
         LiveSupabaseScenario::TargetCapability,
+        LiveSupabaseScenario::AdminConsoleRoles,
+        LiveSupabaseScenario::LifecycleTenancy,
     ];
     let mut names = HashSet::new();
     for index in 0..1_000 {

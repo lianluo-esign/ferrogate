@@ -44,6 +44,7 @@ fn restart_configs_preserve_one_schema_across_auto_and_validate_only() {
     assert!(auto.contains("migration_mode: auto"));
     assert!(validate.contains("migration_mode: validate_only"));
     assert_eq!(storage.readiness_timeout(), Duration::from_secs(180));
+    assert_eq!(storage.request_timeout(), Duration::from_secs(300));
 }
 
 #[test]
@@ -88,10 +89,9 @@ fn token4ai_fixture_identity_is_threaded_into_config_auth_and_evidence() {
 
 #[test]
 fn local_supabase_compatible_storage_keeps_short_readiness_timeout() {
-    assert_eq!(
-        supabase_storage("ferrogate_control", false).readiness_timeout(),
-        Duration::from_secs(60)
-    );
+    let storage = supabase_storage("ferrogate_control", false);
+    assert_eq!(storage.readiness_timeout(), Duration::from_secs(60));
+    assert_eq!(storage.request_timeout(), Duration::from_secs(60));
 }
 
 /// The schema the `supabase-restart` scenario applies, read here directly so

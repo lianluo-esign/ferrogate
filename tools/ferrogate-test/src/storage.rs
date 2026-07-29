@@ -13,7 +13,7 @@ use crate::{
         POSTGRES_MIGRATION_TARGET_CONTAINER,
     },
     fixtures::toml_basic_string,
-    http::{free_addr, free_port, http_request_addr},
+    http::{free_addr, free_port, http_request_addr, http_request_addr_with_timeout},
     mocks::spawn_local_provider_upstream,
     payment_attempt_restart::DurablePaymentAttemptFixture,
     supabase_schema::{LiveSupabaseScenario, LiveSupabaseSchema},
@@ -497,7 +497,7 @@ pub(crate) fn run_supabase_migration(args: &LocalArgs) -> Result<()> {
     Ok(())
 }
 
-fn supabase_live_tls_mode(mode: &str) -> Result<&'static str> {
+pub(crate) fn supabase_live_tls_mode(mode: &str) -> Result<&'static str> {
     match mode.trim() {
         "require" => Ok("require"),
         "verify_ca" | "verify-ca" => Ok("verify_ca"),
@@ -1628,6 +1628,19 @@ impl ControlPlaneRestartStorage<'_> {
         }
     }
 
+    fn request_timeout(self) -> Duration {
+        match self {
+            // Live Supabase scenarios run against a managed database where a
+            // single admin mutation can legitimately chain several bounded
+            // storage reads/writes (attach validation, control-plane upsert,
+            // snapshot reload). Keep local failures quick, but do not let the
+            // harness client kill a live functional proof before the gateway's
+            // own per-statement deadlines have had room to report a real error.
+            Self::Supabase { live: true, .. } => Duration::from_secs(300),
+            Self::Supabase { live: false, .. } | Self::Postgres { .. } => Duration::from_secs(60),
+        }
+    }
+
     pub(crate) fn supports_durable_metering(self) -> bool {
         matches!(
             self,
@@ -1888,6 +1901,7 @@ pub(crate) struct TursoRestartHarness {
     expected_storage_provider: &'static str,
     expected_migration_mode: StorageMigrationMode,
     readiness_timeout: Duration,
+    request_timeout: Duration,
 }
 
 impl TursoRestartHarness {
@@ -1961,6 +1975,7 @@ impl TursoRestartHarness {
             expected_storage_provider: storage.provider_name(),
             expected_migration_mode: migration_mode,
             readiness_timeout: storage.readiness_timeout(),
+            request_timeout: storage.request_timeout(),
         };
         harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
@@ -2041,6 +2056,7 @@ impl TursoRestartHarness {
             expected_storage_provider: storage.provider_name(),
             expected_migration_mode: migration_mode,
             readiness_timeout: storage.readiness_timeout(),
+            request_timeout: storage.request_timeout(),
         };
         harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
@@ -2092,8 +2108,15 @@ impl TursoRestartHarness {
     where
         F: FnOnce(Value) -> Result<()>,
     {
-        let response = http_request_addr(&self.gateway_addr, method, path, headers, body)
-            .with_context(|| format!("failed HTTP request {method} {path}"))?;
+        let response = http_request_addr_with_timeout(
+            &self.gateway_addr,
+            method,
+            path,
+            headers,
+            body,
+            self.request_timeout,
+        )
+        .with_context(|| format!("failed HTTP request {method} {path}"))?;
         if response.status != expected_status {
             bail!(
                 "{method} {path} expected status {expected_status}, got {}; raw: {}",

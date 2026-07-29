@@ -84,10 +84,29 @@ fn admin_reload_writes_every_client_action_identity_header_to_the_socket() {
                 Err(error) => panic!("failed to read admin reload request head: {error}"),
             }
         }
+        let head = String::from_utf8(head).unwrap();
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or_default();
+        let mut remaining = content_length;
+        let mut body = [0_u8; 1024];
+        while remaining > 0 {
+            let chunk = remaining.min(body.len());
+            stream
+                .read_exact(&mut body[..chunk])
+                .unwrap_or_else(|error| panic!("failed to drain admin reload body: {error}"));
+            remaining -= chunk;
+        }
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
             .unwrap();
-        String::from_utf8(head).unwrap()
+        head
     });
 
     let directory = tempfile::tempdir().unwrap();

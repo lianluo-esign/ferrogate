@@ -22,7 +22,7 @@ use ferrogate_runtime::{
 use std::{cell::RefCell, thread, time::Duration};
 
 pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start(&args.ferrogate_bin, 5)?;
+    let case = LocalHarness::start(&args.ferrogate_bin, 7)?;
     let self_hosted_worker_id = RefCell::new(String::new());
     let expired_self_hosted_worker_id = RefCell::new(String::new());
     let self_hosted_lease_id = RefCell::new(String::new());
@@ -2487,7 +2487,7 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         "POST",
         "/admin/v1/virtual-keys",
         &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{"id":"lifecycle-live","name":"Lifecycle live key","workspace_id":"lifecycle-workspace","scopes":["models.read"]}"#,
+        r#"{"id":"lifecycle-live","name":"Lifecycle live key","workspace_id":"lifecycle-workspace","scopes":["models.read","chat.completions"],"allowed_models":["fast-chat"]}"#,
         201,
         |body| {
             live_secret = body["secret"]
@@ -2520,7 +2520,7 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         "POST",
         "/admin/v1/api-keys",
         &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{"id":"lifecycle-project-only","name":"Lifecycle project-only key","key":"lifecycle-project-only-secret","project_id":"project_gateway","scopes":["models.read"]}"#,
+        r#"{"id":"lifecycle-project-only","name":"Lifecycle project-only key","key":"lifecycle-project-only-secret","organization_id":"org_demo","project_id":"project_gateway","scopes":["models.read"]}"#,
         201,
         |_| Ok(()),
     )?;
@@ -2561,6 +2561,17 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     for auth in [CLIENT_AUTH, live_auth.as_str(), project_only_auth] {
         case.expect_json("GET", "/v1/models", &[auth], "", 200, |_| Ok(()))?;
     }
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[live_auth.as_str(), JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"lifecycle active"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["id"], "chatcmpl_ferrogate_test");
+            Ok(())
+        },
+    )?;
 
     // A typo must be rejected at the write, while the canonical value below
     // must actually take effect. This catches the old "unknown means active"
@@ -2595,6 +2606,17 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
             Ok(())
         })?;
     }
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[live_auth.as_str(), JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"lifecycle suspended"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "tenancy_suspended");
+            Ok(())
+        },
+    )?;
 
     case.expect_json(
         "POST",
@@ -2622,7 +2644,7 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         "POST",
         "/admin/v1/api-keys",
         &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{"id":"lifecycle-blocked-native","name":"Blocked","key":"lifecycle-blocked-secret","project_id":"project_gateway"}"#,
+        r#"{"id":"lifecycle-blocked-native","name":"Blocked","key":"lifecycle-blocked-secret","organization_id":"org_demo","project_id":"project_gateway"}"#,
         403,
         |body| {
             assert_eq!(body["error"]["code"], "inactive_tenancy_reference");
@@ -2733,6 +2755,17 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     }
     case.expect_json(
         "POST",
+        "/v1/chat/completions",
+        &[live_auth.as_str(), JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"lifecycle reactivated"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["id"], "chatcmpl_ferrogate_test");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
         "/admin/v1/virtual-keys/lifecycle-disabled/enable",
         &[ADMIN_AUTH],
         "",
@@ -2754,6 +2787,13 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         },
     )?;
 
+    Ok(())
+}
+
+pub(crate) fn run_lifecycle_tenancy(args: &LocalArgs) -> Result<()> {
+    let case = LocalHarness::start(&args.ferrogate_bin, 2)?;
+    assert_lifecycle_tenancy_enforcement(&case)?;
+    println!("lifecycle-tenancy scenario passed");
     Ok(())
 }
 

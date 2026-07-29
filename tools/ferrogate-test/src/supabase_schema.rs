@@ -32,6 +32,7 @@ pub(crate) enum LiveSupabaseScenario {
     Compliance,
     TargetCapability,
     AdminConsoleRoles,
+    LifecycleTenancy,
 }
 
 impl LiveSupabaseScenario {
@@ -45,6 +46,7 @@ impl LiveSupabaseScenario {
             Self::Compliance => "cmp",
             Self::TargetCapability => "tgt",
             Self::AdminConsoleRoles => "role",
+            Self::LifecycleTenancy => "life",
         }
     }
 }
