@@ -8,7 +8,7 @@ use crate::{
     assertions::{
         agent_run_otlp_trace_is_reconstructable, assert_secret_redacted, http_request_body,
     },
-    constants::ADMIN_AUTH,
+    constants::{ADMIN_AUTH, JSON_CONTENT},
     fixtures::{
         auth_service_config, blocking_stdio_mcp_script, local_gateway_config, LocalGatewayConfig,
     },
@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::{
     env,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -361,6 +361,7 @@ struct LocalHarnessOptions<'a> {
 
 pub(crate) struct LocalHarness {
     _dir: tempfile::TempDir,
+    config_path: PathBuf,
     pub(crate) gateway_addr: String,
     gateway: Child,
     provider: Option<JoinHandle<Vec<String>>>,
@@ -413,21 +414,6 @@ impl LocalHarness {
             LocalHarnessOptions {
                 billing: Some(billing),
                 include_agent: true,
-                ..LocalHarnessOptions::default()
-            },
-        )
-    }
-
-    pub(crate) fn start_with_scheduler(
-        ferrogate_bin: &Path,
-        expected_provider_requests: usize,
-        tick_interval_secs: u64,
-    ) -> Result<Self> {
-        Self::start_inner(
-            ferrogate_bin,
-            expected_provider_requests,
-            LocalHarnessOptions {
-                scheduler_tick_interval_secs: Some(tick_interval_secs),
                 ..LocalHarnessOptions::default()
             },
         )
@@ -605,6 +591,7 @@ impl LocalHarness {
 
         let mut harness = Self {
             _dir: dir,
+            config_path,
             gateway_addr,
             gateway,
             provider: Some(provider),
@@ -671,6 +658,40 @@ impl LocalHarness {
             )
         })?;
         check(body)
+    }
+
+    pub(crate) fn enable_scheduler(&self, tick_interval_secs: u64) -> Result<()> {
+        let mut config_toml = std::fs::read_to_string(&self.config_path)
+            .with_context(|| format!("read {}", self.config_path.display()))?;
+        if config_toml.contains("\n[scheduler]") || config_toml.starts_with("[scheduler]") {
+            bail!(
+                "local harness config already contains [scheduler]; refusing duplicate section in {}",
+                self.config_path.display()
+            );
+        }
+        config_toml.push_str(&format!(
+            r#"
+[scheduler]
+enabled = true
+tick_interval_secs = {tick_interval_secs}
+"#
+        ));
+        std::fs::write(&self.config_path, &config_toml)
+            .with_context(|| format!("write {}", self.config_path.display()))?;
+        let payload = serde_json::json!({ "config_toml": config_toml }).to_string();
+        self.expect_json(
+            "POST",
+            "/admin/v1/config/reload",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &payload,
+            200,
+            |body| {
+                assert_eq!(body["valid"], true);
+                assert_eq!(body["committed"], true);
+                assert_eq!(body["listener_reload_required"], false);
+                Ok(())
+            },
+        )
     }
 
     pub(crate) fn expect_text<F>(

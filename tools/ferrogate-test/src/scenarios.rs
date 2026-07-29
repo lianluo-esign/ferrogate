@@ -2526,6 +2526,10 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         r#"{"id":"lifecycle-execution-schedule","tenant_id":"org_demo","workspace_id":"lifecycle-workspace","name":"Lifecycle execution schedule","spec_kind":"interval","interval_secs":2,"target_kind":"self_hosted_dispatch","target":{"required_capabilities":["shell"],"workload_ref":"lifecycle-execution-workload"}}"#,
         201,
         |body| {
+            // #578 review rework: run_lifecycle_tenancy starts with scheduler
+            // disabled. This active-tenancy create proves attachment is valid,
+            // but the schedule cannot mature until the scenario explicitly
+            // enables the scheduler after suspending the tenant.
             assert_eq!(body["agent_schedule"]["enabled"], true);
             assert_eq!(
                 body["agent_schedule"]["target"]["workload_ref"],
@@ -2652,6 +2656,7 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
             Ok(())
         },
     )?;
+    case.enable_scheduler(1)?;
 
     for auth in [CLIENT_AUTH, live_auth.as_str(), project_only_auth] {
         case.expect_json("GET", "/v1/models", &[auth], "", 403, |body| {
@@ -2885,7 +2890,7 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
 }
 
 pub(crate) fn run_lifecycle_tenancy(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start_with_scheduler(&args.ferrogate_bin, 2, 1)?;
+    let case = LocalHarness::start(&args.ferrogate_bin, 2)?;
     assert_lifecycle_tenancy_enforcement(&case)?;
     println!("lifecycle-tenancy scenario passed");
     Ok(())
