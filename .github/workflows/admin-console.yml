@@ -1,0 +1,95 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-29
+# description: Admin Console CI gate - lint, typecheck, Vitest, build, generated API drift, and Playwright.
+
+name: Admin console
+
+# This gate is deliberately path-filtered and per-commit. The release-only Rust
+# CI policy is wrong for admin-console/: the gate is cheap compared with the
+# cost of silently landing a broken frontend route, catalog, bundle, or browser
+# contract. See #531.
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    paths:
+      - "admin-console/**"
+      - "docs/openapi/admin-api.openapi.json"
+      - "scripts/check-admin-console.sh"
+      - "scripts/test-check-admin-console.sh"
+      - "scripts/test_admin_console_workflow.py"
+      - "scripts/node-env.sh"
+      - ".github/workflows/admin-console.yml"
+  pull_request:
+    paths:
+      - "admin-console/**"
+      - "docs/openapi/admin-api.openapi.json"
+      - "scripts/check-admin-console.sh"
+      - "scripts/test-check-admin-console.sh"
+      - "scripts/test_admin_console_workflow.py"
+      - "scripts/node-env.sh"
+      - ".github/workflows/admin-console.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: admin-console-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  admin-console:
+    name: admin-console
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: admin-console/package-lock.json
+
+      - name: Test admin-console workflow contract
+        run: python3 -m unittest scripts/test_admin_console_workflow.py
+
+      - name: Install admin-console dependencies
+        working-directory: admin-console
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint admin-console
+        working-directory: admin-console
+        run: npm run lint
+
+      - name: Typecheck admin-console
+        working-directory: admin-console
+        run: npx tsc -b
+
+      - name: Typecheck admin-console Playwright specs
+        working-directory: admin-console
+        run: npx tsc -p tsconfig.e2e.json --noEmit
+
+      - name: Run admin-console Vitest suite
+        working-directory: admin-console
+        run: npx vitest run
+
+      - name: Build admin-console and enforce bundle budget
+        working-directory: admin-console
+        run: npm run build
+
+      - name: Check generated Admin API types
+        working-directory: admin-console
+        run: npm run check:api-types
+
+      - name: Install Playwright chromium
+        working-directory: admin-console
+        run: npm run test:e2e:install
+
+      - name: Run admin-console Playwright suite
+        working-directory: admin-console
+        run: npm run test:e2e

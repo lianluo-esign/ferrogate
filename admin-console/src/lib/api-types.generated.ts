@@ -6285,6 +6285,12 @@ export interface components {
             last_error: string | null;
             last_connected_at_unix: number | null;
             next_reconnect_backoff_secs: number;
+            /** @enum {string|null} */
+            protocol_version?: "2026-07-28" | "2025-11-25" | "2025-06-18" | null;
+            /** @enum {string|null} */
+            protocol_mode?: "modern" | "legacy" | null;
+            /** @enum {string|null} */
+            protocol_downgrade_reason?: "http400_unrecognized_response" | "http404_unrecognized_response" | "http405_unrecognized_response" | "stdio_method_not_found" | null;
         };
         AdminList_McpServerStatus: {
             /** @constant */

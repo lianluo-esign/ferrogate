@@ -85,6 +85,7 @@ run_quality() {
   # Gate contracts and the module-layout ratchet mirror rust-quality.yml. A
   # workflow-only invocation would catch these only after release (#499).
   scripts/test-check-admin-console.sh
+  python3 -m unittest scripts/test_admin_console_workflow.py
   scripts/test-check-workers.sh
   python3 -m unittest scripts/test_module_layout.py
   python3 scripts/check-module-layout.py

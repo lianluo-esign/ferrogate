@@ -52,7 +52,9 @@ jobs:
       # toolchain is unreachable, never silently skip. Runs against stub
       # binaries in a scrubbed PATH; no npm/vitest/build work is triggered.
       - name: Test admin-console gate toolchain contract
-        run: ./scripts/test-check-admin-console.sh
+        run: |
+          ./scripts/test-check-admin-console.sh
+          python3 -m unittest scripts/test_admin_console_workflow.py
 
       # #499: hold manifest discovery, per-commit triggers, stale dependency
       # repair, and the exact workerd/Vitest opt-in set with hermetic stubs.
