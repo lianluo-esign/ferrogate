@@ -559,8 +559,9 @@ fn rejects_r2_asset_bucket_with_non_auto_region() {
 }
 
 /// Issue #485 item 1: a path suffix on an R2 endpoint used to pass validation
-/// and then get folded into the signed `host` header. The guard now reasons
-/// about the signer's host, so it fails at load time and names the bad host.
+/// and then get folded into the request target. The guard now reasons about
+/// the signer's host plus base-path split, so it fails at load time and names
+/// the actual Host header the runtime would send.
 #[test]
 fn rejects_r2_asset_bucket_endpoint_with_a_path_suffix() {
     let mut asset_bucket = enabled_r2_asset_bucket();
@@ -572,9 +573,10 @@ fn rejects_r2_asset_bucket_endpoint_with_a_path_suffix() {
     let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("field asset_bucket.endpoint"), "{error}");
     assert!(error.contains("Cloudflare R2 endpoint"), "{error}");
-    // The message names the host the signer would actually have sent.
+    // The message names the Host header the signer would actually send; the
+    // path suffix is still rejected because R2 account endpoints must be bare.
     assert!(
-        error.contains("host: abc123def456.r2.cloudflarestorage.com/x"),
+        error.contains("host: abc123def456.r2.cloudflarestorage.com"),
         "{error}"
     );
 }
@@ -682,14 +684,17 @@ fn r2_config_validation_matches_the_runtime_signed_host() {
             "{endpoint}: config validation disagrees with the table"
         );
         // Whatever the verdict, it must match what the production R2 parser
-        // says about the literal scheme+host the runtime would use. Do not restate
-        // the R2 account/jurisdiction grammar in this oracle.
+        // says about the literal scheme+host the runtime would use, plus the
+        // endpoint-shape constraints (`no base path`, `no userinfo/port`) that
+        // the shared decomposition exposes. Do not restate the R2
+        // account/jurisdiction grammar in this oracle.
         let parts = parse_endpoint(endpoint).unwrap();
-        let signed_endpoint_is_valid_r2 =
-            parse_r2_endpoint(&format!("{}://{}", parts.scheme, parts.signing_host())).is_some();
+        let runtime_target_is_bare_r2 = parts.path_prefix.is_empty()
+            && parts.host_name().len() == parts.authority.len()
+            && parse_r2_endpoint(&format!("{}://{}", parts.scheme, parts.signing_host())).is_some();
         assert_eq!(
             accepted,
-            signed_endpoint_is_valid_r2,
+            runtime_target_is_bare_r2,
             "{endpoint}: validation verdict disagrees with the signed endpoint {}://{}",
             parts.scheme,
             parts.signing_host()

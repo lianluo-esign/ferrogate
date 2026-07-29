@@ -981,11 +981,6 @@ impl AssetBucketClient {
         Ok(format!("{}?{query}", endpoint.url(&path)))
     }
 
-    #[cfg(test)]
-    fn object_path(&self, key: &str) -> String {
-        format!("/{}/{key}", self.config.bucket)
-    }
-
     fn sign(
         &self,
         method: &'static str,
@@ -1666,7 +1661,10 @@ mod tests {
     struct CapturedRequest {
         method: String,
         path: String,
+        host: Option<String>,
         body: Vec<u8>,
+        authorization: Option<String>,
+        x_amz_date: Option<String>,
         has_authorization: bool,
         content_sha256_header: Option<String>,
     }
@@ -1716,9 +1714,12 @@ mod tests {
             let mut parts = request_line.split_whitespace();
             let method = parts.next().unwrap_or_default().to_string();
             let path = parts.next().unwrap_or_default().to_string();
-            let has_authorization = head
-                .to_lowercase()
-                .contains("authorization: aws4-hmac-sha256");
+            let host = captured_header(&head, "host");
+            let authorization = captured_header(&head, "authorization");
+            let x_amz_date = captured_header(&head, "x-amz-date");
+            let has_authorization = authorization
+                .as_deref()
+                .is_some_and(|value| value.starts_with("AWS4-HMAC-SHA256"));
             let content_sha256_header = head.lines().find_map(|line| {
                 line.split_once(':').and_then(|(name, value)| {
                     name.eq_ignore_ascii_case("x-amz-content-sha256")
@@ -1728,7 +1729,10 @@ mod tests {
             *server_captured.lock().unwrap() = Some(CapturedRequest {
                 method,
                 path,
+                host,
                 body,
+                authorization,
+                x_amz_date,
                 has_authorization,
                 content_sha256_header,
             });
@@ -1742,6 +1746,24 @@ mod tests {
         });
 
         (endpoint, captured)
+    }
+
+    fn captured_header(head: &str, header_name: &str) -> Option<String> {
+        head.lines().find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                name.eq_ignore_ascii_case(header_name)
+                    .then(|| value.trim().to_string())
+            })
+        })
+    }
+
+    fn sigv4_timestamp_unix(x_amz_date: &str) -> u64 {
+        chrono::NaiveDateTime::parse_from_str(x_amz_date, "%Y%m%dT%H%M%SZ")
+            .expect("captured x-amz-date is a SigV4 timestamp")
+            .and_utc()
+            .timestamp()
+            .try_into()
+            .expect("SigV4 timestamp is after the Unix epoch")
     }
 
     fn client(endpoint: String) -> AssetBucketClient {
@@ -1770,6 +1792,8 @@ mod tests {
 
         let request = captured.lock().unwrap().clone().unwrap();
         assert_eq!(request.method, "PUT");
+        let expected_host = bucket.scheme_and_host().unwrap().1;
+        assert_eq!(request.host.as_deref(), Some(expected_host.as_str()));
         assert_eq!(
             request.path,
             "/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0"
@@ -1778,6 +1802,84 @@ mod tests {
         assert!(request.has_authorization);
         assert!(request.content_sha256_header.is_some());
         assert!(!format!("{request:?}").contains("wJalrXUtnFEMI"));
+    }
+
+    #[tokio::test]
+    async fn path_prefixed_s3_endpoint_signs_host_and_canonical_uri_separately() {
+        let (endpoint, captured) = spawn_bucket_mock("200 OK", b"");
+        let endpoint_host = endpoint
+            .strip_prefix("http://")
+            .expect("mock endpoint is http")
+            .to_string();
+        let bucket = client(format!("{endpoint}/storage/v1/s3"));
+
+        bucket
+            .put_object(
+                "tenant-a:cli_tool:hello:1.0.0",
+                b"asset bytes",
+                "text/plain",
+            )
+            .await
+            .unwrap();
+
+        let request = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.host.as_deref(), Some(endpoint_host.as_str()));
+        assert_eq!(
+            request.path,
+            "/storage/v1/s3/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0"
+        );
+        assert!(request.has_authorization);
+
+        let endpoint = bucket.endpoint().unwrap();
+        let fixed_path =
+            endpoint.object_path(&bucket.config.bucket, "tenant-a:cli_tool:hello:1.0.0");
+        let timestamp_unix = sigv4_timestamp_unix(
+            request
+                .x_amz_date
+                .as_deref()
+                .expect("runtime sent x-amz-date"),
+        );
+        let credentials = AwsCredentials {
+            access_key_id: bucket.config.access_key_id.clone(),
+            secret_access_key: bucket.config.secret_access_key.clone(),
+            session_token: None,
+        };
+        let fixed = sign_sigv4_with_content_hash_header(
+            &SigningRequest {
+                method: "PUT",
+                path: &fixed_path,
+                host: &endpoint.host,
+                region: &bucket.config.region,
+                service: "s3",
+                body: b"asset bytes",
+                timestamp_unix,
+            },
+            &credentials,
+        );
+        let old_host = format!("{endpoint_host}/storage/v1/s3");
+        let old_path = "/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0";
+        let old = sign_sigv4_with_content_hash_header(
+            &SigningRequest {
+                method: "PUT",
+                path: old_path,
+                host: &old_host,
+                region: &bucket.config.region,
+                service: "s3",
+                body: b"asset bytes",
+                timestamp_unix,
+            },
+            &credentials,
+        );
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(fixed.authorization.as_str())
+        );
+        assert_ne!(
+            request.authorization.as_deref(),
+            Some(old.authorization.as_str()),
+            "restoring the old host/path split would sign the prefix as Host and omit it from the canonical URI"
+        );
     }
 
     // ---- the one bounded buffering read (issue #259 round 2) ---------------
@@ -2888,7 +2990,12 @@ mod tests {
         let https_bucket = client("https://project.supabase.co/storage/v1/s3".into());
         assert_eq!(
             https_bucket.scheme_and_host().unwrap(),
-            ("https", "project.supabase.co/storage/v1/s3".to_string())
+            ("https", "project.supabase.co".to_string())
+        );
+        let endpoint = https_bucket.endpoint().unwrap();
+        assert_eq!(
+            endpoint.object_path(&https_bucket.config.bucket, "tenant-a:cli_tool:hello:1.0.0"),
+            "/storage/v1/s3/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0"
         );
     }
 
@@ -2919,10 +3026,10 @@ mod tests {
                 jurisdiction: None,
             })
         );
-        // A bare trailing slash is ignored -- and only because the runtime
-        // signer trims it too (`parse_endpoint`). A real path suffix is NOT
-        // ignored: the signer folds it into the signed `host`, so the strict
-        // parse rejects it. See
+        // A bare trailing slash is ignored -- and only because the shared
+        // parser trims it too (`parse_endpoint`). A real path suffix is NOT
+        // ignored: it would become a base path before the bucket/key path, so
+        // the strict parse rejects it. See
         // `r2_validation_and_the_runtime_signer_agree_on_every_endpoint`.
         assert_eq!(
             parse_r2_endpoint("https://abc123def456.r2.cloudflarestorage.com/"),
@@ -3049,12 +3156,13 @@ mod tests {
                 true,
                 "abc123def456.fedramp.r2.cloudflarestorage.com",
             ),
-            // Detected as R2 but the signer would sign a host R2 cannot serve.
+            // Detected as R2 but the runtime target carries a shape R2 cannot
+            // serve.
             (
                 "https://abc123def456.r2.cloudflarestorage.com/x",
                 true,
                 false,
-                "abc123def456.r2.cloudflarestorage.com/x",
+                "abc123def456.r2.cloudflarestorage.com",
             ),
             (
                 "https://abc123def456.r2.cloudflarestorage.com:8443",
@@ -3066,19 +3174,19 @@ mod tests {
                 "https://abc123def456.r2.cloudflarestorage.com?x=1",
                 true,
                 false,
-                "abc123def456.r2.cloudflarestorage.com?x=1",
+                "abc123def456.r2.cloudflarestorage.com",
             ),
             (
                 "https://abc123def456.r2.cloudflarestorage.com#fragment",
                 true,
                 false,
-                "abc123def456.r2.cloudflarestorage.com#fragment",
+                "abc123def456.r2.cloudflarestorage.com",
             ),
             (
                 "https://user:pass@abc123def456.r2.cloudflarestorage.com",
                 true,
                 false,
-                "user:pass@abc123def456.r2.cloudflarestorage.com",
+                "abc123def456.r2.cloudflarestorage.com",
             ),
             (
                 "https://.r2.cloudflarestorage.com",
@@ -3105,7 +3213,7 @@ mod tests {
                 "https://project.supabase.co/storage/v1/s3",
                 false,
                 false,
-                "project.supabase.co/storage/v1/s3",
+                "project.supabase.co",
             ),
             ("http://127.0.0.1:9999", false, false, "127.0.0.1:9999"),
         ];
@@ -3131,14 +3239,19 @@ mod tests {
                 "{endpoint}: the strict R2 guard disagrees with the table"
             );
             // Ask the production parser whether the literal signed host is a
-            // valid R2 endpoint under the runtime scheme. Restating the
+            // valid R2 endpoint under the runtime scheme, then combine it with
+            // the no-base-path/no-userinfo/no-port constraints exposed by the
+            // same endpoint decomposition the runtime uses. Restating the
             // account/jurisdiction grammar here created a third policy
             // implementation that could drift in lock step with the test while
             // production remained wrong.
-            let signed_host_is_valid_r2 = parse_r2_endpoint(&format!("{scheme}://{host}"));
+            let parts = parse_endpoint(endpoint).unwrap();
+            let runtime_target_is_bare_r2 = parts.path_prefix.is_empty()
+                && parts.host_name().len() == parts.authority.len()
+                && parse_r2_endpoint(&format!("{scheme}://{host}")).is_some();
             assert_eq!(
                 parsed.is_some(),
-                signed_host_is_valid_r2.is_some(),
+                runtime_target_is_bare_r2,
                 "{endpoint}: validation verdict disagrees with the signed endpoint {scheme}://{host}"
             );
         }
@@ -3203,7 +3316,8 @@ mod tests {
         //   * a real `x-amz-content-sha256` (not UNSIGNED-PAYLOAD), path-style.
         let bucket = r2_client("https://abc123def456.r2.cloudflarestorage.com");
         let (_scheme, host) = bucket.scheme_and_host().unwrap();
-        let path = bucket.object_path("tenant-a:cli_tool:hello:1.0.0");
+        let endpoint = bucket.endpoint().unwrap();
+        let path = endpoint.object_path(&bucket.config.bucket, "tenant-a:cli_tool:hello:1.0.0");
         assert_eq!(path, "/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0");
 
         let signed = bucket.sign("PUT", &path, &host, b"asset bytes");
@@ -3478,6 +3592,8 @@ mod tests {
 
         let request = captured.lock().unwrap().clone().unwrap();
         assert_eq!(request.method, "PUT");
+        let expected_host = concrete.scheme_and_host().unwrap().1;
+        assert_eq!(request.host.as_deref(), Some(expected_host.as_str()));
         assert_eq!(
             request.path,
             "/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0"
