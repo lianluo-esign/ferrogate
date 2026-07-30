@@ -524,11 +524,11 @@ fn only_a_live_verified_record_is_eligible_for_acme() {
 
 /// The bind handler's runtime ACME decision, as a value.
 ///
-/// This is the exact decision `handle_admin_site_domain_bind` applies (it calls
-/// `acme_order_action` and hands the result to `apply_site_domain_acme_action`
-/// without re-deriving anything), so flipping the policy back to "serving means
-/// enrolled" reds here: `grandfathered` serves AND withholds in the same
-/// assertion, which no single boolean can satisfy.
+/// This is the exact decision `handle_admin_site_domain_bind` applies: it hands
+/// the stored record to `apply_site_domain_acme_policy`, which derives the action
+/// from `acme_order_action` and cannot be given one. So flipping the policy back
+/// to "serving means enrolled" reds here: `grandfathered` serves AND withholds in
+/// the same assertion, which no single boolean can satisfy.
 #[test]
 fn a_grandfathered_rebind_keeps_serving_but_never_enters_the_acme_order_set() {
     let now = 1_000;
@@ -916,16 +916,17 @@ fn the_cleanup_reports_what_the_store_actually_did() {
 /// The verify path's certificate-order decision.
 ///
 /// `handle_admin_site_domain_verify` promotes the record with `mark_verified`
-/// and then hands `acme_order_action(&verification, now)` to
-/// `apply_site_domain_acme_action`, so this is the policy that call applies: a
-/// completed proof is what enrolls a hostname, and a promotion whose proof is no
-/// longer live withholds instead.
+/// and then hands THAT RECORD to `apply_site_domain_acme_policy`, which derives
+/// the action here rather than accepting one, so this is the policy that call
+/// applies: a completed proof is what enrolls a hostname, and a promotion whose
+/// proof is no longer live withholds instead.
 ///
-/// WHAT THIS DOES NOT CATCH, stated plainly: no test drives the handler arm, so
-/// replacing its argument with a hand-picked `AcmeOrderAction::Enroll` would
-/// leave this green. Closing that needs either the `BindTerminal` sealing
-/// treatment on `AcmeOrderAction` or an in-process admin-request test over the
-/// verify handler; neither is done here.
+/// WHAT THIS DOES NOT CATCH, stated plainly: no test drives the handler arm. The
+/// mutation an earlier round named -- replacing the argument with a hand-picked
+/// `AcmeOrderAction::Enroll` -- is now a compile error, because the call takes
+/// the record and no action, but a deliberate rewrite of the match INSIDE
+/// `apply_site_domain_acme_policy` would still leave this green. An in-process
+/// admin-request test over the verify handler is what closes that.
 #[test]
 fn a_completed_proof_is_what_enrolls_a_hostname_in_the_acme_order_set() {
     let now = 1_000;

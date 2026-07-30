@@ -471,10 +471,11 @@ impl FerroGateway {
         // Two DIFFERENT questions, deliberately answered by two different
         // predicates and never by one boolean (#488): `serving` is HTTP
         // availability, which the `grandfathered` migration exception
-        // satisfies; `acme_action` is certificate-issuance policy, which only a
-        // live DNS proof satisfies.
+        // satisfies; certificate-issuance policy is a separate decision that
+        // only a live DNS proof satisfies, and this handler does not get to
+        // express it -- `apply_site_domain_acme_policy` derives it from the
+        // stored record below.
         let serving = verification.serves(now);
-        let acme_action = acme_order_action(&verification, now);
         if let Err(error) = state
             .upsert_site_domain_verification(verification.clone())
             .await
@@ -527,10 +528,11 @@ impl FerroGateway {
         // #488: an unproven hostname must NOT enter the ACME order set. That is
         // both the certificate-issuance rate-limit pollution the issue calls
         // out and a second place an unowned hostname would become real. The
-        // handler does not re-decide that here -- it applies the action derived
-        // from the stored proof above.
-        let acme = self.apply_site_domain_acme_action(&state, &hostname, acme_action);
-        let live_ownership_proof = acme_action.enrolls();
+        // handler cannot re-decide or hand-pick that here: it passes the STORED
+        // proof and reads back the action that was applied.
+        let applied = self.apply_site_domain_acme_policy(&state, &hostname, &verification, now);
+        let acme = applied.acme;
+        let live_ownership_proof = applied.action.enrolls();
         let admin_verification = AdminSiteDomainVerification::new(&verification, now);
         state.record_admin_audit_event(admin_audit_event_draft_for_target(
             ctx,
@@ -905,15 +907,13 @@ impl FerroGateway {
                 let takeover_detail = cleanup.audit_detail();
 
                 // The order-set decision is derived from the STORED proof here
-                // too, never from a literal at the call site: `acme_order_action`
-                // is the single place the #488 certificate-order policy exists,
-                // and a promotion that did not actually leave a live proof
-                // behind must withhold instead of enrolling.
-                let acme = self.apply_site_domain_acme_action(
-                    &state,
-                    &hostname,
-                    acme_order_action(&verification, now),
-                );
+                // too, and cannot be spelled at the call site at all: the only
+                // thing this arm can pass is the record it just promoted, so a
+                // promotion that did not actually leave a live proof behind
+                // withholds instead of enrolling.
+                let acme = self
+                    .apply_site_domain_acme_policy(&state, &hostname, &verification, now)
+                    .acme;
                 audit(
                     "committed",
                     format!(
@@ -1030,21 +1030,31 @@ impl FerroGateway {
     }
 
     /// Applies the #488 certificate-order policy for a bind or a completed
-    /// verification.
+    /// verification, and reports which action it applied.
     ///
-    /// The caller passes the ACTION derived from the stored ownership proof,
-    /// not a boolean it computed itself, so "is this hostname serving?" is no
-    /// longer available at this call as an answer to "may FerroGate order a
-    /// certificate for it?". The withheld case is logged with the state that
-    /// caused it: a grandfathered hostname answering traffic while staying out
-    /// of the order set is an operational decision, not something to hide.
-    fn apply_site_domain_acme_action(
+    /// The caller passes the STORED ownership proof, never an action and never a
+    /// boolean it computed itself. Two earlier attempts at this issue regressed
+    /// because the enrollment decision was expressible at the call site -- first
+    /// as `serving`, then as a literal [`AcmeOrderAction`] -- and both times a
+    /// one-token edit put an unproven hostname back into the certificate order
+    /// set. With the record as the only input there is nothing at either call
+    /// site to pick: [`acme_order_action`] is the single place the policy exists,
+    /// and reverting to a hand-picked action is a compile error rather than a
+    /// silent behaviour change. The applied action is returned so the audit line
+    /// reports what was actually done to the order set instead of re-deriving it.
+    ///
+    /// The withheld case is logged with the state that caused it: a
+    /// grandfathered hostname answering traffic while staying out of the order
+    /// set is an operational decision, not something to hide.
+    fn apply_site_domain_acme_policy(
         &self,
         state: &crate::state::AppState,
         hostname: &str,
-        action: AcmeOrderAction,
-    ) -> AdminSiteDomainAcme {
-        match action {
+        verification: &StoredSiteDomainVerification,
+        now_unix: i64,
+    ) -> AppliedSiteDomainAcme {
+        let action = acme_order_action(verification, now_unix);
+        let acme = match action {
             AcmeOrderAction::Enroll => self.refresh_acme_after_domain_change(state, hostname, true),
             AcmeOrderAction::Withhold {
                 serving,
@@ -1061,7 +1071,8 @@ impl FerroGateway {
                 );
                 self.site_domain_acme_state(state)
             }
-        }
+        };
+        AppliedSiteDomainAcme { acme, action }
     }
 
     /// Reports the ACME posture attached to a bind/unbind response without
@@ -1160,6 +1171,16 @@ struct AdminSiteDomainAcme {
     /// Whether this change triggered the listener-level graceful upgrade that
     /// re-issues the certificate with the updated domain set.
     reload_triggered: bool,
+}
+
+/// The ACME posture that was actually applied to a site-domain mutation, paired
+/// with the typed action that produced it (#488).
+///
+/// Returned as one value so the response body and the audit line cannot claim
+/// something different from what happened to the certificate order set.
+struct AppliedSiteDomainAcme {
+    acme: AdminSiteDomainAcme,
+    action: AcmeOrderAction,
 }
 
 #[derive(Debug, Serialize)]
