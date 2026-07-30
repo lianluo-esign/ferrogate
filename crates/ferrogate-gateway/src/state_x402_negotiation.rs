@@ -46,6 +46,15 @@
 //     through the SAME shared comparison the on-chain reconciler applies
 //     (#469/#476). A report SHORT of what is owed -- or one that omits the amount
 //     entirely -- parks `outcome_unknown` instead of capturing.
+//   * Every park leaves a DURABLE audit row, not just a log line (#497). A park
+//     retains a post-submission hold, and nothing reaps one (the TTL sweeper only
+//     touches pre-submission holds), so the tenant's credits stay locked until an
+//     operator acts -- which they cannot do from process logs, because logs are
+//     not the system of record and cannot be queried alongside the attempt. The
+//     amount anomalies record `x402.settlement.amount_mismatch`, the SAME action
+//     the offline reconciler emits so one query answers both paths; the parks
+//     that are not about the amount record `x402.settlement.outcome_unknown` so
+//     the two causes never flatten together.
 //   * Attribution + evidence preserved. Request/trace ids flow into the durable
 //     attempt, and every terminal path returns the policy decision, the attempt
 //     id, and the settlement edge outcome as inspectable evidence.
@@ -71,6 +80,7 @@ use super::state_x402_settlement::{
     classify_settled_amount, AmountCoverage, EdgeOutcome, OpenOutcome, PaidEgressOpen,
     SettlementEvidence, X402SettlementLoop,
 };
+use super::AppState;
 
 /// HTTP status a paid-egress upstream returns to demand payment.
 const STATUS_PAYMENT_REQUIRED: u16 = 402;
@@ -383,7 +393,13 @@ impl From<StorageError> for X402NegotiationError {
 /// payment is judged by: the settlement loop stamps the hold and the attempt
 /// with it, and it is also what the policy's conversion-freshness window is
 /// tested against, so `spent.now_unix` is overridden rather than trusted.
+///
+/// `state` is the durable audit sink (#497). It is a required positional
+/// parameter rather than an option so no present or future caller can wire this
+/// path up without the money-anomaly audit trail; the anomaly is recorded inside
+/// [`finalize_settlement`], so no call site can drop it either.
 pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
+    state: &AppState,
     loop_: &X402SettlementLoop,
     policy: &ValidatedX402SpendPolicy,
     spent: &SpendSnapshot,
@@ -523,9 +539,10 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
         Err(source) => {
             // Dispatch failed after submit: we cannot know the on-chain outcome,
             // so park unknown (retain the hold) for the reconciler.
-            let settlement = finalize_settlement(loop_, &attempt_id, &selected, None, now_unix)
-                .await
-                .ok();
+            let settlement =
+                finalize_settlement(state, loop_, ctx, &attempt_id, &selected, None, now_unix)
+                    .await
+                    .ok();
             return Err(X402NegotiationError::Transport {
                 source,
                 attempt_id: Some(attempt_id),
@@ -540,7 +557,9 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
         // already submitted, so this parks unknown (retained hold), never a
         // release.
         let settlement = finalize_settlement(
+            state,
             loop_,
+            ctx,
             &attempt_id,
             &selected,
             paid.payment_response.as_deref(),
@@ -556,7 +575,9 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
 
     if !paid.is_success() {
         let settlement = finalize_settlement(
+            state,
             loop_,
+            ctx,
             &attempt_id,
             &selected,
             paid.payment_response.as_deref(),
@@ -575,7 +596,9 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
     // evidence the PAYMENT-RESPONSE carried (durable on-chain proof -> Settled;
     // anything ambiguous -> outcome_unknown with the hold retained).
     let settlement = finalize_settlement(
+        state,
         loop_,
+        ctx,
         &attempt_id,
         &selected,
         paid.payment_response.as_deref(),
@@ -749,7 +772,9 @@ fn classify_reported_amount(
 /// on-chain confirmation is the separate design change that needs the live RPC
 /// transport first (#354).
 async fn finalize_settlement(
+    state: &AppState,
     loop_: &X402SettlementLoop,
+    ctx: &X402NegotiationContext<'_>,
     attempt_id: &str,
     selected: &SelectedPayment,
     payment_response: Option<&str>,
@@ -811,26 +836,72 @@ async fn finalize_settlement(
         // header every tick -- the earliest edge a signature is known that is not
         // a settle.
         _ => {
-            match reported.as_ref() {
+            // #497: EVERY park on this path strands a POST-SUBMISSION hold that
+            // nothing reaps -- the TTL sweeper deliberately only touches
+            // pre-submission holds -- so the tenant's credits stay locked until
+            // an operator intervenes. A `warn!` is not the system of record and
+            // cannot be queried next to the attempt it belongs to, so each park
+            // also lands a durable audit row. The classification drives the
+            // action, so the amount anomalies keep the SAME
+            // `x402.settlement.amount_mismatch` name the offline reconciler
+            // emits (one event name answers both paths) while the parks that are
+            // NOT about the amount stay distinguishable from them.
+            let (action, message) = match reported.as_ref() {
                 Some(ReportedAmount::Short {
                     observed_atomic_amount,
-                }) => tracing::warn!(
-                    attempt_id,
-                    owed = %owed_atomic_amount,
-                    observed = %observed_atomic_amount,
-                    "x402 finalize: merchant claimed success for LESS than the owed amount; \
-                     NOT capturing the hold, parking outcome_unknown for on-chain \
-                     reconciliation (fail-closed)"
+                }) => {
+                    tracing::warn!(
+                        attempt_id,
+                        owed = %owed_atomic_amount,
+                        observed = %observed_atomic_amount,
+                        "x402 finalize: merchant claimed success for LESS than the owed amount; \
+                         NOT capturing the hold, parking outcome_unknown for on-chain \
+                         reconciliation (fail-closed)"
+                    );
+                    (
+                        X402_AMOUNT_MISMATCH_ACTION,
+                        format!(
+                            "merchant reported a settled amount that does not cover what is owed \
+                             (expected at least {owed_atomic_amount}, reported \
+                             {observed_atomic_amount}); hold retained, attempt left \
+                             outcome_unknown pending on-chain reconciliation"
+                        ),
+                    )
+                }
+                Some(ReportedAmount::Absent) => {
+                    tracing::warn!(
+                        attempt_id,
+                        owed = %owed_atomic_amount,
+                        "x402 finalize: merchant claimed success but reported NO settled amount; \
+                         NOT assuming the owed amount was paid, parking outcome_unknown for \
+                         on-chain reconciliation (fail-closed)"
+                    );
+                    (
+                        X402_AMOUNT_MISMATCH_ACTION,
+                        format!(
+                            "merchant claimed success but reported NO settled amount (expected at \
+                             least {owed_atomic_amount}); hold retained, attempt left \
+                             outcome_unknown pending on-chain reconciliation"
+                        ),
+                    )
+                }
+                // No settlement header, one that does not parse (which is how an
+                // unparseable AMOUNT reaches this path -- the frozen #350 parse
+                // rejects the whole header), a merchant-reported failure, or a
+                // success claim with no on-chain signature. None of these prove
+                // the money did or did not move, so the hold is retained; the
+                // row says which of those it was without claiming more.
+                _ => (
+                    X402_EVIDENCE_UNPROVEN_ACTION,
+                    format!(
+                        "paid replay produced no settlement evidence that proves the owed \
+                         {owed_atomic_amount} was paid ({}); hold retained, attempt left \
+                         outcome_unknown pending on-chain reconciliation",
+                        unproven_evidence_reason(payment_response, parsed.as_ref())
+                    ),
                 ),
-                Some(ReportedAmount::Absent) => tracing::warn!(
-                    attempt_id,
-                    owed = %owed_atomic_amount,
-                    "x402 finalize: merchant claimed success but reported NO settled amount; \
-                     NOT assuming the owed amount was paid, parking outcome_unknown for \
-                     on-chain reconciliation (fail-closed)"
-                ),
-                _ => {}
-            }
+            };
+            state.record_x402_online_settlement_audit(ctx, attempt_id, action, &message);
             SettlementEvidence::Unknown {
                 response: payment_response,
                 transaction_signature: parsed
@@ -840,6 +911,88 @@ async fn finalize_settlement(
         }
     };
     loop_.finalize(attempt_id, &evidence, now_unix).await
+}
+
+/// Audit action for a settlement whose REPORTED amount does not prove what is
+/// owed was paid. Deliberately the same string the offline reconciler records
+/// (`state_x402_reconciler.rs`) so one query returns the anomaly from both the
+/// online negotiation path and the on-chain reconciler (#497).
+const X402_AMOUNT_MISMATCH_ACTION: &str = "x402.settlement.amount_mismatch";
+
+/// Audit action for a park whose cause is NOT the reported amount: no
+/// settlement header, one that does not parse, a merchant-reported failure, or a
+/// success claim carrying no on-chain signature. Kept distinct from
+/// [`X402_AMOUNT_MISMATCH_ACTION`] so "the merchant shorted us" and "the
+/// merchant told us nothing usable" do not flatten into one operator query,
+/// and named for the attempt state it leaves behind (`outcome_unknown`) so the
+/// row joins the attempts an operator finds parked (#497).
+const X402_EVIDENCE_UNPROVEN_ACTION: &str = "x402.settlement.outcome_unknown";
+
+/// Which of the non-amount ambiguities produced this park, as one short clause
+/// for the audit message. Distinguishing them matters operationally: a merchant
+/// that never sends the header is a different problem from one that reports
+/// failure, and the log line these rows replace is the only place that
+/// distinction lived.
+fn unproven_evidence_reason(
+    payment_response: Option<&str>,
+    parsed: Option<&ferrogate_payments::SettlementEvidence>,
+) -> &'static str {
+    match (payment_response, parsed) {
+        (None, _) => "the paid replay carried no PAYMENT-RESPONSE header",
+        (Some(_), None) => "the PAYMENT-RESPONSE header did not parse against the expected network",
+        (Some(_), Some(evidence)) if !evidence.success => {
+            "the merchant reported a FAILED settlement"
+        }
+        // Success without a signature: nothing to query the chain with.
+        (Some(_), Some(_)) => {
+            "the merchant claimed success but carried no on-chain transaction signature"
+        }
+    }
+}
+
+impl AppState {
+    /// Record the durable audit row for an online x402 settlement anomaly.
+    ///
+    /// The online path has no live `AuthContext` -- the merchant response is
+    /// classified inside the egress negotiation, not inside an admin request --
+    /// so the draft is built directly with `actor_api_key_id: None`, mirroring
+    /// the reconciler's and the TTL sweeper's precedent. Attribution comes from
+    /// the negotiation context, which is the same identity the durable payment
+    /// attempt was opened under, so the audit row joins the attempt it belongs
+    /// to.
+    fn record_x402_online_settlement_audit(
+        &self,
+        ctx: &X402NegotiationContext<'_>,
+        attempt_id: &str,
+        action: &str,
+        message: &str,
+    ) {
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: (!ctx.tenant_id.is_empty()).then(|| ctx.tenant_id.to_string()),
+            project_id: ctx.project_id.map(str::to_string),
+            workspace_id: ctx.workspace_id.map(str::to_string),
+            ..ferrogate_core::TenantContext::default()
+        };
+        self.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            action_identity: Default::default(),
+            // The negotiation's own request id when it has one; the idempotency
+            // key otherwise -- the same fallback `build_payment_intent` uses, so
+            // the audit row, the intent and the attempt id stay joined by one
+            // value.
+            request_id: ctx.request_id.unwrap_or(ctx.idempotency_key).to_string(),
+            trace_id: ctx.trace_id.map(str::to_string),
+            agent_run_id: ctx.run_id.map(str::to_string),
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            actor_api_key_id: ctx.key_id.map(str::to_string),
+            tenant,
+            action: action.to_string(),
+            target: attempt_id.to_string(),
+            outcome: "committed".to_string(),
+            message: message.to_string(),
+        });
+    }
 }
 
 #[cfg(test)]

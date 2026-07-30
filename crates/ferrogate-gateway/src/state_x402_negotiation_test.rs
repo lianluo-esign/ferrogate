@@ -14,7 +14,10 @@
 // merchant-REPORTED settled amount is proven to COVER the owed amount on parsed
 // integers -- underpayment, an omitted amount, and an unparseable amount all
 // park instead of capturing, while a spec-valid overpayment settles and still
-// captures only the owed hold.
+// captures only the owed hold. Finally pins #497: every park leaves a DURABLE
+// audit row (amount anomalies under the reconciler's own
+// `x402.settlement.amount_mismatch`, other causes under
+// `x402.settlement.outcome_unknown`), and a clean settle leaves neither.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -155,6 +158,17 @@ fn settled_payment_response_for(settled_atomic_amount: &str) -> String {
 
 fn settled_payment_response() -> String {
     settled_payment_response_for("1000")
+}
+
+/// A merchant `PAYMENT-RESPONSE` that reports the settlement FAILED. Not
+/// on-chain proof in either direction, so it parks rather than releasing.
+fn failed_payment_response() -> String {
+    let object = json!({
+        "success": false,
+        "network": CAIP2_SOLANA_DEVNET,
+        "transaction": signature(),
+    });
+    BASE64_STD.encode(serde_json::to_vec(&object).expect("serialize settlement"))
 }
 
 fn payment_required_response() -> EgressResponse {
@@ -407,6 +421,7 @@ fn allow_settle_single_replay_records_attempt_and_settlement() {
     let loop_ = state.x402_settlement_loop();
 
     let outcome = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -477,6 +492,7 @@ fn policy_deny_makes_no_payment_and_never_signs() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -514,6 +530,7 @@ fn approval_required_short_circuits_without_signing() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -561,6 +578,7 @@ fn a_stale_ledger_clock_cannot_vouch_for_an_expired_conversion_rate() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         // The snapshot says "it is 100", which is inside the window.
@@ -604,6 +622,7 @@ fn the_negotiations_clock_proves_freshness_when_the_caller_supplied_none() {
     let loop_ = state.x402_settlement_loop();
 
     let outcome = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -645,6 +664,7 @@ fn second_402_after_paying_is_typed_failure_and_never_loops() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -705,6 +725,7 @@ fn paid_replay_without_settlement_evidence_parks_outcome_unknown() {
     let loop_ = state.x402_settlement_loop();
 
     let outcome = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -759,6 +780,7 @@ fn paid_replay_non_2xx_failure_parks_outcome_unknown() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -814,6 +836,7 @@ fn transport_failure_after_submit_parks_outcome_unknown() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -870,6 +893,7 @@ fn insufficient_funds_never_invokes_signer() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -911,6 +935,7 @@ fn signer_rejection_releases_hold_and_makes_no_paid_replay() {
     let loop_ = state.x402_settlement_loop();
 
     let error = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -962,6 +987,7 @@ fn no_payment_required_passes_response_through() {
     let loop_ = state.x402_settlement_loop();
 
     let outcome = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -1003,6 +1029,7 @@ fn negotiate_with(owed: &str, payment_response: Option<String>) -> (AppState, St
     let loop_ = state.x402_settlement_loop();
 
     let outcome = block_on(negotiate_paid_egress(
+        &state,
         &loop_,
         &policy,
         &SpendSnapshot::default(),
@@ -1228,4 +1255,160 @@ fn reported_amount_decision_table() {
         short(&max)
     );
     assert_eq!(classify_reported_amount("", Some(u64::MAX)), short(&max));
+}
+
+// --------------------------------------------------------------------------
+// 9. #497: an online amount anomaly leaves a DURABLE audit row, not only a log
+//    line. The park holds tenant credits that nothing reaps -- the TTL sweeper
+//    deliberately never touches a post-submission hold -- so the anomaly has to
+//    be queryable next to the attempt it belongs to. The offline reconciler
+//    already emits `x402.settlement.amount_mismatch` for the same class of
+//    anomaly; both paths must answer ONE query.
+// --------------------------------------------------------------------------
+
+const AMOUNT_MISMATCH: &str = "x402.settlement.amount_mismatch";
+const EVIDENCE_UNPROVEN: &str = "x402.settlement.outcome_unknown";
+
+/// Every audit event recorded for `attempt_id` under `action`.
+fn audit_events_for(
+    state: &AppState,
+    attempt_id: &str,
+    action: &str,
+) -> Vec<ferrogate_storage::StoredAuditEvent> {
+    state.flush_evidence_writer();
+    block_on(state.repositories_arc().audit_events())
+        .into_iter()
+        .filter(|event| event.target == attempt_id && event.action == action)
+        .collect()
+}
+
+/// The single amount-mismatch event for `attempt_id`, or a panic naming what the
+/// audit trail actually holds.
+fn amount_mismatch_event(
+    state: &AppState,
+    attempt_id: &str,
+) -> ferrogate_storage::StoredAuditEvent {
+    let mut events = audit_events_for(state, attempt_id, AMOUNT_MISMATCH);
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one {AMOUNT_MISMATCH} row for {attempt_id}, got {events:?}"
+    );
+    events.remove(0)
+}
+
+#[test]
+fn merchant_reported_underpayment_records_a_durable_amount_mismatch_audit_row() {
+    // The defect this pins: before #497 the online path emitted only a
+    // `tracing::warn!`, so an operator querying the audit trail saw NOTHING for
+    // a park that had locked the tenant's credits indefinitely.
+    let (state, attempt_id, settlement) =
+        negotiate_with("1000", Some(settled_payment_response_for("999")));
+    assert_hold_not_captured(&state, &attempt_id, &settlement);
+
+    let event = amount_mismatch_event(&state, &attempt_id);
+    // The message must carry BOTH sides of the comparison: an operator has to be
+    // able to see the shortfall from the audit row alone, without the process
+    // log the row exists to replace.
+    assert!(
+        event.message.contains("1000") && event.message.contains("999"),
+        "the audit message must name the owed and the reported amount: {}",
+        event.message
+    );
+    // Attribution: the row joins the tenant, the run and the trace the payment
+    // was authorized under, so it is queryable alongside the payment attempt.
+    assert_eq!(event.tenant.organization_id.as_deref(), Some(TENANT));
+    assert_eq!(event.tenant.project_id.as_deref(), Some("project-1"));
+    assert_eq!(event.trace_id.as_deref(), Some("trace-1"));
+    assert_eq!(event.agent_run_id.as_deref(), Some("run-1"));
+    assert_eq!(event.request_id, "req-1");
+}
+
+#[test]
+fn merchant_omitting_the_settled_amount_records_a_durable_amount_mismatch_audit_row() {
+    // The absent-amount park is the other #476 anomaly class, and it strands the
+    // hold identically -- so it is auditable identically, under the SAME action.
+    let (state, attempt_id, settlement) =
+        negotiate_with("1000", Some(settled_payment_response_with_amount(None)));
+    assert_hold_not_captured(&state, &attempt_id, &settlement);
+
+    let event = amount_mismatch_event(&state, &attempt_id);
+    assert!(
+        event.message.contains("1000"),
+        "the audit message must name what was owed: {}",
+        event.message
+    );
+    assert!(
+        event.message.contains("NO settled amount"),
+        "an absent amount must be distinguishable from an underpayment in the audit \
+         trail, not flattened into it: {}",
+        event.message
+    );
+}
+
+#[test]
+fn every_other_park_is_audited_too_and_is_not_called_an_amount_mismatch() {
+    // The park classes that are NOT about the amount strand the hold exactly the
+    // same way -- nothing reaps a post-submission hold -- so leaving them
+    // log-only would reproduce this issue for four of the five park causes.
+    // They are audited under a DISTINCT action: an unparseable header is not
+    // evidence that the merchant shorted us, and an operator hunting merchants
+    // that under-report must not have to filter these out by message text.
+    //
+    // Note the third class the issue names, "unparseable", lands HERE and not in
+    // the amount branch: the frozen #350 parse rejects the entire
+    // PAYMENT-RESPONSE when the amount is non-canonical, so by the time this
+    // path sees it there is no amount to compare -- only an unusable header.
+    let cases: Vec<(&str, Option<String>, &str)> = vec![
+        ("no header at all", None, "no PAYMENT-RESPONSE header"),
+        (
+            "an unparseable amount makes the whole header unparseable",
+            Some(settled_payment_response_with_amount(Some(json!("1.5")))),
+            "did not parse",
+        ),
+        (
+            "the merchant reported a failure",
+            Some(failed_payment_response()),
+            "FAILED settlement",
+        ),
+    ];
+
+    for (case, payment_response, expected_reason) in cases {
+        let (state, attempt_id, settlement) = negotiate_with("1000", payment_response);
+        assert_hold_not_captured(&state, &attempt_id, &settlement);
+
+        assert!(
+            audit_events_for(&state, &attempt_id, AMOUNT_MISMATCH).is_empty(),
+            "{case}: this is not an amount mismatch and must not be recorded as one"
+        );
+        let events = audit_events_for(&state, &attempt_id, EVIDENCE_UNPROVEN);
+        assert_eq!(events.len(), 1, "{case}: expected exactly one park row");
+        assert!(
+            events[0].message.contains(expected_reason),
+            "{case}: the row must name WHY the evidence was unusable, got: {}",
+            events[0].message
+        );
+    }
+}
+
+#[test]
+fn a_settling_negotiation_records_no_amount_mismatch_row() {
+    // The negative pin: the row must mean "an anomaly happened", not "a
+    // settlement was attempted". A covering report captures the hold and must
+    // leave no mismatch row -- otherwise the query an operator runs to find
+    // stranded holds returns every paid request.
+    let (state, attempt_id, settlement) =
+        negotiate_with("1000", Some(settled_payment_response_for("1000")));
+    assert!(
+        matches!(settlement, EdgeOutcome::Settled { .. }),
+        "expected a settle, got {settlement:?}"
+    );
+    assert!(
+        audit_events_for(&state, &attempt_id, AMOUNT_MISMATCH).is_empty(),
+        "a clean settle must not be recorded as an amount mismatch"
+    );
+    assert!(
+        audit_events_for(&state, &attempt_id, EVIDENCE_UNPROVEN).is_empty(),
+        "a clean settle parked nothing, so it must leave no park row either"
+    );
 }
