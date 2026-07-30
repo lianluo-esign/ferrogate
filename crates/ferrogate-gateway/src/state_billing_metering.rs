@@ -906,6 +906,145 @@ impl AppState {
         Ok(())
     }
 
+    /// #574: settle and record one managed external-action metering event
+    /// through the SAME durable metering + billing-outbox path token usage,
+    /// asset egress, and A2A exchanges flow through, so a *successful* managed
+    /// external action lands a project-attributed spend record in the ledger and
+    /// usage aggregates. This closes the "authorize succeeds / spend never
+    /// recorded" gap (the #428 unwired-field class): before this, a billable
+    /// managed external action emitted timeline + guardrail evidence only, so no
+    /// spend row existed and "which project the spend lands on" could not be
+    /// proven.
+    ///
+    /// BILLABILITY + SETTLEMENT POINT (issue #574 asks the caller to decide and
+    /// document this): exactly ONE metering row is emitted per *successful*
+    /// managed external action — one that capability authorization Allowed and
+    /// that then passed every managed-action guardrail — at the gateway
+    /// authorization boundary, the point the action's authorize outcome is known
+    /// and it is cleared to execute an external effect. Refused actions
+    /// (capability-denied, guardrail-blocked, or attribution-unresolved
+    /// refusals) and non-billable outcomes (approval-required — the action is
+    /// gated pending human approval, so no external effect has occurred) never
+    /// reach this method, so they emit NO spend. Managed external-action units
+    /// are not priced by default, so — exactly like an unpriced model, egress, or
+    /// A2A exchange — the event is metered and audited but carries no `cost_usd`
+    /// and never debits a wallet.
+    ///
+    /// `tenant` MUST be the #519-resolved workspace-attribution context, whose
+    /// `project_id` is the real project the workspace rolls up to (never the
+    /// workspace id), so the spend lands on the resolved project. Idempotency is
+    /// keyed on the transport `request_id` via `ledger_entry_id` — a stable
+    /// identity per logical action (request/run/action) — so a retry/replay of
+    /// the same action does not double-settle: `append_billing_event` returns
+    /// `recorded = false` on a same-settlement replay and the row is never
+    /// duplicated.
+    pub(crate) async fn record_managed_external_action_event(
+        &self,
+        request_id: &str,
+        trace_id: Option<&str>,
+        agent_run_id: &str,
+        tenant: &ferrogate_core::TenantContext,
+        action_class: &str,
+        action_target: &str,
+        action_fingerprint: Option<&str>,
+    ) -> Result<(), ferrogate_billing::BillingError> {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("managed_action_class".to_string(), action_class.to_string());
+        metadata.insert(
+            "managed_action_target".to_string(),
+            action_target.to_string(),
+        );
+        // #306/#574: the capability-evidence action fingerprint (when the action
+        // has a canonical target) joins the metering row to the timeline/audit
+        // rows of the same action. Absent for class-only actions — never
+        // fabricated.
+        if let Some(fingerprint) = action_fingerprint {
+            metadata.insert(
+                "managed_action_fingerprint".to_string(),
+                fingerprint.to_string(),
+            );
+        }
+
+        let event = BillingEvent {
+            request_id: request_id.to_string(),
+            trace_id: trace_id.map(str::to_string),
+            provider_attempt: ProviderAttempt::for_request(request_id, 0),
+            // #305/#574: the action executes under a declared agent run, whose id
+            // rides the metering row so spend joins the run's other evidence.
+            agent_run_id: Some(agent_run_id.to_string()),
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: Some(self.cluster_identity.cluster_id.clone()),
+            node_id: Some(self.cluster_identity.node_id.clone()),
+            tenant: tenant.clone(),
+            logical_model: format!("managed_action:{action_class}"),
+            provider: "managed_external_action".to_string(),
+            provider_model: action_target.to_string(),
+            usage: BillingTokenUsage::new(0, 0, 0),
+            usage_source: BillingUsageSource::GatewayEstimate,
+            status_code: 200,
+            occurred_at_unix: now_unix_seconds(),
+            cost_usd: None,
+            latency_ms: None,
+            metadata,
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
+        };
+
+        // Same durable outbox path token usage / asset egress / A2A use so a
+        // managed-action charge survives a billing outage or gateway restart and
+        // lands in usage_monthly_rollups / usage aggregates, idempotent on the
+        // ledger entry id.
+        let recorded = if self.billing_reporter.is_some() {
+            let entry_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+            let now = now_unix_seconds().unwrap_or_default() as i64;
+            let outcome = self
+                .repositories
+                .append_billing_event_with_outbox_enqueue(event.clone(), &entry_id, now)
+                .await
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist managed external action event: {error}"),
+                    )
+                })?;
+            if let Some(error) = outcome.enqueue_error {
+                if let Ok(mut metrics) = self.metrics.lock() {
+                    metrics.record_billing_report_enqueue_failure();
+                }
+                warn!(
+                    request_id = %event.request_id,
+                    error = %error,
+                    "failed to enqueue managed external action billing report for durable delivery"
+                );
+            }
+            outcome.recorded
+        } else {
+            self.repositories
+                .append_billing_event(event.clone())
+                .await
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist managed external action event: {error}"),
+                    )
+                })?
+        };
+        if !recorded {
+            return Ok(());
+        }
+        self.metering_events.record(event.clone())?;
+        self.record_billing_metrics(&event);
+        if let Some(exporter) = &self.metering_exporter {
+            exporter.export_event(event.clone());
+        }
+        // Managed-action spend counts toward the tenant's monthly budget/alert
+        // tiers just like token, egress, and A2A spend.
+        self.dispatch_budget_threshold_alerts(tenant).await;
+        Ok(())
+    }
+
     pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
         let mut snapshot = self
             .metrics

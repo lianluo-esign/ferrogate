@@ -122,6 +122,27 @@ pub enum ManagedActionClass {
     Network,
 }
 
+impl ManagedActionClass {
+    /// Stable snake_case identifier for this class, matching the `serde`
+    /// `rename_all = "snake_case"` wire form. Used where a managed-action class
+    /// must be recorded as a plain string dimension (e.g. #574 project-attributed
+    /// external-action metering) without round-tripping through `serde`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ManagedActionClass::Mcp => "mcp",
+            ManagedActionClass::Tool => "tool",
+            ManagedActionClass::Cli => "cli",
+            ManagedActionClass::Skill => "skill",
+            ManagedActionClass::Filesystem => "filesystem",
+            ManagedActionClass::Browser => "browser",
+            ManagedActionClass::Rest => "rest",
+            ManagedActionClass::Secret => "secret",
+            ManagedActionClass::Memory => "memory",
+            ManagedActionClass::Network => "network",
+        }
+    }
+}
+
 /// Targets managed actions by class and (optionally) by concrete target name
 /// — the MCP server/tool, CLI program, filesystem path, host, secret name, or
 /// REST route the action addresses (issue #200). Empty `classes`/`targets`

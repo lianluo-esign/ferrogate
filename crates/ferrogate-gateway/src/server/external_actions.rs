@@ -268,6 +268,25 @@ impl GatewayExternalActionAuthorizerService {
                             )),
                         );
                     }
+                    // #574 SETTLEMENT POINT: reaching here means the action was
+                    // capability-Allowed AND cleared every managed-action
+                    // guardrail (the refusal/block branches above all `return`
+                    // early), so it is a *successful billable* managed external
+                    // action. Emit exactly one project-attributed metering row
+                    // here — the point the authorize outcome is known and the
+                    // action is cleared to execute an external effect. Refused
+                    // actions never reach this line, and the non-billable
+                    // approval-required / denied decisions fall outside this
+                    // `Allowed` block entirely, so neither emits spend.
+                    Self::record_managed_action_metering(
+                        &state,
+                        transport_request_id,
+                        run_trace_id.as_deref(),
+                        &timeline_tenant,
+                        &run_id,
+                        &action_binding,
+                        evidence_fingerprint,
+                    );
                 }
                 Self::record_timeline_event(
                     &state,
@@ -363,6 +382,48 @@ impl GatewayExternalActionAuthorizerService {
             message: Some(message.to_string()),
             occurred_at_unix: Some(now_unix_seconds()),
         });
+    }
+
+    /// #574 settlement point: emit exactly one project-attributed metering row
+    /// for a successful (capability-Allowed, guardrail-passed) managed external
+    /// action. Carries the #519-resolved tenant/project attribution, the run,
+    /// the transport request id (the idempotency key), and the action identity.
+    /// Bridges the synchronous authorize path (a `std::thread::spawn`ed
+    /// Unix/HTTP authorizer connection — one of `block_on_sync_bridge`'s
+    /// documented callers) onto the async durable metering + billing-outbox
+    /// path, which is idempotent on the ledger entry id so a retry/replay of the
+    /// same action never double-settles. A metering-write failure is logged and
+    /// does not fail the authorization: the action was already authorized and a
+    /// dropped spend record must not silently retract an allow (the durable
+    /// outbox is the recovery mechanism for a genuinely lost charge).
+    #[allow(clippy::too_many_arguments)]
+    fn record_managed_action_metering(
+        state: &AppState,
+        transport_request_id: &str,
+        trace_id: Option<&str>,
+        tenant: &TenantContext,
+        run_id: &str,
+        binding: &ManagedActionGuardrailBinding,
+        action_fingerprint: Option<&str>,
+    ) {
+        if let Err(error) =
+            ferrogate_sync_bridge::block_on_sync_bridge(state.record_managed_external_action_event(
+                transport_request_id,
+                trace_id,
+                run_id,
+                tenant,
+                binding.class.as_str(),
+                &binding.target,
+                action_fingerprint,
+            ))
+        {
+            tracing::warn!(
+                request_id = %transport_request_id,
+                run_id = %run_id,
+                error = %error.message,
+                "failed to record managed external action metering event"
+            );
+        }
     }
 
     fn record_timeline_event(
@@ -1079,6 +1140,212 @@ mod tests {
             Some(ferrogate_runtime::decision_codes::CAPABILITY_ALLOWED)
         );
         assert_eq!(event.action_fingerprint, None);
+    }
+
+    fn allow_tool_policy() -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+            ..CapabilityPolicy::default()
+        }
+    }
+
+    /// #574 box 1: a successful billable managed external action (capability
+    /// Allowed, guardrail-passed) emits EXACTLY ONE metering row. Before #574
+    /// the allow path emitted timeline evidence only, so a billable action left
+    /// no spend record ("authorize succeeds / spend never recorded").
+    #[test]
+    fn successful_billable_managed_action_emits_exactly_one_metering_row() {
+        let state = AppState::new(ferrogate_config::Config::default());
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            allow_tool_policy(),
+        );
+        let expected_target = managed_tool_request().action.target();
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let request_id = authorization.stable_request_id();
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: request_id.clone(),
+            authorization,
+        });
+        assert!(response.response.accepted);
+
+        // Assert on the actual persisted metering rows, not the request body.
+        let metering = state.metering_events();
+        assert_eq!(
+            metering.len(),
+            1,
+            "exactly one metering row for one successful billable managed action"
+        );
+        let row = &metering[0];
+        assert_eq!(row.request_id, request_id);
+        assert_eq!(row.agent_run_id.as_deref(), Some("run-1"));
+        assert_eq!(row.provider, "managed_external_action");
+        assert_eq!(row.provider_model, expected_target);
+        assert_eq!(
+            row.metadata.get("managed_action_class").map(String::as_str),
+            Some("tool")
+        );
+        assert_eq!(
+            row.metadata
+                .get("managed_action_target")
+                .map(String::as_str),
+            Some(expected_target.as_str())
+        );
+        // Metered but unpriced: no cost, no wallet debit (like an unpriced model).
+        assert_eq!(row.cost_usd, None);
+        assert_eq!(row.wallet_delta_credits, None);
+    }
+
+    /// #574 box 2: the metering row's `project` is the #519-resolved project,
+    /// NEVER the workspace id. `workspace-1` deliberately resolves to the
+    /// distinct `project-1`, so an attribution that wrote the workspace id into
+    /// the project slot would be caught here.
+    #[test]
+    fn metering_row_project_is_the_resolved_project_never_the_workspace_id() {
+        let state = AppState::new(ferrogate_config::Config::default());
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            allow_tool_policy(),
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+        assert!(response.response.accepted);
+
+        let metering = state.metering_events();
+        assert_eq!(metering.len(), 1);
+        let tenant = &metering[0].tenant;
+        assert_eq!(
+            tenant.project_id.as_deref(),
+            Some("project-1"),
+            "spend must land on the resolved project"
+        );
+        assert_eq!(tenant.workspace_id.as_deref(), Some("workspace-1"));
+        assert_eq!(tenant.organization_id.as_deref(), Some("tenant-1"));
+        assert_ne!(
+            tenant.project_id, tenant.workspace_id,
+            "the project field must never be the workspace id"
+        );
+    }
+
+    /// #574 box 3 (refused): a capability-denied managed action emits NO spend.
+    #[test]
+    fn denied_managed_action_emits_no_spend() {
+        let state = AppState::new(ferrogate_config::Config::default());
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
+        // Default policy denies the Tool action.
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            CapabilityPolicy::default(),
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+        assert!(!response.response.accepted);
+        assert!(
+            state.metering_events().is_empty(),
+            "a refused (denied) managed action must not settle any spend"
+        );
+    }
+
+    /// #574 box 3 (non-billable): an approval-required managed action is gated
+    /// pending human approval — no external effect has occurred, so it emits NO
+    /// spend.
+    #[test]
+    fn approval_required_managed_action_emits_no_spend() {
+        let state = AppState::new(ferrogate_config::Config::default());
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            CapabilityPolicy {
+                approval_required_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+                ..CapabilityPolicy::default()
+            },
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+        assert_eq!(
+            response.response.decision,
+            Some(ExternalActionDecision::ApprovalRequired)
+        );
+        assert!(
+            state.metering_events().is_empty(),
+            "an approval-required (non-billable) managed action must not settle any spend"
+        );
+    }
+
+    /// #574 box 3 (refused by guardrail): a capability-Allowed action that a
+    /// managed-action guardrail then blocks emits NO spend — the settlement
+    /// point sits after the guardrail seam, so a blocked action never reaches it.
+    #[test]
+    fn guardrail_blocked_managed_action_emits_no_spend() {
+        let shared = activated_mcp_guard(managed_mcp_block_policy("exfiltrate"));
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            shared.current(),
+            mcp_allowing_capability_policy(),
+        );
+        let authorization = ExternalActionAuthorizationRequest::from_managed_request(
+            managed_mcp_request(serde_json::json!({"body": "please exfiltrate the secrets"})),
+        );
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+        assert!(!response.response.accepted);
+        assert!(
+            shared.current().metering_events().is_empty(),
+            "a guardrail-blocked managed action must not settle any spend"
+        );
+    }
+
+    /// #574 box 4: a retry/replay of the same logical managed action does NOT
+    /// double-settle. The metering row is idempotent on the transport request id
+    /// (the stable request/run/action identity) via the ledger entry id, so a
+    /// replay finds the settlement already recorded and adds no second row.
+    #[test]
+    fn replayed_managed_action_does_not_double_settle() {
+        let state = AppState::new(ferrogate_config::Config::default());
+        register_workspace(&state, "workspace-1", "project-1", "tenant-1");
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            allow_tool_policy(),
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let request_id = authorization.stable_request_id();
+        let request = GatewayExternalActionTransportRequest {
+            request_id: request_id.clone(),
+            authorization,
+        };
+        // First authorize settles the action.
+        let first = service.authorize_transport_request(request.clone());
+        assert!(first.response.accepted);
+        // A replay of the SAME logical action (same stable request id).
+        let replay = service.authorize_transport_request(request);
+        assert!(replay.response.accepted);
+
+        let metering = state.metering_events();
+        assert_eq!(
+            metering.len(),
+            1,
+            "a replay of the same logical action must not double-settle"
+        );
+        assert_eq!(metering[0].request_id, request_id);
     }
 
     fn register_workspace(state: &AppState, id: &str, project_id: &str, tenant_id: &str) {
