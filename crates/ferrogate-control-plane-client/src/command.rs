@@ -98,6 +98,28 @@ pub enum ResponseMode {
     Raw { media_type: String },
 }
 
+/// Whether a read verb's response is allowed to carry its group's one-time
+/// secret material out to the operator.
+///
+/// The default — [`SecretDisclosure::Redacted`] — is what makes a `GET` that
+/// merely *echoes* key material (a virtual key re-read, an admin API key
+/// listing) safe: the field is blanked before anything reaches stdout.
+///
+/// [`SecretDisclosure::Issued`] is the deliberate exception for a read whose
+/// **entire product** is a freshly minted credential. `asset-transfer
+/// download-url` is that shape: the contract models it as a `GET`, and its
+/// response's only load-bearing field is the presigned `download_url`. Blanking
+/// it left the verb printing `download_url: <redacted>` — a command that could
+/// not perform its operation. The distinction lives on the verb rather than in
+/// a group/verb-pair table so a verb added tomorrow must state which it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretDisclosure {
+    /// Blank the group's secret fields before rendering (the default).
+    Redacted,
+    /// The credential is the operation's result; render it intact.
+    Issued,
+}
+
 /// Metadata for one verb (operation) within a resource family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerbDescriptor {
@@ -115,6 +137,10 @@ pub struct VerbDescriptor {
     pub confirmation: ConfirmationPolicy,
     /// Whether the response is structured CLI data or a byte-faithful export.
     pub response_mode: ResponseMode,
+    /// Whether this verb's response legitimately carries the group's one-time
+    /// secret material (issue #363: `download-url` was blanking its own
+    /// payload).
+    secret_disclosure: SecretDisclosure,
     /// Required query values supplied as positional CLI segments after the
     /// operation's OpenAPI path parameters.
     ///
@@ -147,6 +173,7 @@ impl VerbDescriptor {
             effect: VerbEffect::Read,
             confirmation: ConfirmationPolicy::None,
             response_mode: ResponseMode::Structured,
+            secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
     }
@@ -168,6 +195,7 @@ impl VerbDescriptor {
             response_mode: ResponseMode::Raw {
                 media_type: media_type.into(),
             },
+            secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
     }
@@ -187,6 +215,7 @@ impl VerbDescriptor {
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::None,
             response_mode: ResponseMode::Structured,
+            secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
     }
@@ -205,6 +234,7 @@ impl VerbDescriptor {
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::Required,
             response_mode: ResponseMode::Structured,
+            secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
     }
@@ -218,8 +248,26 @@ impl VerbDescriptor {
             effect: VerbEffect::Local,
             confirmation: ConfirmationPolicy::None,
             response_mode: ResponseMode::Structured,
+            secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
+    }
+
+    /// Declare that this verb's response *is* the credential it returns, so the
+    /// group's secret fields must survive rendering instead of being blanked.
+    ///
+    /// Only correct for an operation that mints a fresh, short-lived grant on
+    /// each call. A read that merely echoes stored key material must keep the
+    /// default [`SecretDisclosure::Redacted`].
+    pub fn issuing_credential(mut self) -> VerbDescriptor {
+        self.secret_disclosure = SecretDisclosure::Issued;
+        self
+    }
+
+    /// Whether this verb's response carries its group's secret material by
+    /// design.
+    pub fn secret_disclosure(&self) -> SecretDisclosure {
+        self.secret_disclosure
     }
 
     /// Declare required query values that the CLI accepts as positional

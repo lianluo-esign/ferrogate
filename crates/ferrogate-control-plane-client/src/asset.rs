@@ -74,6 +74,11 @@ pub const SITE_DOMAINS: ResourceApi = ResourceApi::new("/admin/v1/site-domains")
 /// storage credentials and must be redacted from any diagnostic rendering.
 pub const ASSET_TRANSFER_SECRET_FIELDS: &[&str] = &["upload_url", "download_url"];
 
+/// `Accept` for the asset content reads. The contract declares `getAsset`'s
+/// 200/206 body as `*/*` (`format: binary`), so the CLI must not claim to want
+/// JSON and must not re-encode what comes back.
+const ASSET_CONTENT_MEDIA_TYPE: &str = "*/*";
+
 /// Require the composite `{asset_type}/{name}/{version}` key from the input
 /// segments, returning an actionable usage error naming the expected shape when
 /// fewer than three are supplied. Guards against an under-specified key silently
@@ -116,7 +121,18 @@ impl CommandGroup for AssetsGroup {
                     "List assets of one type",
                     "listAssetsByType",
                 ),
-                VerbDescriptor::read("get", "Show one asset version", "getAsset"),
+                // `getAsset`'s 200/206 body is the asset itself — the contract
+                // declares `*/*` with `format: binary`. Routing it through the
+                // structured renderer replaced every non-UTF-8 byte with
+                // U+FFFD, so `ctl assets get … > out.bin` produced a
+                // JSON-quoted lossy string instead of the object. A raw read
+                // writes the bytes through unchanged and refuses `--output`.
+                VerbDescriptor::raw_read(
+                    "get",
+                    "Download one asset version's bytes to stdout",
+                    "getAsset",
+                    ASSET_CONTENT_MEDIA_TYPE,
+                ),
                 VerbDescriptor::mutating("put", "Publish or replace an asset version", "putAsset"),
                 VerbDescriptor::mutating("delete", "Delete an asset version", "deleteAsset"),
                 VerbDescriptor::read(
@@ -133,6 +149,11 @@ impl CommandGroup for AssetsGroup {
                     "withheld",
                     "List withheld (pending_scan/quarantined) assets",
                     "listWithheldAssets",
+                ),
+                VerbDescriptor::mutating(
+                    "promote-visibility",
+                    "Promote an asset version's visibility",
+                    "promoteAssetVisibility",
                 ),
                 VerbDescriptor::mutating("yank", "Yank an asset version", "yankAssetVersion"),
                 VerbDescriptor::mutating(
@@ -157,7 +178,9 @@ pub fn build_assets(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec>
         }
         "get" => {
             let key = asset_version_ref(input, verb)?;
-            ASSETS.get(&key)
+            // `platform` (and any other contract query parameter) arrives as a
+            // list filter; `getAsset` needs it to resolve a variant.
+            ASSETS.get(&key, &input.list)
         }
         "put" => {
             let key = asset_version_ref(input, verb)?;
@@ -173,6 +196,14 @@ pub fn build_assets(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec>
         }
         "storage-summary" => ASSETS.read(&["storage", "summary"], &input.list),
         "withheld" => ASSETS.read(&["withheld"], &input.list),
+        "promote-visibility" => {
+            let [asset_type, name, version] = asset_version_ref(input, verb)?;
+            let spec = ASSETS.action(
+                &[asset_type, name, version, "visibility"],
+                Some(input.require_body(verb)?),
+            )?;
+            Ok(input.list.apply(spec))
+        }
         "yank" => {
             let [asset_type, name, version] = asset_version_ref(input, verb)?;
             ASSETS.action(&[asset_type, name, version, "yank"], input.body.clone())
@@ -210,11 +241,16 @@ impl CommandGroup for AssetTransferGroup {
                     "Release a presigned upload intent that will not be committed",
                     "abortAssetUpload",
                 ),
+                // The presigned URL IS this verb's product. It is still named
+                // in ASSET_TRANSFER_SECRET_FIELDS so it stays redacted out of
+                // *diagnostics* (error details, other verbs' echoes) — only
+                // this operation's own success body renders it.
                 VerbDescriptor::read(
                     "download-url",
                     "Request a presigned download URL",
                     "getAssetDownloadUrl",
-                ),
+                )
+                .issuing_credential(),
             ],
         )
     }
@@ -340,7 +376,7 @@ impl CommandGroup for SiteDomainsGroup {
 pub fn build_site_domains(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "list" => SITE_DOMAINS.read(&[], &input.list),
-        "get" => SITE_DOMAINS.get(&[first_segment(input, "site-domain")?]),
+        "get" => SITE_DOMAINS.get(&[first_segment(input, "site-domain")?], &input.list),
         "bind" => SITE_DOMAINS.create(input.require_body(verb)?),
         "verify" => SITE_DOMAINS.action(
             &[first_segment(input, "site-domain")?, "verify"],

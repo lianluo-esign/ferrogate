@@ -135,7 +135,7 @@ impl CommandGroup for GuardrailPoliciesGroup {
 /// sub-path; `list`/`create` are plain collection CRUD.
 pub fn build_guardrail_policies(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
-        "get" => GUARDRAIL_POLICIES.get(&[first_segment(input, "guardrail-policy")?]),
+        "get" => GUARDRAIL_POLICIES.get(&[first_segment(input, "guardrail-policy")?], &input.list),
         "revisions" => GUARDRAIL_POLICIES.read(
             &[first_segment(input, "guardrail-policy")?, "revisions"],
             &input.list,
@@ -146,7 +146,7 @@ pub fn build_guardrail_policies(verb: &str, input: &ResourceInput) -> CliResult<
         ),
         "get-revision" => {
             let (policy, revision) = policy_and_revision(input)?;
-            GUARDRAIL_POLICIES.get(&[policy, "revisions", revision])
+            GUARDRAIL_POLICIES.get(&[policy, "revisions", revision], &input.list)
         }
         "archive" => {
             let (policy, revision) = policy_and_revision(input)?;

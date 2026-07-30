@@ -32,6 +32,7 @@
 use http::Method;
 use serde_json::Value;
 
+use crate::command::SecretDisclosure;
 use crate::error::{CliError, CliResult};
 use crate::registry_helpers::ResourceInput;
 use crate::resource::redact_secret_fields;
@@ -163,7 +164,23 @@ pub fn secret_fields_for(group: &str) -> &'static [&'static str] {
 /// moment of that call — the binary routes it to the operator once and it is
 /// never persisted. A `GET` (`list`/`get`) must never surface key material, so
 /// any secret field the server echoes back is blanked defensively.
-pub fn redact_response(group: &str, spec: &RequestSpec, body: &mut Value) {
+///
+/// `disclosure` is the invoked verb's own declaration
+/// ([`VerbDescriptor::secret_disclosure`](crate::command::VerbDescriptor::secret_disclosure)).
+/// Method alone is not enough to decide this: a handful of operations are
+/// modelled as a `GET` *because* they mint a short-lived grant, and for those
+/// the secret field is the whole response. `asset-transfer download-url` is the
+/// case that forced this parameter — blanking `download_url` there left the
+/// verb unable to perform its operation (issue #363 review).
+pub fn redact_response(
+    group: &str,
+    disclosure: SecretDisclosure,
+    spec: &RequestSpec,
+    body: &mut Value,
+) {
+    if disclosure == SecretDisclosure::Issued {
+        return;
+    }
     if spec.method == Method::GET {
         let fields = secret_fields_for(group);
         if !fields.is_empty() {

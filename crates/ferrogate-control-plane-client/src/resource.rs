@@ -83,9 +83,17 @@ impl ResourceApi {
         Ok(spec)
     }
 
-    /// A `GET` on the item identified by `segments`, with no query parameters.
-    pub fn get(&self, segments: &[&str]) -> CliResult<RequestSpec> {
-        self.read(segments, &ListParams::new())
+    /// A `GET` on the item identified by `segments`.
+    ///
+    /// `params` is threaded through rather than dropped: several item reads
+    /// declare required or disambiguating query parameters in the contract —
+    /// `getAsset`'s `platform`, which it marks *"Required when resolution is
+    /// otherwise ambiguous"*, is the case that exposed this. Discarding them
+    /// made `--filter platform=linux-x64` a silent no-op, which is worse than
+    /// an error: the operator gets some other variant and no indication of it
+    /// (issue #363 review).
+    pub fn get(&self, segments: &[&str], params: &ListParams) -> CliResult<RequestSpec> {
+        self.read(segments, params)
     }
 
     /// The top-level collection listing.
@@ -184,7 +192,12 @@ impl ListParams {
     }
 
     /// Fold pagination, filters, and sort keys into a request spec.
-    fn apply(&self, mut spec: RequestSpec) -> RequestSpec {
+    ///
+    /// `pub(crate)` so a family builder can thread operator-supplied query
+    /// parameters onto a mutation too: `promoteAssetVisibility` declares
+    /// `platform`, which reaches the CLI as a filter and would otherwise be
+    /// dropped the same way `getAsset`'s was.
+    pub(crate) fn apply(&self, mut spec: RequestSpec) -> RequestSpec {
         if let Some(page) = &self.page {
             spec = spec.with_page(page);
         }

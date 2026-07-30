@@ -12,12 +12,13 @@
 use super::*;
 use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
-use crate::command::CommandGroup;
+use crate::command::{CommandGroup, SecretDisclosure};
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
+use crate::dispatch::redact_response;
 use crate::error::{CliResult, ExitClass};
 use crate::output::OutputFormat;
 use crate::registry_helpers::ResourceInput;
-use crate::resource::redact_secret_fields;
+use crate::resource::{redact_secret_fields, ListParams};
 use crate::transport::{ControlPlaneClient, PreparedRequest, RawResponse, RequestSpec, Transport};
 use http::Method;
 use std::sync::{Arc, Mutex};
@@ -141,6 +142,7 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "getAssetManifest",
         "getAssetStorageSummary",
         "listWithheldAssets",
+        "promoteAssetVisibility",
         "yankAssetVersion",
         "unyankAssetVersion",
         "createAssetUploadIntent",
@@ -158,8 +160,8 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 10 (assets) + 4 (transfer) + 3 (channels) + 5 (site-domains) = 22 ids.
-    assert_eq!(manifest.len(), 22);
+    // 11 (assets) + 4 (transfer) + 3 (channels) + 5 (site-domains) = 23 ids.
+    assert_eq!(manifest.len(), 23);
 }
 
 #[test]
@@ -335,6 +337,107 @@ fn presigned_urls_are_named_for_redaction() {
     assert_eq!(body["upload_url"], "<redacted>");
     // Non-secret metadata is preserved.
     assert_eq!(body["expires_in_seconds"], 900);
+}
+
+/// The regression the #363 review caught: `presigned_urls_are_named_for_redaction`
+/// above exercises `redact_secret_fields` in isolation, which is why nobody
+/// noticed that the layer actually wired into the binary — `redact_response` —
+/// blanked `download-url`'s own payload. This drives that layer, through the
+/// verb's declared disclosure, exactly as `read_output` does.
+#[test]
+fn download_url_response_survives_redaction_but_a_plain_read_does_not() {
+    let mut registry = Registry::new();
+    register(&mut registry).unwrap();
+
+    let download_spec = build_asset_transfer(
+        "download-url",
+        &ResourceInput::new().with_segments(["models", "llama", "1.2.3"]),
+    )
+    .unwrap();
+    let download_verb = registry.resolve("asset-transfer", "download-url").unwrap();
+    assert_eq!(download_spec.method, Method::GET);
+    let mut body = serde_json::json!({
+        "download_url": "https://bucket.example.com/signed?sig=GRANT",
+        "expires_in_seconds": 900
+    });
+    redact_response(
+        "asset-transfer",
+        download_verb.secret_disclosure(),
+        &download_spec,
+        &mut body,
+    );
+    assert_eq!(
+        body["download_url"], "https://bucket.example.com/signed?sig=GRANT",
+        "download-url's only load-bearing field must reach the operator; \
+         blanking it leaves a verb that cannot perform its operation"
+    );
+    assert_eq!(body["expires_in_seconds"], 900);
+
+    // The exception is scoped to the issuing verb, not to the group: a read
+    // that merely echoes a stored URL is still blanked.
+    let echo_spec = RequestSpec::new(
+        Method::GET,
+        "/v1/assets/presign/download/models/llama/1.2.3",
+    );
+    let mut echoed = serde_json::json!({"download_url": "https://bucket.example.com/x?sig=ECHO"});
+    redact_response(
+        "asset-transfer",
+        SecretDisclosure::Redacted,
+        &echo_spec,
+        &mut echoed,
+    );
+    assert_eq!(echoed["download_url"], "<redacted>");
+}
+
+/// `getAsset`'s body is `*/*` binary. Declaring it a structured read is what
+/// turned every non-UTF-8 byte into U+FFFD on the way to stdout.
+#[test]
+fn asset_get_is_a_byte_faithful_read_and_forwards_the_platform_filter() {
+    let mut registry = Registry::new();
+    register(&mut registry).unwrap();
+    let verb = registry.resolve("assets", "get").unwrap();
+    assert_eq!(
+        verb.raw_response_media_type(),
+        Some("*/*"),
+        "asset bytes must bypass the structured renderer"
+    );
+
+    // `platform` is the contract's disambiguator for a multi-variant asset; it
+    // reaches the CLI as a filter and used to be dropped on the floor.
+    let spec = build_assets(
+        "get",
+        &ResourceInput::new()
+            .with_segments(["cli_tool", "mytool", "1.0.0"])
+            .with_list(ListParams::new().with_filter("platform", "linux-x64")),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::GET);
+    assert_eq!(spec.path, "/v1/assets/cli_tool/mytool/1.0.0");
+    assert_eq!(
+        spec.query,
+        vec![("platform".to_string(), "linux-x64".to_string())]
+    );
+}
+
+/// The parity gate was green only because this issue's own gap was whitelisted.
+#[test]
+fn visibility_promotion_is_a_real_verb_not_a_parity_exclusion() {
+    let spec = build_assets(
+        "promote-visibility",
+        &ResourceInput::new()
+            .with_segments(["cli_tool", "mytool", "1.0.0"])
+            .with_body(serde_json::json!({"visibility": "public"})),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::POST);
+    assert_eq!(spec.path, "/v1/assets/cli_tool/mytool/1.0.0/visibility");
+    assert!(spec.body.is_some());
+    assert!(
+        !crate::parity::REVIEWED_EXCLUSIONS
+            .iter()
+            .any(|exclusion| exclusion.operation_id == "promoteAssetVisibility"),
+        "the verb exists now, so the gate must cover it rather than excuse it"
+    );
 }
 
 #[test]

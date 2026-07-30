@@ -40,7 +40,7 @@ use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 use ferrogate_control_plane_client::action_identity::{ClientActionIdentity, FingerprintEnv};
 use ferrogate_control_plane_client::args::GlobalArgs;
 use ferrogate_control_plane_client::auth::{resolve_credential, Credential};
-use ferrogate_control_plane_client::command::Registry;
+use ferrogate_control_plane_client::command::{Registry, SecretDisclosure};
 use ferrogate_control_plane_client::context::EffectiveContext;
 use ferrogate_control_plane_client::dispatch::{build_request, redact_response, secret_fields_for};
 use ferrogate_control_plane_client::error::{CliError, CliResult};
@@ -409,6 +409,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
                 read_output(
                     renderer,
                     group_name,
+                    descriptor.secret_disclosure(),
                     &resource,
                     spec,
                     &redaction_spec,
@@ -519,6 +520,7 @@ fn write_raw_output(
 fn read_output(
     renderer: BareRenderer<'_>,
     group_name: &str,
+    disclosure: SecretDisclosure,
     resource: &ResourceArgs,
     spec: RequestSpec,
     redaction_spec: &RequestSpec,
@@ -548,7 +550,7 @@ fn read_output(
 
     // Blank one-time secret material on reads before it can reach stdout.
     let mut body = response.body;
-    redact_response(group_name, redaction_spec, &mut body);
+    redact_response(group_name, disclosure, redaction_spec, &mut body);
 
     // A cursor endpoint ignores `--offset`, so page N is page ONE with exit 0 —
     // checked BEFORE anything is printed, so the wrong page never reaches stdout

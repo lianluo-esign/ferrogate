@@ -9,7 +9,7 @@
 use http::Method;
 use serde_json::json;
 
-use crate::command::Registry;
+use crate::command::{Registry, SecretDisclosure};
 use crate::dispatch::{build_request, redact_response, resource_builder, secret_fields_for};
 use crate::register_resource_families;
 use crate::registry_helpers::ResourceInput;
@@ -98,7 +98,7 @@ fn redaction_applies_only_to_reads() {
     )
     .unwrap();
     let mut body = json!({"id": "vk-1", "key": "sk-LEAK", "secret": "SHHH"});
-    redact_response("virtual-keys", &read, &mut body);
+    redact_response("virtual-keys", SecretDisclosure::Redacted, &read, &mut body);
     assert_eq!(body["key"], "<redacted>");
     assert_eq!(body["secret"], "<redacted>");
 
@@ -109,7 +109,12 @@ fn redaction_applies_only_to_reads() {
     )
     .unwrap();
     let mut created = json!({"id": "vk-2", "key": "sk-ONE-TIME"});
-    redact_response("virtual-keys", &create, &mut created);
+    redact_response(
+        "virtual-keys",
+        SecretDisclosure::Redacted,
+        &create,
+        &mut created,
+    );
     assert_eq!(
         created["key"], "sk-ONE-TIME",
         "a create response must surface the one-time secret"
