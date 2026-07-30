@@ -1896,6 +1896,139 @@ fn a_peer_still_holding_a_cancelled_jobs_start_dispatch_refuses_to_lease_it() {
 }
 
 #[test]
+fn a_cancel_reaches_the_peer_that_leased_the_durable_row_while_this_node_holds_an_unleased_copy() {
+    // The tie-breaker `2b11003` added, and the one combination no other test
+    // builds: this node holds an UNLEASED local start-dispatch copy while the
+    // shared durable row has been LEASED AND ASSIGNED TO A PEER that is now
+    // executing the job. `cancel_agent_job_in_runtime` chooses the withdraw arm
+    // vs. the `cancel_run` arm on `!durable_start_is_assigned`, NOT on this
+    // node's own lease queue. Drop that term (restore the pre-2b11003
+    // local-first decision) and this node withdraws its stale unleased copy,
+    // reports `runtime_cancel_dispatched == false`, mints NO `cancel_run`, and
+    // the peer runs the cancelled job to completion. Every existing peer/cancel
+    // test either has an empty local queue on the cancelling node (:1091) or an
+    // UNassigned durable row (:1786), so none exercises the assigned-durable /
+    // unleased-local pairing this term exists for.
+    let node_a = AppState::new(Config::default());
+    let run_id =
+        try_submit_job(&node_a, "tenant-a", "peer-leased-then-a-cancels").expect("submitted");
+    let start_dispatch_id = agent_job_start_dispatch_id(&run_id);
+    let start = start_dispatch(&run_id, "tenant-a");
+    // Node A KEEPS its own start-dispatch copy in memory, and never leases it:
+    // this is precisely the stale copy the removed term would wrongly withdraw.
+    assert!(
+        node_a.self_hosted_dispatch_unacked(&start_dispatch_id),
+        "node A must hold its own leasable start-dispatch copy locally"
+    );
+    assert!(
+        node_a
+            .self_hosted_dispatch_lease_owner(&run_id, SelfHostedRunAction::StartRun)
+            .is_none(),
+        "node A's local copy is UNLEASED -- the exact copy `withdraw_unleased_self_hosted_dispatch` \
+         would succeed against once the durable-assigned tie-breaker is gone"
+    );
+
+    // The peer replica: a second node over the SAME durable tables. It rebuilds
+    // its lease queue after the submit, then LEASES the shared start dispatch,
+    // which persists `assigned_worker_id = B` back to the durable row.
+    let node_b = node_a.new_peer_replica(Config::default());
+    let (worker_b, identity_b) = register_job_worker(&node_b, "tenant-a");
+    node_b
+        .rebuild_self_hosted_worker_dispatch_runtime()
+        .expect("peer B rebuilds its lease queue from the durable rows");
+    let mut leased_start = false;
+    for attempt in 0..8 {
+        let Some(lease) = poll_for_lease(&node_b, &identity_b, 1_000 + attempt) else {
+            break;
+        };
+        if lease.run_id == run_id && lease.action == SelfHostedRunAction::StartRun {
+            assert_eq!(lease.dispatch_id, start_dispatch_id);
+            assert_eq!(lease.worker_id, worker_b);
+            leased_start = true;
+            break;
+        }
+    }
+    assert!(
+        leased_start,
+        "peer B must genuinely lease + persist the shared start dispatch before the cancel, or \
+         this proves nothing"
+    );
+
+    // The tie-breaker's precondition, read exactly as the product reads it: the
+    // durable row is now ASSIGNED to B, while node A's local copy is still
+    // unassigned. This is the combination `!durable_start_is_assigned` decides
+    // on -- and the only combination in which deleting it flips the outcome.
+    let durable_start = node_a
+        .durable_self_hosted_dispatch_record_for_run(&run_id, SelfHostedRunAction::StartRun)
+        .expect("the durable start row survives the peer's lease");
+    assert_eq!(
+        durable_start.assigned_worker_id.as_deref(),
+        Some(worker_b.as_str()),
+        "peer B's lease is durably persisted, so the durable row node A reads is ASSIGNED"
+    );
+
+    // Node A serves the cancel while its own local copy is still unassigned.
+    let run = node_a.agent_run_record(&run_id).expect("run row on node A");
+    let decision =
+        cancel_agent_job(&node_a, &run, "fg-cancel", 5_000).expect("the cancel is accepted");
+    assert!(decision.cancelled, "the cancel terminalizes the run");
+    // THE mutation-killer. With `!durable_start_is_assigned` removed, node A
+    // withdraws its stale unleased copy and reports `false` here, minting no
+    // `cancel_run` -- and peer B runs the cancelled job to completion.
+    assert!(
+        decision.runtime_cancel_dispatched,
+        "an assigned durable row means a peer is executing: the cancel must dispatch a cancel_run, \
+         not withdraw this node's stale unleased copy"
+    );
+
+    // The `cancel_run` is durable and addresses the SAME work B leased.
+    let cancel_dispatch_id = agent_job_cancel_dispatch_id(&run_id);
+    assert!(
+        durable_dispatch_ids(&node_a).contains(&cancel_dispatch_id),
+        "the cancel_run must be persisted for the peer holder to read: {:?}",
+        durable_dispatch_ids(&node_a)
+    );
+    let cancel = node_a
+        .self_hosted_dispatch_for_run(&run_id, SelfHostedRunAction::CancelRun)
+        .expect("a cancel_run was minted for the holder");
+    assert_eq!(cancel.dispatch_id, cancel_dispatch_id);
+    assert_eq!(cancel.session_id, start.session_id);
+    assert_eq!(cancel.framework_adapter, start.framework_adapter);
+    assert_eq!(cancel.tenant_id, "tenant-a");
+
+    // ...and the peer that actually holds the job can COLLECT that cancel_run,
+    // addressed at its own worker/session/adapter identity, while the settled
+    // start dispatch is never handed out again.
+    node_b
+        .rebuild_self_hosted_worker_dispatch_runtime()
+        .expect("peer B rebuilds after the cancel and picks up the cancel_run");
+    let mut cancel_lease = None;
+    for attempt in 0..8 {
+        let Some(lease) = poll_for_lease(&node_b, &identity_b, 9_000 + attempt) else {
+            break;
+        };
+        assert_ne!(
+            lease.dispatch_id, start_dispatch_id,
+            "a cancelled job's start dispatch must never be re-leased to the peer"
+        );
+        if lease.action == SelfHostedRunAction::CancelRun && lease.run_id == run_id {
+            cancel_lease = Some(lease);
+        }
+    }
+    let cancel_lease = cancel_lease
+        .expect("the peer executing the cancelled job must be able to lease the cancel_run");
+    assert_eq!(
+        cancel_lease.worker_id, worker_b,
+        "the cancel_run reaches B, the worker that leased and is running the cancelled job"
+    );
+    assert_eq!(
+        cancel_lease.session_id, start.session_id,
+        "...addressed at the same session the start dispatch targeted"
+    );
+    assert_eq!(cancel_lease.framework_adapter, start.framework_adapter);
+}
+
+#[test]
 fn cancelling_an_already_leased_job_supersedes_its_start_dispatch() {
     // The harder half of the same defect. When a worker HOLDS the job the start
     // dispatch cannot simply be withdrawn -- the holder still has to be told to
