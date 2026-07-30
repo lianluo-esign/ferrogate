@@ -145,13 +145,30 @@ function healthz(): Response {
   });
 }
 
+/** The one `Authorization` scheme this Worker's automation shortcut accepts. */
+const BEARER_PREFIX = "Bearer ";
+
+/**
+ * Whether the request presents a `Bearer` credential at all.
+ *
+ * This is the gate in front of {@link resolveAutomationBearer}, and it is a
+ * security property, not an optimisation: without it **any** unauthenticated
+ * request to `/mcp` or `/sse` — including an anonymous scan with no
+ * `Authorization` header — drives an external Secrets Store read, and a store
+ * outage turns into one `console.error` per anonymous request, drowning the only
+ * diagnostic signal that path has.
+ */
+export function presentsBearer(request: Request): boolean {
+  return (request.headers.get("authorization") ?? "").startsWith(BEARER_PREFIX);
+}
+
 /**
  * Length-independent constant-time bearer comparison. Returns `true` when the
  * request presents exactly the expected token.
  */
-function matchesBearer(request: Request, expected: string): boolean {
+export function matchesBearer(request: Request, expected: string): boolean {
   const header = request.headers.get("authorization") ?? "";
-  const prefix = "Bearer ";
+  const prefix = BEARER_PREFIX;
   if (!header.startsWith(prefix)) return false;
   const presented = header.slice(prefix.length);
   const enc = new TextEncoder();
@@ -172,8 +189,17 @@ function matchesBearer(request: Request, expected: string): boolean {
  * losing the automation shortcut degrades to "OAuth only", while a thrown error
  * here would 500 every request including the OAuth ones. The failure is logged
  * so it is diagnosable rather than silent.
+ *
+ * COST — read this before calling it from a new place. There is **one store read
+ * per call**, deliberately un-memoised: an isolate-level cache is what would
+ * break the "rotate the secret, no redeploy" property this binding exists for.
+ * Callers must therefore reach it only for a request that presents a `Bearer`
+ * credential ({@link presentsBearer}). An OAuth-authenticated request presents
+ * one too — its token is indistinguishable from an automation token before the
+ * comparison — so those still pay one read each; that is the accepted cost and
+ * it is written down in `docs/cloudflare-mcp-hosting.md`.
  */
-async function resolveAutomationBearer(env: Env): Promise<string | undefined> {
+export async function resolveAutomationBearer(env: Env): Promise<string | undefined> {
   if (env.MCP_BEARER_TOKEN_STORE) {
     try {
       const fromStore = await env.MCP_BEARER_TOKEN_STORE.get();
@@ -252,8 +278,10 @@ export default {
 
     if (url.pathname === "/healthz") return healthz();
 
-    // Only pay the Secrets Store read on the two routes a bearer can unlock.
-    if (url.pathname === "/mcp" || url.pathname === "/sse") {
+    // Only pay the Secrets Store read on the two routes a bearer can unlock, and
+    // only for a request that actually presents one — an anonymous caller must
+    // not be able to drive a store read (or a store-failure log line) at all.
+    if ((url.pathname === "/mcp" || url.pathname === "/sse") && presentsBearer(request)) {
       const bearer = await resolveAutomationBearer(env);
       if (bearer && matchesBearer(request, bearer)) {
         return url.pathname === "/mcp"

@@ -46,38 +46,56 @@ enabled = true
 
 # --- Secrets (values NEVER stored here) -------------------------------------
 # The automation bearer bypasses the interactive OAuth flow. It is OPTIONAL —
-# without it, OAuth is the only way in. Two sources, checked in this order:
+# without it, OAuth is the only way in. The Worker checks two sources in order:
+# the Secrets Store binding first, the plain secret second.
 #
-# 1. PREFERRED — a Cloudflare Secrets Store binding. Rotating the value in the
-#    store takes effect with no redeploy, and the plaintext never passes through
-#    a FerroGate process. Create the store + secret once, then uncomment and
-#    paste the store id:
+# WHICH PATH TO USE depends on how this Worker gets deployed, and getting it
+# wrong loses the credential silently:
+#
+# 1. PREFERRED where FerroGate's Rust pipeline deploys the Worker — declare the
+#    binding THERE, with
+#    `McpWorkerSpec::with_bearer_token_from_secrets_store(<STORE_ID>)`.
+#
+#    A Workers Script-API PUT replaces the script's ENTIRE binding set, and the
+#    upload's `keep_bindings` covers only `secret_text` — NOT
+#    `secrets_store_secret` (see `DEFAULT_KEEP_BINDINGS` in
+#    crates/ferrogate-mcp/src/mcp_worker_deploy.rs for why it is not listed).
+#    So a `[[secrets_store_secrets]]` block declared ONLY here is erased by the
+#    next Rust-side deploy: `env.MCP_BEARER_TOKEN_STORE` becomes undefined and
+#    the automation path degrades to OAuth-only with NO error and NO log line.
+#
+# 2. Use the `[[secrets_store_secrets]]` block below only when `wrangler deploy`
+#    is how this Worker reaches Cloudflare — or alongside (1), declaring the same
+#    store id on both sides so either deploy path reproduces the binding.
+#
+#    Create the store + secret once, then uncomment and paste the store id:
 #
 #      wrangler secrets-store store create ferrogate
 #      wrangler secrets-store secret create <STORE_ID> --name mcp-bearer-token
 #
 #    Kept commented because it is optional and a store id that does not exist
-#    fails the deploy outright. FerroGate's Rust pipeline emits the equivalent
-#    `secrets_store_secret` binding from
-#    `McpWorkerSpec::with_bearer_token_from_secrets_store`.
+#    fails the deploy outright.
 #
-#    The secret NAME is canonical (`[a-z0-9-]+`) on purpose: the same secret is
-#    then also addressable from the Rust gateway as
-#    `cf://ferrogate/mcp-bearer-token` without the `FERROGATE_CF_SECRET_*`
-#    aliasing hazard — see docs/cloudflare-secrets-resolution.md (#423).
+#    The secret NAME is canonical (`[a-z0-9-]+`) on purpose: it is what makes the
+#    same secret ALSO addressable from the Rust gateway as
+#    `cf://ferrogate/mcp-bearer-token`. Canonical naming is NECESSARY but not
+#    SUFFICIENT — Secrets Store values are write-only over REST, so resolving
+#    that reference additionally requires the value to reach the gateway process
+#    (`FERROGATE_CF_SECRET_MCP_BEARER_TOKEN`, or an injected `CfSecretBindings`).
+#    See docs/cloudflare-secrets-resolution.md (#423).
 #
 #    NOTE the runtime read is `await env.MCP_BEARER_TOKEN_STORE.get()` with NO
-#    name argument: store id + secret name are fixed at DEPLOY time.
+#    name argument: store id + secret name are fixed at DEPLOY time. It costs one
+#    store read per request that presents a `Bearer` credential.
 #
 # [[secrets_store_secrets]]
 # binding = "MCP_BEARER_TOKEN_STORE"
 # store_id = "REPLACE_WITH_SECRETS_STORE_ID"
 # secret_name = "mcp-bearer-token"
 #
-# 2. FALLBACK — a plain Worker secret, for deployments with no Secrets Store:
+# 3. FALLBACK — a plain Worker secret, for deployments with no Secrets Store:
 #      wrangler secret put MCP_BEARER_TOKEN
 #
-#    A Workers Script-API PUT replaces the whole binding set, so this value
-#    would be erased by a redeploy through the Rust pipeline. It is not: the
+#    Unlike (2), this one DOES survive a redeploy through the Rust pipeline: the
 #    upload metadata carries `keep_bindings: ["secret_text"]`
 #    (`McpWorkerSpec::keep_bindings`), which tells Cloudflare to preserve it.

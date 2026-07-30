@@ -84,10 +84,26 @@ The secret's **name** is canonical (`mcp-bearer-token`, matching `^[a-z0-9-]+$`)
 and the deploy pipeline rejects a non-canonical one. That is not cosmetic: the
 `cf://` env convention (`FERROGATE_CF_SECRET_*`) is lossy, so only a canonical
 name lets the *same* Secrets Store secret also be referenced as
-`cf://<store>/<name>` from the Rust gateway. See
-`docs/cloudflare-secrets-resolution.md`.
+`cf://<store>/<name>` from the Rust gateway.
 
-### `keep_bindings`: a redeploy must not strip the secret
+Canonical naming is **necessary but not sufficient** for that reference to
+resolve. Secrets Store values are write-only over REST
+(`crates/ferrogate-secrets/src/cloudflare.rs` implements the manage plane and
+never value retrieval), so `cf://ferrogate/mcp-bearer-token` resolves in the
+gateway only once the value reaches the process — as
+`FERROGATE_CF_SECRET_MCP_BEARER_TOKEN`, or through an injected
+`CfSecretBindings`. See `docs/cloudflare-secrets-resolution.md`.
+
+**Cost of the store read.** `resolveAutomationBearer` performs **one store read
+per request that presents a `Bearer` credential**, and it is deliberately not
+memoised in the isolate — an isolate-level cache is exactly what would break the
+"rotate the value, no redeploy" property the binding exists for. Requests with no
+`Authorization: Bearer …` header (including anonymous probes of `/mcp` and
+`/sse`) perform **no** store read at all; an OAuth-authenticated request does pay
+one, because its token is indistinguishable from an automation token until the
+comparison.
+
+### `keep_bindings`: which bindings survive a redeploy, and which do not
 
 A Workers Script-API `PUT` replaces the script's **entire** binding set, so a
 `secret_text` binding seeded by `wrangler secret put` would be erased by the next
@@ -95,6 +111,25 @@ deploy through the Rust pipeline — silently disabling the automation path. The
 upload metadata therefore carries `keep_bindings: ["secret_text"]`
 (`McpWorkerSpec::keep_bindings`), which tells Cloudflare to carry those bindings
 over from the live script.
+
+**`secrets_store_secret` is NOT in that list**, and the consequence is
+operator-visible: a `[[secrets_store_secrets]]` binding declared only in
+`wrangler.toml` is erased by the next Rust-side deploy unless that deploy also
+declares it (`McpWorkerSpec::with_bearer_token_from_secrets_store`). The Worker
+then sees `env.MCP_BEARER_TOKEN_STORE === undefined` and falls through to
+OAuth-only — no error, no log line, because that is the "no binding declared"
+branch rather than a failure branch. Declare the store id on **both** sides if
+both deploy paths are in use.
+
+It is excluded rather than added because adding it cannot be verified from here:
+Cloudflare documents `keep_bindings` only under Workers for Platforms, its
+multipart-upload-metadata reference does not list the key at all, and
+`secrets_store_secret` is not among its binding-type examples. An unrecognised
+value risks a 400 on *every* upload, which would trade a documented one-line
+operator constraint for a chance of breaking the whole deploy path. A live-account
+run (test gate) can settle it; until then the constraint is written down and
+pinned by
+`a_store_binding_declared_only_in_wrangler_toml_is_not_preserved_by_a_redeploy`.
 
 ## 3. The deploy flow
 

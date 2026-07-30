@@ -95,6 +95,7 @@
 //! fallback. The request *construction* is faithful and fully modeled/tested;
 //! the live upload against real Cloudflare is the test agent's to prove.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use ferrogate_cloudflare::{
@@ -139,6 +140,26 @@ pub const DEFAULT_MCP_BEARER_SECRET_NAME: &str = "mcp-bearer-token";
 /// Binding types a Workers Script-API `PUT` must be told to preserve rather than
 /// replace. `secret_text` covers a `wrangler secret put`-seeded value, which the
 /// upload body itself can never carry (the plaintext lives only in Cloudflare).
+///
+/// **`secrets_store_secret` is deliberately NOT in this list, and that has an
+/// operator-visible consequence.** A `[[secrets_store_secrets]]` binding declared
+/// only in `wrangler.toml` is erased by the next deploy through this pipeline
+/// unless that deploy also declares it (see
+/// [`McpWorkerSpec::with_bearer_token_from_secrets_store`]) — the Worker's
+/// `env.MCP_BEARER_TOKEN_STORE` then becomes `undefined` and the automation path
+/// silently degrades to OAuth-only.
+///
+/// It is excluded rather than added because adding it is unverifiable from here:
+/// Cloudflare documents `keep_bindings` only for Workers for Platforms, its
+/// multipart-upload-metadata reference does not list the key at all, and
+/// `secrets_store_secret` does not appear among its binding-type examples. An
+/// unrecognised value in `keep_bindings` risks a 400 on *every* upload — trading
+/// a documented, one-line operator constraint for a chance of breaking the whole
+/// deploy path. The constraint is therefore written down (`workers/mcp-server/
+/// README.md`, `wrangler.toml`, `docs/cloudflare-mcp-hosting.md`) rather than
+/// guessed at, and
+/// `a_store_binding_declared_only_in_wrangler_toml_is_not_preserved_by_a_redeploy`
+/// pins the behaviour so a future change to it is deliberate.
 pub const DEFAULT_KEEP_BINDINGS: &[&str] = &["secret_text"];
 
 /// One Cloudflare **Secrets Store** binding to declare on the deployed Worker.
@@ -179,41 +200,72 @@ impl McpSecretsStoreBinding {
     /// through the `cf://` env convention from the Rust gateway, so FerroGate
     /// would have two spellings of "the same secret" that only agree by luck.
     pub fn validate(&self) -> Result<(), CloudflareError> {
-        if self.binding_name.trim().is_empty() {
+        if self.wire_binding_name().is_empty() {
             return Err(CloudflareError::Config(
                 "secrets-store binding name must not be empty".to_string(),
             ));
         }
-        if self.store_id.trim().is_empty() {
+        if self.wire_store_id().is_empty() {
             return Err(CloudflareError::Config(format!(
                 "secrets-store binding {:?} has no store_id: create the store once \
                  (`wrangler secrets-store store create`) and set its id",
-                self.binding_name
+                self.wire_binding_name()
             )));
         }
-        if !ferrogate_secrets::cf_binding_name_is_unambiguous(&self.secret_name) {
+        // Checked before the canonical-shape test below, which would otherwise
+        // report an absent secret_name as "not the canonical [a-z0-9-]+ shape" —
+        // misleading advice for a field that was simply never filled in.
+        if self.wire_secret_name().is_empty() {
+            return Err(CloudflareError::Config(format!(
+                "secrets-store binding {:?} has no secret_name: name the secret within \
+                 store {:?} (`wrangler secrets-store secret create <STORE_ID> --name <NAME>`)",
+                self.wire_binding_name(),
+                self.wire_store_id(),
+            )));
+        }
+        if !ferrogate_secrets::cf_binding_name_is_unambiguous(self.wire_secret_name()) {
             return Err(CloudflareError::Config(format!(
                 "secrets-store binding {:?} names secret {:?}, which is not the canonical \
                  [a-z0-9-]+ shape: the same secret would not be resolvable as \
                  cf://<store>/{} from the gateway, because the {} variable that name maps \
                  to is shared with other distinct secrets (see \
                  docs/cloudflare-secrets-resolution.md)",
-                self.binding_name,
-                self.secret_name,
-                self.secret_name,
-                ferrogate_secrets::cf_binding_env_var(&self.secret_name),
+                self.wire_binding_name(),
+                self.wire_secret_name(),
+                self.wire_secret_name(),
+                ferrogate_secrets::cf_binding_env_var(self.wire_secret_name()),
             )));
         }
         Ok(())
+    }
+
+    /// The binding name as it reaches Cloudflare.
+    ///
+    /// Trimmed at the wire boundary, and every check in [`validate`](Self::validate)
+    /// reads the same trimmed view: validating a trimmed value while sending the raw
+    /// one is how `" store-9f3 "` passes here and comes back as an opaque
+    /// Cloudflare 400 that names nothing.
+    fn wire_binding_name(&self) -> &str {
+        self.binding_name.trim()
+    }
+
+    /// The Secrets Store id as it reaches Cloudflare (see [`wire_binding_name`](Self::wire_binding_name)).
+    fn wire_store_id(&self) -> &str {
+        self.store_id.trim()
+    }
+
+    /// The secret name as it reaches Cloudflare (see [`wire_binding_name`](Self::wire_binding_name)).
+    fn wire_secret_name(&self) -> &str {
+        self.secret_name.trim()
     }
 
     /// The metadata `bindings[]` entry Cloudflare expects.
     fn metadata_entry(&self) -> serde_json::Value {
         json!({
             "type": "secrets_store_secret",
-            "name": self.binding_name,
-            "store_id": self.store_id,
-            "secret_name": self.secret_name,
+            "name": self.wire_binding_name(),
+            "store_id": self.wire_store_id(),
+            "secret_name": self.wire_secret_name(),
         })
     }
 }
@@ -342,6 +394,29 @@ impl McpWorkerSpec {
         for binding in &self.secrets_store_bindings {
             binding.validate()?;
         }
+
+        // `bindings[]` is a flat list keyed by `name`, and Cloudflare is free to
+        // resolve a duplicate either way — so two entries sharing a name mean
+        // `env.<NAME>` is whichever one won, which is not a thing to discover in
+        // production. Checked across the whole set (DO + KV + every secret), not
+        // just among the secrets, because that is the namespace they share.
+        let mut seen = HashSet::new();
+        for name in [self.do_binding_name.trim(), self.kv_binding_name.trim()]
+            .into_iter()
+            .chain(
+                self.secrets_store_bindings
+                    .iter()
+                    .map(McpSecretsStoreBinding::wire_binding_name),
+            )
+        {
+            if !seen.insert(name) {
+                return Err(CloudflareError::Config(format!(
+                    "binding name {name:?} is declared more than once: every entry in the \
+                     upload's bindings[] is a distinct env.<NAME>, so a duplicate makes \
+                     which binding the Worker sees undefined"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -460,7 +535,13 @@ pub struct McpScriptStatus {
     pub deployed: bool,
     /// The MCP endpoint, when the caller asked via
     /// [`McpWorkerDeployer::status_for`] with a spec carrying the account's
-    /// `workers.dev` subdomain. `None` says "not known", never "not reachable".
+    /// `workers.dev` subdomain **and** [`deployed`](Self::deployed) is true.
+    ///
+    /// `None` says "no URL to report" — either the subdomain is not known, or
+    /// nothing is deployed at that name. It never says "deployed but not
+    /// reachable": a `Some` here is safe to register as an `McpServerConfig`
+    /// upstream, which is the whole reason it is not filled in for a script
+    /// Cloudflare is not currently hosting.
     pub mcp_url: Option<String>,
 }
 
@@ -565,12 +646,32 @@ impl McpWorkerDeployer {
     /// server's URL. Kept off the deploy path deliberately: a deploy stays one
     /// request, and a subdomain lookup failure must not fail an upload that
     /// otherwise succeeded.
+    ///
+    /// # Errors
+    ///
+    /// A blank result is an error, not an empty `Ok`. An account with no
+    /// workers.dev subdomain enabled answers `{"result":{}}`, and a response
+    /// whose shape does not match decodes the same way — both would otherwise
+    /// return `Ok("")`, which
+    /// [`with_workers_dev_subdomain`](McpWorkerSpec::with_workers_dev_subdomain)
+    /// accepts and [`mcp_endpoint_url`](McpWorkerSpec::mcp_endpoint_url) turns
+    /// back into `None`. The operator then sees "there is just no URL" with
+    /// nothing pointing at the subdomain lookup as the cause.
     pub async fn workers_dev_subdomain(&self) -> Result<String, CloudflareError> {
         let subdomain: WorkersSubdomain = self
             .read_client()
             .get_json("accounts/{account_id}/workers/subdomain", None)
             .await?;
-        Ok(subdomain.subdomain)
+        let subdomain = subdomain.subdomain.trim();
+        if subdomain.is_empty() {
+            return Err(CloudflareError::Config(format!(
+                "GET /accounts/{}/workers/subdomain returned no subdomain: the account may \
+                 not have workers.dev enabled (enable it in the dashboard, or deploy behind \
+                 a custom domain and set the URL explicitly)",
+                self.config.account_id
+            )));
+        }
+        Ok(subdomain.to_string())
     }
 
     /// List the account's deployed Worker scripts (each `{ id, .. }`), via the
@@ -596,14 +697,21 @@ impl McpWorkerDeployer {
     }
 
     /// [`status`](Self::status) for a spec, additionally reporting the MCP
-    /// endpoint when the spec knows the account's `workers.dev` subdomain.
+    /// endpoint when the spec knows the account's `workers.dev` subdomain **and**
+    /// the script is actually deployed.
+    ///
+    /// The `deployed` conjunct is load-bearing: a spec carries a subdomain
+    /// whether or not anything was ever uploaded, so filling the URL in
+    /// unconditionally would report a live-looking endpoint for a script
+    /// Cloudflare is not hosting — and callers register that field as an
+    /// `McpServerConfig` upstream.
     pub async fn status_for(
         &self,
         spec: &McpWorkerSpec,
     ) -> Result<McpScriptStatus, CloudflareError> {
         let status = self.status(&spec.script_name).await?;
         Ok(McpScriptStatus {
-            mcp_url: spec.mcp_endpoint_url(),
+            mcp_url: status.deployed.then(|| spec.mcp_endpoint_url()).flatten(),
             ..status
         })
     }

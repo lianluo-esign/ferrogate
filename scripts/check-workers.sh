@@ -61,7 +61,7 @@ echo "-- gating ${#WORKERS[@]} workers: ${WORKERS[*]}"
 # green. Keep the expected set explicit, then require it to equal the configs
 # in the tree before any Worker is checked. Adding or removing a workerd suite
 # is therefore an intentional gate change, never a silent coverage change.
-EXPECTED_WORKER_E2E=(agent-gateway gateway-front telemetry-collector)
+EXPECTED_WORKER_E2E=(agent-gateway gateway-front mcp-server telemetry-collector)
 ACTUAL_WORKER_E2E=()
 for expected in "${EXPECTED_WORKER_E2E[@]}"; do
   if [ ! -f "$ROOT/workers/$expected/package.json" ]; then

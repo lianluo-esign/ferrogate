@@ -70,12 +70,29 @@ consuming CF MCP servers.
    wrangler secrets-store secret create <STORE_ID> --name mcp-bearer-token
    ```
 
-   then uncomment the `[[secrets_store_secrets]]` block in `wrangler.toml` (or
-   deploy through the Rust pipeline with
-   `McpWorkerSpec::with_bearer_token_from_secrets_store(<STORE_ID>)`, which emits
-   the same binding). The secret name is canonical `[a-z0-9-]+` on purpose: the
-   same secret is then addressable from the Rust gateway as
-   `cf://ferrogate/mcp-bearer-token` — see `docs/cloudflare-secrets-resolution.md`.
+   Then declare the binding **on whichever side deploys this Worker**:
+
+   | Deployed by | Declare the store binding in | Survives a Rust-side redeploy |
+   |---|---|---|
+   | FerroGate's Rust pipeline | `McpWorkerSpec::with_bearer_token_from_secrets_store(<STORE_ID>)` | yes — it is in every upload |
+   | `wrangler deploy` | the `[[secrets_store_secrets]]` block in `wrangler.toml` | **no** — see below |
+
+   > **A store binding declared only in `wrangler.toml` is erased by the next
+   > deploy through the Rust pipeline.** A Workers Script-API `PUT` replaces the
+   > script's entire binding set, and the upload's `keep_bindings` covers only
+   > `secret_text`, not `secrets_store_secret` (`DEFAULT_KEEP_BINDINGS` in
+   > `crates/ferrogate-mcp/src/mcp_worker_deploy.rs` records why). After such a
+   > redeploy `env.MCP_BEARER_TOKEN_STORE` is `undefined` and the automation path
+   > degrades to OAuth-only with no error and no log line. If both deploy paths
+   > are in use, declare the same store id on both sides.
+
+   The secret name is canonical `[a-z0-9-]+` on purpose: that is what lets the
+   same secret also be referenced from the Rust gateway as
+   `cf://ferrogate/mcp-bearer-token`. Canonical naming is **necessary but not
+   sufficient** — Secrets Store values are write-only over REST, so resolving
+   that reference additionally requires the value to reach the gateway process
+   (`FERROGATE_CF_SECRET_MCP_BEARER_TOKEN`, or an injected `CfSecretBindings`).
+   See `docs/cloudflare-secrets-resolution.md`.
 
    Fallback, where there is no Secrets Store:
 
@@ -83,7 +100,7 @@ consuming CF MCP servers.
    wrangler secret put MCP_BEARER_TOKEN
    ```
 
-   This `secret_text` binding survives a redeploy through the Rust pipeline
+   This `secret_text` binding *does* survive a redeploy through the Rust pipeline
    because the upload metadata carries `keep_bindings: ["secret_text"]`; without
    that, a Script-API PUT would replace the whole binding set and silently
    disable the automation path.

@@ -327,6 +327,37 @@ fn metadata_keeps_secret_text_bindings_so_a_redeploy_does_not_strip_the_bearer()
 }
 
 #[test]
+fn a_store_binding_declared_only_in_wrangler_toml_is_not_preserved_by_a_redeploy() {
+    // The chosen resolution of the #409 review's keep_bindings finding, pinned so
+    // that changing it is deliberate. `secrets_store_secret` is NOT preserved
+    // across a Script-API PUT, so a `[[secrets_store_secrets]]` block that lives
+    // only in wrangler.toml is dropped by the next Rust-side deploy — the Worker's
+    // env.MCP_BEARER_TOKEN_STORE goes undefined and the automation path silently
+    // degrades to OAuth-only. That constraint is documented (workers/mcp-server/
+    // README.md + wrangler.toml + docs/cloudflare-mcp-hosting.md) rather than
+    // papered over with an undocumented keep_bindings value that could 400 every
+    // upload; see DEFAULT_KEEP_BINDINGS.
+    let meta = McpWorkerSpec::new("export default {};").metadata_json();
+    let kept: Vec<&str> = meta["keep_bindings"]
+        .as_array()
+        .expect("keep_bindings is an array")
+        .iter()
+        .map(|kind| kind.as_str().expect("keep_bindings entries are strings"))
+        .collect();
+    assert_eq!(kept, ["secret_text"]);
+
+    // …and a redeploy that does not declare the binding does not re-send it,
+    // which is what makes the erasure reachable in the first place.
+    let bindings = meta["bindings"].as_array().expect("bindings is an array");
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding["type"] != "secrets_store_secret"),
+        "a spec with no declared store binding must not emit one: {bindings:?}"
+    );
+}
+
+#[test]
 fn a_secrets_store_binding_is_declared_alongside_the_do_and_kv_bindings() {
     let spec = McpWorkerSpec::new("export default {};")
         .with_kv_namespace_id("kv-abc123")
@@ -393,6 +424,88 @@ fn a_non_canonical_secret_name_is_refused_with_the_variable_it_would_collide_on(
 }
 
 #[test]
+fn an_empty_secret_name_is_refused_as_missing_rather_than_as_non_canonical() {
+    // "" is not "the wrong shape", it is "not filled in". Reporting the canonical
+    // [a-z0-9-]+ rule for it sends the operator off to fix a name they never wrote.
+    let spec = McpWorkerSpec::new("export default {};").with_secrets_store_binding(
+        McpSecretsStoreBinding {
+            binding_name: "MCP_BEARER_TOKEN_STORE".to_string(),
+            store_id: "store-9f3".to_string(),
+            secret_name: "   ".to_string(),
+        },
+    );
+
+    let err = spec.validate().unwrap_err();
+    let CloudflareError::Config(message) = &err else {
+        panic!("expected a config error, got {err:?}");
+    };
+    assert!(
+        message.contains("has no secret_name"),
+        "an absent secret_name must be reported as absent: {message}"
+    );
+    assert!(
+        !message.contains("canonical"),
+        "an absent secret_name must not be reported as a shape violation: {message}"
+    );
+}
+
+#[test]
+fn binding_fields_reach_cloudflare_trimmed_rather_than_as_typed() {
+    // Validating a trimmed value while sending the raw one is how " store-9f3 "
+    // passes here and comes back as an opaque Cloudflare 400 naming nothing.
+    let spec = McpWorkerSpec::new("export default {};").with_secrets_store_binding(
+        McpSecretsStoreBinding {
+            binding_name: " MCP_BEARER_TOKEN_STORE ".to_string(),
+            store_id: " store-9f3 ".to_string(),
+            secret_name: " mcp-bearer-token ".to_string(),
+        },
+    );
+
+    spec.validate().unwrap();
+    let secret = &spec.metadata_json()["bindings"][2];
+    assert_eq!(secret["name"], "MCP_BEARER_TOKEN_STORE");
+    assert_eq!(secret["store_id"], "store-9f3");
+    assert_eq!(secret["secret_name"], "mcp-bearer-token");
+}
+
+#[test]
+fn a_binding_name_colliding_with_the_do_or_kv_binding_is_refused() {
+    // bindings[] is a flat name-keyed list, so a duplicate makes which binding
+    // env.<NAME> resolves to Cloudflare's choice rather than ours.
+    let collides_with_kv = McpWorkerSpec::new("export default {};").with_secrets_store_binding(
+        McpSecretsStoreBinding {
+            binding_name: "OAUTH_KV".to_string(),
+            store_id: "store-9f3".to_string(),
+            secret_name: "mcp-bearer-token".to_string(),
+        },
+    );
+    let err = collides_with_kv.validate().unwrap_err();
+    assert!(
+        matches!(&err, CloudflareError::Config(message) if message.contains("OAUTH_KV")),
+        "the error must name the binding that collided, got {err:?}"
+    );
+
+    // Two secrets sharing a name collide with each other, not just with DO/KV.
+    let duplicate_secrets = McpWorkerSpec::new("export default {};")
+        .with_bearer_token_from_secrets_store("store-9f3")
+        .with_bearer_token_from_secrets_store("store-other");
+    let err = duplicate_secrets.validate().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            CloudflareError::Config(message) if message.contains(DEFAULT_MCP_BEARER_SECRET_BINDING)
+        ),
+        "the error must name the duplicated binding, got {err:?}"
+    );
+
+    // The default spec plus one bearer binding is still accepted.
+    McpWorkerSpec::new("export default {};")
+        .with_bearer_token_from_secrets_store("store-9f3")
+        .validate()
+        .unwrap();
+}
+
+#[test]
 fn deploy_reports_the_mcp_url_when_the_workers_dev_subdomain_is_known() {
     let transport = CapturingTransport::new(ok(
         200,
@@ -450,6 +563,30 @@ fn workers_dev_subdomain_reads_the_account_endpoint() {
 }
 
 #[test]
+fn an_account_without_a_workers_dev_subdomain_is_an_error_not_an_empty_string() {
+    // `{"result":{}}` is what an account with workers.dev disabled answers, and it
+    // is also what a response whose shape we guessed wrong decodes to. Returning
+    // Ok("") from either would surface downstream as "there is just no URL", with
+    // nothing pointing at the subdomain lookup as the cause.
+    let transport = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":{}}"#,
+    ));
+    let deployer = deployer(transport.clone());
+
+    let err = runtime()
+        .block_on(deployer.workers_dev_subdomain())
+        .unwrap_err();
+    let CloudflareError::Config(message) = &err else {
+        panic!("expected a config error, got {err:?}");
+    };
+    assert!(
+        message.contains("workers/subdomain") && message.contains("workers.dev"),
+        "the error must name the endpoint and the likely cause: {message}"
+    );
+}
+
+#[test]
 fn status_for_a_spec_carries_the_url_while_status_by_name_stays_silent() {
     let transport = CapturingTransport::new(ok(
         200,
@@ -470,4 +607,26 @@ fn status_for_a_spec_carries_the_url_while_status_by_name_stays_silent() {
         .unwrap();
     assert!(by_name.deployed);
     assert_eq!(by_name.mcp_url, None);
+}
+
+#[test]
+fn status_for_an_undeployed_script_reports_no_url_even_though_the_spec_knows_one() {
+    // A spec carries its subdomain whether or not anything was ever uploaded, so
+    // an unconditional fill would report a live-looking endpoint for a script
+    // Cloudflare is not hosting — and callers register this field as an upstream.
+    let transport = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":[{"id":"some-other-script"}]}"#,
+    ));
+    let deployer = deployer(transport.clone());
+    let spec = McpWorkerSpec::new("export default {};").with_workers_dev_subdomain("acme");
+
+    let status = runtime().block_on(deployer.status_for(&spec)).unwrap();
+    assert!(!status.deployed);
+    assert_eq!(status.mcp_url, None);
+    // The spec itself still knows the URL; it is `status_for` that withholds it.
+    assert_eq!(
+        spec.mcp_endpoint_url().as_deref(),
+        Some("https://ferrogate-mcp-server.acme.workers.dev/mcp")
+    );
 }

@@ -9,7 +9,8 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit",
-    "teardown": "wrangler delete"
+    "teardown": "wrangler delete",
+    "test": "vitest run"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.0.5",
@@ -18,8 +19,10 @@
     "zod": "3.25.76"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.8",
     "@cloudflare/workers-types": "4.20250620.0",
     "typescript": "5.5.4",
+    "vitest": "4.1.10",
     "wrangler": "4.20.5"
   }
 }
