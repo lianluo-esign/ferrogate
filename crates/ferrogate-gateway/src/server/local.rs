@@ -6,7 +6,7 @@
 
 use crate::dashboard::ADMIN_DASHBOARD_HTML;
 use bytes::Bytes;
-use ferrogate_observability::render_prometheus_text;
+use ferrogate_observability::{render_prometheus_text, render_unjoinable_actions_text};
 use ferrogate_runtime::{
     SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedTransportAdmissionError,
     SelfHostedTransportChannel, SelfHostedTransportPolicy, SelfHostedWorkerError,
@@ -3057,6 +3057,51 @@ impl FerroGateway {
                 .await;
             }
         };
+
+        // #522: the MCP ingress is governed agent traffic, so the caller
+        // declares the run it belongs to via the same validated
+        // `x-ferrogate-agent-run-id` header the chat/agent-run/A2A ingresses
+        // accept; every audit row this handler records then joins on that run
+        // id. Absent the header the id stays None (never fabricated) — that is
+        // the "unjoinable action" signal, counted per authenticated tenant and
+        // surface, and optionally rejected under the per-tenant enforcement
+        // switch (default OFF).
+        let agent_run_id = match declared_agent_run_id(&headers) {
+            Ok(agent_run_id) => agent_run_id,
+            Err(message) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_agent_run_id_header",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if agent_run_id.is_none() {
+            let tenant_key = governed_action_tenant_key(&auth.tenant_context());
+            state.record_unjoinable_action(&tenant_key, "mcp");
+            if require_declared_action_id(&tenant_key) {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp.action_id_required",
+                    "mcp",
+                    "rejected",
+                    "governed MCP request rejected: x-ferrogate-agent-run-id is required for this tenant",
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "agent_run_id_required",
+                    "this tenant requires a declared x-ferrogate-agent-run-id on governed agent traffic",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
+
         let ingress = match ingress_validation {
             Ok(ingress) => ingress,
             Err(error) if ingress_mode == mcp_ingress::McpIngressMode::Legacy => {
@@ -3159,6 +3204,7 @@ impl FerroGateway {
             &state,
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             skill_context.as_ref(),
             original_bearer,
             rpc,
@@ -4252,7 +4298,13 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
-                let body = render_prometheus_text(&state.prometheus_metrics_snapshot());
+                let mut body = render_prometheus_text(&state.prometheus_metrics_snapshot());
+                // #522: the unjoinable-action counter is sourced from its own
+                // accumulator (kept out of the snapshot data model) and appended
+                // to the same exposition body.
+                body.push_str(&render_unjoinable_actions_text(
+                    &state.unjoinable_action_metrics(),
+                ));
                 write_raw_response(
                     session,
                     StatusCode::OK,
@@ -9869,7 +9921,7 @@ impl FerroGateway {
         // header the chat/agent-run ingresses accept; every governance row this
         // handler records then joins on that run id. Absent the header the id
         // stays None — never fabricated.
-        let agent_run_id = match a2a_agent_run_id(&headers) {
+        let agent_run_id = match declared_agent_run_id(&headers) {
             Ok(agent_run_id) => agent_run_id,
             Err(message) => {
                 return write_json_error(
@@ -10601,13 +10653,14 @@ fn agent_upstream_discovery<'a>(
     }
 }
 
-/// #278: wall-clock seconds for A2A request-log timestamps, matching the
-/// `now_unix_seconds` helpers the other gateway modules use for the same field.
-/// #305: optional `x-ferrogate-agent-run-id` declaration on the A2A ingress —
-/// the same header (and validation rules) the chat/agent-run ingresses accept.
-/// Returns `Ok(None)` when absent/empty (nothing is fabricated) and an error
-/// message for a malformed value, mirroring `requested_agent_run_id`.
-fn a2a_agent_run_id(headers: &http::HeaderMap) -> Result<Option<String>, String> {
+/// Optional `x-ferrogate-agent-run-id` declaration on an agent-traffic ingress
+/// — the ONE validated parser the A2A (#305), MCP, and asset (#522) surfaces
+/// share, using the exact same header name and validation rules the
+/// chat/agent-run ingresses accept (visible ASCII, ≤128 chars, charset
+/// `[A-Za-z0-9_-.:]`). Returns `Ok(None)` when absent/empty (nothing is
+/// fabricated — an absent declaration is the "unjoinable action" signal) and an
+/// error message for a malformed value, mirroring `requested_agent_run_id`.
+pub(super) fn declared_agent_run_id(headers: &http::HeaderMap) -> Result<Option<String>, String> {
     const AGENT_RUN_ID_HEADER: &str = "x-ferrogate-agent-run-id";
     let Some(value) = headers.get(AGENT_RUN_ID_HEADER) else {
         return Ok(None);
@@ -10633,6 +10686,66 @@ fn a2a_agent_run_id(headers: &http::HeaderMap) -> Result<Option<String>, String>
         ));
     }
     Ok(Some(value.to_string()))
+}
+
+/// #522: operator env switch that turns on rejection of governed agent traffic
+/// arriving without a declared `x-ferrogate-agent-run-id`. Default OFF.
+const REQUIRE_AGENT_RUN_ID_ENV: &str = "FG_REQUIRE_AGENT_RUN_ID";
+
+/// #522: the low-cardinality tenant key used both as the `tenant` label on the
+/// unjoinable-action metric and as the match key for per-tenant enforcement.
+/// Derived ONLY from the authenticated tenant context (never a client-declared
+/// value), preferring the broadest stable scope down to the api key. Empty when
+/// the identity carries no tenant attribution at all.
+pub(super) fn governed_action_tenant_key(tenant: &ferrogate_core::TenantContext) -> String {
+    tenant
+        .organization_id
+        .clone()
+        .or_else(|| tenant.project_id.clone())
+        .or_else(|| tenant.team_id.clone())
+        .or_else(|| tenant.workspace_id.clone())
+        .or_else(|| tenant.user_id.clone())
+        .or_else(|| tenant.api_key_id.clone())
+        .unwrap_or_default()
+}
+
+/// #522 (optional, default OFF): whether the given authenticated tenant must
+/// declare an action id on governed agent surfaces. Split from env reading so
+/// it is deterministically unit-testable. Parsed from `FG_REQUIRE_AGENT_RUN_ID`:
+///   - unset/empty            → OFF for every tenant (default posture)
+///   - `1|true|yes|on|all|*`  → ON for every tenant
+///   - comma/whitespace list  → ON only for the listed tenant keys
+///
+/// Kept as an operator/env switch (mirroring `parse_require_production_mtls`)
+/// rather than a config-schema field so it adds no OpenAPI surface, while the
+/// allowlist form still gives per-tenant granularity.
+fn tenant_requires_declared_action_id(config: Option<&str>, tenant_key: &str) -> bool {
+    let Some(config) = config.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if matches!(
+        config.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "all" | "*"
+    ) {
+        return true;
+    }
+    let tenant_key = tenant_key.trim();
+    if tenant_key.is_empty() {
+        return false;
+    }
+    config
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| entry == tenant_key)
+}
+
+/// #522: resolve the per-tenant enforcement decision from the process env.
+pub(super) fn require_declared_action_id(tenant_key: &str) -> bool {
+    tenant_requires_declared_action_id(
+        std::env::var(REQUIRE_AGENT_RUN_ID_ENV).ok().as_deref(),
+        tenant_key,
+    )
 }
 
 fn a2a_now_unix_seconds() -> u64 {
@@ -11852,6 +11965,27 @@ pub(super) fn admin_audit_event_draft_for_target(
     }
 }
 
+/// #522: [`admin_audit_event_draft_for_target`] plus the caller-declared action
+/// id (validated `x-ferrogate-agent-run-id`), so a data-plane surface such as
+/// the asset fetch/put handlers records governance rows that join the same
+/// correlation chain as chat/agent-run/A2A/MCP. `agent_run_id` is `None` when
+/// the caller declared no id — never fabricated. The `tenant` field still comes
+/// exclusively from the authenticated `auth`, so borrowing another tenant's run
+/// id string cannot move the row out of the caller's own tenant chain.
+pub(super) fn admin_audit_event_draft_for_target_with_run_id(
+    ctx: &ProxyContext,
+    auth: &crate::auth::AuthContext,
+    agent_run_id: Option<&str>,
+    action: impl Into<String>,
+    target: impl Into<String>,
+    outcome: &str,
+    message: impl Into<String>,
+) -> AdminAuditEventDraft {
+    let mut event = admin_audit_event_draft_for_target(ctx, auth, action, target, outcome, message);
+    event.agent_run_id = agent_run_id.map(str::to_string);
+    event
+}
+
 fn tool_audit_event_draft_for_target(
     ctx: &ProxyContext,
     auth: &crate::auth::AuthContext,
@@ -11925,5 +12059,94 @@ mod self_hosted_transport_policy_tests {
         assert!(policy
             .admit(SelfHostedTransportSecurity::MutualTls.observed_channel())
             .is_err());
+    }
+}
+
+/// #522: the shared action-id parser + the optional per-tenant enforcement
+/// switch that gate the MCP and asset surfaces.
+#[cfg(test)]
+mod action_id_admission_tests {
+    use super::*;
+    use ferrogate_core::TenantContext;
+
+    #[test]
+    fn declared_agent_run_id_accepts_valid_and_reports_absence() {
+        let mut headers = http::HeaderMap::new();
+        // Absent -> None (never fabricated: this is the unjoinable-action signal).
+        assert_eq!(declared_agent_run_id(&headers).unwrap(), None);
+        // A blank/whitespace value is also treated as absent.
+        headers.insert("x-ferrogate-agent-run-id", "   ".parse().unwrap());
+        assert_eq!(declared_agent_run_id(&headers).unwrap(), None);
+        // The documented charset is accepted verbatim.
+        headers.insert(
+            "x-ferrogate-agent-run-id",
+            "run_9-abc.def:42".parse().unwrap(),
+        );
+        assert_eq!(
+            declared_agent_run_id(&headers).unwrap(),
+            Some("run_9-abc.def:42".to_string())
+        );
+    }
+
+    #[test]
+    fn declared_agent_run_id_rejects_overlong_and_out_of_charset() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-ferrogate-agent-run-id", "a".repeat(129).parse().unwrap());
+        assert!(declared_agent_run_id(&headers).is_err());
+
+        headers.insert("x-ferrogate-agent-run-id", "has space".parse().unwrap());
+        assert!(declared_agent_run_id(&headers).is_err());
+    }
+
+    #[test]
+    fn enforcement_defaults_off_and_honours_global_switch() {
+        // Unset/empty -> OFF for every tenant (default posture).
+        assert!(!tenant_requires_declared_action_id(None, "tenant-a"));
+        assert!(!tenant_requires_declared_action_id(Some("   "), "tenant-a"));
+        // Global truthy spellings -> ON for every tenant.
+        for value in ["1", "true", "YES", " on ", "all", "*"] {
+            assert!(
+                tenant_requires_declared_action_id(Some(value), "tenant-a"),
+                "expected {value:?} to enable enforcement globally"
+            );
+        }
+    }
+
+    #[test]
+    fn enforcement_allowlist_is_per_tenant() {
+        let config = Some("tenant-a, tenant-c");
+        assert!(tenant_requires_declared_action_id(config, "tenant-a"));
+        assert!(tenant_requires_declared_action_id(config, "tenant-c"));
+        // A tenant not on the list is NOT enforced.
+        assert!(!tenant_requires_declared_action_id(config, "tenant-b"));
+        // An empty tenant key never matches an allowlist.
+        assert!(!tenant_requires_declared_action_id(config, ""));
+    }
+
+    #[test]
+    fn governed_action_tenant_key_prefers_broadest_authenticated_scope() {
+        let tenant = TenantContext {
+            organization_id: Some("org-1".into()),
+            team_id: Some("team-1".into()),
+            project_id: Some("project-1".into()),
+            workspace_id: None,
+            user_id: None,
+            api_key_id: Some("key-1".into()),
+        };
+        assert_eq!(governed_action_tenant_key(&tenant), "org-1");
+
+        // Falls through to the next available scope when broader ones are absent.
+        let key_only = TenantContext {
+            organization_id: None,
+            team_id: None,
+            project_id: None,
+            workspace_id: None,
+            user_id: None,
+            api_key_id: Some("key-9".into()),
+        };
+        assert_eq!(governed_action_tenant_key(&key_only), "key-9");
+
+        // No attribution at all yields an empty key (never panics).
+        assert_eq!(governed_action_tenant_key(&TenantContext::default()), "");
     }
 }

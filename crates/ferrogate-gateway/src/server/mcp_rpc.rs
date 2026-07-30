@@ -144,11 +144,13 @@ pub(super) fn required_scope(method: &str) -> Result<&'static str, MissingScopeM
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_request(
     gateway: &FerroGateway,
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    agent_run_id: Option<&str>,
     skill_context: Option<&SkillExecutionContext>,
     original_bearer: Option<&str>,
     rpc: McpJsonRpcRequest,
@@ -165,6 +167,7 @@ pub(super) async fn handle_request(
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
+                agent_run_id,
                 skill_context,
                 action,
                 format!("protocol:{negotiated}"),
@@ -180,6 +183,7 @@ pub(super) async fn handle_request(
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
+                agent_run_id,
                 skill_context,
                 "mcp.protocol_negotiated",
                 format!("protocol:{}", ferrogate_mcp::MCP_PROTOCOL_VERSION),
@@ -191,15 +195,18 @@ pub(super) async fn handle_request(
         // `ping` exists only on initialize-based legacy revisions. Modern
         // ingress rejects it before dispatch because 2026-07-28 removed it.
         "ping" => result(rpc.id, json!({})),
-        "resources/list" => resources_list(state, ctx, auth, rpc.id).await,
-        "resources/read" => resources_read(state, ctx, auth, rpc.id, &rpc.params).await,
-        "tools/list" => tools_list(state, ctx, auth, skill_context, rpc.id),
+        "resources/list" => resources_list(state, ctx, auth, agent_run_id, rpc.id).await,
+        "resources/read" => {
+            resources_read(state, ctx, auth, agent_run_id, rpc.id, &rpc.params).await
+        }
+        "tools/list" => tools_list(state, ctx, auth, agent_run_id, skill_context, rpc.id),
         "tools/call" => {
             tools_call(
                 gateway,
                 state,
                 ctx,
                 auth,
+                agent_run_id,
                 skill_context,
                 original_bearer,
                 rpc.id,
@@ -314,6 +321,7 @@ fn tools_list(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    agent_run_id: Option<&str>,
     skill_context: Option<&SkillExecutionContext>,
     id: Option<Value>,
 ) -> McpJsonRpcResponse {
@@ -332,6 +340,7 @@ fn tools_list(
     state.record_admin_audit_event(audit_event(
         ctx,
         auth,
+        agent_run_id,
         skill_context,
         "tool.list",
         "mcp",
@@ -369,6 +378,7 @@ async fn resources_list(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    agent_run_id: Option<&str>,
     id: Option<Value>,
 ) -> McpJsonRpcResponse {
     let Some(tenant_id) = auth.organization_id.clone() else {
@@ -389,6 +399,7 @@ async fn resources_list(
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
+                agent_run_id,
                 None,
                 "resource.list",
                 "mcp",
@@ -434,6 +445,7 @@ async fn resources_read(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    agent_run_id: Option<&str>,
     id: Option<Value>,
     params: &Value,
 ) -> McpJsonRpcResponse {
@@ -462,6 +474,7 @@ async fn resources_read(
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
+                agent_run_id,
                 None,
                 "resource.read",
                 crate::builtin_tools::asset_uri(&asset.asset_type, &asset.name, &asset.version),
@@ -524,6 +537,7 @@ async fn tools_call(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    agent_run_id: Option<&str>,
     skill_context: Option<&SkillExecutionContext>,
     original_bearer: Option<&str>,
     id: Option<Value>,
@@ -575,6 +589,7 @@ async fn tools_call(
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
+                agent_run_id,
                 Some(skill_context),
                 "tool.execute",
                 audit_target,
@@ -606,6 +621,12 @@ async fn tools_call(
     // entitlement gate and skill-capability check above run before governance,
     // matching the REST handler which performs them prior to the chokepoint.
     let execution = ToolExecutionContext {
+        // #522: thread the MCP-declared action id into the governed tool
+        // chokepoint so `execute_tool_request_with_governance` stamps the
+        // tool.execute / guardrail / approval / identity audit rows (and the
+        // request log) with the same `agent_run_id` — this is what joins a
+        // `tools/call` into its correlation chain.
+        agent_run_id,
         skill_package_id: skill_context.map(|context| context.id.as_str()),
         skill_package_version: skill_context.map(|context| context.version.as_str()),
         mcp_original_bearer: original_bearer,
@@ -708,9 +729,11 @@ pub(super) fn tool_audit_failure_message(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn audit_event(
     ctx: &ProxyContext,
     auth: &AuthContext,
+    agent_run_id: Option<&str>,
     skill_context: Option<&SkillExecutionContext>,
     action: impl Into<String>,
     target: impl Into<String>,
@@ -722,7 +745,11 @@ fn audit_event(
         action_identity: Default::default(),
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
-        agent_run_id: None,
+        // #522: the MCP-declared action id (validated
+        // `x-ferrogate-agent-run-id`) so these ingress audit rows join the same
+        // correlation chain as the chat/agent-run/A2A surfaces. `None` when the
+        // caller declared no id — never fabricated.
+        agent_run_id: agent_run_id.map(str::to_string),
         workflow_id: None,
         workflow_version: None,
         workflow_node_id: None,

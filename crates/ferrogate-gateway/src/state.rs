@@ -67,7 +67,7 @@ use ferrogate_mcp::{
 };
 use ferrogate_observability::{
     GatewayMetricsSnapshot, McpMethodMetricTotal, ModelProviderMetricTotal, RequestStatusMetric,
-    TokenMetricTotals,
+    TokenMetricTotals, UnjoinableActionMetricTotal,
 };
 use ferrogate_policy::{
     resolve_effective_quota, BasicPolicyEngine, EffectiveQuota, PolicyDecision, PolicyEngine,
@@ -3266,6 +3266,14 @@ struct GatewayMetricsAccumulator {
     /// bytes were NOT reclaimed. The abort-path twin of
     /// `asset_lifecycle_failed_total`.
     asset_presign_abort_reclaim_failed_total: u64,
+    /// #522: governed actions that arrived at a gateway surface with no declared
+    /// `x-ferrogate-agent-run-id`, keyed by `(authenticated tenant, surface)`.
+    /// Deliberately NOT part of [`GatewayMetricsSnapshot`]: it is rendered into
+    /// the `/metrics` body from its own accessor so the snapshot data model (and
+    /// every exporter that builds it field-by-field) stays untouched. The key is
+    /// low-cardinality by construction — tenant + surface, never the absent id
+    /// (issue #500).
+    unjoinable_action_totals: BTreeMap<(String, String), UnjoinableActionMetricTotal>,
 }
 
 /// #368: the outcomes of one presigned staging upload, the unit the
@@ -3638,6 +3646,25 @@ impl GatewayMetricsAccumulator {
                 requests: 0,
             });
         total.requests = total.requests.saturating_add(1);
+    }
+
+    /// #522: fold one unjoinable governed action (no declared
+    /// `x-ferrogate-agent-run-id`) into the per-(tenant, surface) counter.
+    fn record_unjoinable_action(&mut self, tenant: &str, surface: &str) {
+        let key = (tenant.to_string(), surface.to_string());
+        let total = self.unjoinable_action_totals.entry(key).or_insert_with(|| {
+            UnjoinableActionMetricTotal {
+                tenant: tenant.to_string(),
+                surface: surface.to_string(),
+                requests: 0,
+            }
+        });
+        total.requests = total.requests.saturating_add(1);
+    }
+
+    /// #522: snapshot the unjoinable-action counters for the `/metrics` exporter.
+    fn unjoinable_action_totals(&self) -> Vec<UnjoinableActionMetricTotal> {
+        self.unjoinable_action_totals.values().cloned().collect()
     }
 
     fn record_mcp_identity_resolution(&mut self, allowed: bool) {

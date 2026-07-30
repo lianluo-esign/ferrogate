@@ -133,7 +133,13 @@ fn resources_list_maps_tenant_assets_to_uris() {
     seed(&state, "tenant-2", "cli_tool", "other", "1.0.0", b"nope");
     let auth = reader_auth(&state);
 
-    let response = block_on(resources_list(&state, &test_ctx(), &auth, Some(json!(1))));
+    let response = block_on(resources_list(
+        &state,
+        &test_ctx(),
+        &auth,
+        None,
+        Some(json!(1)),
+    ));
     let value = serde_json::to_value(&response).unwrap();
     let resources = value["result"]["resources"].as_array().unwrap();
     assert_eq!(resources.len(), 1);
@@ -145,7 +151,13 @@ fn resources_list_maps_tenant_assets_to_uris() {
 fn resources_list_without_tenant_is_a_json_rpc_error() {
     let state = reader_state(None);
     let auth = reader_auth(&state);
-    let response = block_on(resources_list(&state, &test_ctx(), &auth, Some(json!(1))));
+    let response = block_on(resources_list(
+        &state,
+        &test_ctx(),
+        &auth,
+        None,
+        Some(json!(1)),
+    ));
     let value = serde_json::to_value(&response).unwrap();
     assert!(value["result"].is_null());
     assert_eq!(value["error"]["code"], ASSET_TENANT_REQUIRED_CODE);
@@ -168,6 +180,7 @@ fn resources_read_returns_content_with_matching_fingerprint() {
         &state,
         &test_ctx(),
         &auth,
+        None,
         Some(json!(1)),
         &json!({ "uri": "asset://cli_tool/deploy/1.0.0" }),
     ));
@@ -354,6 +367,7 @@ fn resources_read_rejects_bad_uri_and_missing_asset() {
         &state,
         &test_ctx(),
         &auth,
+        None,
         Some(json!(1)),
         &json!({ "uri": "https://example/x" }),
     ));
@@ -363,6 +377,7 @@ fn resources_read_rejects_bad_uri_and_missing_asset() {
         &state,
         &test_ctx(),
         &auth,
+        None,
         Some(json!(1)),
         &json!({ "uri": "asset://cli_tool/absent/9.9.9" }),
     ));

@@ -6,7 +6,7 @@
 
 //! Prometheus text-format rendering of the gateway metrics snapshot.
 
-use crate::metrics::GatewayMetricsSnapshot;
+use crate::metrics::{GatewayMetricsSnapshot, UnjoinableActionMetricTotal};
 
 pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     let mut output = String::new();
@@ -544,6 +544,32 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
         ));
     }
 
+    output
+}
+
+/// #522: render the unjoinable-action counter as its own Prometheus block.
+///
+/// Kept out of [`GatewayMetricsSnapshot`] on purpose — it is sourced from a
+/// separate accumulator and appended to the `/metrics` body — so the snapshot
+/// data model (and the many exporters that construct it exhaustively) stay
+/// untouched. Labels are `tenant` and `surface` only; the absent action id is
+/// never a label (issue #500 low-cardinality rule).
+pub fn render_unjoinable_actions_text(totals: &[UnjoinableActionMetricTotal]) -> String {
+    let mut output = String::new();
+    push_help(
+        &mut output,
+        "ferrogate_unjoinable_actions_total",
+        "Governed agent actions received without a declared x-ferrogate-agent-run-id, grouped by tenant and ingress surface.",
+        "counter",
+    );
+    for total in totals {
+        let tenant = escape_label_value(&total.tenant);
+        let surface = escape_label_value(&total.surface);
+        output.push_str(&format!(
+            "ferrogate_unjoinable_actions_total{{tenant=\"{tenant}\",surface=\"{surface}\"}} {}\n",
+            total.requests
+        ));
+    }
     output
 }
 

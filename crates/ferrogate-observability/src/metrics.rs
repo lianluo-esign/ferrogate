@@ -150,3 +150,19 @@ pub struct McpMethodMetricTotal {
     pub name: String,
     pub requests: u64,
 }
+
+/// #522: governed agent actions that reached a gateway surface without a
+/// declared action id (`x-ferrogate-agent-run-id`), so the gateway cannot join
+/// them into a correlation chain. Kept deliberately low-cardinality: the only
+/// labels are the authenticated `tenant` and the ingress `surface` (`mcp`,
+/// `asset`) — never the (absent) id and never any client-supplied value — so an
+/// unbounded id space can never blow up the metric (issue #500).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnjoinableActionMetricTotal {
+    /// Authenticated tenant key the action was attributed to (never a
+    /// client-declared value).
+    pub tenant: String,
+    /// Ingress surface that observed the missing id (`mcp`, `asset`).
+    pub surface: String,
+    pub requests: u64,
+}

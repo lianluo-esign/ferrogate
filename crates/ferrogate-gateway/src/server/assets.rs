@@ -31,7 +31,10 @@ use super::asset_bucket::{
 use super::asset_inline_publish;
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
 use super::body::read_request_body;
-use super::local::admin_audit_event_draft_for_target;
+use super::local::{
+    admin_audit_event_draft_for_target, admin_audit_event_draft_for_target_with_run_id,
+    declared_agent_run_id, governed_action_tenant_key, require_declared_action_id,
+};
 use super::sites::{is_zip_archive, SITE_ASSET_TYPE};
 use super::FerroGateway;
 use crate::{
@@ -576,6 +579,22 @@ impl FerroGateway {
             return asset_hosting_disabled(session, ctx).await;
         }
 
+        // #522: an asset push is governed agent traffic, so the caller declares
+        // the run it belongs to via the validated `x-ferrogate-agent-run-id`
+        // header; the push audit rows below then join that correlation chain.
+        // An absent id feeds the unjoinable-action metric and the optional
+        // per-tenant enforcement switch (default OFF).
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
+
         // Platform/arch variant (#260): one logical version can carry several
         // per-target-triple artifacts, each its own immutable row.
         let variant = query_param(query, "platform").unwrap_or_default();
@@ -815,9 +834,10 @@ impl FerroGateway {
                 // (nothing reserved or published). Audit the rejection with the
                 // tenant/request/asset identity and the observed usage, mirroring
                 // the presigned commit's `rejected_commit` event.
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.push",
                     &id,
                     "rejected_commit",
@@ -856,9 +876,10 @@ impl FerroGateway {
                 // Preserve every candidate and report unknown; a retry of the
                 // identical push resolves it (create-if-absent is idempotent for
                 // the same winner). Never delete a possibly-referenced winner.
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.push",
                     &id,
                     "outcome_unknown",
@@ -885,9 +906,10 @@ impl FerroGateway {
         // Immutable trust evidence (#261): the scan/signature/approval outcome
         // and the verification manifest are recorded on the push audit event,
         // retrievable via the Admin audit API.
-        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+        state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             "asset.push",
             &id,
             "committed",
@@ -949,6 +971,21 @@ impl FerroGateway {
         let Some(tenant_id) = auth.organization_id.clone() else {
             return tenant_required(session, ctx).await;
         };
+
+        // #522: an asset pull is governed agent traffic; the caller declares the
+        // run it belongs to via `x-ferrogate-agent-run-id` so the pull audit row
+        // joins that correlation chain. Absent id -> unjoinable-action metric +
+        // optional per-tenant enforcement (default OFF).
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
 
         // #402: the admin console addresses per-file static-site objects by bare
         // path (`/v1/assets/static_site/{site}/{path}`), but a #397-published
@@ -1091,6 +1128,7 @@ impl FerroGateway {
             &state,
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             asset_type,
             name,
             &resolved.version,
@@ -2333,6 +2371,78 @@ fn now_unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// #522: outcome of resolving the caller-declared action id
+/// (`x-ferrogate-agent-run-id`) on a governed asset request.
+enum AssetActionIdOutcome {
+    /// Proceed with this (possibly absent) declared run id.
+    Proceed(Option<String>),
+    /// The header was present but malformed — reject with 400
+    /// `invalid_agent_run_id_header`. Carries the human-readable reason.
+    Malformed(String),
+    /// The id was absent AND per-tenant enforcement is ON — reject with 400
+    /// `agent_run_id_required`.
+    Required,
+}
+
+/// #522: parse the declared action id on the asset surface using the SAME
+/// validated parser the chat/agent-run/A2A/MCP ingresses share; on an absent id
+/// record the low-cardinality unjoinable-action metric (per authenticated
+/// tenant + surface) and consult the optional per-tenant enforcement switch
+/// (default OFF). Never fabricates an id.
+fn resolve_asset_action_id(
+    headers: &http::HeaderMap,
+    state: &crate::state::AppState,
+    tenant: &ferrogate_core::TenantContext,
+    surface: &str,
+) -> AssetActionIdOutcome {
+    match declared_agent_run_id(headers) {
+        Err(message) => AssetActionIdOutcome::Malformed(message),
+        Ok(Some(id)) => AssetActionIdOutcome::Proceed(Some(id)),
+        Ok(None) => {
+            let tenant_key = governed_action_tenant_key(tenant);
+            state.record_unjoinable_action(&tenant_key, surface);
+            if require_declared_action_id(&tenant_key) {
+                AssetActionIdOutcome::Required
+            } else {
+                AssetActionIdOutcome::Proceed(None)
+            }
+        }
+    }
+}
+
+/// #522: shared 400 body for a governed asset request that a tenant's
+/// enforcement switch requires to carry a declared action id.
+async fn asset_action_id_required(
+    session: &mut Session,
+    ctx: &super::ProxyContext,
+) -> PingoraResult<()> {
+    write_json_error(
+        session,
+        StatusCode::BAD_REQUEST,
+        "agent_run_id_required",
+        "this tenant requires a declared x-ferrogate-agent-run-id on governed agent traffic",
+        &ctx.request_id,
+    )
+    .await
+}
+
+/// #522: shared 400 body for a malformed `x-ferrogate-agent-run-id` header on
+/// the asset surface.
+async fn asset_invalid_action_id(
+    session: &mut Session,
+    ctx: &super::ProxyContext,
+    message: String,
+) -> PingoraResult<()> {
+    write_json_error(
+        session,
+        StatusCode::BAD_REQUEST,
+        "invalid_agent_run_id_header",
+        message,
+        &ctx.request_id,
+    )
+    .await
 }
 
 #[cfg(test)]

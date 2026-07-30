@@ -13,7 +13,7 @@
 use ferrogate_policy::EffectiveQuota;
 use ferrogate_storage::stored_asset_id;
 
-use super::local::admin_audit_event_draft_for_target;
+use super::local::admin_audit_event_draft_for_target_with_run_id;
 use super::ProxyContext;
 use crate::auth::AuthContext;
 use crate::state::AppState;
@@ -109,10 +109,12 @@ pub(super) fn asset_egress_quota_denial(
 /// event symmetric with the existing push/delete audit. Best-effort side
 /// effects: a metering failure is logged, never propagated, so serving the
 /// download the client already received is never turned into an error.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn record_asset_egress(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    agent_run_id: Option<&str>,
     asset_type: &str,
     name: &str,
     version: &str,
@@ -152,9 +154,10 @@ pub(super) async fn record_asset_egress(
         name,
         version,
     );
-    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+    state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
         ctx,
         auth,
+        agent_run_id,
         "asset.pull",
         &id,
         "served",

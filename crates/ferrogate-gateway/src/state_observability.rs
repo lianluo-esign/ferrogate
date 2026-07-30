@@ -135,6 +135,28 @@ impl AppState {
         self.config.analytics.batch_max_events
     }
 
+    /// #522: record one governed action that reached a gateway surface without
+    /// a declared `x-ferrogate-agent-run-id`, so it cannot be joined into a
+    /// correlation chain. `tenant` is the authenticated tenant key (never a
+    /// client-supplied value) and `surface` is a small fixed set (`mcp`,
+    /// `asset`) — together they keep the exported metric low-cardinality.
+    pub(crate) fn record_unjoinable_action(&self, tenant: &str, surface: &str) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_unjoinable_action(tenant, surface);
+        }
+    }
+
+    /// #522: current unjoinable-action counters, appended to the `/metrics`
+    /// body by [`render_unjoinable_actions_text`](ferrogate_observability::render_unjoinable_actions_text).
+    pub(crate) fn unjoinable_action_metrics(
+        &self,
+    ) -> Vec<ferrogate_observability::UnjoinableActionMetricTotal> {
+        self.metrics
+            .lock()
+            .map(|metrics| metrics.unjoinable_action_totals())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn record_observability_export_success(&self) {
         if let Ok(mut status) = self.observability_export.lock() {
             status.last_success_at_unix = now_unix_seconds();

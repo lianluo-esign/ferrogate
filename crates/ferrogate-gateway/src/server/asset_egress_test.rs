@@ -230,6 +230,7 @@ fn record_asset_egress_emits_metering_counter_and_pull_audit() {
         &state,
         &ctx,
         &auth,
+        Some("run-egress-1"),
         "skill_bundle",
         "helper",
         "v2",
@@ -253,4 +254,52 @@ fn record_asset_egress_emits_metering_counter_and_pull_audit() {
     assert_eq!(pull.target, "org:skill_bundle:helper:v2");
     assert!(pull.message.contains("4096 bytes"));
     assert_eq!(pull.tenant.organization_id.as_deref(), Some("org"));
+    // #522: the pull audit row joins the declared correlation chain. Reverting
+    // `record_asset_egress` to `admin_audit_event_draft_for_target` (dropping
+    // the run id) reds this.
+    assert_eq!(pull.agent_run_id.as_deref(), Some("run-egress-1"));
+}
+
+/// #522: the unjoinable-action counter aggregates per (tenant, surface) and
+/// never keys on the (absent) action id. Removing the `saturating_add` bump in
+/// `record_unjoinable_action`, or folding tenant/surface into one key, reds this.
+#[test]
+fn unjoinable_action_metric_counts_per_tenant_and_surface() {
+    let state = priced_state(None);
+    state.record_unjoinable_action("tenant-a", "mcp");
+    state.record_unjoinable_action("tenant-a", "mcp");
+    state.record_unjoinable_action("tenant-a", "asset");
+    state.record_unjoinable_action("tenant-b", "asset");
+
+    let mut totals = state.unjoinable_action_metrics();
+    totals.sort_by(|left, right| {
+        (left.tenant.as_str(), left.surface.as_str())
+            .cmp(&(right.tenant.as_str(), right.surface.as_str()))
+    });
+
+    assert_eq!(totals.len(), 3, "one row per distinct (tenant, surface)");
+    assert_eq!(
+        (
+            totals[0].tenant.as_str(),
+            totals[0].surface.as_str(),
+            totals[0].requests
+        ),
+        ("tenant-a", "asset", 1)
+    );
+    assert_eq!(
+        (
+            totals[1].tenant.as_str(),
+            totals[1].surface.as_str(),
+            totals[1].requests
+        ),
+        ("tenant-a", "mcp", 2)
+    );
+    assert_eq!(
+        (
+            totals[2].tenant.as_str(),
+            totals[2].surface.as_str(),
+            totals[2].requests
+        ),
+        ("tenant-b", "asset", 1)
+    );
 }

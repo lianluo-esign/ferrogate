@@ -75,7 +75,10 @@ use ferrogate_storage::{
 };
 
 use super::body::read_request_body;
-use super::local::admin_audit_event_draft_for_target;
+use super::local::{
+    admin_audit_event_draft_for_target, admin_audit_event_draft_for_target_with_run_id,
+    declared_agent_run_id, governed_action_tenant_key, require_declared_action_id,
+};
 use super::FerroGateway;
 use crate::auth::AuthContext;
 use crate::{
@@ -1497,6 +1500,39 @@ impl FerroGateway {
         else {
             return Ok(());
         };
+
+        // #522: the presigned download is a governed asset fetch; thread the
+        // caller-declared `x-ferrogate-agent-run-id` onto its audit + egress
+        // rows. Absent id -> unjoinable-action metric (surface `asset`) plus the
+        // optional per-tenant enforcement switch (default OFF).
+        let agent_run_id = match declared_agent_run_id(headers) {
+            Ok(agent_run_id) => agent_run_id,
+            Err(message) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_agent_run_id_header",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if agent_run_id.is_none() {
+            let tenant_key = governed_action_tenant_key(&auth.tenant_context());
+            state.record_unjoinable_action(&tenant_key, "asset");
+            if require_declared_action_id(&tenant_key) {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "agent_run_id_required",
+                    "this tenant requires a declared x-ferrogate-agent-run-id on governed agent traffic",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
+
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
         let asset = match state.get_asset(&id).await {
             Ok(Some(asset)) => asset,
@@ -1577,9 +1613,10 @@ impl FerroGateway {
             }
         };
 
-        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+        state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             "asset.presign_download",
             &id,
             "issued",
@@ -1593,6 +1630,7 @@ impl FerroGateway {
             &state,
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             asset_type,
             name,
             version,

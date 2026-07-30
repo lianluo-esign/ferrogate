@@ -86,6 +86,69 @@ fn evidence_filter_rejects_a_matching_request_from_another_tenant() {
     assert!(!filter.matches(&evaluation("tenant-other"), &[]));
 }
 
+/// #522 box 5 — client-declared run-id namespacing. Tenant A's audit row (its
+/// `tenant.organization_id` is stamped from the AUTHENTICATED context, never
+/// from the client) that *borrows* tenant B's run-id string can never surface
+/// under B's chain: B's investigation join filters on `tenant_id == B` AND the
+/// run id, so A's row (tenant A) is excluded even though the run id matches. It
+/// still joins under A's own chain.
+///
+/// Mutation: dropping the `investigation_matches_tenant(...)` conjunct from
+/// `investigation_matches_audit` (leaving only the id match) reds the second
+/// assertion — B would then see A's borrowed-run-id row.
+#[test]
+fn borrowed_run_id_from_another_tenant_never_joins_the_victims_chain() {
+    let borrowed_run_id = "run-belongs-to-tenant-b";
+    // Written by tenant A: the tenant column is the authenticated tenant (A),
+    // and the agent_run_id is the string A declared — here deliberately B's.
+    let audit_row = ferrogate_storage::StoredAuditEvent {
+        id: "audit-a".into(),
+        request_id: "request-a".into(),
+        trace_id: None,
+        agent_run_id: Some(borrowed_run_id.into()),
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        actor_api_key_id: None,
+        tenant: ferrogate_core::TenantContext {
+            organization_id: Some("tenant-a".into()),
+            ..ferrogate_core::TenantContext::default()
+        },
+        action: "asset.pull".into(),
+        target: "asset-x".into(),
+        outcome: "served".into(),
+        message: "downloaded".into(),
+        occurred_at_unix: Some(1),
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
+        output_disposition: None,
+        parent_action_fingerprint: None,
+    };
+
+    // Victim tenant B investigates its own run id: A's row must NOT appear.
+    let victim_filter = GuardrailEvidenceFilter {
+        tenant_id: Some("tenant-b".into()),
+        agent_run_id: Some(borrowed_run_id.into()),
+        ..GuardrailEvidenceFilter::default()
+    };
+    assert!(
+        !investigation_matches_audit(&victim_filter, &audit_row),
+        "tenant B must never see tenant A's row even when A borrowed B's run id"
+    );
+
+    // The row still joins under its OWN tenant's chain (A), so declaring a run
+    // id remains useful for the declaring tenant.
+    let owner_filter = GuardrailEvidenceFilter {
+        tenant_id: Some("tenant-a".into()),
+        agent_run_id: Some(borrowed_run_id.into()),
+        ..GuardrailEvidenceFilter::default()
+    };
+    assert!(investigation_matches_audit(&owner_filter, &audit_row));
+}
+
 #[test]
 fn investigation_dtos_omit_raw_bodies_tool_arguments_and_billing_metadata() {
     let request = sanitize_investigation_request(StoredRequestLog {

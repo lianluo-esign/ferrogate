@@ -323,6 +323,39 @@ fn builds_otlp_http_json_requests_for_metrics_traces_and_logs() {
     );
 }
 
+/// #522: the unjoinable-action exporter renders one counter line per
+/// (tenant, surface) with those two labels and nothing else — the absent action
+/// id is never a label (issue #500 low-cardinality rule). Reverting the
+/// `escape_label_value`-wrapped format string to drop either label, or changing
+/// the metric name, reds this.
+#[test]
+fn unjoinable_actions_render_low_cardinality_tenant_surface_counter() {
+    let totals = vec![
+        UnjoinableActionMetricTotal {
+            tenant: "tenant-a".to_string(),
+            surface: "mcp".to_string(),
+            requests: 2,
+        },
+        UnjoinableActionMetricTotal {
+            tenant: "tenant-b".to_string(),
+            surface: "asset".to_string(),
+            requests: 5,
+        },
+    ];
+
+    let text = render_unjoinable_actions_text(&totals);
+
+    assert!(text.contains("# TYPE ferrogate_unjoinable_actions_total counter"));
+    assert!(
+        text.contains("ferrogate_unjoinable_actions_total{tenant=\"tenant-a\",surface=\"mcp\"} 2")
+    );
+    assert!(text
+        .contains("ferrogate_unjoinable_actions_total{tenant=\"tenant-b\",surface=\"asset\"} 5"));
+    // The declared/absent id must never become a label.
+    assert!(!text.contains("agent_run_id"));
+    assert!(!text.contains("run-"));
+}
+
 #[test]
 fn rejects_invalid_otlp_http_endpoint() {
     let snapshot = GatewayMetricsSnapshot::default();
