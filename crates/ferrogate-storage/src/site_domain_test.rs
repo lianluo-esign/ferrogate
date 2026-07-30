@@ -7,12 +7,40 @@
 // live-Postgres test proving writes land in the CONFIGURED schema (#237
 // schema-routing pin), not the connection-default `public`.
 
-use crate::{RuntimeStorageRepositories, StorageProviderKind, StoredSiteDomain};
+use std::sync::{Arc, Barrier};
+
+use crate::{
+    RuntimeStorageRepositories, StorageError, StorageProviderKind, StoredSiteDomain,
+    StoredSiteDomainVerification,
+};
 
 use crate::schema_routing_test_support::block_on;
 
 fn memory_repositories() -> RuntimeStorageRepositories {
     RuntimeStorageRepositories::in_memory(vec![StorageProviderKind::Memory], 16, 16)
+}
+
+/// A fresh current-thread runtime per call: the CAS-race workers below run on
+/// raw `std::thread::spawn`, which have no ambient tokio runtime and must not
+/// contend on a shared one (mirrors the guardrail-policy CAS test).
+fn block_on_local<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("site-domain CAS test runtime")
+        .block_on(future)
+}
+
+/// A live DNS ownership proof (`verified`, unexpired at `now`) for the holder.
+fn live_proof(
+    hostname: &str,
+    tenant_id: &str,
+    site: &str,
+    now: i64,
+) -> StoredSiteDomainVerification {
+    let mut record = StoredSiteDomainVerification::pending(tenant_id, hostname, site, "token", now);
+    record.mark_verified(now);
+    record
 }
 
 fn sample_domain(hostname: &str, tenant_id: &str, site: &str) -> StoredSiteDomain {
@@ -94,6 +122,202 @@ fn in_memory_site_domain_listing_filters_by_tenant() {
             .expect("list missing tenant")
             .is_empty()
     );
+}
+
+// ---------------------------------------------------------------------------
+// #575: the site-domain claim is a cross-backend conditional write. A bind is a
+// security decision, not a read followed by an unrelated upsert -- the write
+// itself carries a compare-and-set contract (create-if-absent, same-tenant
+// replace, reject a DIFFERENT current tenant). These pin the in-memory backend;
+// `control_plane_store_d1_test.rs` pins the identical D1 result, and the
+// DSN-gated Postgres race below proves it under a real concurrent engine.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claim_site_domain_creates_when_absent() {
+    let repositories = memory_repositories();
+    let domain = sample_domain("race.example.com", "org_a", "marketing");
+    let claimed = block_on(repositories.claim_site_domain(domain.clone())).expect("first claim");
+    assert_eq!(claimed, domain);
+    assert_eq!(
+        block_on(repositories.get_site_domain("race.example.com"))
+            .expect("get")
+            .expect("present")
+            .tenant_id,
+        "org_a",
+    );
+}
+
+#[test]
+fn claim_site_domain_same_tenant_replacement_preserves_created_at() {
+    let repositories = memory_repositories();
+    let original = sample_domain("race.example.com", "org_a", "marketing");
+    block_on(repositories.claim_site_domain(original.clone())).expect("first claim");
+
+    // Same tenant re-binds the hostname at a different site and a later clock.
+    let mut update = original.clone();
+    update.site = "docs".into();
+    update.created_at_unix = 9_999; // a caller-supplied value that must be ignored
+    update.updated_at_unix = 2_000;
+    let claimed = block_on(repositories.claim_site_domain(update)).expect("same-tenant update");
+    assert_eq!(claimed.site, "docs");
+    assert_eq!(claimed.updated_at_unix, 2_000);
+    assert_eq!(
+        claimed.created_at_unix, original.created_at_unix,
+        "a same-tenant claim preserves the original created_at, never the caller's value",
+    );
+}
+
+#[test]
+fn claim_site_domain_rejects_a_different_tenant() {
+    let repositories = memory_repositories();
+    block_on(repositories.claim_site_domain(sample_domain("race.example.com", "org_a", "site_a")))
+        .expect("first claim");
+
+    let theft = sample_domain("race.example.com", "org_b", "site_b");
+    let error = block_on(repositories.claim_site_domain(theft)).expect_err("cross-tenant claim");
+    assert!(
+        matches!(error, StorageError::Conflict(_)),
+        "a different current tenant is a typed Conflict (the non-leaking ownership response), \
+         got {error:?}",
+    );
+    // The incumbent row is untouched: the losing write changed nothing.
+    let row = block_on(repositories.get_site_domain("race.example.com"))
+        .expect("get")
+        .expect("present");
+    assert_eq!(row.tenant_id, "org_a");
+    assert_eq!(row.site, "site_a");
+}
+
+/// Acceptance: a stale preflight read cannot authorize the final write. Two
+/// tenants both observe NO binding, then race the claim behind a barrier.
+/// Exactly one wins; the other's write is rejected even though its preflight
+/// read said the hostname was free. Under the pre-#575 unconditional upsert
+/// BOTH would "succeed" and the later writer would silently overwrite the
+/// earlier owner (last-write-wins theft).
+#[test]
+fn claim_site_domain_concurrent_race_has_exactly_one_winner() {
+    let repositories = Arc::new(memory_repositories());
+    let barrier = Arc::new(Barrier::new(3));
+    let handles: Vec<_> = [("org_a", "site_a"), ("org_b", "site_b")]
+        .into_iter()
+        .map(|(tenant, site)| {
+            let repositories = Arc::clone(&repositories);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                // Stale preflight read: the hostname is free from here.
+                let preflight = block_on_local(repositories.get_site_domain("race.example.com"))
+                    .expect("preflight read");
+                assert!(
+                    preflight.is_none(),
+                    "both racers must observe an absent binding before the write",
+                );
+                // Release both racers simultaneously so neither ordering is baked in.
+                barrier.wait();
+                block_on_local(repositories.claim_site_domain(sample_domain(
+                    "race.example.com",
+                    tenant,
+                    site,
+                )))
+            })
+        })
+        .collect();
+    barrier.wait();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("claim worker panicked"))
+        .collect();
+
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one racer may take the hostname",
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(StorageError::Conflict(_))))
+            .count(),
+        1,
+        "the loser is a typed Conflict, not a silent overwrite",
+    );
+    // The stored row belongs to whichever racer won -- and to exactly one of them.
+    let winner = results
+        .iter()
+        .find_map(|result| result.as_ref().ok())
+        .expect("a winner");
+    let row = block_on(repositories.get_site_domain("race.example.com"))
+        .expect("get")
+        .expect("present");
+    assert_eq!(row.tenant_id, winner.tenant_id);
+    assert_eq!(row.site, winner.site);
+}
+
+#[test]
+fn claim_verified_site_domain_takes_over_a_holder_without_live_proof() {
+    let repositories = memory_repositories();
+    let now = 5_000;
+    // org_a holds the binding but has only a PENDING challenge -- no live proof.
+    block_on(repositories.claim_site_domain(sample_domain("race.example.com", "org_a", "site_a")))
+        .expect("holder binding");
+    block_on(
+        repositories.upsert_site_domain_verification(StoredSiteDomainVerification::pending(
+            "org_a",
+            "race.example.com",
+            "site_a",
+            "tok",
+            now,
+        )),
+    )
+    .expect("holder pending proof");
+
+    // org_b has just proven ownership: verification is allowed to take over an
+    // unproven incumbent (#488/#575).
+    let claimed = block_on(
+        repositories
+            .claim_verified_site_domain(sample_domain("race.example.com", "org_b", "site_b"), now),
+    )
+    .expect("verified takeover of an unproven incumbent");
+    assert_eq!(claimed.tenant_id, "org_b");
+    assert_eq!(
+        block_on(repositories.get_site_domain("race.example.com"))
+            .expect("get")
+            .expect("present")
+            .tenant_id,
+        "org_b",
+    );
+}
+
+#[test]
+fn claim_verified_site_domain_rejects_a_holder_with_live_dns_proof() {
+    let repositories = memory_repositories();
+    let now = 5_000;
+    block_on(repositories.claim_site_domain(sample_domain("race.example.com", "org_a", "site_a")))
+        .expect("holder binding");
+    // org_a holds a LIVE (verified, unexpired) DNS ownership proof.
+    block_on(repositories.upsert_site_domain_verification(live_proof(
+        "race.example.com",
+        "org_a",
+        "site_a",
+        now,
+    )))
+    .expect("holder live proof");
+
+    let error = block_on(
+        repositories
+            .claim_verified_site_domain(sample_domain("race.example.com", "org_b", "site_b"), now),
+    )
+    .expect_err("cannot take over a holder with a live proof");
+    assert!(
+        matches!(error, StorageError::Conflict(_)),
+        "even a freshly verified challenger loses to a holder that ALSO holds a live proof \
+         (first-proof-wins, not last-write), got {error:?}",
+    );
+    let row = block_on(repositories.get_site_domain("race.example.com"))
+        .expect("get")
+        .expect("present");
+    assert_eq!(row.tenant_id, "org_a");
+    assert_eq!(row.site, "site_a");
 }
 
 // ---------------------------------------------------------------------------
@@ -187,4 +411,104 @@ fn live_site_domain_writes_to_configured_schema() {
         Some(0),
         "binding must NOT be misrouted to public (#237)",
     );
+}
+
+/// #575 under a REAL concurrent engine: two tenants race the guarded upsert for
+/// one free hostname. The claim is a single `INSERT ... ON CONFLICT DO UPDATE
+/// ... WHERE tenant_id = EXCLUDED.tenant_id`, so under READ COMMITTED the row's
+/// unique index serializes the two writers -- one INSERTs, the other's
+/// ON CONFLICT branch matches its own guard against the NOW-committed foreign
+/// tenant and touches nothing (RETURNING yields no row -> `Conflict`). A
+/// read-then-write would let both "succeed". Gated on `FERROGATE_TEST_POSTGRES_DSN`;
+/// skips cleanly when unset (the dev-lane box has no live DSN).
+#[test]
+fn live_local_postgres_concurrent_site_domain_claims_have_one_winner() {
+    let Ok(dsn) = std::env::var("FERROGATE_TEST_POSTGRES_DSN") else {
+        eprintln!(
+            "skipping live_local_postgres_concurrent_site_domain_claims_have_one_winner: \
+             FERROGATE_TEST_POSTGRES_DSN is not set"
+        );
+        return;
+    };
+
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_site_domain_cas");
+    let hostname = "race-575.example.com";
+    let _guard = SchemaGuard::new(&dsn, &schema);
+
+    run_sql(
+        &dsn,
+        &format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; CREATE SCHEMA \"{schema}\"; \
+             CREATE TABLE \"{schema}\".site_domains ( \
+                 hostname TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, site TEXT NOT NULL, \
+                 created_at_unix BIGINT NOT NULL, updated_at_unix BIGINT NOT NULL);"
+        ),
+    );
+
+    let config = PostgresStorageConfig {
+        dsn: dsn.clone(),
+        pool_size: 4,
+        pool_acquire_timeout_millis: 30_000,
+        tls_mode: PostgresTlsMode::Disable,
+        tls_ca_cert_path: None,
+        connect_timeout_secs: 20,
+        statement_timeout_millis: 30_000,
+        schema: Some(schema.clone()),
+        search_path: Vec::new(),
+    };
+    let repositories = Arc::new(
+        RuntimeStorageRepositories::postgres_for_migration(config, false, false)
+            .expect("open the postgres control plane against the test DSN"),
+    );
+
+    let barrier = Arc::new(Barrier::new(3));
+    let handles: Vec<_> = [("org_a", "site_a"), ("org_b", "site_b")]
+        .into_iter()
+        .map(|(tenant, site)| {
+            let repositories = Arc::clone(&repositories);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                // Both racers observe the hostname free, then claim in lockstep.
+                let preflight =
+                    block_on_local(repositories.get_site_domain(hostname)).expect("preflight read");
+                assert!(
+                    preflight.is_none(),
+                    "the hostname starts free for both racers"
+                );
+                barrier.wait();
+                block_on_local(
+                    repositories.claim_site_domain(sample_domain(hostname, tenant, site)),
+                )
+            })
+        })
+        .collect();
+    barrier.wait();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("claim worker panicked"))
+        .collect();
+
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one tenant may take the hostname under a real concurrent engine",
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(StorageError::Conflict(_))))
+            .count(),
+        1,
+        "the loser is a typed Conflict, never a silent last-write-wins overwrite",
+    );
+    let winner = results
+        .iter()
+        .find_map(|result| result.as_ref().ok())
+        .expect("a winner");
+    let stored = block_on(repositories.get_site_domain(hostname))
+        .expect("get")
+        .expect("present");
+    assert_eq!(stored.tenant_id, winner.tenant_id);
+    assert_eq!(stored.site, winner.site);
 }

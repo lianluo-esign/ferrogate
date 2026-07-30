@@ -1186,6 +1186,101 @@ fn site_domain_round_trips_and_filters_by_tenant() {
     );
 }
 
+// #575: the D1 site-domain claim is the SAME conditional write the memory and
+// Postgres backends expose. The guarded upsert carries its compare-and-set in
+// the SQL `WHERE` clause; when the guard misses, D1 reports `meta.changes = 0`,
+// which the backend maps to the identical typed `StorageError::Conflict` (the
+// non-leaking ownership response) WITHOUT a follow-up row reload.
+
+fn claim_domain() -> StoredSiteDomain {
+    StoredSiteDomain {
+        hostname: "docs.example.com".into(),
+        tenant_id: "acme".into(),
+        site: "handbook".into(),
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+    }
+}
+
+#[test]
+fn claim_site_domain_guards_the_upsert_by_tenant_and_reloads_on_success() {
+    let domain = claim_domain();
+    let row = serde_json::json!([{
+        "hostname": "docs.example.com", "tenant_id": "acme", "site": "handbook",
+        "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64
+    }]);
+    // Guarded upsert touches one row, then the row is reloaded.
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![query_ok(serde_json::json!([]), 1), query_ok(row, 0)],
+    );
+
+    let claimed = runtime()
+        .block_on(store.claim_site_domain(domain.clone()))
+        .expect("claim should succeed");
+    assert_eq!(claimed, domain);
+
+    let requests = transport.recorded();
+    let sql = body_sql(&requests[0]);
+    assert!(sql.starts_with("INSERT INTO site_domains"));
+    assert!(
+        sql.contains("WHERE site_domains.tenant_id = excluded.tenant_id"),
+        "the claim is a compare-and-set on the current tenant, not an unconditional upsert: {sql}",
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "success reloads the committed row exactly once"
+    );
+}
+
+#[test]
+fn claim_site_domain_maps_a_guard_miss_to_a_conflict_without_reloading() {
+    // The guarded upsert changes NOTHING (a different tenant currently holds the
+    // hostname): meta.changes = 0.
+    let (store, transport) =
+        store_with_transport(control_registry(), vec![query_ok(serde_json::json!([]), 0)]);
+
+    let error = runtime()
+        .block_on(store.claim_site_domain(claim_domain()))
+        .expect_err("a guard miss is a conflict");
+    assert!(
+        matches!(error, StorageError::Conflict(_)),
+        "D1 exposes the SAME typed conflict as memory/Postgres, got {error:?}",
+    );
+    assert_eq!(
+        transport.recorded().len(),
+        1,
+        "a losing claim performs NO row reload -- the guard miss is terminal",
+    );
+}
+
+#[test]
+fn claim_verified_site_domain_guards_the_takeover_by_live_proof() {
+    // A verified challenger takes over only an incumbent WITHOUT a live proof;
+    // the guard is the `NOT EXISTS (... state = 'verified' ...)` holder subquery.
+    let (store, transport) =
+        store_with_transport(control_registry(), vec![query_ok(serde_json::json!([]), 0)]);
+
+    let error = runtime()
+        .block_on(store.claim_verified_site_domain(claim_domain(), 1_753_000_100))
+        .expect_err("a holder with a live proof wins");
+    assert!(
+        matches!(error, StorageError::Conflict(_)),
+        "verified takeover blocked by a live-proof holder is the same typed conflict, got {error:?}",
+    );
+    let sql = body_sql(&transport.recorded()[0]);
+    assert!(
+        sql.contains("NOT EXISTS") && sql.contains("state = 'verified'"),
+        "the takeover is guarded on the holder's live DNS proof, not an unconditional upsert: {sql}",
+    );
+    assert!(
+        sql.contains("holder.verification_expires_at_unix IS NULL")
+            && sql.contains("holder.verification_expires_at_unix > ?"),
+        "an EXPIRED proof does not block takeover: {sql}",
+    );
+}
+
 #[test]
 fn budget_alert_notification_ledger_round_trips() {
     let notification = StoredBudgetAlertNotification {
