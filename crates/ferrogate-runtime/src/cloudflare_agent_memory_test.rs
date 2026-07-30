@@ -12,7 +12,10 @@ use std::sync::Mutex;
 use ferrogate_cloudflare::{HttpMethod, HttpRequest, HttpResponse};
 use serde_json::json;
 
-use super::{AgentInstanceIdentity, AgentMemoryClient, AgentMemoryError};
+use super::{
+    vectorize_namespace, AgentChatMessageInput, AgentInstanceIdentity, AgentMemoryClient,
+    AgentMemoryError, AGENT_INSTANCE_COMPONENT_MAX_LEN, VECTORIZE_NAMESPACE_MAX_BYTES,
+};
 use crate::cloudflare_gateway_control::GatewayControlTransport;
 use crate::cloudflare_worker::CloudflareControlSurfaceError;
 
@@ -335,6 +338,104 @@ fn chat_history_prune_without_cap_defers_to_the_deployment_cap() {
     assert!(
         body.get("maxMessages").is_none(),
         "cap must be omitted: {body}"
+    );
+}
+
+#[test]
+fn chat_history_append_posts_the_batch_and_maps_the_outcome() {
+    let c = client(vec![ok(
+        r#"{ "ok": true, "instance": "fg.tenant-a.sess-1.run-9", "appended": 2, "cap": 200, "pruned": 0, "remaining": 2 }"#,
+    )]);
+    let outcome = c
+        .chat_history_append(
+            &identity(),
+            &[
+                AgentChatMessageInput {
+                    id: "m1".into(),
+                    message: json!({ "role": "user", "content": "one" }),
+                },
+                AgentChatMessageInput {
+                    id: "m2".into(),
+                    message: json!({ "role": "assistant", "content": "two" }),
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(outcome.appended, 2);
+    assert_eq!(outcome.remaining, 2);
+
+    let req = c.transport().last();
+    assert_eq!(
+        req.url,
+        "https://ferrogate-agent-gateway.example.workers.dev/memory/chat/append"
+    );
+    assert_eq!(req.bearer_token, "control-secret");
+    let body = body_json(&req);
+    assert_eq!(body["instance"], "fg.tenant-a.sess-1.run-9");
+    assert_eq!(body["messages"][0]["id"], "m1");
+    assert_eq!(body["messages"][1]["message"]["content"], "two");
+}
+
+// ---- The SQL governance guard ----------------------------------------------
+
+#[test]
+fn refused_statement_maps_to_sql_forbidden_not_denied() {
+    // The Worker refuses a statement naming an SDK control table with 403.
+    // Reporting that as a credential denial would send an operator hunting a
+    // token problem that does not exist.
+    let c = client(vec![status(
+        403,
+        r#"{ "error": "sql_forbidden", "message": "statement references the reserved Agents SDK control table 'cf_agents_state'" }"#,
+    )]);
+    let err = c
+        .sql_query(&identity(), "select * from cf_agents_state", &[])
+        .unwrap_err();
+    match err {
+        AgentMemoryError::SqlForbidden(detail) => assert!(detail.contains("cf_agents_state")),
+        other => panic!("expected SqlForbidden, got {other:?}"),
+    }
+}
+
+// ---- Vectorize namespace ----------------------------------------------------
+
+#[test]
+fn short_instance_names_are_their_own_vectorize_namespace() {
+    assert_eq!(vectorize_namespace("fg.t.s.r"), "fg.t.s.r");
+}
+
+#[test]
+fn overlong_instance_names_collapse_into_the_64_byte_namespace_cap() {
+    // A realistic UUID triple is ~110 bytes against Vectorize's 64-byte cap;
+    // the worst case the naming scheme can mint is 197.
+    let component = "a".repeat(AGENT_INSTANCE_COMPONENT_MAX_LEN);
+    let instance = format!("fg.{component}.{component}.{component}");
+    assert_eq!(instance.len(), 197);
+
+    let namespace = vectorize_namespace(&instance);
+    assert_eq!(namespace.len(), VECTORIZE_NAMESPACE_MAX_BYTES);
+    assert!(namespace.starts_with("fgh_"));
+    assert!(namespace[4..].chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn vectorize_namespace_is_deterministic_and_separates_tenants() {
+    let a = format!("fg.{}.sess.run", "t".repeat(64));
+    let b = format!("fg.{}.sess.run", "u".repeat(64));
+    assert_eq!(vectorize_namespace(&a), vectorize_namespace(&a));
+    assert_ne!(vectorize_namespace(&a), vectorize_namespace(&b));
+}
+
+#[test]
+fn vectorize_namespace_matches_the_worker_recipe() {
+    // Pins the exact digest the Worker's `vectorizeNamespace` produces for the
+    // same input. The two sides derive the namespace independently, so a
+    // divergence would partition writes from reads instead of failing loudly —
+    // this value is what makes that divergence a test failure.
+    let component = "a".repeat(AGENT_INSTANCE_COMPONENT_MAX_LEN);
+    let instance = format!("fg.{component}.{component}.{component}");
+    assert_eq!(
+        vectorize_namespace(&instance),
+        "fgh_73e51c31d07ae87dda7fb74b74bbd972d68250ef373c80be85f86d88c090"
     );
 }
 

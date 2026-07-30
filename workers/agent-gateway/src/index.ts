@@ -13,6 +13,7 @@ import { Sandbox, ContainerProxy } from "@cloudflare/sandbox";
 import { json, requireBearer } from "./auth";
 import {
   handleMemory,
+  memoryChatHistoryAppend,
   memoryChatHistoryGet,
   memoryChatHistoryPrune,
   memorySqlQuery,
@@ -20,7 +21,7 @@ import {
   memoryStateSet,
   persistedMessageCap,
 } from "./memory";
-import type { RawSqlResult, SqlBinding } from "./memory";
+import type { ChatMessageInput, RawSqlResult, SqlBinding } from "./memory";
 import {
   dispatchScheduledTask,
   handleSchedule,
@@ -753,6 +754,11 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
   /** RPC: query the embedded per-agent SQLite (memory layer 2). */
   async memorySqlQuery(sql: string, params: SqlBinding[]) {
     return memorySqlQuery(this, sql, params);
+  }
+
+  /** RPC: append messages to the chat history, capped (memory layer 3). */
+  async memoryChatHistoryAppend(messages: ChatMessageInput[]) {
+    return memoryChatHistoryAppend(this, messages);
   }
 
   /** RPC: read persisted chat history (memory layer 3). */

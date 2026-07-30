@@ -22,7 +22,7 @@ Code map:
 |---|---|---|---|
 | 1. Synced JSON state | `this.state` / `setState` (persists to SQLite, whole-object replace) | `POST /memory/state/get`, `POST /memory/state/set` | `state_get`, `state_set` |
 | 2. Embedded SQLite | DO `SqlStorage` (`this.ctx.storage.sql.exec`) | `POST /memory/sql/query` | `sql_query`, `sql_query_with_prune_on_full` |
-| 3. Chat history | `cf_ai_chat_agent_messages` (the `AIChatAgent` table) | `POST /memory/chat/get`, `POST /memory/chat/prune` | `chat_history_get`, `chat_history_prune` |
+| 3. Chat history | `cf_ai_chat_agent_messages` (the `AIChatAgent` table) | `POST /memory/chat/append`, `POST /memory/chat/get`, `POST /memory/chat/prune` | `chat_history_append`, `chat_history_get`, `chat_history_prune` |
 | Semantic (pilot, beta) | Vectorize + Workers AI embeddings | `POST /memory/semantic/query` | `semantic_query` |
 
 All routes are POST + bearer-gated with the same `GATEWAY_CONTROL_TOKEN`
@@ -37,7 +37,32 @@ gateway state is a whole-object replace, so the validator checks the full
 
 Durable Object RPC strips a thrown error's class identity, so the memory RPC
 verbs return a discriminated `MemoryResult` envelope; the route maps codes to
-HTTP statuses: `invalid_state` → 422, `sqlite_full` → 507, `sql_error` → 400.
+HTTP statuses: `invalid_state` → 422, `sqlite_full` → 507, `sql_error` → 400,
+`sql_forbidden` → 403.
+
+### `/memory/sql/query` cannot reach the SDK's control tables
+
+Caller SQL naming an `cf_agents_*` table is refused with 403 `sql_forbidden`
+(Rust: `AgentMemoryError::SqlForbidden`, kept distinct from `Denied` so a
+refused statement is not read as a bad credential). Without that guard the
+route is a hole under two invariants this surface documents as enforced:
+
+- the SDK persists synced state in `cf_agents_state`, so an
+  `insert or replace into cf_agents_state …` would write state that
+  `validateStateChange` never saw;
+- the SDK's alarm dispatches `this[row.callback]` from a `cf_agents_schedules`
+  row, so an INSERT there would defeat the `SCHEDULE_DISPATCH_METHOD` pin and
+  re-open arbitrary-verb dispatch.
+
+The rule is deliberately blunt — a reserved identifier **anywhere** in the
+statement is refused, reads included — because deciding "is this position a
+write" needs a real SQL parser, and a partial parser is how such guards fail.
+Identifier quoting and comments are normalized away before the scan, and
+string literals are stripped so a literal mentioning a table is not a
+reference. Nothing legitimate is lost: layer 1 has `/memory/state/*`, layer 3
+has `/memory/chat/*`, and schedules have the #426 `/schedule/*` routes — each
+applying its own governance. FerroGate's own tables (`fg_*`, the chat table)
+are unaffected.
 
 ## Identity mapping: memory isolation == tenant isolation
 
@@ -75,19 +100,37 @@ Worker) is the test agent's to run; it is not locally provable.
   prune path (chat-history DELETE) and retries the statement once.
 - **2 MB row/value limit**: state replaces are measured and rejected (422)
   before `setState`; oversized SQL string params are rejected (413) before
-  they reach the DO.
+  they reach the DO. Both checks measure **UTF-8 bytes** (`TextEncoder`), not
+  `String.length` — a code-unit count would let a multi-byte payload several
+  times over the limit through.
 - **`maxPersistedMessages` cap**: the pinned Agents SDK (`agents` 0.0.109)
   predates the SDK-side `maxPersistedMessages` option, so the gateway enforces
   the cap itself: `MEMORY_MAX_PERSISTED_MESSAGES` (default 200) bounds
   `/memory/chat/prune`, and a caller-supplied cap can only tighten it. Pruning
-  deletes oldest-first by insertion order. When the SDK option graduates into
-  the pinned version, defer to it and keep this route as the governed surface.
+  deletes oldest-first by insertion order, and the reported `pruned`/
+  `remaining` counters come from a **re-COUNT after the DELETE** rather than
+  from `min(total, cap)` arithmetic — the eviction outcome FerroGate records is
+  an observation, not an assumption. `/memory/chat/append` applies the cap in
+  the same call, so history cannot exceed it between an append and a later
+  prune. When the SDK option graduates into the pinned version, defer to it and
+  keep this route as the governed surface.
+- **A blank `MEMORY_MAX_PERSISTED_MESSAGES` means UNCONFIGURED, not zero.**
+  `Number("")` is `0` and a cap of zero makes every prune delete the entire
+  history, so a declared-but-empty var falls back to the default; an explicit
+  `"0"` still selects a retain-nothing policy.
 
 The chat table schema is byte-identical to the one `AIChatAgent` creates, so
 on a chat-capable agent class these routes read/prune the SDK's own persisted
 `this.messages` history (which also backs the SDK's built-in `/get-messages`
-and resumable streaming); on the plain `Agent` gateway class the table simply
-starts empty.
+and resumable streaming).
+
+**Layer 3 has its own writer.** The deployed class is a plain `Agent`, not
+`AIChatAgent`, so nothing else in the Worker ever INSERTs into the chat table.
+`POST /memory/chat/append` (Rust: `chat_history_append`) is what makes the
+table grow on the deployed artifact — and therefore what makes prune able to
+delete anything and `sql_query_with_prune_on_full` able to free any bytes. A
+repeated message id REPLACEs the row, so the id is the caller's idempotency
+key; a batch is capped at 100 messages per call.
 
 ## Semantic memory pilot (Vectorize) — BETA, default OFF
 
@@ -103,8 +146,23 @@ sides**:
   `AgentMemoryError::SemanticDisabled`.
 
 When enabled, queries embed via Workers AI and search the Vectorize index
-scoped to the instance's **namespace** (= the minted instance name), so
-semantic recall inherits the same per-tenant isolation as layers 1–3.
+scoped to the instance's **namespace**, so semantic recall inherits the same
+per-tenant isolation as layers 1–3.
+
+The namespace is NOT the minted instance name verbatim. Vectorize caps a
+namespace at **64 bytes**, while `fg.{tenant}.{session}.{run}` reaches 197 in
+the worst case (a realistic UUID triple is ~110), so passing the name through
+would make every real query fail at the platform. `vectorizeNamespace`
+(`memory.ts`) / `vectorize_namespace` (`cloudflare_agent_memory.rs`) therefore
+use the name verbatim when it fits and otherwise collapse it to `fgh_` + 60
+hex characters of its SHA-256 — exactly 64 bytes, and unable to collide with a
+verbatim name because minted names always contain `.`. The response reports the
+`namespace` actually searched.
+
+**Both sides derive this independently**, so the recipe is pinned by a shared
+literal in `test/memory.test.ts` and `cloudflare_agent_memory_test.rs`: a
+divergence would silently partition writes from reads instead of failing, and
+the write side is still a follow-up (the pilot is query-only).
 Vectorize is an open beta; AI Search was considered as an alternative binding
 and can replace Vectorize behind the same flag later without changing the
 route shape. Scope decision: the pilot implements **query** only; write-side

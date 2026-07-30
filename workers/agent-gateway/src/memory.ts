@@ -44,8 +44,19 @@ export const CHAT_MESSAGES_TABLE = "cf_ai_chat_agent_messages";
 const MAX_CHAT_GET_LIMIT = 1000;
 const MAX_SEMANTIC_TOP_K = 20;
 
+/** Upper bound on messages accepted by one `chat/append` call. */
+const MAX_CHAT_APPEND_BATCH = 100;
+
 /** Workers AI embedding model used by the semantic-memory pilot (beta). */
 export const SEMANTIC_EMBEDDING_MODEL = "@cf/baai/bge-m3";
+
+/**
+ * Vectorize caps a namespace name at 64 BYTES. A minted instance name
+ * (`fg.{tenant}.{session}.{run}`, components up to 64 chars each) reaches 195
+ * bytes, so the name cannot be used as the namespace verbatim — see
+ * {@link vectorizeNamespace}.
+ */
+export const MAX_VECTORIZE_NAMESPACE_BYTES = 64;
 
 // ---------------------------------------------------------------------------
 // RPC-safe result envelope
@@ -55,9 +66,14 @@ export const SEMANTIC_EMBEDDING_MODEL = "@cf/baai/bge-m3";
  * Error vocabulary carried across the Durable Object RPC boundary. Class-based
  * exceptions lose their identity over DO RPC, so the memory methods return a
  * discriminated result instead of throwing; the route maps each code onto an
- * HTTP status (`invalid_state` → 422, `sqlite_full` → 507, `sql_error` → 400).
+ * HTTP status (`invalid_state` → 422, `sqlite_full` → 507, `sql_error` → 400,
+ * `sql_forbidden` → 403).
  */
-export type MemoryErrorCode = "invalid_state" | "sqlite_full" | "sql_error";
+export type MemoryErrorCode =
+  | "invalid_state"
+  | "sqlite_full"
+  | "sql_error"
+  | "sql_forbidden";
 
 /** Discriminated success/failure envelope returned by every memory RPC verb. */
 export type MemoryResult<T> =
@@ -90,8 +106,19 @@ export interface AgentMemoryHost {
   maxPersistedMessages: number;
 }
 
-/** Parse the `MEMORY_MAX_PERSISTED_MESSAGES` var, falling back to the default. */
+/**
+ * Parse the `MEMORY_MAX_PERSISTED_MESSAGES` var, falling back to the default.
+ *
+ * A blank value counts as UNCONFIGURED, not as zero. `Number("")` is `0`, so
+ * without this an env var that is declared but left empty would set the cap to
+ * zero — and a cap of zero means every prune deletes the entire chat history.
+ * A misconfiguration must not silently become a retain-nothing policy; an
+ * explicit `"0"` still selects it.
+ */
 export function persistedMessageCap(raw: string | undefined): number {
+  if (raw === undefined || raw.trim().length === 0) {
+    return DEFAULT_MAX_PERSISTED_MESSAGES;
+  }
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) {
     return DEFAULT_MAX_PERSISTED_MESSAGES;
@@ -207,10 +234,104 @@ function isSqliteFull(message: string): boolean {
 }
 
 /**
+ * Identifier prefix owned by the Agents SDK's own control tables inside the
+ * per-instance SQLite (`cf_agents_state`, `cf_agents_schedules`, …).
+ *
+ * These tables are the STORAGE BEHIND governance decisions made elsewhere, so
+ * caller-supplied SQL must not reach them at all — see {@link reservedTableViolation}.
+ */
+const RESERVED_TABLE_PREFIX = "cf_agents_";
+
+/**
+ * Strip SQL comments and single-quoted string literals so an identifier scan
+ * sees only code. Both directions matter: `cf/**\/_agents_state` must NOT hide a
+ * reserved name behind a comment, and `values ('cf_agents_state')` must NOT be
+ * mistaken for one.
+ */
+function stripCommentsAndLiterals(sql: string): string {
+  let out = "";
+  let i = 0;
+  while (i < sql.length) {
+    const two = sql.slice(i, i + 2);
+    if (two === "--") {
+      const nl = sql.indexOf("\n", i);
+      i = nl === -1 ? sql.length : nl;
+      continue;
+    }
+    if (two === "/*") {
+      const end = sql.indexOf("*/", i + 2);
+      i = end === -1 ? sql.length : end + 2;
+      continue;
+    }
+    if (sql[i] === "'") {
+      i += 1;
+      while (i < sql.length) {
+        if (sql[i] === "'") {
+          // Doubled quote is an escaped quote, not the end of the literal.
+          if (sql[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    out += sql[i];
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Reject caller SQL that names an Agents SDK control table.
+ *
+ * Without this the `/memory/sql/query` route is a hole under two invariants
+ * this same surface documents as enforced:
+ *
+ * 1. `validateStateChange` "aborts the write" — but the SDK persists the synced
+ *    state in `cf_agents_state`, so an
+ *    `insert or replace into cf_agents_state ...` writes unvalidated state
+ *    straight past {@link memoryStateSet}.
+ * 2. {@link SCHEDULE_DISPATCH_METHOD} pins the only method a schedule may
+ *    dispatch — but the SDK's alarm invokes `this[row.callback]` from a
+ *    `cf_agents_schedules` row, so an INSERT there re-opens the arbitrary-verb
+ *    dispatch that pin closes.
+ *
+ * The rule is deliberately blunt — a reserved identifier ANYWHERE in the
+ * statement is refused, reads included — because "which position is a write"
+ * needs a SQL parser, and a partial parser is exactly how this kind of guard
+ * fails. Nothing legitimate is lost: layer 1 is served by
+ * {@link memoryStateGet}/{@link memoryStateSet} and schedules by the #426
+ * routes, both of which apply their governance. Identifier quoting
+ * (`"x"`, `` `x` ``, `[x]`) is unwrapped before the scan, so a quoted name
+ * cannot slip past.
+ *
+ * Returns a refusal message, or `null` when the statement is acceptable.
+ */
+export function reservedTableViolation(sql: string): string | null {
+  const code = stripCommentsAndLiterals(sql)
+    .toLowerCase()
+    .replace(/["`[\]]/g, "");
+  const match = new RegExp(`\\b${RESERVED_TABLE_PREFIX}\\w*`).exec(code);
+  if (!match) return null;
+  return (
+    `statement references the reserved Agents SDK control table '${match[0]}'; ` +
+    `use /memory/state/* for agent state and the /schedule/* routes for schedules`
+  );
+}
+
+/**
  * RPC verb: run one SQL statement against the agent's embedded SQLite
  * (layer 2). On SQLITE_FULL the failure is surfaced as a typed code so the
  * FerroGate client can run its prune path — reads and DELETEs still succeed
  * on a full database, which is exactly what pruning relies on.
+ *
+ * The statement is refused up front when it names an SDK control table
+ * ({@link reservedTableViolation}); the guard sits here rather than in the
+ * route so it also covers the direct Durable Object RPC entry point.
  */
 export function memorySqlQuery(
   host: AgentMemoryHost,
@@ -222,6 +343,10 @@ export function memorySqlQuery(
   rows: Record<string, unknown>[];
   rowCount: number;
 }> {
+  const forbidden = reservedTableViolation(sql);
+  if (forbidden) {
+    return { ok: false, code: "sql_forbidden", message: forbidden };
+  }
   try {
     const result = host.rawSql(sql, params);
     return {
@@ -256,11 +381,85 @@ function ensureChatTable(host: AgentMemoryHost): void {
   );
 }
 
+/** Current row count of the chat table (the table must already exist). */
+function countChatMessages(host: AgentMemoryHost): number {
+  const result = host.rawSql(`select count(*) as n from ${CHAT_MESSAGES_TABLE}`, []);
+  return Number(result.rows[0]?.n ?? 0);
+}
+
 /** One chat-history record; `message` is the SDK's persisted JSON, parsed. */
 export interface ChatHistoryRecord {
   id: string;
   message: unknown;
   createdAt: string | null;
+}
+
+/** One message accepted by {@link memoryChatHistoryAppend}. */
+export interface ChatMessageInput {
+  /** Caller-chosen id; the table's primary key. */
+  id: string;
+  /** Message payload. Persisted as the SDK does: JSON text in `message`. */
+  message: unknown;
+}
+
+/** True when `value` is a usable {@link ChatMessageInput}. */
+export function isChatMessageInput(value: unknown): value is ChatMessageInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" && record.id.length > 0 && "message" in record
+  );
+}
+
+/**
+ * RPC verb: append messages to the chat history (layer 3).
+ *
+ * Layer 3 needs a writer for the rest of the layer to mean anything: the
+ * deployed class is a plain `Agent`, not `AIChatAgent`, so nothing else in this
+ * Worker ever INSERTs into {@link CHAT_MESSAGES_TABLE}. Without this verb the
+ * table is permanently empty, which makes `chat/prune` delete nothing and the
+ * client's SQLITE_FULL recovery path free no bytes — a documented eviction
+ * mechanism that cannot evict.
+ *
+ * The retention cap is applied in the SAME call, so history cannot exceed
+ * `maxPersistedMessages` between an append and some later prune. A row whose id
+ * already exists is REPLACEd, keeping the id the caller's idempotency key.
+ */
+export function memoryChatHistoryAppend(
+  host: AgentMemoryHost,
+  messages: ChatMessageInput[],
+): MemoryResult<{
+  instance: string;
+  appended: number;
+  cap: number;
+  pruned: number;
+  remaining: number;
+}> {
+  try {
+    ensureChatTable(host);
+    for (const entry of messages) {
+      host.rawSql(
+        `insert or replace into ${CHAT_MESSAGES_TABLE} (id, message) values (?, ?)`,
+        [entry.id, JSON.stringify(entry.message ?? null)],
+      );
+    }
+  } catch (err) {
+    const message = (err as Error).message ?? String(err);
+    if (isSqliteFull(message)) {
+      return { ok: false, code: "sqlite_full", message };
+    }
+    return { ok: false, code: "sql_error", message };
+  }
+  const pruned = memoryChatHistoryPrune(host);
+  if (!pruned.ok) return pruned;
+  return {
+    ok: true,
+    instance: host.name,
+    appended: messages.length,
+    cap: pruned.cap,
+    pruned: pruned.pruned,
+    remaining: pruned.remaining,
+  };
 }
 
 /** RPC verb: read the newest `limit` chat messages, oldest-first (layer 3). */
@@ -321,11 +520,7 @@ export function memoryChatHistoryPrune(
   const cap = Math.min(requested, host.maxPersistedMessages);
   try {
     ensureChatTable(host);
-    const before = host.rawSql(
-      `select count(*) as n from ${CHAT_MESSAGES_TABLE}`,
-      [],
-    );
-    const total = Number(before.rows[0]?.n ?? 0);
+    const total = countChatMessages(host);
     if (total > cap) {
       host.rawSql(
         `delete from ${CHAT_MESSAGES_TABLE} where rowid not in (
@@ -334,7 +529,10 @@ export function memoryChatHistoryPrune(
         [cap],
       );
     }
-    const remaining = Math.min(total, cap);
+    // Re-COUNT rather than reporting `Math.min(total, cap)`: the eviction
+    // outcome FerroGate records has to be an observation of the table, not an
+    // assumption about what the DELETE did.
+    const remaining = countChatMessages(host);
     return {
       ok: true,
       instance: host.name,
@@ -356,6 +554,7 @@ const ERROR_STATUS: Record<MemoryErrorCode, number> = {
   invalid_state: 422,
   sqlite_full: 507,
   sql_error: 400,
+  sql_forbidden: 403,
 };
 
 /**
@@ -383,6 +582,7 @@ interface MemoryRequestBody {
   params?: unknown;
   limit?: unknown;
   maxMessages?: unknown;
+  messages?: unknown;
   query?: unknown;
   topK?: unknown;
 }
@@ -403,6 +603,7 @@ function isSqlBinding(value: unknown): value is SqlBinding {
  *   POST /memory/state/get      { instance }                  layer 1 read
  *   POST /memory/state/set      { instance, state }           layer 1 whole-object replace
  *   POST /memory/sql/query      { instance, sql, params? }    layer 2 (507 on SQLITE_FULL)
+ *   POST /memory/chat/append    { instance, messages }        layer 3 write (capped)
  *   POST /memory/chat/get       { instance, limit? }          layer 3 read
  *   POST /memory/chat/prune     { instance, maxMessages? }    layer 3 eviction
  *   POST /memory/semantic/query { instance, query, topK? }    Vectorize pilot (default OFF)
@@ -449,8 +650,12 @@ export async function handleMemory(request: Request, env: Env, url: URL): Promis
         if (!Array.isArray(params) || !params.every(isSqlBinding)) {
           return json({ error: "params must be string|number|boolean|null" }, 400);
         }
+        // Measured in BYTES, matching the Durable Object's own limit — a
+        // `.length` check counts UTF-16 code units and lets a multi-byte
+        // string several times over the limit through the pre-check.
+        const encoder = new TextEncoder();
         const oversize = params.find(
-          (p) => typeof p === "string" && p.length > MAX_SQL_VALUE_BYTES,
+          (p) => typeof p === "string" && encoder.encode(p).length > MAX_SQL_VALUE_BYTES,
         );
         if (oversize !== undefined) {
           return json(
@@ -459,6 +664,22 @@ export async function handleMemory(request: Request, env: Env, url: URL): Promis
           );
         }
         return memoryResponse(await agent.memorySqlQuery(body.sql, params));
+      }
+      case "chat/append": {
+        const messages = body.messages;
+        if (!Array.isArray(messages) || messages.length === 0) {
+          return json({ error: "messages must be a non-empty array" }, 400);
+        }
+        if (messages.length > MAX_CHAT_APPEND_BATCH) {
+          return json(
+            { error: `messages exceeds the ${MAX_CHAT_APPEND_BATCH}-message batch limit` },
+            413,
+          );
+        }
+        if (!messages.every(isChatMessageInput)) {
+          return json({ error: "each message needs a non-empty id and a message field" }, 400);
+        }
+        return memoryResponse(await agent.memoryChatHistoryAppend(messages));
       }
       case "chat/get":
         return memoryResponse(
@@ -489,9 +710,47 @@ export async function handleMemory(request: Request, env: Env, url: URL): Promis
  * DEFAULT-OFF: it activates only when `MEMORY_SEMANTIC_ENABLED="true"` AND the
  * `VECTORIZE` + `AI` bindings are configured (both are commented out in
  * wrangler.toml). Queries embed via Workers AI and search the index scoped to
- * the instance's Vectorize NAMESPACE, so semantic recall inherits the same
- * per-instance (= per-tenant) isolation as layers 1–3.
+ * the instance's Vectorize NAMESPACE ({@link vectorizeNamespace}), so semantic
+ * recall inherits the same per-instance (= per-tenant) isolation as layers 1–3.
  */
+/**
+ * Prefix marking a HASHED Vectorize namespace. Minted instance names always
+ * begin `fg.`, and `.` is not in this prefix's charset, so a hashed namespace
+ * can never collide with a verbatim one.
+ */
+const HASHED_NAMESPACE_PREFIX = "fgh_";
+
+/**
+ * Map an agent instance name onto the Vectorize namespace that isolates its
+ * vectors.
+ *
+ * The namespace IS the only isolation mechanism semantic memory has, and
+ * Vectorize caps it at {@link MAX_VECTORIZE_NAMESPACE_BYTES} bytes — but a
+ * minted `fg.{tenant}.{session}.{run}` name reaches 195 bytes (a realistic UUID
+ * triple is ~110), so passing the name through verbatim makes every real query
+ * fail at the platform. Names that fit are used verbatim; longer ones collapse
+ * to `fgh_` + 60 hex chars of their SHA-256, which is exactly 64 bytes and stays
+ * injective in practice (240 bits of digest).
+ *
+ * Write-side indexing is a follow-up (the pilot is query-only), so this is the
+ * single place the recipe is defined — a writer must derive its namespace the
+ * same way or it will index into a namespace no query can see.
+ */
+export async function vectorizeNamespace(instance: string): Promise<string> {
+  const encoded = new TextEncoder().encode(instance);
+  if (encoded.length <= MAX_VECTORIZE_NAMESPACE_BYTES) {
+    return instance;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  const hex = [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return (
+    HASHED_NAMESPACE_PREFIX +
+    hex.slice(0, MAX_VECTORIZE_NAMESPACE_BYTES - HASHED_NAMESPACE_PREFIX.length)
+  );
+}
+
 async function handleSemanticQuery(
   env: Env,
   instance: string,
@@ -534,14 +793,16 @@ async function handleSemanticQuery(
     if (!vector) {
       return json({ error: "embedding model returned no vector" }, 502);
     }
+    const namespace = await vectorizeNamespace(instance);
     const matches = await env.VECTORIZE.query(vector, {
       topK,
-      namespace: instance,
+      namespace,
       returnMetadata: "all",
     });
     return json({
       ok: true,
       instance,
+      namespace,
       beta: true,
       matches: matches.matches.map((m) => ({
         id: m.id,

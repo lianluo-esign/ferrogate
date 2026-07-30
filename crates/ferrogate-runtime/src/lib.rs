@@ -68,10 +68,11 @@ pub use cloudflare_agent_cost::{
     WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
 };
 pub use cloudflare_agent_memory::{
-    AgentChatHistory, AgentChatMessage, AgentChatPruneOutcome, AgentInstanceIdentity,
-    AgentMemoryClient, AgentMemoryError, AgentSemanticMatch, AgentSemanticMatches, AgentSqlOutcome,
+    vectorize_namespace, AgentChatAppendOutcome, AgentChatHistory, AgentChatMessage,
+    AgentChatMessageInput, AgentChatPruneOutcome, AgentInstanceIdentity, AgentMemoryClient,
+    AgentMemoryError, AgentSemanticMatch, AgentSemanticMatches, AgentSqlOutcome,
     AgentStateSnapshot, AGENT_INSTANCE_COMPONENT_MAX_LEN, AGENT_INSTANCE_NAME_PREFIX,
-    AGENT_INSTANCE_NAME_SEPARATOR,
+    AGENT_INSTANCE_NAME_SEPARATOR, VECTORIZE_NAMESPACE_MAX_BYTES,
 };
 pub use cloudflare_agent_schedule::{
     AgentScheduleCancelOutcome, AgentScheduleCancelSelector, AgentScheduleClient,
