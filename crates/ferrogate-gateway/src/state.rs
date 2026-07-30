@@ -878,12 +878,73 @@ impl SharedAppState {
     }
 
     pub(crate) fn reload_process_local(&self, candidate: Config) -> RuntimeReloadResult {
-        let active = self.current();
-        let candidate_snapshot = config_snapshot_id(&candidate);
-        let mut coordinator = match self.reload_coordinator.lock() {
+        let mut coordinator = self.lock_reload_coordinator();
+        self.commit_process_local_reload(&mut coordinator, candidate)
+    }
+
+    /// Apply an inline `POST /admin/v1/config/reload` payload, restoring the
+    /// durable control-plane documents the payload had no way to name (#512).
+    ///
+    /// The merge runs INSIDE the reload coordinator lock, which is the same lock
+    /// `upsert_api_key` / `upsert_policy` take to commit. Reading the durable
+    /// snapshot outside it left a narrow version of the very defect this
+    /// restores against: a key minted between the read and
+    /// `sync_control_plane_storage_from_config`'s wholesale replace was absent
+    /// from the merge and then deleted by it. Under the lock, any admin write
+    /// that has already committed is in the snapshot, and any that has not
+    /// cannot commit until this reload has.
+    ///
+    /// The merged candidate is validated before it is committed, because the
+    /// restored rows were never seen by `Config::from_toml_str`'s validation of
+    /// the payload. A failure is a reload REJECTION: the running config and the
+    /// durable control plane are both left exactly as they were.
+    pub(crate) fn reload_process_local_from_inline_payload(
+        &self,
+        candidate: Config,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let mut coordinator = self.lock_reload_coordinator();
+        let candidate = self.inline_reload_candidate(candidate)?;
+        Ok(self.commit_process_local_reload(&mut coordinator, candidate))
+    }
+
+    /// The config an inline reload payload will ACTUALLY apply: the payload plus
+    /// the undeclared durable control-plane documents, validated as one whole.
+    ///
+    /// `POST /admin/v1/config/validate` evaluates this too, so the dry-run and
+    /// the apply cannot disagree about a payload whose only defect appears once
+    /// the durable rows are merged back in. (`source=file` is not an inline
+    /// payload and does not come through here: that path reconciles the full
+    /// durable snapshot in `reload_from_source_path`.)
+    pub(crate) fn inline_reload_candidate(&self, mut candidate: Config) -> anyhow::Result<Config> {
+        self.current()
+            .merge_undeclared_durable_control_plane_documents(&mut candidate)?;
+        candidate.validate().map_err(|error| {
+            error.context(
+                "config reload rejected: the payload cannot be reconciled with the durable \
+                 control-plane documents it does not declare (api-keys, policies and gateway \
+                 configs minted through the admin API are restored, not dropped); the running \
+                 config is unchanged",
+            )
+        })?;
+        Ok(candidate)
+    }
+
+    fn lock_reload_coordinator(
+        &self,
+    ) -> std::sync::MutexGuard<'_, ferrogate_runtime::ReloadCoordinator> {
+        match self.reload_coordinator.lock() {
             Ok(coordinator) => coordinator,
             Err(poisoned) => poisoned.into_inner(),
-        };
+        }
+    }
+
+    fn commit_process_local_reload(
+        &self,
+        coordinator: &mut ferrogate_runtime::ReloadCoordinator,
+        candidate: Config,
+    ) -> RuntimeReloadResult {
+        let active = self.current();
+        let candidate_snapshot = config_snapshot_id(&candidate);
         let reload_candidate = coordinator.prepare(candidate_snapshot);
 
         if let Some(reason) = process_local_reload_rejection(&active.config, &candidate) {
@@ -1976,6 +2037,28 @@ fn deserialize_control_plane_documents<T: for<'de> Deserialize<'de>>(
         .map_err(|error| {
             anyhow::anyhow!("failed to decode control-plane storage document: {error}")
         })
+}
+
+/// Append every durable document whose id `declared` does not already carry, and
+/// report how many were appended (#512).
+///
+/// The inverse of `serialize_control_plane_documents`, which is why it takes the
+/// same `(items, id-extractor)` shape: one document class per call, identity
+/// named once. A declared id keeps the declared version -- the payload is still
+/// authoritative for everything it names -- so restoring can add rows but can
+/// never duplicate an id or overwrite an operator's edit.
+fn restore_undeclared_durable_documents<T>(
+    durable: Vec<T>,
+    declared: &mut Vec<T>,
+    id: impl Fn(&T) -> String,
+) -> usize {
+    let declared_ids: HashSet<String> = declared.iter().map(&id).collect();
+    let restored = durable
+        .into_iter()
+        .filter(|document| !declared_ids.contains(&id(document)));
+    let before = declared.len();
+    declared.extend(restored);
+    declared.len() - before
 }
 
 fn workflow_resource_id(workflow: &ferrogate_config::AgentWorkflowPolicy) -> String {
@@ -4985,9 +5068,10 @@ impl AppState {
         Ok(())
     }
 
-    /// Restore the durable control-plane api-keys an inline reload payload does
+    /// Restore the durable control-plane documents an inline reload payload does
     /// not declare, so a reload of an unrelated config section cannot delete a
-    /// credential minted through `POST /admin/v1/api-keys` (#512).
+    /// credential minted through `POST /admin/v1/api-keys` -- nor the deny policy
+    /// that constrains it (#512).
     ///
     /// `POST /admin/v1/config/reload` with an inline `config_toml` /
     /// `config_yaml` / `config_caddyfile` body applies the payload directly --
@@ -5008,42 +5092,72 @@ impl AppState {
     ///
     /// Only ids the payload does NOT list are restored: an id the operator
     /// re-declares is theirs, so the payload's version still wins and an inline
-    /// reload can introduce or overwrite keys exactly as before. Removing a
-    /// durable key stays the job of `DELETE /admin/v1/api-keys/{id}` -- the same
-    /// rule `reload_from_source_path` already enforces for the file path, where
-    /// letting a reload edit the durable credential set is called out as a
-    /// security-control downgrade.
-    pub(crate) fn merge_durable_control_plane_api_keys(
+    /// reload can introduce or overwrite documents exactly as before. Removing a
+    /// durable document stays the job of its own `DELETE` -- `/admin/v1/api-keys/
+    /// {id}`, `/admin/v1/policies/{name}`, `/admin/v1/gateway-configs/{id}` --
+    /// which is the direction `reload_from_source_path` already enforces for the
+    /// file path, where letting a reload edit the durable set is called out as a
+    /// security-control downgrade. (The file path is stricter still: there the
+    /// durable set wins unconditionally, including over a re-declared id.)
+    ///
+    /// # Why policies are restored alongside the credentials
+    ///
+    /// Restoring the credential alone would have been worse than restoring
+    /// nothing. `config.policies` are pure DENY rules -- `PolicyRule::effect`
+    /// defaults to `deny` and `build_policy_engine` admits only
+    /// `enabled && effect == "deny"` -- and a rule can bind to a specific
+    /// credential through `api_key_ids`. Dropping one REMOVES a restriction.
+    /// With api-keys merged and policies still overwritten, an inline reload of
+    /// an unrelated section produced a state the code before #512 could not
+    /// reach: key `k1` alive, and the `deny gpt-5 for k1` rule that constrained
+    /// it gone. Fail-closed loss became fail-open survival. `gateway_configs`
+    /// carry the same `api_key_ids` binding and are restored for the same
+    /// reason.
+    ///
+    /// Every other durable-only document class (`mcp_servers`,
+    /// `prompt_templates`, `agent_workflows`, …) is still replaced wholesale by
+    /// an inline payload. That is a pre-existing availability gap, not an
+    /// authorization one, and it is deliberately left where it was.
+    pub(crate) fn merge_undeclared_durable_control_plane_documents(
         &self,
         config: &mut Config,
     ) -> anyhow::Result<()> {
         let snapshot = self.repositories.control_plane_snapshot()?;
-        let mut durable: Vec<ApiKey> = deserialize_control_plane_documents(snapshot.api_keys)?;
+
+        let mut durable_keys: Vec<ApiKey> = deserialize_control_plane_documents(snapshot.api_keys)?;
         let tenant_refs: Vec<crate::responses::AdminTenantRef> =
             deserialize_control_plane_documents(snapshot.tenants)?;
         if !tenant_refs.is_empty() {
-            apply_tenant_refs_to_api_keys(&mut durable, tenant_refs);
+            apply_tenant_refs_to_api_keys(&mut durable_keys, tenant_refs);
         }
-        let declared: HashSet<String> = config
-            .api_keys
-            .iter()
-            .map(|key| key.id.clone())
-            .collect::<HashSet<_>>();
-        let restored: Vec<ApiKey> = durable
-            .into_iter()
-            .filter(|key| !declared.contains(&key.id))
-            .collect();
-        if restored.is_empty() {
-            return Ok(());
+        let restored_keys =
+            restore_undeclared_durable_documents(durable_keys, &mut config.api_keys, |key| {
+                key.id.clone()
+            });
+
+        restore_undeclared_durable_documents(
+            deserialize_control_plane_documents(snapshot.policies)?,
+            &mut config.policies,
+            |policy: &ConfigPolicyRule| policy.name.clone(),
+        );
+        restore_undeclared_durable_documents(
+            deserialize_control_plane_documents(snapshot.gateway_configs)?,
+            &mut config.gateway_configs,
+            |profile: &GatewayConfigProfile| profile.id.clone(),
+        );
+
+        if restored_keys > 0 {
+            // `config.api_keys` now carries rows that are control-plane documents
+            // rather than lines the operator can edit in the payload, so the
+            // `validate()` the caller runs over the merged candidate must take
+            // the #540 durable branch: a pre-#515 row is warned about and still
+            // refused at authentication, not turned into a reload refusal that
+            // would wedge the operator out over a credential that already fails
+            // closed. Before `inline_reload_candidate` validated, this
+            // assignment was dead on this path and only affected LATER admin
+            // mutations.
+            config.api_keys_are_control_plane_documents = true;
         }
-        // `config.api_keys` now carries rows that are control-plane documents
-        // rather than lines the operator can edit in the payload, so it must
-        // answer to the #540 durable branch: a pre-#515 row is warned about and
-        // still refused at authentication, not turned into a reload refusal that
-        // would wedge the operator out over a credential that already fails
-        // closed.
-        config.api_keys_are_control_plane_documents = true;
-        config.api_keys.extend(restored);
         Ok(())
     }
 

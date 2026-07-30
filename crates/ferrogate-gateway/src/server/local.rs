@@ -4694,7 +4694,7 @@ impl FerroGateway {
             }
         };
 
-        let response = match config_from_admin_payload(&payload, &self.state) {
+        let response = match validation_candidate_from_admin_payload(&payload, &self.state) {
             Ok(candidate) => {
                 let snapshot = config_snapshot_id(&candidate);
                 let reload_plan = self.state.reload_plan_for_candidate(&candidate);
@@ -11609,6 +11609,27 @@ fn config_from_admin_payload(
     Ok(config)
 }
 
+/// The candidate `POST /admin/v1/config/validate` reports on: exactly what the
+/// matching `POST /admin/v1/config/reload` would apply (#512).
+///
+/// Since the inline reload path restores the durable control-plane documents the
+/// payload cannot name, validating the payload alone would have left a gap
+/// between the dry run and the apply -- `"valid":true` for a payload whose only
+/// defect appears once the restored rows are back in it. `source=file` keeps the
+/// payload-only answer, because its reload counterpart is
+/// `reload_from_source_path`, which reconciles the whole durable snapshot rather
+/// than merging into the file.
+fn validation_candidate_from_admin_payload(
+    payload: &AdminConfigValidateRequest,
+    state: &crate::state::SharedAppState,
+) -> anyhow::Result<Config> {
+    let candidate = config_from_admin_payload(payload, state)?;
+    if payload.source.as_deref() == Some("file") {
+        return Ok(candidate);
+    }
+    state.inline_reload_candidate(candidate)
+}
+
 fn parse_config_from_admin_payload(
     payload: &AdminConfigValidateRequest,
     state: &crate::state::SharedAppState,
@@ -11901,17 +11922,16 @@ fn reload_from_admin_payload(
     // so we apply the supplied config directly. Any key the payload re-lists is
     // added by the caller's explicit choice, not silently resurrected.
     //
-    // #512: "authoritative" cannot extend to DELETING credentials the payload
-    // was never able to name. A config document has no way to declare a key
-    // minted through `POST /admin/v1/api-keys`, so applying the payload
-    // verbatim dropped every runtime-minted key on any inline reload. Undeclared
-    // durable rows are merged back in below -- declared ids still lose to the
-    // payload, so nothing about introducing or overwriting keys changes.
-    let mut candidate = config_from_admin_payload(payload, state)?;
-    state
-        .current()
-        .merge_durable_control_plane_api_keys(&mut candidate)?;
-    Ok(state.reload_process_local(candidate))
+    // #512: "authoritative" cannot extend to DELETING documents the payload was
+    // never able to name. A config document has no way to declare a key minted
+    // through `POST /admin/v1/api-keys` or a rule created through `POST
+    // /admin/v1/policies`, so applying the payload verbatim dropped every
+    // runtime-minted credential -- and every deny rule constraining one -- on any
+    // inline reload. `reload_process_local_from_inline_payload` merges the
+    // undeclared durable rows back in under the reload lock and validates the
+    // result before committing it; declared ids still lose to the payload, so
+    // nothing about introducing or overwriting documents changes.
+    state.reload_process_local_from_inline_payload(config_from_admin_payload(payload, state)?)
 }
 
 fn admin_audit_event_draft(
