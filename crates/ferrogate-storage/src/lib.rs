@@ -258,8 +258,10 @@ pub use site_domain::{StoredSiteDomain, SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE};
 // actually serve. A `StoredSiteDomain` records intent; this records evidence.
 mod site_domain_verification;
 pub use site_domain_verification::{
-    site_domain_verification_key, SiteDomainVerificationState, StoredSiteDomainVerification,
-    SITE_DOMAIN_CHALLENGE_TTL_SECONDS, SITE_DOMAIN_VERIFICATION_TTL_SECONDS,
+    site_domain_verification_attempt_decision, site_domain_verification_key,
+    SiteDomainVerificationAttempt, SiteDomainVerificationState, StoredSiteDomainVerification,
+    SITE_DOMAIN_CHALLENGE_TTL_SECONDS, SITE_DOMAIN_VERIFICATION_ATTEMPT_COOLDOWN_SECONDS,
+    SITE_DOMAIN_VERIFICATION_TTL_SECONDS,
 };
 
 // #357: durable, coalesced observed-agent presence backing the observed-agent

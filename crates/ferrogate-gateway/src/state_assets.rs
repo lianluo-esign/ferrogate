@@ -363,6 +363,30 @@ impl AppState {
             .await?)
     }
 
+    /// Atomically reserve one ownership-verification DNS slot for
+    /// `(tenant_id, hostname)` under the per-(tenant, hostname) cooldown (#576).
+    /// The verify handler MUST consult this and refuse before constructing any
+    /// outbound DNS request when the result is
+    /// [`ferrogate_storage::SiteDomainVerificationAttempt::RateLimited`]. The
+    /// reservation is durable, so a restart does not silently reset the limit.
+    pub(crate) async fn try_begin_site_domain_verification_attempt(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> anyhow::Result<ferrogate_storage::SiteDomainVerificationAttempt> {
+        Ok(self
+            .repositories
+            .try_begin_site_domain_verification_attempt(
+                tenant_id,
+                hostname,
+                now_unix,
+                cooldown_secs,
+            )
+            .await?)
+    }
+
     /// Lists proofs; `None` is the platform-operator view used by the #488
     /// startup migration backfill.
     pub(crate) async fn list_site_domain_verifications(

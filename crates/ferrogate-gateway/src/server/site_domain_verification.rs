@@ -27,7 +27,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ferrogate_storage::{sha256_hex, SiteDomainVerificationState, StoredSiteDomainVerification};
+use ferrogate_storage::{
+    sha256_hex, SiteDomainVerificationAttempt, SiteDomainVerificationState,
+    StoredSiteDomainVerification,
+};
 
 /// The DNS label the challenge TXT record is published under, prefixed to the
 /// bound hostname: `_ferrogate-challenge.<hostname>`. Underscore-prefixed so it
@@ -416,6 +419,51 @@ pub(super) fn resolve_challenge(expected_value: &str, lookup: TxtLookup) -> Chal
                 ))
             }
         }
+    }
+}
+
+/// The result of the #576 pre-DNS rate-limit gate feeding ownership
+/// resolution. Either the per-(tenant, hostname) cooldown refused the attempt
+/// -- in which case the resolver was NEVER touched -- or the attempt was
+/// admitted and the resolver produced a [`ChallengeOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum GatedChallengeCheck {
+    /// The cooldown refused this attempt BEFORE any DNS request was constructed
+    /// or sent. Carries the bounded retry hint for the typed 429.
+    RateLimited { retry_after_secs: i64 },
+    /// The attempt was admitted; here is what resolving the challenge produced.
+    Resolved(ChallengeOutcome),
+}
+
+/// Fold the rate-limit reservation and (only when admitted) the DNS lookup into
+/// one outcome. This is the load-bearing short-circuit for #576: on a
+/// [`SiteDomainVerificationAttempt::RateLimited`] reservation the resolver's
+/// `lookup_txt` is NEVER awaited, so an over-limit `admin.write` credential
+/// cannot drive an outbound DNS-over-HTTPS request. The caller passes `None` for
+/// the resolver on the refused path (it never builds one), and `Some(resolver)`
+/// only after the slot is reserved; an admitted attempt with no resolver folds
+/// to `ResolverUnavailable`, never to `Verified`.
+pub(super) async fn resolve_challenge_within_rate_limit(
+    reservation: SiteDomainVerificationAttempt,
+    expected_value: &str,
+    record_name: &str,
+    resolver: Option<&dyn SiteDomainTxtResolver>,
+) -> GatedChallengeCheck {
+    match reservation {
+        SiteDomainVerificationAttempt::RateLimited { retry_after_secs } => {
+            // Refused: the resolver is intentionally left untouched -- no DNS
+            // request is constructed and none is sent.
+            GatedChallengeCheck::RateLimited { retry_after_secs }
+        }
+        SiteDomainVerificationAttempt::Allowed => match resolver {
+            Some(resolver) => {
+                let lookup = resolver.lookup_txt(record_name).await;
+                GatedChallengeCheck::Resolved(resolve_challenge(expected_value, lookup))
+            }
+            None => GatedChallengeCheck::Resolved(ChallengeOutcome::ResolverUnavailable(
+                "no DNS resolver was constructed for an admitted verification attempt".to_string(),
+            )),
+        },
     }
 }
 

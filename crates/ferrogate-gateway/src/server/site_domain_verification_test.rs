@@ -55,6 +55,104 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
+/// A resolver that COUNTS how many times it was asked to look up a name, so a
+/// test can prove the #576 refused path never reaches DNS. Any real lookup on
+/// the refused path bumps this counter, reddening the zero-calls assertion.
+struct CountingTxtResolver {
+    calls: std::sync::atomic::AtomicUsize,
+    answer: TxtLookup,
+}
+
+impl CountingTxtResolver {
+    fn new(answer: TxtLookup) -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            answer,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl SiteDomainTxtResolver for CountingTxtResolver {
+    async fn lookup_txt(&self, _name: &str) -> TxtLookup {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.answer.clone()
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "counting"
+    }
+}
+
+#[test]
+fn a_rate_limited_reservation_never_calls_the_resolver() {
+    let expected = challenge_txt_value("org_a", "example.com", "token_a");
+    // Even though the resolver WOULD answer with the matching record, a refused
+    // reservation must short-circuit before `lookup_txt` is ever awaited.
+    let resolver = CountingTxtResolver::new(TxtLookup::Answers(vec![expected.clone()]));
+    let check = block_on(resolve_challenge_within_rate_limit(
+        SiteDomainVerificationAttempt::RateLimited {
+            retry_after_secs: 17,
+        },
+        &expected,
+        &challenge_record_name("example.com"),
+        Some(&resolver),
+    ));
+    assert_eq!(
+        check,
+        GatedChallengeCheck::RateLimited {
+            retry_after_secs: 17
+        },
+    );
+    assert_eq!(
+        resolver.calls(),
+        0,
+        "an over-limit verify attempt must NOT drive an outbound DNS lookup (#576)",
+    );
+}
+
+#[test]
+fn an_admitted_reservation_calls_the_resolver_exactly_once_and_folds_the_outcome() {
+    let expected = challenge_txt_value("org_a", "example.com", "token_a");
+    let resolver = CountingTxtResolver::new(TxtLookup::Answers(vec![expected.clone()]));
+    let check = block_on(resolve_challenge_within_rate_limit(
+        SiteDomainVerificationAttempt::Allowed,
+        &expected,
+        &challenge_record_name("example.com"),
+        Some(&resolver),
+    ));
+    assert_eq!(
+        check,
+        GatedChallengeCheck::Resolved(ChallengeOutcome::Verified)
+    );
+    assert_eq!(
+        resolver.calls(),
+        1,
+        "an admitted attempt performs exactly one lookup",
+    );
+}
+
+#[test]
+fn an_admitted_reservation_without_a_resolver_is_unavailable_never_verified() {
+    // Defence in depth: an admitted attempt with no resolver constructed must
+    // fold to `ResolverUnavailable`, never to a free `Verified`.
+    let expected = challenge_txt_value("org_a", "example.com", "token_a");
+    let check = block_on(resolve_challenge_within_rate_limit(
+        SiteDomainVerificationAttempt::Allowed,
+        &expected,
+        &challenge_record_name("example.com"),
+        None,
+    ));
+    assert!(matches!(
+        check,
+        GatedChallengeCheck::Resolved(ChallengeOutcome::ResolverUnavailable(_))
+    ));
+}
+
 #[test]
 fn the_challenge_is_published_under_an_underscore_prefixed_name() {
     assert_eq!(

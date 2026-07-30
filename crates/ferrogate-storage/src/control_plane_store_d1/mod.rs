@@ -2008,6 +2008,22 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             .await
     }
 
+    async fn try_begin_site_domain_verification_attempt(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> Result<SiteDomainVerificationAttempt, StorageError> {
+        self.try_begin_site_domain_verification_attempt_async(
+            tenant_id,
+            hostname,
+            now_unix,
+            cooldown_secs,
+        )
+        .await
+    }
+
     async fn list_site_domain_verifications(
         &self,
         tenant_id: Option<&str>,

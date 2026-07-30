@@ -34,15 +34,18 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 
-use ferrogate_storage::{StorageError, StoredSiteDomain, StoredSiteDomainVerification};
+use ferrogate_storage::{
+    StorageError, StoredSiteDomain, StoredSiteDomainVerification,
+    SITE_DOMAIN_VERIFICATION_ATTEMPT_COOLDOWN_SECONDS,
+};
 
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::route_groups::RequestParts;
 use super::site_domain_verification::{
     challenge_record_name, challenge_txt_value, eligible_for_acme, new_challenge_token,
-    resolve_challenge, reusable_on_rebind, AdminSiteDomainVerification, ChallengeOutcome,
-    SiteDomainResolverBackend,
+    resolve_challenge_within_rate_limit, reusable_on_rebind, AdminSiteDomainVerification,
+    ChallengeOutcome, GatedChallengeCheck, SiteDomainResolverBackend,
 };
 use super::{FerroGateway, ProxyContext};
 use crate::auth::{authorize_tenant_scope, enforce_tenant_filter};
@@ -645,8 +648,6 @@ impl FerroGateway {
             &verification.hostname,
             &verification.challenge_token,
         );
-        let resolver = SiteDomainResolverBackend::from_env().build_resolver();
-        let outcome = resolve_challenge(&expected, resolver.lookup_txt(&record_name).await);
 
         let audit = |verdict: &'static str, detail: String| {
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -657,6 +658,73 @@ impl FerroGateway {
                 verdict,
                 detail,
             ));
+        };
+
+        // #576: enforce a persisted, atomic per-(tenant, hostname) verification
+        // cooldown BEFORE any outbound DNS request is constructed or sent. An
+        // `admin.write` credential increments `attempt_count` on every verify,
+        // but nothing used to READ it, so it could drive UNBOUNDED DNS-over-HTTPS
+        // traffic from the admin path. The reservation is a single conditional
+        // write (mirroring the #575 claim CAS across memory/Postgres/D1), so it
+        // both survives a restart and cannot be raced by two concurrent verifies.
+        // The refusal is scoped to THIS tenant and hostname alone, so one tenant
+        // can never throttle another.
+        let reservation = match state
+            .try_begin_site_domain_verification_attempt(
+                &tenant_id,
+                &hostname,
+                now,
+                SITE_DOMAIN_VERIFICATION_ATTEMPT_COOLDOWN_SECONDS,
+            )
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(error) => return storage_error(session, ctx, error.to_string()).await,
+        };
+
+        // The resolver is constructed ONLY once a slot is reserved; a refused
+        // attempt never builds a resolver, never constructs a DNS request, and
+        // never calls out. `resolve_challenge_within_rate_limit` performs that
+        // short-circuit as one testable unit.
+        let resolver = reservation
+            .is_allowed()
+            .then(|| SiteDomainResolverBackend::from_env().build_resolver());
+        let backend_name = resolver
+            .as_deref()
+            .map_or("unavailable", |resolver| resolver.backend_name());
+        let check = resolve_challenge_within_rate_limit(
+            reservation,
+            &expected,
+            &record_name,
+            resolver.as_deref(),
+        )
+        .await;
+
+        let outcome = match check {
+            GatedChallengeCheck::RateLimited { retry_after_secs } => {
+                // Audit the refusal against THIS tenant's own hostname only --
+                // no other tenant's host appears here, keeping the record
+                // low-cardinality and leak-free.
+                audit(
+                    "rejected",
+                    format!(
+                        "site-domain verification for {hostname} refused before DNS by the \
+                         per-(tenant, hostname) cooldown; retry after {retry_after_secs}s"
+                    ),
+                );
+                return write_json_error(
+                    session,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "site_domain_verification_rate_limited",
+                    format!(
+                        "site-domain ownership verification for {hostname} is rate-limited to \
+                         protect the shared DNS resolver; retry after {retry_after_secs}s"
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            GatedChallengeCheck::Resolved(outcome) => outcome,
         };
 
         match outcome {
@@ -681,9 +749,8 @@ impl FerroGateway {
                     StatusCode::SERVICE_UNAVAILABLE,
                     "dns_resolver_unavailable",
                     format!(
-                        "could not resolve {record_name} ({} backend): {reason}. \
+                        "could not resolve {record_name} ({backend_name} backend): {reason}. \
                          The domain remains unverified and does not serve.",
-                        resolver.backend_name()
                     ),
                     &ctx.request_id,
                 )
@@ -798,11 +865,9 @@ impl FerroGateway {
                     "committed",
                     format!(
                         "DNS ownership of {hostname} verified for {tenant_id}/{} via TXT \
-                         {record_name} ({} backend, acme_enabled={}, reload_triggered={})",
-                        verification.site,
-                        resolver.backend_name(),
-                        acme.enabled,
-                        acme.reload_triggered
+                         {record_name} ({backend_name} backend, acme_enabled={}, \
+                         reload_triggered={})",
+                        verification.site, acme.enabled, acme.reload_triggered
                     ),
                 );
                 write_json_response(

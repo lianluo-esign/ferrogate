@@ -1285,6 +1285,22 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
         self.get_site_domain_verification(tenant_id, hostname).await
     }
 
+    async fn try_begin_site_domain_verification_attempt(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> Result<SiteDomainVerificationAttempt, StorageError> {
+        self.try_begin_site_domain_verification_attempt(
+            tenant_id,
+            hostname,
+            now_unix,
+            cooldown_secs,
+        )
+        .await
+    }
+
     async fn list_site_domain_verifications(
         &self,
         tenant_id: Option<&str>,

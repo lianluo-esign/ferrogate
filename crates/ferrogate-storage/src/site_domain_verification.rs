@@ -44,6 +44,17 @@ pub const SITE_DOMAIN_CHALLENGE_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// unbounded past is not a proof of present control.
 pub const SITE_DOMAIN_VERIFICATION_TTL_SECONDS: i64 = 90 * 24 * 60 * 60;
 
+/// The minimum wall-clock gap between two ownership-verification DNS lookups for
+/// the SAME `(tenant, hostname)` (#576). A verify call arriving inside this
+/// cooldown is refused BEFORE any outbound DNS request is built, so an
+/// `admin.write` credential can drive at most one DNS-over-HTTPS lookup per
+/// `(tenant, hostname)` per cooldown window instead of the unbounded stream the
+/// pre-#576 handler allowed. Scoped per `(tenant, hostname)` on purpose: one
+/// tenant hammering its own hostname can never throttle another tenant's
+/// verification (the anti-goal in the issue). Anchored to the persisted
+/// `last_checked_at_unix`, so the limit survives a restart with durable storage.
+pub const SITE_DOMAIN_VERIFICATION_ATTEMPT_COOLDOWN_SECONDS: i64 = 30;
+
 /// The explicit lifecycle of one `(tenant, hostname)` ownership proof. Modelled
 /// as a closed enum rather than a `verified: bool` so a binding can never sit
 /// in an ambiguous "no record / maybe fine" state: the ABSENCE of a record and
@@ -234,6 +245,62 @@ impl StoredSiteDomainVerification {
     }
 }
 
+/// The verdict of the per-(tenant, hostname) verification rate-limit gate
+/// (#576). Returned by [`RuntimeStorageRepositories::try_begin_site_domain_verification_attempt`]
+/// and consumed by the site-domain verify handler BEFORE it constructs any
+/// outbound DNS request. Typed so a refusal carries a bounded, machine-readable
+/// retry time rather than a bare boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteDomainVerificationAttempt {
+    /// The cooldown had elapsed (or this is the first attempt): the caller
+    /// reserved the DNS slot and MAY perform exactly one lookup. The reservation
+    /// advanced the persisted `last_checked_at_unix`, so a concurrent or
+    /// immediately following call is refused.
+    Allowed,
+    /// The cooldown has NOT elapsed for this `(tenant, hostname)`. The caller
+    /// must refuse before any DNS request and surface `retry_after_secs` (always
+    /// >= 1 and bounded by the cooldown) to the client.
+    RateLimited { retry_after_secs: i64 },
+}
+
+impl SiteDomainVerificationAttempt {
+    /// Whether the DNS lookup slot was reserved.
+    pub fn is_allowed(self) -> bool {
+        matches!(self, SiteDomainVerificationAttempt::Allowed)
+    }
+}
+
+/// Pure decision for the verification cooldown, given the persisted
+/// `last_checked_at_unix` of the `(tenant, hostname)` row, the injected `now`,
+/// and the cooldown width. Split out so the window arithmetic is unit-tested
+/// deterministically without any store, and shared verbatim by all three
+/// backends so they cannot drift.
+///
+/// The FIRST attempt (no prior check recorded) is always allowed. Every backend
+/// then reserves the slot with an ATOMIC conditional write on exactly this
+/// predicate, so the read-then-write race the naive check would open cannot let
+/// two concurrent calls both reach the resolver.
+pub fn site_domain_verification_attempt_decision(
+    last_checked_at_unix: Option<i64>,
+    now_unix: i64,
+    cooldown_secs: i64,
+) -> SiteDomainVerificationAttempt {
+    match last_checked_at_unix {
+        Some(last) => {
+            let ready_at = last.saturating_add(cooldown_secs);
+            if now_unix >= ready_at {
+                SiteDomainVerificationAttempt::Allowed
+            } else {
+                // Bounded and never below 1s: the client always gets a concrete,
+                // positive hint that is at most one cooldown wide.
+                let retry_after_secs = ready_at.saturating_sub(now_unix).max(1);
+                SiteDomainVerificationAttempt::RateLimited { retry_after_secs }
+            }
+        }
+        None => SiteDomainVerificationAttempt::Allowed,
+    }
+}
+
 /// Composite in-memory identity for a verification row. Length-prefixed on the
 /// tenant so a crafted `(tenant, hostname)` pair can never alias another -- the
 /// same collision-safety trick as [`crate::observed_agent_presence_key`] and
@@ -334,6 +401,73 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
         Ok(())
+    }
+
+    /// Atomically reserve one verification DNS slot for `(tenant, hostname)`
+    /// (#576). The reservation is a single CONDITIONAL UPDATE -- never a
+    /// read-then-write under READ COMMITTED -- that advances
+    /// `last_checked_at_unix` to `now_unix` only when the cooldown has elapsed
+    /// (or no check was ever recorded). If it updated a row the slot is reserved
+    /// (`Allowed`); if it updated none, either the row is absent (nothing to
+    /// rate-limit) or the cooldown is still open, and the current
+    /// `last_checked_at_unix` yields the bounded retry time. Because the same
+    /// predicate both guards and writes in one statement, two concurrent verify
+    /// calls can never both reserve a slot inside one cooldown window.
+    pub(super) async fn try_begin_site_domain_verification_attempt(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> Result<SiteDomainVerificationAttempt, StorageError> {
+        let operation =
+            self.site_domain_verification_operation("begin site domain verification attempt");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let reserved = transaction
+            .execute(
+                "UPDATE site_domain_verifications \
+                 SET last_checked_at_unix = $3, updated_at_unix = $3 \
+                 WHERE tenant_id = $1 AND hostname = $2 \
+                   AND (last_checked_at_unix IS NULL \
+                        OR $3 - last_checked_at_unix >= $4)",
+                &[&tenant_id, &hostname, &now_unix, &cooldown_secs],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if reserved > 0 {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(SiteDomainVerificationAttempt::Allowed);
+        }
+        // No row was reserved: read the current anchor to distinguish "cooldown
+        // still open" (RateLimited, with a bounded retry) from "no row at all"
+        // (Allowed -- there is nothing to throttle).
+        let row = transaction
+            .query_opt(
+                "SELECT last_checked_at_unix FROM site_domain_verifications \
+                 WHERE tenant_id = $1 AND hostname = $2",
+                &[&tenant_id, &hostname],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(match row {
+            Some(row) => site_domain_verification_attempt_decision(
+                row.get::<_, Option<i64>>(0),
+                now_unix,
+                cooldown_secs,
+            ),
+            None => SiteDomainVerificationAttempt::Allowed,
+        })
     }
 
     pub(super) async fn get_site_domain_verification(
@@ -456,6 +590,38 @@ impl RuntimeControlPlaneState {
             .get(&site_domain_verification_key(tenant_id, hostname))
     }
 
+    /// Reserve one verification DNS slot for `(tenant, hostname)` (#576). The
+    /// enclosing control-plane lock is held for the whole get-decide-write, so
+    /// this get-then-insert is atomic for the memory backend, mirroring the
+    /// single conditional UPDATE the SQL backends use. Only an `Allowed`
+    /// decision advances the persisted `last_checked_at_unix`.
+    pub(super) fn try_begin_site_domain_verification_attempt(
+        &mut self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> SiteDomainVerificationAttempt {
+        let key = site_domain_verification_key(tenant_id, hostname);
+        match self.site_domain_verifications.get(&key) {
+            Some(mut record) => {
+                let decision = site_domain_verification_attempt_decision(
+                    record.last_checked_at_unix,
+                    now_unix,
+                    cooldown_secs,
+                );
+                if decision.is_allowed() {
+                    record.last_checked_at_unix = Some(now_unix);
+                    record.updated_at_unix = now_unix;
+                    self.site_domain_verifications.insert(key, record);
+                }
+                decision
+            }
+            // No row to throttle -- there is nothing to rate-limit yet.
+            None => SiteDomainVerificationAttempt::Allowed,
+        }
+    }
+
     pub(super) fn list_site_domain_verifications(
         &self,
         tenant_id: Option<&str>,
@@ -508,6 +674,31 @@ impl RuntimeStorageRepositories {
         self.control_plane
             .store()
             .get_site_domain_verification(tenant_id, hostname)
+            .await
+    }
+
+    /// Atomically reserve one ownership-verification DNS slot for
+    /// `(tenant_id, hostname)` (#576), enforcing the per-(tenant, hostname)
+    /// cooldown durably across the memory, Postgres, and D1 backends. The verify
+    /// handler MUST call this and refuse before building any DNS request when the
+    /// result is [`SiteDomainVerificationAttempt::RateLimited`]; only an
+    /// `Allowed` result reserves the slot and advances the persisted
+    /// `last_checked_at_unix`, so the limit is not silently erased by a restart.
+    pub async fn try_begin_site_domain_verification_attempt(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> Result<SiteDomainVerificationAttempt, StorageError> {
+        self.control_plane
+            .store()
+            .try_begin_site_domain_verification_attempt(
+                tenant_id,
+                hostname,
+                now_unix,
+                cooldown_secs,
+            )
             .await
     }
 

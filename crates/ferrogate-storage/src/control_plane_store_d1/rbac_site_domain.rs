@@ -221,6 +221,54 @@ impl D1ControlPlaneStore {
         .map(|_| ())
     }
 
+    /// Reserve one verification DNS slot for `(tenant, hostname)` (#576) with a
+    /// single conditional UPDATE on the control DB -- the same CAS shape as the
+    /// #575 site-domain claim. `changes() > 0` means the slot was reserved and
+    /// `last_checked_at_unix` advanced; otherwise the row is re-read to
+    /// distinguish an open cooldown (RateLimited, bounded retry) from an absent
+    /// row (nothing to throttle).
+    pub(super) async fn try_begin_site_domain_verification_attempt_async(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> Result<SiteDomainVerificationAttempt, StorageError> {
+        let result = self
+            .execute_control(
+                "UPDATE site_domain_verifications \
+                 SET last_checked_at_unix = ?, updated_at_unix = ? \
+                 WHERE tenant_id = ? AND hostname = ? \
+                   AND (last_checked_at_unix IS NULL \
+                        OR ? - last_checked_at_unix >= ?)",
+                vec![
+                    now_unix.to_string(),
+                    now_unix.to_string(),
+                    tenant_id.to_string(),
+                    hostname.to_string(),
+                    now_unix.to_string(),
+                    cooldown_secs.to_string(),
+                ],
+            )
+            .await?;
+        if result.changes() > 0 {
+            return Ok(SiteDomainVerificationAttempt::Allowed);
+        }
+        Ok(
+            match self
+                .get_site_domain_verification_async(tenant_id, hostname)
+                .await?
+            {
+                Some(record) => site_domain_verification_attempt_decision(
+                    record.last_checked_at_unix,
+                    now_unix,
+                    cooldown_secs,
+                ),
+                None => SiteDomainVerificationAttempt::Allowed,
+            },
+        )
+    }
+
     pub(super) async fn get_site_domain_verification_async(
         &self,
         tenant_id: &str,

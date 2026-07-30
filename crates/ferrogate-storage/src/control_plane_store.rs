@@ -644,6 +644,18 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         tenant_id: &str,
         hostname: &str,
     ) -> Result<Option<StoredSiteDomainVerification>, StorageError>;
+    /// Atomically reserve one ownership-verification DNS slot for
+    /// `(tenant_id, hostname)`, enforcing the per-(tenant, hostname) cooldown
+    /// before any outbound DNS request (#576). A single conditional write in the
+    /// SQL backends (and a lock-held get-then-write in memory) so two concurrent
+    /// verify calls cannot both reach the resolver inside one cooldown window.
+    async fn try_begin_site_domain_verification_attempt(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> Result<SiteDomainVerificationAttempt, StorageError>;
     async fn list_site_domain_verifications(
         &self,
         tenant_id: Option<&str>,

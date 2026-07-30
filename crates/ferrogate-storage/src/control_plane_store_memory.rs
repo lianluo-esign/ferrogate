@@ -1801,6 +1801,29 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .get_site_domain_verification(tenant_id, hostname))
     }
 
+    async fn try_begin_site_domain_verification_attempt(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) -> Result<SiteDomainVerificationAttempt, StorageError> {
+        // The reservation is get-decide-write under ONE lock acquisition, so it
+        // is atomic for the memory backend just as the SQL backends do it in one
+        // conditional statement.
+        Ok(self
+            .lock()
+            .map_err(|_| {
+                StorageError::Runtime("site domain verification repository lock poisoned".into())
+            })?
+            .try_begin_site_domain_verification_attempt(
+                tenant_id,
+                hostname,
+                now_unix,
+                cooldown_secs,
+            ))
+    }
+
     async fn list_site_domain_verifications(
         &self,
         tenant_id: Option<&str>,
