@@ -127,6 +127,9 @@ fn malformed_filter_is_a_usage_error() {
         sorts: vec![],
         all_pages: false,
         dry_run: false,
+        set: vec![],
+        set_json: vec![],
+        secret_file: None,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("KEY=VALUE"));
@@ -144,6 +147,9 @@ fn malformed_body_is_a_usage_error() {
         sorts: vec![],
         all_pages: false,
         dry_run: false,
+        set: vec![],
+        set_json: vec![],
+        secret_file: None,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("not valid JSON"));
@@ -241,6 +247,9 @@ fn empty_sort_key_is_a_usage_error() {
         sorts: vec!["   ".to_string()],
         all_pages: false,
         dry_run: false,
+        set: vec![],
+        set_json: vec![],
+        secret_file: None,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("--sort"));

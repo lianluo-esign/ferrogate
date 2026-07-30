@@ -154,3 +154,89 @@ fn list_without_sort_sends_no_sort_parameter() {
     let spec = TENANTS.list(&ListParams::new()).unwrap();
     assert!(spec.query.is_empty(), "unexpected query: {:?}", spec.query);
 }
+
+/// A create/rotate response legitimately carries key material once, so the
+/// write path MOVES it rather than blanking it: the operator still gets the
+/// secret (through the sink), and the printed document says where it went.
+#[test]
+fn divert_secret_fields_moves_the_value_and_leaves_a_distinct_marker() {
+    let mut body = serde_json::json!({"id": "vk_1", "key": "sk-live-abc"});
+    let taken = divert_secret_fields(&mut body, &["key"]);
+    assert_eq!(
+        body,
+        serde_json::json!({"id": "vk_1", "key": DIVERTED_SECRET_MARKER})
+    );
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].field, "key");
+    assert_eq!(taken[0].pointer, "/key");
+    assert_eq!(taken[0].value, serde_json::json!("sk-live-abc"));
+    // The two markers must not be confusable: `<redacted>` means gone,
+    // `<written-to-secret-file>` means moved.
+    assert_ne!(DIVERTED_SECRET_MARKER, "<redacted>");
+}
+
+#[test]
+fn divert_secret_fields_reaches_nested_and_arrayed_secrets() {
+    let mut body = serde_json::json!({
+        "wrapper": {"key": "sk-1"},
+        "batch": [{"key": "sk-2"}, {"key": "sk-3"}]
+    });
+    let taken = divert_secret_fields(&mut body, &["key"]);
+    let pointers: Vec<&str> = taken.iter().map(|secret| secret.pointer.as_str()).collect();
+    assert_eq!(pointers, ["/batch/0/key", "/batch/1/key", "/wrapper/key"]);
+    assert!(
+        !serde_json::to_string(&body).unwrap().contains("sk-"),
+        "no secret may survive in the rendered document: {body}"
+    );
+}
+
+/// A null field carries nothing; reporting it would write an empty entry to the
+/// sink and tell the operator a key was issued when none was.
+#[test]
+fn divert_secret_fields_ignores_null_and_unnamed_fields() {
+    let mut body = serde_json::json!({"key": null, "name": "prod"});
+    assert!(divert_secret_fields(&mut body, &["key"]).is_empty());
+    assert_eq!(body, serde_json::json!({"key": null, "name": "prod"}));
+    let mut body = serde_json::json!({"name": "prod"});
+    assert!(divert_secret_fields(&mut body, &["key"]).is_empty());
+}
+
+#[test]
+fn secret_field_names_reports_without_touching_the_document() {
+    let body = serde_json::json!({"wrapper": {"key": "sk-1"}, "key": null});
+    assert_eq!(secret_field_names(&body, &["key"]), vec!["key".to_string()]);
+    // Unchanged: the warning path prints this document immediately afterwards.
+    assert_eq!(
+        body,
+        serde_json::json!({"wrapper": {"key": "sk-1"}, "key": null})
+    );
+}
+
+#[test]
+fn the_secret_document_is_keyed_by_field_name() {
+    let mut body = serde_json::json!({"key": "sk-1", "key_id": "id-1"});
+    let taken = divert_secret_fields(&mut body, &["key", "key_id"]);
+    assert_eq!(
+        diverted_secret_document(&taken),
+        serde_json::json!({"key": "sk-1", "key_id": "id-1"})
+    );
+}
+
+/// Two same-named secrets must not collapse into one entry — that would hand
+/// the operator one key and silently drop the other.
+#[test]
+fn repeated_field_names_fall_back_to_json_pointers() {
+    let mut body = serde_json::json!({"batch": [{"key": "sk-2"}, {"key": "sk-3"}]});
+    let taken = divert_secret_fields(&mut body, &["key"]);
+    assert_eq!(
+        diverted_secret_document(&taken),
+        serde_json::json!({"/batch/0/key": "sk-2", "/batch/1/key": "sk-3"})
+    );
+}
+
+#[test]
+fn pointers_escape_reserved_characters() {
+    let mut body = serde_json::json!({"a/b": {"~t": {"key": "sk-1"}}});
+    let taken = divert_secret_fields(&mut body, &["key"]);
+    assert_eq!(taken[0].pointer, "/a~1b/~0t/key");
+}

@@ -32,12 +32,15 @@
 //! * [`resource_cmd`] — the generic `ctl <group> <verb>` tree (#361–#365) built
 //!   from the `ferrogate-control-plane-client` registry and dispatched through the same
 //!   foundation, with no per-resource code in the binary.
+//! * [`secret_sink`] — the `--secret-file` safe output path for the one-time
+//!   key material a create/rotate returns (#361).
 
 pub(crate) mod confirmation;
 pub(crate) mod context_cmd;
 pub(crate) mod dispatch;
 pub(crate) mod ops_cmd;
 pub(crate) mod resource_cmd;
+pub(crate) mod secret_sink;
 pub(crate) mod store;
 
 /// Cross-crate pin that the CLI's `action_fingerprint` byte-matches the

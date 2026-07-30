@@ -44,20 +44,22 @@ use ferrogate_control_plane_client::command::Registry;
 use ferrogate_control_plane_client::context::EffectiveContext;
 use ferrogate_control_plane_client::dispatch::{build_request, redact_response, secret_fields_for};
 use ferrogate_control_plane_client::error::{CliError, CliResult};
+use ferrogate_control_plane_client::field_set;
 use ferrogate_control_plane_client::output::{render_output, Table};
 use ferrogate_control_plane_client::receipt::{
     BareRenderer, MutationPlan, MutationReport, ReceiptRenderer, RenderGate, VerbOutput,
 };
+
 use ferrogate_control_plane_client::registry_helpers::ResourceInput;
-use ferrogate_control_plane_client::resource::ListParams;
+use ferrogate_control_plane_client::resource::{diverted_secret_document, ListParams};
 use ferrogate_control_plane_client::transport::{
     page_cursor_state, page_envelope, ApiResponse, ControlPlaneClient, PageCursorState,
     PageRequest, RawApiResponse, RequestSpec, ReqwestTransport, DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
 };
 use serde_json::{Map, Value};
 
-use super::confirmation;
 use super::dispatch::{self, report_error_for, ProcessSecretResolver};
+use super::{confirmation, secret_sink};
 
 /// Top-level namespace command that hosts every registered resource family.
 pub(crate) const CTL_COMMAND: &str = "ctl";
@@ -84,6 +86,43 @@ struct ResourceArgs {
     /// Path to a JSON request document for a write verb (`-` reads stdin).
     #[arg(long, value_name = "PATH")]
     file: Option<PathBuf>,
+
+    /// Set one request-document field as `KEY=VALUE`, repeatable; the value is
+    /// always a JSON string.
+    ///
+    /// `KEY` may be dotted (`quota.max_bytes`) to reach a nested field, with
+    /// `\.` for a literal dot in a name. Use `--set-json` for a number,
+    /// boolean, null, array, or object. This is the "explicit flags for small
+    /// mutations" half of the command contract: a one-field status flip no
+    /// longer requires hand-writing the whole document.
+    #[arg(
+        long = "set",
+        value_name = "KEY=VALUE",
+        conflicts_with_all = ["data", "file"]
+    )]
+    set: Vec<String>,
+
+    /// Set one request-document field to a JSON literal as `KEY=JSON`,
+    /// repeatable.
+    ///
+    /// Same dotted-key syntax as `--set`; the value is parsed as JSON, so a
+    /// number, boolean, null, array, or object arrives typed.
+    #[arg(
+        long = "set-json",
+        value_name = "KEY=JSON",
+        conflicts_with_all = ["data", "file"]
+    )]
+    set_json: Vec<String>,
+
+    /// Write one-time secret material to PATH with mode 0600 instead of
+    /// printing it; the file must not already exist.
+    ///
+    /// The key a create/rotate returns is replaced on stdout by a marker
+    /// naming the file. Only meaningful for a mutating verb in a family that
+    /// issues one-time secrets; anywhere else it is refused rather than
+    /// silently ignored.
+    #[arg(long = "secret-file", value_name = "PATH")]
+    secret_file: Option<PathBuf>,
 
     /// Page size for a list verb.
     #[arg(long, value_name = "N")]
@@ -181,9 +220,13 @@ impl ResourceArgs {
         Ok(input)
     }
 
-    /// Read and parse the request document from `--data` or `--file`, if either
-    /// was given. A malformed document is a usage error before any request is
-    /// sent.
+    /// Read and parse the request document from `--data`, `--file`, or the
+    /// per-field `--set`/`--set-json` flags. A malformed document is a usage
+    /// error before any request is sent.
+    ///
+    /// The three sources are mutually exclusive at the clap layer, so there is
+    /// no merge order to define here: a document is supplied whole, or it is
+    /// assembled from fields.
     fn read_body(&self) -> CliResult<Option<Value>> {
         let raw = match (&self.data, &self.file) {
             (Some(data), _) => Some(data.clone()),
@@ -197,8 +240,13 @@ impl ResourceArgs {
                 })?;
                 Ok(Some(value))
             }
-            None => Ok(None),
+            None => field_set::document_from_flags(&self.set, &self.set_json),
         }
+    }
+
+    /// Whether any per-field assignment flag was given.
+    fn has_field_flags(&self) -> bool {
+        !self.set.is_empty() || !self.set_json.is_empty()
     }
 }
 
@@ -327,10 +375,61 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         effective.non_interactive,
     )?;
 
+    // Every flag whose applicability depends on the resolved verb is refused
+    // here, BEFORE the body is read and before a socket can be opened. The
+    // alternative — accepting and ignoring — is the `ca_bundle_path` /
+    // pre-#361 `--sort` anti-pattern this family keeps closing: a flag that
+    // parses but does nothing reads as a capability the CLI does not have.
+    let group_secret_fields = secret_fields_for(group_name);
+    if let Some(path) = &resource.secret_file {
+        if !descriptor.render_gate().requires_receipt() {
+            return Err(CliError::usage(format!(
+                "--secret-file applies to mutating verbs that issue one-time key material; \
+                 '{group_name} {verb_name}' is a {} verb, and a read's secret fields are \
+                 redacted rather than returned",
+                descriptor.effect.as_str()
+            )));
+        }
+        if group_secret_fields.is_empty() {
+            return Err(CliError::usage(format!(
+                "--secret-file applies to families that return one-time key material; \
+                 '{group_name}' returns none, so {} would be written empty",
+                path.display()
+            )));
+        }
+        if resource.dry_run {
+            return Err(CliError::usage(
+                "--secret-file has nothing to write under --dry-run: no request is sent, so no \
+                 key material is issued"
+                    .to_string(),
+            ));
+        }
+    }
+    if resource.has_field_flags() && !descriptor.render_gate().requires_receipt() {
+        return Err(CliError::usage(format!(
+            "--set/--set-json build a request document; '{group_name} {verb_name}' is a {} verb \
+             and sends none",
+            descriptor.effect.as_str()
+        )));
+    }
+
     // Confirmation deliberately precedes this conversion: `--file -` may
     // consume stdin, and a guarded mutation must not lose its prompt merely
     // because its request body also comes from stdin.
     let input = resource.to_input()?;
+
+    // `--data` puts the whole request document in argv, where it survives in
+    // shell history and is readable by any local `ps` for the life of the
+    // process. `--file`/stdin is the safe alternative, and nothing said so.
+    // Keyed on the document actually passed, so the note fires on the creates
+    // that really do carry a credential and stays quiet otherwise.
+    if resource.data.is_some() {
+        if let Some(body) = &input.body {
+            if let Some(warning) = field_set::argv_credential_warning(body, group_secret_fields) {
+                eprintln!("{warning}");
+            }
+        }
+    }
 
     // `--sort` is honest about being unhonored. A structural parse of
     // `docs/openapi/admin-api.openapi.json` finds **zero** operations declaring
@@ -386,6 +485,13 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         return Ok(());
     }
 
+    // Reserved before the request leaves the process, so an unusable sink is a
+    // refusal with nothing sent rather than a key issued into the void.
+    let secret_file = match &resource.secret_file {
+        Some(path) => Some(secret_sink::SecretFile::reserve(path)?),
+        None => None,
+    };
+
     // The #505 render gate. This `match` is the whole enforcement: the
     // `Receipt` arm holds a `ReceiptRenderer`, which has no `render(Value)`
     // method, and `VerbOutput` wraps a private payload, so there is no
@@ -396,49 +502,80 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     // A mutating verb yields a receipt on EVERY terminal path, so the failure
     // travels alongside the output instead of short-circuiting the render. It
     // is propagated below, after the receipt has reached stdout.
-    let (output, failure) = match descriptor.render_gate() {
-        RenderGate::Bare(renderer) => {
-            if resource.dry_run {
-                return Err(CliError::usage(format!(
-                    "--dry-run applies to mutating verbs; '{group_name} {verb_name}' is a \
-                     {} verb and changes nothing",
-                    descriptor.effect.as_str()
-                )));
+    // Wrapped in a closure so an early exit cannot strand the reserved secret
+    // file on disk: a zero-byte reservation left behind would make the next
+    // run's `create_new` refusal fire on a file holding nothing.
+    let rendered = (|| -> CliResult<(VerbOutput, Option<CliError>)> {
+        match descriptor.render_gate() {
+            RenderGate::Bare(renderer) => {
+                if resource.dry_run {
+                    return Err(CliError::usage(format!(
+                        "--dry-run applies to mutating verbs; '{group_name} {verb_name}' is a \
+                         {} verb and changes nothing",
+                        descriptor.effect.as_str()
+                    )));
+                }
+                Ok((
+                    read_output(
+                        renderer,
+                        group_name,
+                        &resource,
+                        spec,
+                        &redaction_spec,
+                        effective,
+                        credential,
+                        identity,
+                    )?,
+                    None,
+                ))
             }
-            (
-                read_output(
+            RenderGate::Receipt(renderer) => {
+                if resource.all_pages {
+                    return Err(CliError::usage(format!(
+                        "--all-pages is a list-walking flag; '{group_name} {verb_name}' is a \
+                         mutating verb and returns one document"
+                    )));
+                }
+                Ok(mutation_output(
                     renderer,
                     group_name,
-                    &resource,
+                    &input.segments,
                     spec,
-                    &redaction_spec,
                     effective,
                     credential,
                     identity,
-                )?,
-                None,
-            )
-        }
-        RenderGate::Receipt(renderer) => {
-            if resource.all_pages {
-                return Err(CliError::usage(format!(
-                    "--all-pages is a list-walking flag; '{group_name} {verb_name}' is a \
-                     mutating verb and returns one document"
-                )));
+                    resource.dry_run,
+                )?
+                .into_parts())
             }
-            mutation_output(
-                renderer,
-                group_name,
-                &input.segments,
-                spec,
-                effective,
-                credential,
-                identity,
-                resource.dry_run,
-            )?
-            .into_parts()
+        }
+    })();
+    let (mut output, failure) = match rendered {
+        Ok(pair) => pair,
+        Err(error) => {
+            if let Some(file) = secret_file {
+                if let Some(note) = file.discard() {
+                    eprintln!("{note}");
+                }
+            }
+            return Err(error);
         }
     };
+
+    // Route one-time key material off stdout when a sink was named, and say so
+    // when one was not. `divert_response_secrets` is the only mutable access
+    // the render gate grants and it hands back just the secrets, so this cannot
+    // become a way to recover a bare mutation body.
+    let diverted = match &secret_file {
+        Some(_) => output.divert_response_secrets(group_secret_fields),
+        None => Vec::new(),
+    };
+    if secret_file.is_none() {
+        let exposed = output.response_secret_names(group_secret_fields);
+        if !exposed.is_empty() {
+            eprintln!("{}", secret_sink::stdout_exposure_warning(&exposed));
+        }
+    }
 
     // Correlation ids are diagnostics → stderr; the payload stays clean on
     // stdout so `--output json` is pipe-safe. A receipt carries them as
@@ -453,6 +590,21 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     }
 
     println!("{}", render_output(output_format, &output, render_table)?);
+
+    // The sink is committed AFTER the receipt reaches stdout: the receipt is
+    // the audit record of a mutation that already happened, so it must not be
+    // withheld because writing the key file failed.
+    if let Some(file) = secret_file {
+        if diverted.is_empty() {
+            if let Some(note) = file.discard() {
+                eprintln!("{note}");
+            }
+        } else {
+            let notice = secret_sink::wrote_notice(file.path(), &diverted);
+            file.commit(&diverted_secret_document(&diverted))?;
+            eprintln!("{notice}");
+        }
+    }
 
     // A single-page list must never look complete when it is not. The notice
     // is a diagnostic → stderr, so it cannot corrupt a piped JSON payload.

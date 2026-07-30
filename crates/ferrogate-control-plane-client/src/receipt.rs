@@ -177,6 +177,7 @@ use crate::auth::AuthSource;
 use crate::command::{VerbDescriptor, VerbEffect};
 use crate::context::EffectiveContext;
 use crate::error::{CliError, CliResult, ExitClass};
+use crate::resource::{divert_secret_fields, secret_field_names, DivertedSecret};
 use crate::transport::{build_url, ApiResponse, ControlPlaneClient, RequestSpec, Transport};
 
 /// `object` discriminator every receipt carries, so a mixed audit stream can
@@ -1247,6 +1248,45 @@ impl VerbOutput {
     /// Whether this output is a receipt.
     pub fn is_receipt(&self) -> bool {
         matches!(self.0, Payload::Receipt(_))
+    }
+
+    /// Move a receipt's one-time secret material out of its nested `response`
+    /// document, leaving [`DIVERTED_SECRET_MARKER`] in each field's place, and
+    /// return what was taken.
+    ///
+    /// This is the ONLY mutable access the gate grants, and it is deliberately
+    /// shaped so it cannot be misused to recover the body: it takes the field
+    /// names to divert rather than a closure, and it returns just the secret
+    /// values — never the response. A mutating verb still cannot render a bare
+    /// body, so the #505 enforcement is unchanged; what becomes possible is
+    /// routing the key material a create/rotate returns to an explicit safe
+    /// sink instead of stdout (issue #361).
+    ///
+    /// Returns an empty vector for a bare (read) output, a dry run, or a
+    /// response carrying none of the named fields.
+    ///
+    /// [`DIVERTED_SECRET_MARKER`]: crate::resource::DIVERTED_SECRET_MARKER
+    pub fn divert_response_secrets(&mut self, secret_fields: &[&str]) -> Vec<DivertedSecret> {
+        match &mut self.0 {
+            Payload::Bare(_) => Vec::new(),
+            Payload::Receipt(receipt) => match &mut receipt.response {
+                Some(response) => divert_secret_fields(response, secret_fields),
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// The names of the one-time secret fields this output's response carries,
+    /// without altering it — the read-only half used to warn an operator who
+    /// did not ask for a safe sink.
+    pub fn response_secret_names(&self, secret_fields: &[&str]) -> Vec<String> {
+        match &self.0 {
+            Payload::Bare(_) => Vec::new(),
+            Payload::Receipt(receipt) => match &receipt.response {
+                Some(response) => secret_field_names(response, secret_fields),
+                None => Vec::new(),
+            },
+        }
     }
 }
 

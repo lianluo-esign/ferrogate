@@ -177,6 +177,7 @@ pub mod context;
 pub mod dispatch;
 pub mod error;
 pub mod evidence;
+pub mod field_set;
 pub mod guardrail;
 pub mod iam;
 pub mod mcp;
