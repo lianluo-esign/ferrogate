@@ -19,6 +19,20 @@
 // libtest thread, not a hand-rolled imitation of one. The fixture prints the
 // gateway pid; the outer test then asserts against `/proc`.
 //
+// The boundary being asserted is the *test thread*, not the test process. A
+// fixture run on its own would let the inner binary exit the moment it
+// panicked, so "the gateway is gone" would also be satisfied by cleanup that
+// only happens at process exit -- and a regression that held the guardian write
+// end open until then, or reaped only from an atexit path, would stay green
+// while every failed test in a real run left its gateway alive for the rest of
+// the binary. That is the actual #568 shape: one assertion fails, ~250 sibling
+// tests keep running, and the orphan count climbs.
+//
+// So each fixture is run ALONGSIDE `inner_sibling_hold`, a second libtest test
+// that blocks until the outer test releases it. The inner binary is therefore
+// provably still running when the gateway verdict is read, and the outer test
+// records that fact BEFORE releasing the sibling.
+//
 // The backlog sweep lives in `gateway_backlog_sweep.rs` and not here on
 // purpose: a sweep kills every orphan on the box, so running one in this binary
 // would clean up after these tests and hold them green with the fix removed.
@@ -38,10 +52,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use support::{gateway_process_alive, parent_pid};
+use support::{gateway_process_alive, parent_pid, reap_with_test};
 
 /// Printed by the inner fixtures so the outer test knows which pid to watch.
 const PID_MARKER: &str = "FERROGATE_568_GATEWAY_PID=";
+
+/// The sibling fixture that keeps an inner test binary alive after the
+/// gateway-spawning fixture's own thread has ended.
+const SIBLING_FIXTURE: &str = "inner_sibling_hold";
+
+/// Path the outer test creates to let [`inner_sibling_hold`] return.
+const SIBLING_RELEASE_ENV: &str = "FERROGATE_568_SIBLING_RELEASE";
 
 /// Spawns a gateway the way every test in this crate does and reports its pid on
 /// stdout. Returns the live child so the caller decides how to die.
@@ -81,6 +102,30 @@ fn inner_spawn_then_panic() {
 fn inner_spawn_then_hang() {
     let _child = spawn_reported_gateway();
     std::thread::sleep(Duration::from_secs(600));
+}
+
+/// Fixture: the sibling. Spawns nothing; its only job is to still be running
+/// when the outer test reads its verdict, so "the gateway is gone" cannot be
+/// explained by the inner test binary having exited.
+///
+/// Blocks on a release file rather than a fixed sleep so the outer test decides
+/// when the inner binary may finish, and so a released run still exercises the
+/// fixture's own panic/exit-status path.
+#[test]
+#[ignore = "fixture: holds an inner test binary open for the per-thread lifetime assertions"]
+fn inner_sibling_hold() {
+    let release = std::path::PathBuf::from(
+        std::env::var(SIBLING_RELEASE_ENV)
+            .unwrap_or_else(|_| panic!("{SIBLING_RELEASE_ENV} must name the release file")),
+    );
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(300) {
+        if release.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("#568 sibling fixture was never released by the outer test");
 }
 
 #[test]
@@ -143,6 +188,11 @@ fn wait_for_pid_file_to_change(path: &std::path::Path, old_pid: u32) -> u32 {
 /// Re-invocation of this very test binary, running one fixture and nothing else.
 fn inner_harness(fixture: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
+    // The inner harness is itself a long-lived test-spawned process, and this
+    // file is where leaking one would be least excusable: an outer assertion
+    // that fires early skips every `kill()` below it. Bind it to the outer test
+    // thread by the same kernel mechanism the suite is gating.
+    reap_with_test(&mut command);
     command
         .args([fixture, "--exact", "--ignored", "--nocapture"])
         // More than one thread so libtest runs the fixture on a spawned test
@@ -151,6 +201,76 @@ fn inner_harness(fixture: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     command
+}
+
+/// Re-invocation of this binary running `fixture` **and** the sibling that
+/// keeps the process alive after `fixture`'s thread is gone.
+///
+/// libtest takes several positional filters, so `--exact` selects exactly these
+/// two tests and nothing else; two threads run them concurrently, which is also
+/// how a real run of this suite executes any test.
+fn inner_harness_with_sibling(fixture: &str, release: &std::path::Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    // See `inner_harness`: the sibling deliberately blocks for minutes, so an
+    // outer assertion that fires before the release would otherwise strand this
+    // process for exactly that long.
+    reap_with_test(&mut command);
+    command
+        .args([
+            fixture,
+            SIBLING_FIXTURE,
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ])
+        .args(["--test-threads", "2"])
+        .env(SIBLING_RELEASE_ENV, release)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Proves the #568 contract at the granularity that actually matters: the
+/// gateway `fixture` spawned is gone while the test binary that spawned it is
+/// **still running** a sibling test.
+///
+/// Order is deliberate. The gateway verdict is taken first, the inner binary's
+/// liveness is sampled immediately after it, and only then is the sibling
+/// released -- so neither observation can be contaminated by the process exit
+/// that ends the run.
+fn assert_gateway_dies_with_its_test_thread(fixture: &str, subject: &str) {
+    let release_dir = tempfile::tempdir().unwrap();
+    let release = release_dir.path().join("release");
+    let mut harness = inner_harness_with_sibling(fixture, &release)
+        .spawn()
+        .unwrap();
+    let pid = read_reported_pid(harness.stdout.take().unwrap());
+
+    let gone = wait_until_gone(pid, Duration::from_secs(15));
+    let harness_alive = matches!(harness.try_wait(), Ok(None));
+    let orphaned_to = parent_pid(pid);
+    kill_survivor(pid);
+
+    std::fs::write(&release, b"released").unwrap();
+    let status = harness.wait().unwrap();
+
+    assert!(
+        harness_alive,
+        "the inner test binary exited before the {subject} verdict was read, so \
+         this run could not tell per-test-thread reaping apart from cleanup at \
+         process exit; the sibling fixture must outlive {fixture}"
+    );
+    assert!(
+        gone,
+        "{subject} {pid} outlived the test thread that spawned it while its test \
+         binary was still running (now parented to {orphaned_to:?}); this is the \
+         #568 leak -- every failing test in a real run leaves one behind for the \
+         rest of the binary"
+    );
+    assert!(
+        !status.success(),
+        "fixture {fixture} was supposed to panic, so its harness must report failure"
+    );
 }
 
 /// Reads the fixture's stdout until it reports its gateway pid. Fails loudly
@@ -195,22 +315,7 @@ fn kill_survivor(pid: u32) {
 /// -- reparented to init -- long after its test binary had exited.
 #[test]
 fn panicking_test_leaves_no_gateway_behind() {
-    let mut harness = inner_harness("inner_spawn_then_panic").spawn().unwrap();
-    let pid = read_reported_pid(harness.stdout.take().unwrap());
-    let status = harness.wait().unwrap();
-    assert!(
-        !status.success(),
-        "fixture was supposed to panic, so its harness must report failure"
-    );
-
-    let gone = wait_until_gone(pid, Duration::from_secs(15));
-    let orphaned_to = parent_pid(pid);
-    kill_survivor(pid);
-    assert!(
-        gone,
-        "gateway {pid} outlived the panicking test that spawned it \
-         (now parented to {orphaned_to:?}); this is the #568 leak"
-    );
+    assert_gateway_dies_with_its_test_thread("inner_spawn_then_panic", "gateway");
 }
 
 /// The SIGKILL path -- `timeout`, Ctrl-C, or a harness fail-fast. No Rust
@@ -241,26 +346,16 @@ fn sigkilled_test_binary_leaves_no_gateway_behind() {
     );
 }
 
+/// The grandchild path. The replacement is spawned by the short-lived `reload`
+/// process, so it is `PPID=1` seconds later and PR_SET_PDEATHSIG can never
+/// reach it -- only the inherited guardian pipe can, and only if that pipe's
+/// write end is owned by the spawning test thread rather than by the process.
+/// That distinction is exactly what the sibling makes observable.
 #[test]
 fn graceful_upgrade_replacement_leaves_no_gateway_behind() {
-    let mut harness = inner_harness("inner_graceful_upgrade_then_panic")
-        .spawn()
-        .unwrap();
-    let pid = read_reported_pid(harness.stdout.take().unwrap());
-    let status = harness.wait().unwrap();
-    assert!(
-        !status.success(),
-        "fixture was supposed to panic, so its harness must report failure"
-    );
-
-    let gone = wait_until_gone(pid, Duration::from_secs(15));
-    let orphaned_to = parent_pid(pid);
-    kill_survivor(pid);
-    assert!(
-        gone,
-        "graceful-upgrade replacement gateway {pid} outlived the panicking test \
-         that spawned reload (now parented to {orphaned_to:?}); this is the \
-         #568 grandchild leak"
+    assert_gateway_dies_with_its_test_thread(
+        "inner_graceful_upgrade_then_panic",
+        "graceful-upgrade replacement gateway",
     );
 }
 
