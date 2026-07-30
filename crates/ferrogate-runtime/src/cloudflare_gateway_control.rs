@@ -51,6 +51,16 @@
 //! verify with `run_status` and escalate to `cleanup_run`
 //! ([`crate::KillMode::Cancel`] does exactly that for the #428 budget kill).
 //!
+//! **The status `cancel_run` returns is the one that makes that verification
+//! mean something.** The Worker writes `stopped` only once a workload has
+//! actually unwound (or when there was nothing in flight to wait on); a cancel
+//! that merely *signalled* a running workload leaves the run `running`. Before
+//! that, `cancel` wrote `stopped` unconditionally and the verify-then-escalate
+//! loop was vacuous — [`crate::kill_is_settled`] treats `Stopped` as terminal, so
+//! it always observed the status the cancel itself had just written and never
+//! escalated. See `workers/agent-gateway/test/lifecycle.test.ts`, "a cancel the
+//! workload IGNORES is NOT reported as stopped".
+//!
 //! ## Refusals are errors, not statuses
 //!
 //! Addressing an agent by name ALWAYS yields a Durable Object stub, so a verb
@@ -59,6 +69,12 @@
 //! contradictory re-start), which this surface maps onto
 //! [`CloudflareControlSurfaceError::RunNotFound`] / `StartFailed` so the caller
 //! never records lifecycle evidence for a run that does not exist.
+//!
+//! The same rule now covers `invoke`: a run whose cancel latch is set refuses
+//! with 409 `run_cancelled` and this surface maps it onto
+//! [`CloudflareControlSurfaceError::RunCancelled`]. It used to answer 200 with
+//! an exec success envelope, so `exec_or_attach` recorded `outcome = "executed"`
+//! for an invocation that never ran.
 //!
 //! HTTP goes through a small synchronous [`GatewayControlTransport`] seam so the
 //! verb→route→status mapping is unit-tested with a scripted mock and **no
@@ -181,6 +197,18 @@ fn decode_ok<T: for<'de> Deserialize<'de>>(
     })
 }
 
+/// Read the `error` code out of a gateway-Worker refusal envelope
+/// (`{"error":"…","runRef":"…","detail":"…"}`), or `None` when the body is not
+/// one.
+///
+/// Refusal codes are matched on this field and never on the human-readable
+/// `detail`: substring-matching prose is how a wording change silently becomes a
+/// behaviour change.
+fn refusal_code(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(value.get("error")?.as_str()?.to_string())
+}
+
 /// Percent-encode `value` for use as a URL query-string value.
 ///
 /// Hand-rolled rather than adding a dependency for one call site: the run-ref
@@ -282,6 +310,14 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
             }),
         )?;
         let decoded: InvokeResponse = decode_ok(response, |status, body| {
+            // A cancelled run REFUSES the invoke (409 `run_cancelled`); it does
+            // not fail it. Kept as its own error so a caller can tell "this run
+            // is closed to further work" from "the work was attempted and blew
+            // up" without reading prose — and so `exec_or_attach` records no
+            // `executed` evidence for work that never ran.
+            if status == 409 && refusal_code(&body).as_deref() == Some("run_cancelled") {
+                return CloudflareControlSurfaceError::RunCancelled(body);
+            }
             CloudflareControlSurfaceError::ExecFailed(format!("HTTP {status}: {body}"))
         })?;
         Ok(CloudflareRunExecOutcome {
@@ -313,6 +349,11 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         // and sets the durable latch that refuses further work. NOT a fiber
         // cancel — `agents@0.0.109` ships no fiber API (see the module doc), and
         // it cannot stop a workload that ignores the signal.
+        //
+        // The returned status is therefore NOT a claim that the run stopped: it
+        // is `stopped` only when a workload actually unwound or there was none
+        // in flight, and stays `running` while a signalled workload is still
+        // going. `KillMode::Cancel` depends on that distinction.
         let response = self.post(
             "control/cancel",
             json!({ "runRef": run_ref, "reason": reason }),

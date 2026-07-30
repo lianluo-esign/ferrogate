@@ -324,6 +324,59 @@ fn a_conflicting_restart_surfaces_as_start_failed() {
 }
 
 #[test]
+fn an_invoke_refused_by_the_cancel_latch_is_run_cancelled_not_an_exec_outcome() {
+    // ISSUE #414: the Worker used to answer a latch-refused invoke with HTTP 200
+    // and an InvokeResult, so `exec_or_attach` recorded
+    // IsolationLifecycleEvidence{outcome:"executed"} for work that never ran and
+    // only the free-text `message` said otherwise. An `Ok(_)` here — of any
+    // shape — means that regression is back.
+    let mut s = surface(vec![HttpResponse {
+        status: 409,
+        retry_after: None,
+        body: br#"{ "error": "run_cancelled", "runRef": "cf-run-r1", "detail": "run r1 was cancelled (over-budget); it accepts no further work" }"#.to_vec(),
+    }]);
+    let err = s
+        .exec_run(CloudflareRunExecRequest {
+            run_ref: "cf-run-r1".into(),
+            workload_ref: "workload-9".into(),
+            args: vec![],
+        })
+        .unwrap_err();
+    match err {
+        CloudflareControlSurfaceError::RunCancelled(m) => {
+            assert!(m.contains("run_cancelled"), "{m}")
+        }
+        other => panic!("expected RunCancelled, got {other:?}"),
+    }
+}
+
+#[test]
+fn other_409_refusals_of_invoke_stay_exec_failed() {
+    // The discriminator is the refusal CODE, not the status: `invoke_in_flight`
+    // (a second concurrent invoke) is also a 409 and must not be mistaken for a
+    // cancelled run, or a caller would stop retrying a run that is very much
+    // alive.
+    let mut s = surface(vec![HttpResponse {
+        status: 409,
+        retry_after: None,
+        body: br#"{ "error": "invoke_in_flight", "runRef": "cf-run-r1", "detail": "already has a workload in flight" }"#.to_vec(),
+    }]);
+    let err = s
+        .exec_run(CloudflareRunExecRequest {
+            run_ref: "cf-run-r1".into(),
+            workload_ref: "workload-9".into(),
+            args: vec![],
+        })
+        .unwrap_err();
+    match err {
+        CloudflareControlSurfaceError::ExecFailed(m) => {
+            assert!(m.contains("invoke_in_flight"), "{m}")
+        }
+        other => panic!("expected ExecFailed, got {other:?}"),
+    }
+}
+
+#[test]
 fn run_status_percent_encodes_the_run_ref_in_the_query() {
     // ISSUE #414 ITEM 7. An unescaped `&` or `#` in a run ref truncates or
     // corrupts the query, so the Worker would answer about a DIFFERENT instance

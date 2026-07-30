@@ -22,12 +22,11 @@
 //   These tests pin exactly that, and nothing stronger.
 
 /// <reference types="@cloudflare/vitest-pool-workers" />
-import { SELF, env, runInDurableObject } from "cloudflare:test";
+import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 
 import wranglerToml from "../wrangler.toml?raw";
-import type { AgentGateway } from "../src/index";
-import type { ProbeAgentGateway } from "./harness/worker";
+import { addressingCalls, observedAborts, sideEffects } from "./harness/worker";
 
 const TOKEN = "test-control-secret";
 const BASE = "https://agent-gateway.test";
@@ -58,24 +57,6 @@ function start(runId: string, extra?: Record<string, unknown>): Promise<Response
   });
 }
 
-/**
- * Which workloads on `runRef` reached their POST-AWAIT side effect.
- *
- * Read straight off the Durable Object instance rather than through a control
- * route: a route read would go through `invoke`, which a cancelled run refuses —
- * so the "no side effect" assertion would pass vacuously for the very case it
- * exists to prove. `getAgentByName` addresses instances with a plain
- * `idFromName(name)` (partyserver `getServerByName`), so this resolves the SAME
- * object the routes drove.
- */
-function sideEffects(runRef: string): Promise<string[]> {
-  const namespace = env.AGENT_GATEWAY as DurableObjectNamespace<AgentGateway>;
-  const stub = namespace.get(namespace.idFromName(runRef));
-  return runInDurableObject(stub, (instance) =>
-    (instance as unknown as ProbeAgentGateway).sideEffects(),
-  );
-}
-
 describe("#414 cancel actually stops in-flight work", () => {
   it("a cancelled run never reaches its workload's post-await side effect", async () => {
     const name = "run-cancel-aborts";
@@ -94,16 +75,63 @@ describe("#414 cancel actually stops in-flight work", () => {
     const cancel = await post("/control/cancel", { runRef: name, reason: "over-budget" });
     expect(cancel.status).toBe(200);
     // `aborted: true` is the honest part of the envelope: in-flight work on this
-    // instance was signalled, not merely flagged.
-    expect(await cancel.json()).toMatchObject({ runRef: name, status: "stopped", aborted: true });
+    // instance was signalled, not merely flagged. The status is still `running`:
+    // signalling is not stopping, and only the workload can say which happened —
+    // see the defiant-workload test below for why that distinction is the point.
+    expect(await cancel.json()).toMatchObject({ runRef: name, status: "running", aborted: true });
 
     // The invoke unwound EARLY (it did not wait out its 5s) and reports stopped.
+    // `invoke`'s abort branch is the ONLY writer of `stopped`.
     const invoked = (await (await inFlight).json()) as { status: string; exitCode: number | null };
     expect(invoked.status).toBe("stopped");
     expect(invoked.exitCode).toBeNull();
 
     // THE ASSERTION THAT MATTERS: the work never happened.
-    expect(await sideEffects(name)).not.toContain("probe:sleep");
+    expect(sideEffects(name)).not.toContain("probe:sleep");
+    // ...and it did not happen because the workload SAW the cancel.
+    expect(observedAborts(name)).toContain("Error: ferrogate cancel: over-budget");
+
+    // Only now that the workload has unwound does the run read as stopped.
+    const after = await SELF.fetch(`${BASE}/control/status?runRef=${name}`, authedInit());
+    expect(await after.json()).toMatchObject({ status: "stopped", cancelRequested: true });
+  });
+
+  it("a cancel the workload IGNORES is NOT reported as stopped (the kill must escalate)", async () => {
+    // THE BLOCKER THIS FILE EXISTS FOR, second occurrence. `cancel` wrote
+    // `status:"stopped"` unconditionally, and the Rust `kill_is_settled` treats
+    // `Stopped` as terminal — so for #428's over-budget kill the sequence was
+    // always cancel -> "stopped", run_status -> "stopped", escalation skipped.
+    // A runaway agent was reported killed and kept spending. The status a
+    // defiant workload leaves behind is the whole discriminator, so it is what
+    // is asserted here.
+    const name = "run-cancel-defiant";
+    await start(name);
+
+    const inFlight = post("/control/invoke", {
+      runRef: name,
+      workloadRef: "probe:defiant",
+      args: ["1000"],
+    });
+    await scheduler.wait(50);
+
+    const cancel = await post("/control/cancel", { runRef: name, reason: "over-budget" });
+    expect(cancel.status).toBe(200);
+    expect(await cancel.json()).toMatchObject({ runRef: name, status: "running", aborted: true });
+
+    // This is the read the Rust `KillMode::Cancel` makes next. It must NOT say
+    // settled, because the run demonstrably is not.
+    const status = await SELF.fetch(`${BASE}/control/status?runRef=${name}`, authedInit());
+    expect(await status.json()).toMatchObject({
+      runRef: name,
+      status: "running",
+      cancelRequested: true,
+    });
+
+    // Proof the workload really was defiant rather than merely slow: it reached
+    // its post-await side effect despite having been signalled.
+    const invoked = (await (await inFlight).json()) as { status: string };
+    expect(invoked.status).toBe("completed");
+    expect(sideEffects(name)).toContain("probe:defiant");
   });
 
   it("an UNcancelled run of the same workload DOES reach its side effect", async () => {
@@ -119,12 +147,17 @@ describe("#414 cancel actually stops in-flight work", () => {
     });
     expect(await done.json()).toMatchObject({ status: "completed", exitCode: 0 });
 
-    expect(await sideEffects(name)).toContain("probe:sleep");
+    expect(sideEffects(name)).toContain("probe:sleep");
   });
 
-  it("the cancel latch is DURABLE: a later invoke on a cancelled run is refused", async () => {
+  it("the cancel latch is DURABLE: a later invoke on a cancelled run is REFUSED, not answered", async () => {
     // The in-memory AbortController dies with hibernation/eviction, so the latch
     // that stops the run from starting NEW work has to be persistent state.
+    //
+    // And the refusal is a refusal: it used to come back as HTTP 200 with an
+    // `InvokeResult`, so the Rust `exec_or_attach` recorded lifecycle evidence
+    // saying `outcome:"executed"` for work that never ran — only the free-text
+    // message said otherwise.
     const name = "run-cancel-latch";
     await start(name);
     await post("/control/cancel", { runRef: name, reason: "operator" });
@@ -134,13 +167,46 @@ describe("#414 cancel actually stops in-flight work", () => {
       workloadRef: "probe:sleep",
       args: ["1"],
     });
-    const body = (await res.json()) as { status: string; message: string; exitCode: number | null };
-    expect(body.status).toBe("stopped");
-    expect(body.message).toContain("refused: run cancelled (operator)");
-    expect(body.exitCode).toBeNull();
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; runRef: string; detail: string };
+    expect(body.error).toBe("run_cancelled");
+    expect(body.runRef).toBe(name);
+    expect(body.detail).toContain("cancelled (operator)");
+    expect(body).not.toHaveProperty("exitCode");
 
     // ...and the refused invoke did no work either.
-    expect(await sideEffects(name)).not.toContain("probe:sleep");
+    expect(sideEffects(name)).not.toContain("probe:sleep");
+  });
+
+  it("a second CONCURRENT invoke is refused rather than silently dropping the abort handle", async () => {
+    // `this.#inFlight = controller` used to overwrite the previous handle, and DO
+    // RPC calls interleave at every await — so a second invoke arriving during the
+    // first one's await left the FIRST workload un-cancellable: a later cancel
+    // signalled only the second, and the first ran to completion.
+    const name = "run-invoke-concurrent";
+    await start(name);
+
+    const first = post("/control/invoke", {
+      runRef: name,
+      workloadRef: "probe:sleep",
+      args: ["2000"],
+    });
+    await scheduler.wait(50);
+
+    const second = await post("/control/invoke", {
+      runRef: name,
+      workloadRef: "probe:sleep",
+      args: ["1"],
+    });
+    expect(second.status).toBe(409);
+    expect(await second.json()).toMatchObject({ error: "invoke_in_flight", runRef: name });
+
+    // The FIRST workload still owns the handle, so the cancel reaches it.
+    const cancel = await post("/control/cancel", { runRef: name, reason: "over-budget" });
+    expect(await cancel.json()).toMatchObject({ aborted: true });
+    const invoked = (await (await first).json()) as { status: string };
+    expect(invoked.status).toBe("stopped");
+    expect(sideEffects(name)).not.toContain("probe:sleep");
   });
 
   it("status reports the cancel latch so an operator can tell cancelled from finished", async () => {
@@ -197,7 +263,13 @@ describe("#414 destroy calls the SDK destroy() primitive", () => {
     expect(await after.json()).toMatchObject({ error: "not_found" });
   });
 
-  it("destroy aborts in-flight work rather than leaving it running on a torn-down object", async () => {
+  it("destroy SIGNALS in-flight work before tearing the object down", async () => {
+    // What this pins, and why it is not "the work stopped": `destroy()` ends in
+    // `ctx.abort("destroyed")`, which stops everything on the instance whatever
+    // `destroyRun` did — so a side-effect-absent or a resolved-promptly assertion
+    // survives deleting the explicit abort. The discriminator is that the
+    // workload OBSERVED an abort, with destroy's own reason, BEFORE the teardown.
+    // Deleting `this.#inFlight?.abort(...)` from `destroyRun` empties that ledger.
     const name = "run-destroy-inflight";
     await start(name);
     const inFlight = post("/control/invoke", {
@@ -208,9 +280,12 @@ describe("#414 destroy calls the SDK destroy() primitive", () => {
     await scheduler.wait(50);
     const destroyed = await post("/control/destroy", { runRef: name });
     expect(await destroyed.json()).toMatchObject({ status: "cleaned_up" });
-    // The invoke unwound instead of sleeping out its 5s. (Its envelope is lost
-    // with the aborted object; what matters is that it resolved promptly.)
     await inFlight.catch(() => undefined);
+
+    expect(observedAborts(name)).toContain("Error: ferrogate destroy");
+    // And it unwound at the signal instead of sleeping out its 5s: the ledger is
+    // in module scope, so it survives the aborted object and this is a real read.
+    expect(sideEffects(name)).not.toContain("probe:sleep");
   });
 });
 
@@ -297,12 +372,33 @@ describe("#414 start state machine", () => {
 });
 
 describe("#414 placement dials are honored or refused, never silently inert", () => {
-  it("locationHint is applied at first addressing and reported back", async () => {
+  it("locationHint is PASSED to the addressing call, not merely echoed back", async () => {
+    // `resolvedLocationHint` is copied out of `props` by `start()` on a path that
+    // never touches `getAgentByName`, so asserting on it alone pinned nothing:
+    // deleting the `{ locationHint }` options argument left this test green and
+    // the run reporting a placement it had not requested. The options object the
+    // Worker actually passes is recorded by the harness's addressing seam, which
+    // is the only place the real argument is visible.
     const name = "run-placement-hint";
     const res = await start(name, { props: { model: "m", locationHint: "weur" } });
     expect(res.status).toBe(200);
+
+    const addressed = addressingCalls.filter((call) => call.name === name);
+    expect(addressed.length).toBeGreaterThan(0);
+    expect(addressed[0].options).toEqual({ locationHint: "weur" });
+
     const status = await SELF.fetch(`${BASE}/control/status?runRef=${name}`, authedInit());
     expect(await status.json()).toMatchObject({ resolvedLocationHint: "weur" });
+  });
+
+  it("a start without a locationHint passes no hint (the recorder is not just always right)", async () => {
+    // The negative control for the assertion above: a recorder that reported
+    // `{ locationHint: "weur" }` for every call would satisfy it too.
+    const name = "run-placement-none";
+    expect((await start(name)).status).toBe(200);
+    const addressed = addressingCalls.filter((call) => call.name === name);
+    expect(addressed.length).toBeGreaterThan(0);
+    expect(addressed[0].options).toEqual({ locationHint: undefined });
   });
 
   it("an unknown locationHint is REFUSED (422), not dropped", async () => {

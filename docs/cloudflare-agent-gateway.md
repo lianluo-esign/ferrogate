@@ -248,6 +248,28 @@ Cloudflare. Concretely:
   the run actually reached a terminal state. A cooperative cancel is an
   optimization on the way to a destroy, never a substitute for one.
 
+  **A signalled cancel does not write `stopped`, and that is what makes the
+  escalation real.** `cancel` sets the durable latch and leaves the run's status
+  alone whenever it signalled something in flight; the invoke path writes
+  `stopped` only once the workload has actually unwound, and a cancel that found
+  nothing running writes it immediately because there is nothing left to wait
+  for. Before this, `cancel` stamped `stopped` unconditionally — so the
+  verification above always read back the status the cancel had just written,
+  `kill_is_settled(Stopped)` said terminal, `cleanup_run` was never reached, and
+  a runaway agent was reported killed while it kept spending. A workload that
+  ignores the signal now keeps reporting `running` until it ends on its own or
+  the destroy lands. `workers/agent-gateway/test/lifecycle.test.ts` pins this
+  with a deliberately defiant workload.
+
+  **A cancelled run refuses later work; it does not answer it.** `invoke` against
+  a latched run returns **409 `run_cancelled`**, mapped to
+  `CloudflareControlSurfaceError::RunCancelled`. It used to return 200 with an
+  exec success envelope, so `exec_or_attach` recorded
+  `IsolationLifecycleEvidence{outcome:"executed"}` for an invocation that never
+  ran. A second *concurrent* invoke on one instance is likewise refused (409
+  `invoke_in_flight`) rather than silently replacing the first workload's abort
+  handle, which would leave that workload un-cancellable.
+
 ### Run parameterization: `props` (transient) vs. state (persistent)
 
 Per-run initialization is delivered as **`props`**, not persistent state:
@@ -257,8 +279,9 @@ Per-run initialization is delivered as **`props`**, not persistent state:
   the placement dials `locationHint`, `jurisdiction` and `routingRetry` (each
   honored, refused or recorded-only per the table below — none is silently
   inert). Cloudflare has **no deploy-time `model` field**: the agent
-  chooses its model/tools/prompt *in code* inside `onStart(props)`, so those
-  become selectable per run without redeploying the Worker.
+  chooses its model/tools/prompt *in code* at start — in `start()`, not in
+  `onStart(props)`; see the paragraph below — so those become selectable per run
+  without redeploying the Worker.
 - **State**: the agent's persistent DO SQLite rows. `start` reads the transient
   props and writes the *resolved* selections into state, so they survive
   hibernation and are available to every later invoke without props being re-sent.

@@ -85,7 +85,23 @@ point — and sets a durable latch that refuses any later `invoke`. The response
 only the latch was set (`false`). It **cannot** stop a workload that ignores the
 signal or one running outside the Durable Object, so a caller that needs a
 guarantee must verify and escalate to `destroy`; #428's `KillMode::Cancel` does
-exactly that. See
+exactly that.
+
+**So a signalled cancel does not report `stopped`.** Signalling is not stopping,
+and only the workload knows which happened: when `cancel` aborted something in
+flight it sets the latch and leaves the status alone, and the `invoke` path
+writes `stopped` once the workload has actually unwound. (A cancel with nothing
+in flight writes `stopped` straight away — there is nothing left to wait for.) A
+workload that ignores the signal therefore keeps reporting `running`, which is
+exactly what makes `KillMode::Cancel`'s verify-then-escalate step do something:
+while `cancel` wrote `stopped` unconditionally, the verification read back the
+status the cancel had just written and the destroy never fired.
+
+**A cancelled run refuses further work.** `invoke` on a latched run returns
+**409 `run_cancelled`** — a refusal envelope, not an `InvokeResult` — so a caller
+cannot record it as an execution. A second *concurrent* invoke on the same
+instance is refused the same way (409 `invoke_in_flight`): one workload per
+instance at a time is what keeps the single abort handle meaningful. See
 [`../../docs/cloudflare-agent-gateway.md`](../../docs/cloudflare-agent-gateway.md)
 §3a for the full verb→primitive→route mapping.
 

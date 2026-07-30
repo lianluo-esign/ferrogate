@@ -895,6 +895,15 @@ fn kill_in_cancel_mode_cancels_then_verifies_and_escalates_when_the_run_survives
     // running and keeps spending, so a budget kill that stopped at "cancel
     // returned Stopped" reported a kill it had not performed. `KillMode::Cancel`
     // therefore re-reads the run and destroys it when it is still alive.
+    //
+    // WHY `Running` IS A REACHABLE POST-CANCEL STATUS. It was not, for a while:
+    // the Worker's `cancel` wrote `status:"stopped"` unconditionally, so the only
+    // status this escalation could ever observe was the terminal one the cancel
+    // itself had written, and the scripted `Running` below described a run the
+    // deployed Worker could not produce. The Worker now leaves the status alone
+    // when it merely SIGNALLED a workload, so a defiant run really does read
+    // `running` here — see `workers/agent-gateway/test/lifecycle.test.ts`,
+    // "a cancel the workload IGNORES is NOT reported as stopped".
     let id = identity("run-1");
     let sample = AgentRuntimeUsageSample {
         metered_egress_usd: 5.0,
@@ -927,6 +936,10 @@ fn kill_in_cancel_mode_does_not_destroy_a_run_the_cancel_actually_stopped() {
     // The other half: when the workload DID honor the abort signal, the soft
     // path is enough and the instance is left alone. Without this, the
     // escalation above would just be "always destroy" wearing a cancel costume.
+    //
+    // `Stopped` is only a truthful input here because the Worker writes it from
+    // the invoke path after a workload has actually unwound — see
+    // `kill_is_settled`'s doc for what goes wrong when a cancel stamps it itself.
     let id = identity("run-1");
     let sample = AgentRuntimeUsageSample {
         metered_egress_usd: 5.0,

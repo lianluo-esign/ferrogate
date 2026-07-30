@@ -1209,6 +1209,18 @@ pub enum KillMode {
 /// `Queued`/`Running` mean the cooperative cancel did not take — the workload
 /// ignored the signal, or the run is executing somewhere the signal does not
 /// reach. Anything terminal means it is settled.
+///
+/// **`Stopped` is trustworthy here only because of what writes it.** In the
+/// gateway Worker, `cancel` no longer stamps `stopped` on the way out: that
+/// status is written by the invoke path once a signalled workload has actually
+/// unwound, or by a cancel that found nothing in flight to wait on. While the
+/// Worker wrote it unconditionally this whole function was decorative — the
+/// status observed after a cancel was the one the cancel had just written, so a
+/// run that ignored the signal read as settled and the escalation below never
+/// fired (issue #414). If that Worker behaviour is ever reverted, this
+/// verification silently becomes a no-op again rather than failing loudly, so
+/// the two must be read together;
+/// `workers/agent-gateway/test/lifecycle.test.ts` pins the Worker half.
 fn kill_is_settled(status: CloudflareRunStatus) -> bool {
     matches!(
         status,

@@ -337,9 +337,16 @@ export interface InvokeRequest {
  * Returned as a VALUE (not a thrown error) because Durable Object RPC strips a
  * thrown error's class identity — the same reason the memory verbs return a
  * `MemoryResult`. {@link controlJson} maps each code onto its HTTP status.
+ *
+ * REFUSALS ARE ERRORS, NOT STATUSES. A verb that did not run must not answer
+ * with that verb's success envelope: `invoke` used to return HTTP 200 and an
+ * {@link InvokeResult} for work the cancel latch refused, so the Rust
+ * `exec_or_attach` recorded `IsolationLifecycleEvidence{outcome:"executed"}`
+ * for an invocation that never executed, and only the free-text `message`
+ * distinguished the two.
  */
 export interface ControlRefusal {
-  error: "not_found" | "run_conflict";
+  error: "not_found" | "run_conflict" | "run_cancelled" | "invoke_in_flight";
   runRef: string;
   detail: string;
 }
@@ -430,626 +437,725 @@ function throwIfAborted(signal: AbortSignal): void {
  */
 function notFound(runRef: string): ControlRefusal {
   return {
-    error: "not_found",
-    runRef,
-    detail: `no run is bound to instance ${runRef}`,
-  };
-}
-
-/**
- * The agent Durable Object. Each instance is addressable by name
- * (`getAgentByName(env.AGENT_GATEWAY, name)`), single-threaded, and stateful.
- *
- * The control-route verbs are plain async methods: called over Durable Object
- * RPC from the Worker's fetch handler. This is the ONLY way to drive an
- * individual agent instance's lifecycle — Cloudflare has no first-party REST
- * API for it.
- */
-export class AgentGateway extends Agent<Env, AgentGatewayState> {
-  initialState = INITIAL_STATE;
+      error: "not_found",
+      runRef,
+      detail: `no run is bound to instance ${runRef}`,
+    };
+  }
 
   /**
-   * Abort handle for the workload currently executing on THIS instance, or
-   * `null` when nothing is in flight.
+   * The agent Durable Object. Each instance is addressable by name
+   * (`getAgentByName(env.AGENT_GATEWAY, name)`), single-threaded, and stateful.
    *
-   * IN-MEMORY ONLY, and deliberately so: it dies with hibernation/eviction,
-   * exactly like the in-run fiber handles Cloudflare documents. The DURABLE
-   * half of cancellation is {@link AgentGatewayState.cancelRequested}, which a
-   * woken instance re-reads before starting any further work. Together they are
-   * the two halves a cancel needs: stop what is running, and stop what would
-   * run next.
+   * The control-route verbs are plain async methods: called over Durable Object
+   * RPC from the Worker's fetch handler. This is the ONLY way to drive an
+   * individual agent instance's lifecycle — Cloudflare has no first-party REST
+   * API for it.
    */
-  #inFlight: AbortController | null = null;
+  export class AgentGateway extends Agent<Env, AgentGatewayState> {
+    initialState = INITIAL_STATE;
 
-  /**
-   * RPC: start (provision) this run. Maps the Rust `start_run`.
-   *
-   * "create" is LAZY on Cloudflare: `getAgentByName(ns, this.name)` already
-   * instantiated this Durable Object (first addressing creates it; the same name
-   * always resolves to the same instance). There is no separate create call — so
-   * `start` resolves the per-run {@link RunProps} into persistent state and
-   * records the run ids.
-   *
-   * The identity triple (`runId`/`sessionId`/`capabilityEnvelopeId`) is bound
-   * ONCE. A start that disagrees with the bound triple is refused (`run_conflict`)
-   * instead of re-pointing a live instance at a different run — silently
-   * re-pointing would detach the control plane's evidence from the workload it
-   * describes. An identical re-start is idempotent (a safe transport retry), and
-   * a start against a terminal run is refused.
-   *
-   * NOTE ON `onStart`: the props are resolved HERE, not by calling
-   * `this.onStart(props)`. The pinned Agents SDK (agents@0.0.109) rebinds
-   * `this.onStart` in its constructor to a zero-argument wrapper
-   * (`node_modules/agents/dist/chunk-3IQQY2UH.js:316-317`) which invokes the
-   * user hook with NO arguments, so props handed to it were silently discarded
-   * and every `resolved*` field fell back to its initial value.
-   */
-  async start(request: StartRequest): Promise<StartResult | ControlRefusal> {
-    const bound = this.state.runId;
-    if (bound !== null) {
-      const sameRun =
-        bound === request.runId &&
-        this.state.sessionId === request.sessionId &&
-        this.state.capabilityEnvelopeId === request.capabilityEnvelopeId;
-      if (!sameRun) {
-        return {
-          error: "run_conflict",
-          runRef: this.name,
-          detail: `instance ${this.name} is already bound to run ${bound} (session ${this.state.sessionId})`,
-        };
+    /**
+     * Abort handle for the workload currently executing on THIS instance, or
+     * `null` when nothing is in flight.
+     *
+     * IN-MEMORY ONLY, and deliberately so: it dies with hibernation/eviction,
+     * exactly like the in-run fiber handles Cloudflare documents. The DURABLE
+     * half of cancellation is {@link AgentGatewayState.cancelRequested}, which a
+     * woken instance re-reads before starting any further work. Together they are
+     * the two halves a cancel needs: stop what is running, and stop what would
+     * run next.
+     */
+    #inFlight: AbortController | null = null;
+
+    /**
+     * RPC: start (provision) this run. Maps the Rust `start_run`.
+     *
+     * "create" is LAZY on Cloudflare: `getAgentByName(ns, this.name)` already
+     * instantiated this Durable Object (first addressing creates it; the same name
+     * always resolves to the same instance). There is no separate create call — so
+     * `start` resolves the per-run {@link RunProps} into persistent state and
+     * records the run ids.
+     *
+     * The identity triple (`runId`/`sessionId`/`capabilityEnvelopeId`) is bound
+     * ONCE. A start that disagrees with the bound triple is refused (`run_conflict`)
+     * instead of re-pointing a live instance at a different run — silently
+     * re-pointing would detach the control plane's evidence from the workload it
+     * describes. An identical re-start is idempotent (a safe transport retry), and
+     * a start against a terminal run is refused.
+     *
+     * NOTE ON `onStart`: the props are resolved HERE, not by calling
+     * `this.onStart(props)`. The pinned Agents SDK (agents@0.0.109) rebinds
+     * `this.onStart` in its constructor to a zero-argument wrapper
+     * (`node_modules/agents/dist/chunk-3IQQY2UH.js:316-317`) which invokes the
+     * user hook with NO arguments, so props handed to it were silently discarded
+     * and every `resolved*` field fell back to its initial value.
+     */
+    async start(request: StartRequest): Promise<StartResult | ControlRefusal> {
+      const bound = this.state.runId;
+      if (bound !== null) {
+        const sameRun =
+          bound === request.runId &&
+          this.state.sessionId === request.sessionId &&
+          this.state.capabilityEnvelopeId === request.capabilityEnvelopeId;
+        if (!sameRun) {
+          return {
+            error: "run_conflict",
+            runRef: this.name,
+            detail: `instance ${this.name} is already bound to run ${bound} (session ${this.state.sessionId})`,
+          };
+        }
+        if (TERMINAL_STATUSES.includes(this.state.status) || this.state.cancelRequested) {
+          return {
+            error: "run_conflict",
+            runRef: this.name,
+            detail: `run ${bound} is already ${this.state.cancelRequested ? "cancelled" : this.state.status}`,
+          };
+        }
+        // Identical re-start of a live run: idempotent, props are not re-resolved.
+        return { runRef: this.name, status: this.state.status };
       }
-      if (TERMINAL_STATUSES.includes(this.state.status) || this.state.cancelRequested) {
-        return {
-          error: "run_conflict",
-          runRef: this.name,
-          detail: `run ${bound} is already ${this.state.cancelRequested ? "cancelled" : this.state.status}`,
-        };
-      }
-      // Identical re-start of a live run: idempotent, props are not re-resolved.
+
+      const props = request.props ?? {};
+      this.setState({
+        ...this.state,
+        status: "running",
+        runId: request.runId,
+        sessionId: request.sessionId,
+        workerTemplateId: request.workerTemplateId,
+        frameworkAdapter: request.frameworkAdapter,
+        capabilityEnvelopeId: request.capabilityEnvelopeId,
+        // The agent chooses its model / tools / system prompt IN CODE here
+        // (Cloudflare has no deploy-time model field). Written into PERSISTENT
+        // state so they survive hibernation and every later invoke reads them
+        // without props being re-sent.
+        resolvedModel: props.model ?? this.state.resolvedModel,
+        resolvedTools: props.tools ?? this.state.resolvedTools,
+        resolvedSystemPrompt: props.systemPrompt ?? this.state.resolvedSystemPrompt,
+        resolvedLocationHint: props.locationHint ?? this.state.resolvedLocationHint,
+        recordedRoutingRetry: props.routingRetry ?? this.state.recordedRoutingRetry,
+        cancelRequested: false,
+        cancelReason: null,
+        lastMessage: "started",
+        updatedAt: Date.now(),
+      });
       return { runRef: this.name, status: this.state.status };
     }
 
-    const props = request.props ?? {};
-    this.setState({
-      ...this.state,
-      status: "running",
-      runId: request.runId,
-      sessionId: request.sessionId,
-      workerTemplateId: request.workerTemplateId,
-      frameworkAdapter: request.frameworkAdapter,
-      capabilityEnvelopeId: request.capabilityEnvelopeId,
-      // The agent chooses its model / tools / system prompt IN CODE here
-      // (Cloudflare has no deploy-time model field). Written into PERSISTENT
-      // state so they survive hibernation and every later invoke reads them
-      // without props being re-sent.
-      resolvedModel: props.model ?? this.state.resolvedModel,
-      resolvedTools: props.tools ?? this.state.resolvedTools,
-      resolvedSystemPrompt: props.systemPrompt ?? this.state.resolvedSystemPrompt,
-      resolvedLocationHint: props.locationHint ?? this.state.resolvedLocationHint,
-      recordedRoutingRetry: props.routingRetry ?? this.state.recordedRoutingRetry,
-      cancelRequested: false,
-      cancelReason: null,
-      lastMessage: "started",
-      updatedAt: Date.now(),
-    });
-    return { runRef: this.name, status: this.state.status };
-  }
+    /**
+     * Agents SDK wake hook. Runs automatically on every cold start / wake and is
+     * invoked by the SDK with NO arguments (see the note on {@link start}), so it
+     * cannot carry per-run props. It is intentionally a no-op: a woken instance
+     * reads its already-resolved run configuration from persistent state.
+     */
+    onStart(): void {}
 
-  /**
-   * Agents SDK wake hook. Runs automatically on every cold start / wake and is
-   * invoked by the SDK with NO arguments (see the note on {@link start}), so it
-   * cannot carry per-run props. It is intentionally a no-op: a woken instance
-   * reads its already-resolved run configuration from persistent state.
-   */
-  onStart(): void {}
-
-  /**
-   * Run the workload for one `invoke`, honoring `signal`.
-   *
-   * THE CANCELLATION CONTRACT. Cancellation on Cloudflare is COOPERATIVE (see
-   * {@link cancel}), so everything a run does must flow through here and must
-   * observe `signal`: work that ignores it keeps running and keeps spending
-   * after the control plane has been told the run was killed. An implementation
-   * must reject once aborted rather than resolve.
-   *
-   * The minimal deployable Worker has no long-running work to abort — it records
-   * the invocation and returns. A framework harness / tool loop overrides this
-   * and threads `signal` into every await and every subrequest it makes.
-   */
-  protected async dispatchWorkload(request: InvokeRequest, signal: AbortSignal): Promise<string> {
-    throwIfAborted(signal);
-    return `invoked ${request.workloadRef} (${request.args.length} args)`;
-  }
-
-  /** RPC: exec/attach and drive the run. Maps the Rust `exec_run`. */
-  async invoke(request: InvokeRequest): Promise<InvokeResult | ControlRefusal> {
-    if (this.state.runId === null) return notFound(this.name);
-    if (this.state.cancelRequested) {
-      // The durable half of the cancel latch: a cancelled run starts no further
-      // work even after hibernation dropped the in-memory abort handle.
-      const message = `refused: run cancelled (${this.state.cancelReason ?? "unspecified"})`;
-      return { runRef: this.name, status: this.state.status, exitCode: null, message };
+    /**
+     * Run the workload for one `invoke`, honoring `signal`.
+     *
+     * THE CANCELLATION CONTRACT. Cancellation on Cloudflare is COOPERATIVE (see
+     * {@link cancel}), so everything a run does must flow through here and must
+     * observe `signal`: work that ignores it keeps running and keeps spending
+     * after the control plane has been told the run was killed. An implementation
+     * must reject once aborted rather than resolve.
+     *
+     * The minimal deployable Worker has no long-running work to abort — it records
+     * the invocation and returns. A framework harness / tool loop overrides this
+     * and threads `signal` into every await and every subrequest it makes.
+     */
+    protected async dispatchWorkload(request: InvokeRequest, signal: AbortSignal): Promise<string> {
+      throwIfAborted(signal);
+      return `invoked ${request.workloadRef} (${request.args.length} args)`;
     }
 
-    const controller = new AbortController();
-    this.#inFlight = controller;
-    try {
-      const message = await this.dispatchWorkload(request, controller.signal);
-      this.setState({
-        ...this.state,
-        status: "completed",
-        lastMessage: message,
-        exitCode: 0,
-        updatedAt: Date.now(),
-      });
-      return { runRef: this.name, status: this.state.status, exitCode: 0, message };
-    } catch (err) {
-      if (controller.signal.aborted) {
-        const message = `cancelled: ${this.state.cancelReason ?? "unspecified"}`;
+    /**
+     * RPC: exec/attach and drive the run. Maps the Rust `exec_run`.
+     *
+     * Two refusals guard it, both returned as a {@link ControlRefusal} rather than
+     * a success envelope carrying an explanatory `message`:
+     *
+     *   * `run_cancelled` — the DURABLE half of the cancel latch. A cancelled run
+     *     starts no further work even after hibernation dropped the in-memory
+     *     abort handle.
+     *   * `invoke_in_flight` — a second concurrent invoke on the same instance.
+     *     Durable Object RPC calls interleave at every `await`, so a second
+     *     invoke arriving during the first one's await used to OVERWRITE
+     *     {@link #inFlight}: a later `cancel` then signalled only the second
+     *     workload, the first ran to completion un-cancellable, and its
+     *     `setState` overwrote what the cancel had written. One workload per
+     *     instance at a time is the invariant that makes the abort handle
+     *     meaningful; FerroGate drives one workload per run, so refusing is a
+     *     truthful 409 rather than a lost handle.
+     */
+    async invoke(request: InvokeRequest): Promise<InvokeResult | ControlRefusal> {
+      if (this.state.runId === null) return notFound(this.name);
+      if (this.state.cancelRequested) {
+        return {
+          error: "run_cancelled",
+          runRef: this.name,
+          detail: `run ${this.state.runId} was cancelled (${this.state.cancelReason ?? "unspecified"}); it accepts no further work`,
+        };
+      }
+      // Check-and-claim, with no `await` between them: the whole prologue of this
+      // method runs in one turn, so a concurrent invoke cannot slip past the test
+      // and land on the same handle.
+      if (this.#inFlight !== null) {
+        return {
+          error: "invoke_in_flight",
+          runRef: this.name,
+          detail: `run ${this.state.runId} already has a workload in flight on instance ${this.name}`,
+        };
+      }
+
+      const controller = new AbortController();
+      this.#inFlight = controller;
+      try {
+        const message = await this.dispatchWorkload(request, controller.signal);
         this.setState({
           ...this.state,
-          status: "stopped",
+          status: "completed",
           lastMessage: message,
-          exitCode: null,
+          exitCode: 0,
           updatedAt: Date.now(),
         });
-        return { runRef: this.name, status: this.state.status, exitCode: null, message };
+        return { runRef: this.name, status: this.state.status, exitCode: 0, message };
+      } catch (err) {
+        if (controller.signal.aborted) {
+          const message = `cancelled: ${this.state.cancelReason ?? "unspecified"}`;
+          this.setState({
+            ...this.state,
+            status: "stopped",
+            lastMessage: message,
+            exitCode: null,
+            updatedAt: Date.now(),
+          });
+          return { runRef: this.name, status: this.state.status, exitCode: null, message };
+        }
+        const message = `invoke failed: ${(err as Error).message}`;
+        this.setState({
+          ...this.state,
+          status: "failed",
+          lastMessage: message,
+          exitCode: 1,
+          updatedAt: Date.now(),
+        });
+        return { runRef: this.name, status: this.state.status, exitCode: 1, message };
+      } finally {
+        if (this.#inFlight === controller) this.#inFlight = null;
       }
-      const message = `invoke failed: ${(err as Error).message}`;
-      this.setState({
-        ...this.state,
-        status: "failed",
-        lastMessage: message,
-        exitCode: 1,
-        updatedAt: Date.now(),
-      });
-      return { runRef: this.name, status: this.state.status, exitCode: 1, message };
-    } finally {
-      if (this.#inFlight === controller) this.#inFlight = null;
     }
-  }
 
-  /**
-   * RPC: current status (out-of-band reconcile). Maps the Rust `run_status`.
-   *
-   * This is a CUSTOM status method — Cloudflare has NO `getStatus` primitive.
-   * Returns the resolved model so a caller can confirm props round-tripped into
-   * the run's persistent configuration, and the cancel latch so an operator can
-   * tell "cancel was requested" from "the run reached a terminal state".
-   */
-  async status(): Promise<StatusResult | ControlRefusal> {
-    if (this.state.runId === null) return notFound(this.name);
-    return {
-      runRef: this.name,
-      status: this.state.status,
-      message: this.state.lastMessage,
-      resolvedModel: this.state.resolvedModel,
-      resolvedLocationHint: this.state.resolvedLocationHint,
-      recordedRoutingRetry: this.state.recordedRoutingRetry,
-      cancelRequested: this.state.cancelRequested,
-    };
-  }
-
-  /**
-   * RPC: actively CANCEL in-flight work. Maps the Rust `cancel_run`.
-   *
-   * COOPERATIVE, NOT A FIBER CANCEL. Cloudflare documents fibers
-   * (`startFiber().cancel` / `abortSubAgent`) as the in-run cancellation
-   * primitive, but the pinned SDK does NOT ship it: `agents@0.0.109` contains no
-   * fiber API at all (`grep -ri fiber node_modules/agents/` finds nothing). So
-   * this route implements cancellation with the mechanism the runtime does give
-   * us — an `AbortSignal` the workload observes:
-   *
-   *   1. abort {@link #inFlight}, which makes the in-flight
-   *      {@link dispatchWorkload} reject at its next observation of the signal;
-   *   2. set the DURABLE `cancelRequested` latch so a later `invoke` — including
-   *      one that arrives after hibernation dropped the handle — is refused.
-   *
-   * WHAT AN OPERATOR ACTUALLY GETS. `aborted: true` means in-flight work on this
-   * instance was signalled; `aborted: false` means nothing was running here and
-   * only the latch was set. Neither can stop a workload that IGNORES the signal
-   * (or one running outside this Durable Object, e.g. in a container). That is
-   * why the #428 cost governor's `KillMode::Cancel` verifies the run afterwards
-   * and escalates to `destroy` — a budget kill may not be best-effort.
-   *
-   * Distinct from a terminal "stop": there is no stop/pause primitive, an idle
-   * agent hibernates on its own. A run that already reached a terminal state is
-   * NOT flipped to `stopped`.
-   */
-  async cancel(reason: string): Promise<CancelResult | ControlRefusal> {
-    if (this.state.runId === null) return notFound(this.name);
-    if (TERMINAL_STATUSES.includes(this.state.status)) {
+    /**
+     * RPC: current status (out-of-band reconcile). Maps the Rust `run_status`.
+     *
+     * This is a CUSTOM status method — Cloudflare has NO `getStatus` primitive.
+     * Returns the resolved model so a caller can confirm props round-tripped into
+     * the run's persistent configuration, and the cancel latch so an operator can
+     * tell "cancel was requested" from "the run reached a terminal state".
+     */
+    async status(): Promise<StatusResult | ControlRefusal> {
+      if (this.state.runId === null) return notFound(this.name);
       return {
         runRef: this.name,
         status: this.state.status,
-        aborted: false,
-        detail: `run ${this.state.runId} already ${this.state.status}; nothing to cancel`,
+        message: this.state.lastMessage,
+        resolvedModel: this.state.resolvedModel,
+        resolvedLocationHint: this.state.resolvedLocationHint,
+        recordedRoutingRetry: this.state.recordedRoutingRetry,
+        cancelRequested: this.state.cancelRequested,
       };
     }
-    const aborted = this.#inFlight !== null;
-    this.#inFlight?.abort(new Error(`ferrogate cancel: ${reason}`));
-    this.#inFlight = null;
-    this.setState({
-      ...this.state,
-      status: "stopped",
-      cancelRequested: true,
-      cancelReason: reason,
-      lastMessage: `cancelled: ${reason}`,
-      updatedAt: Date.now(),
-    });
-    return {
-      runRef: this.name,
-      status: this.state.status,
-      aborted,
-      detail: aborted
-        ? "in-flight workload signalled and the cancel latch set"
-        : "no workload in flight on this instance; cancel latch set",
-    };
+
+    /**
+     * RPC: actively CANCEL in-flight work. Maps the Rust `cancel_run`.
+     *
+     * COOPERATIVE, NOT A FIBER CANCEL. Cloudflare documents fibers
+     * (`startFiber().cancel` / `abortSubAgent`) as the in-run cancellation
+     * primitive, but the pinned SDK does NOT ship it: `agents@0.0.109` contains no
+     * fiber API at all (`grep -ri fiber node_modules/agents/` finds nothing). So
+     * this route implements cancellation with the mechanism the runtime does give
+     * us — an `AbortSignal` the workload observes:
+     *
+     *   1. abort {@link #inFlight}, which makes the in-flight
+     *      {@link dispatchWorkload} reject at its next observation of the signal;
+     *   2. set the DURABLE `cancelRequested` latch so a later `invoke` — including
+     *      one that arrives after hibernation dropped the handle — is refused.
+     *
+     * WHAT AN OPERATOR ACTUALLY GETS. `aborted: true` means in-flight work on this
+     * instance was signalled; `aborted: false` means nothing was running here and
+     * only the latch was set. Neither can stop a workload that IGNORES the signal
+     * (or one running outside this Durable Object, e.g. in a container). That is
+     * why the #428 cost governor's `KillMode::Cancel` verifies the run afterwards
+     * and escalates to `destroy` — a budget kill may not be best-effort.
+     *
+     * WHY THIS METHOD DOES NOT WRITE `stopped` WHEN IT SIGNALLED SOMETHING. Signalling
+     * a workload is not the same as the workload having stopped, and only the workload
+     * can tell the difference. `cancel` used to write `status: "stopped"` unconditionally,
+     * which made the verification above VACUOUS: the Rust `kill_is_settled` treats
+     * `Stopped` as terminal, so `cancel -> "stopped"`, `run_status -> "stopped"`,
+     * escalation never fires, and a run that ignored the signal was reported killed
+     * while it kept spending. So when work was in flight this method sets ONLY the
+     * durable latch and leaves the status alone; {@link invoke}'s abort branch — which
+     * runs only once the workload has actually unwound — is the sole writer of
+     * `stopped`. A defiant workload therefore keeps reporting `running`, and the
+     * budget kill escalates to a destroy for real. (`TERMINAL_STATUSES` deliberately
+     * excludes `stopped` for the same reason: it is a status this run can leave.)
+     *
+     * With nothing in flight there is nothing to wait on — no workload can write the
+     * status later — so the latch alone settles the run and `stopped` is written here.
+     *
+     * Distinct from a terminal "stop": there is no stop/pause primitive, an idle
+     * agent hibernates on its own. A run that already reached a terminal state is
+     * NOT flipped to `stopped`.
+     */
+    async cancel(reason: string): Promise<CancelResult | ControlRefusal> {
+      if (this.state.runId === null) return notFound(this.name);
+      if (TERMINAL_STATUSES.includes(this.state.status)) {
+        return {
+          runRef: this.name,
+          status: this.state.status,
+          aborted: false,
+          detail: `run ${this.state.runId} already ${this.state.status}; nothing to cancel`,
+        };
+      }
+      const aborted = this.#inFlight !== null;
+      this.#inFlight?.abort(new Error(`ferrogate cancel: ${reason}`));
+      this.#inFlight = null;
+      this.setState({
+        ...this.state,
+        status: aborted ? this.state.status : "stopped",
+        cancelRequested: true,
+        cancelReason: reason,
+        lastMessage: `cancelled: ${reason}`,
+        updatedAt: Date.now(),
+      });
+      return {
+        runRef: this.name,
+        status: this.state.status,
+        aborted,
+        detail: aborted
+          ? `in-flight workload signalled and the cancel latch set; the run stays ${this.state.status} until the workload unwinds, so a workload that ignores the signal is never reported stopped`
+          : "no workload in flight on this instance; cancel latch set and the run marked stopped",
+      };
+    }
+
+    /**
+     * RPC: tear down the run's resources. Maps the Rust `cleanup_run`.
+     *
+     * Calls the Agents SDK's own `this.destroy()` — the primitive #414's mapping
+     * table names for this verb. It DROPs `cf_agents_state` /
+     * `cf_agents_schedules` / `cf_agents_mcp_servers` / `cf_agents_queues`,
+     * DELETES the Durable Object's alarm, and clears storage. Its predecessor here
+     * called `ctx.storage.deleteAll()`, which leaves the alarm armed so a destroyed
+     * run's schedules keep waking the object (issue #482).
+     *
+     * Named `destroyRun` (not `destroy`) because the base class reserves
+     * `destroy(): Promise<void>`; this variant returns the status envelope the
+     * control route reports back to FerroGate. The envelope is built BEFORE the
+     * teardown because `destroy()` ends with `ctx.abort("destroyed")` — after it,
+     * this object's state is gone.
+     */
+    async destroyRun(): Promise<DestroyResult | ControlRefusal> {
+      if (this.state.runId === null) return notFound(this.name);
+      // Signal any in-flight workload first: destroy pulls the storage out from
+      // under it, and an un-signalled workload would keep running against a torn
+      // down object.
+      this.#inFlight?.abort(new Error("ferrogate destroy"));
+      this.#inFlight = null;
+      const result: DestroyResult = { runRef: this.name, status: "cleaned_up" };
+      this.setState({
+        ...this.state,
+        status: "cleaned_up",
+        lastMessage: "destroyed",
+        updatedAt: Date.now(),
+      });
+      await this.destroy();
+      return result;
+    }
+
+    // ---- Memory verbs (issue #427) ----------------------------------------
+    //
+    // Thin RPC delegates: the verb implementations live in `memory.ts` against
+    // the structural `AgentMemoryHost` seam so index.ts stays a routing shell
+    // (engineering standard #429). Each returns the RPC-safe `MemoryResult`
+    // envelope — DO RPC would strip a thrown error's class identity.
+
+    /** Layer 2 escape hatch used by the memory verbs: dynamic SqlStorage exec. */
+    rawSql(query: string, bindings: SqlBinding[]): RawSqlResult {
+      const cursor = this.ctx.storage.sql.exec(query, ...bindings);
+      const rows = cursor.toArray() as Record<string, unknown>[];
+      return { columns: cursor.columnNames, rows };
+    }
+
+    /** Chat-history retention cap for this deployment (layer 3 eviction). */
+    get maxPersistedMessages(): number {
+      return persistedMessageCap(this.env.MEMORY_MAX_PERSISTED_MESSAGES);
+    }
+
+    /** RPC: read the synced JSON state (memory layer 1). */
+    async memoryStateGet() {
+      return memoryStateGet(this);
+    }
+
+    /** RPC: validated whole-object state replace (memory layer 1). */
+    async memoryStateSet(candidate: unknown) {
+      return memoryStateSet(this, candidate);
+    }
+
+    /** RPC: query the embedded per-agent SQLite (memory layer 2). */
+    async memorySqlQuery(sql: string, params: SqlBinding[]) {
+      return memorySqlQuery(this, sql, params);
+    }
+
+    /** RPC: read persisted chat history (memory layer 3). */
+    async memoryChatHistoryGet(limit?: number) {
+      return memoryChatHistoryGet(this, limit);
+    }
+
+    /** RPC: prune chat history to the retention cap (memory layer 3). */
+    async memoryChatHistoryPrune(maxMessages?: number) {
+      return memoryChatHistoryPrune(this, maxMessages);
+    }
+
+    // ---- Scheduling verbs (issue #426) ------------------------------------
+    //
+    // Thin RPC delegates: the verb implementations live in `schedule.ts`
+    // against the structural `AgentScheduleHost` seam (engineering standard
+    // #429). Schedules persist as rows in `cf_agents_schedules`, multiplexed
+    // through this DO's single alarm — they survive hibernation, and the SDK
+    // re-arms the alarm in the constructor on wake.
+
+    /** Per-instance schedule-row cap for this deployment. */
+    get maxScheduledTasks(): number {
+      return scheduledTaskCap(this.env.SCHEDULE_MAX_TASKS_PER_INSTANCE);
+    }
+
+    /** RPC: cancel-before-recreate + schedule one task (once/cron/interval). */
+    async scheduleCreate(task: unknown) {
+      return scheduleCreate(this, task);
+    }
+
+    /** RPC: list schedules, optionally filtered by taskId/kind. */
+    async scheduleList(criteria?: { taskId?: string; kind?: ScheduleKind }) {
+      return scheduleList(this, criteria);
+    }
+
+    /** RPC: cancel by FerroGate taskId or raw SDK schedule id. */
+    async scheduleCancel(selector: { taskId?: string; scheduleId?: string }) {
+      return scheduleCancel(this, selector);
+    }
+
+    // ---- Brokered git credential verbs (issue #475) -----------------------
+    //
+    // The run's credential grant lives HERE, in the run's own Durable Object,
+    // and the `/git-credential/get` callback path reads it from here rather than
+    // from the request body. That is the whole point: the container is the
+    // untrusted party, so a grant it could supply is a grant it could forge.
+    // Only `gitCredentialRegister` writes one, and only the control-plane-gated
+    // `/git-credential/register` route can call it.
+
+    /** DO storage seam for the broker verbs (`GitCredentialHost`). */
+    async brokerRecordGet(): Promise<BrokerRunRecord | undefined> {
+      return this.ctx.storage.get<BrokerRunRecord>(BROKER_RECORD_KEY);
+    }
+
+    async brokerRecordPut(record: BrokerRunRecord): Promise<void> {
+      await this.ctx.storage.put(BROKER_RECORD_KEY, record);
+    }
+
+    async brokerRecordDelete(): Promise<void> {
+      await this.ctx.storage.delete(BROKER_RECORD_KEY);
+    }
+
+    /** RPC: register this run's grant + callback-capability fingerprint. */
+    async gitCredentialRegister(registration: unknown) {
+      return brokerRegister(this, registration);
+    }
+
+    /** RPC: authorize one helper callback, charge the budget, audit the row. */
+    async gitCredentialAuthorize(callback: unknown, capability: string, nowUnix: number) {
+      return brokerAuthorize(this, callback, capability, nowUnix);
+    }
+
+    /** RPC: retain the just-minted token as this run's revocation handle. */
+    async gitCredentialRecordMint(operationId: string, token: string, expiresAtUnix: number) {
+      return brokerRecordMint(this, operationId, token, expiresAtUnix);
+    }
+
+    /** RPC: close the grant and surrender the outstanding token for revocation. */
+    async gitCredentialClose() {
+      return brokerClose(this);
+    }
+
+    /** RPC: this run's material-free credential audit rows. */
+    async gitCredentialAudit() {
+      return brokerAudit(this);
+    }
+
+    /**
+     * The ONE method name FerroGate-minted schedules call back into (pinned by
+     * `SCHEDULE_DISPATCH_METHOD` — callers can never schedule arbitrary agent
+     * methods). Logs the firing and re-arms emulated intervals; the pinned
+     * agents SDK (0.0.109) has NO `scheduleEvery`, so intervals are delayed
+     * one-shots that re-schedule themselves here.
+     */
+    async runScheduledTask(payload: unknown) {
+      await dispatchScheduledTask(this, payload);
+    }
+
+    /**
+     * DIY auth gate for path-routed agent traffic (`/agents/:agent/:name/...`).
+     * `routeAgentRequest` hands the request here after `onBeforeRequest`; we
+     * re-check the bearer token as defense-in-depth before any agent work.
+     */
+    override async onRequest(request: Request): Promise<Response> {
+      const denied = requireBearer(request, this.env.GATEWAY_CONTROL_TOKEN);
+      if (denied) return denied;
+      return super.onRequest(request);
+    }
   }
 
   /**
-   * RPC: tear down the run's resources. Maps the Rust `cleanup_run`.
+   * Options Cloudflare consumes when a name is addressed for the FIRST time —
+   * i.e. when the Durable Object is created and placed.
    *
-   * Calls the Agents SDK's own `this.destroy()` — the primitive #414's mapping
-   * table names for this verb. It DROPs `cf_agents_state` /
-   * `cf_agents_schedules` / `cf_agents_mcp_servers` / `cf_agents_queues`,
-   * DELETES the Durable Object's alarm, and clears storage. Its predecessor here
-   * called `ctx.storage.deleteAll()`, which leaves the alarm armed so a destroyed
-   * run's schedules keep waking the object (issue #482).
+   * Deliberately narrower than the SDK's parameter: `jurisdiction` is absent
+   * because {@link placementRefusal} refuses it outright (it changes the object's
+   * identity), so there is no code path that may pass one.
+   */
+  export interface AgentAddressingOptions {
+    locationHint?: DurableObjectLocationHint;
+  }
+
+  /**
+   * Seam for addressing an agent instance by name — the same kind of overridable
+   * seam as {@link AgentGateway.dispatchWorkload}, and it exists for the same
+   * reason: the addressing OPTIONS are consumed inside `getAgentByName` before any
+   * agent code runs, so nothing an agent reports back can prove they were passed.
    *
-   * Named `destroyRun` (not `destroy`) because the base class reserves
-   * `destroy(): Promise<void>`; this variant returns the status envelope the
-   * control route reports back to FerroGate. The envelope is built BEFORE the
-   * teardown because `destroy()` ends with `ctx.abort("destroyed")` — after it,
-   * this object's state is gone.
+   * `resolvedLocationHint` in {@link StatusResult} is copied out of `props` by
+   * {@link AgentGateway.start} independently of the addressing call, so asserting
+   * on it pins nothing: deleting the options argument below leaves it reporting the
+   * requested hint regardless. A test worker substitutes a recording implementation
+   * here and asserts the options object the Worker actually passed.
    */
-  async destroyRun(): Promise<DestroyResult | ControlRefusal> {
-    if (this.state.runId === null) return notFound(this.name);
-    // Signal any in-flight workload first: destroy pulls the storage out from
-    // under it, and an un-signalled workload would keep running against a torn
-    // down object.
-    this.#inFlight?.abort(new Error("ferrogate destroy"));
-    this.#inFlight = null;
-    const result: DestroyResult = { runRef: this.name, status: "cleaned_up" };
-    this.setState({
-      ...this.state,
-      status: "cleaned_up",
-      lastMessage: "destroyed",
-      updatedAt: Date.now(),
-    });
-    await this.destroy();
-    return result;
-  }
+  export type AgentAddressing = (
+    namespace: DurableObjectNamespace<AgentGateway>,
+    name: string,
+    options?: AgentAddressingOptions,
+  ) => Promise<DurableObjectStub<AgentGateway>>;
 
-  // ---- Memory verbs (issue #427) ----------------------------------------
-  //
-  // Thin RPC delegates: the verb implementations live in `memory.ts` against
-  // the structural `AgentMemoryHost` seam so index.ts stays a routing shell
-  // (engineering standard #429). Each returns the RPC-safe `MemoryResult`
-  // envelope — DO RPC would strip a thrown error's class identity.
-
-  /** Layer 2 escape hatch used by the memory verbs: dynamic SqlStorage exec. */
-  rawSql(query: string, bindings: SqlBinding[]): RawSqlResult {
-    const cursor = this.ctx.storage.sql.exec(query, ...bindings);
-    const rows = cursor.toArray() as Record<string, unknown>[];
-    return { columns: cursor.columnNames, rows };
-  }
-
-  /** Chat-history retention cap for this deployment (layer 3 eviction). */
-  get maxPersistedMessages(): number {
-    return persistedMessageCap(this.env.MEMORY_MAX_PERSISTED_MESSAGES);
-  }
-
-  /** RPC: read the synced JSON state (memory layer 1). */
-  async memoryStateGet() {
-    return memoryStateGet(this);
-  }
-
-  /** RPC: validated whole-object state replace (memory layer 1). */
-  async memoryStateSet(candidate: unknown) {
-    return memoryStateSet(this, candidate);
-  }
-
-  /** RPC: query the embedded per-agent SQLite (memory layer 2). */
-  async memorySqlQuery(sql: string, params: SqlBinding[]) {
-    return memorySqlQuery(this, sql, params);
-  }
-
-  /** RPC: read persisted chat history (memory layer 3). */
-  async memoryChatHistoryGet(limit?: number) {
-    return memoryChatHistoryGet(this, limit);
-  }
-
-  /** RPC: prune chat history to the retention cap (memory layer 3). */
-  async memoryChatHistoryPrune(maxMessages?: number) {
-    return memoryChatHistoryPrune(this, maxMessages);
-  }
-
-  // ---- Scheduling verbs (issue #426) ------------------------------------
-  //
-  // Thin RPC delegates: the verb implementations live in `schedule.ts`
-  // against the structural `AgentScheduleHost` seam (engineering standard
-  // #429). Schedules persist as rows in `cf_agents_schedules`, multiplexed
-  // through this DO's single alarm — they survive hibernation, and the SDK
-  // re-arms the alarm in the constructor on wake.
-
-  /** Per-instance schedule-row cap for this deployment. */
-  get maxScheduledTasks(): number {
-    return scheduledTaskCap(this.env.SCHEDULE_MAX_TASKS_PER_INSTANCE);
-  }
-
-  /** RPC: cancel-before-recreate + schedule one task (once/cron/interval). */
-  async scheduleCreate(task: unknown) {
-    return scheduleCreate(this, task);
-  }
-
-  /** RPC: list schedules, optionally filtered by taskId/kind. */
-  async scheduleList(criteria?: { taskId?: string; kind?: ScheduleKind }) {
-    return scheduleList(this, criteria);
-  }
-
-  /** RPC: cancel by FerroGate taskId or raw SDK schedule id. */
-  async scheduleCancel(selector: { taskId?: string; scheduleId?: string }) {
-    return scheduleCancel(this, selector);
-  }
-
-  // ---- Brokered git credential verbs (issue #475) -----------------------
-  //
-  // The run's credential grant lives HERE, in the run's own Durable Object,
-  // and the `/git-credential/get` callback path reads it from here rather than
-  // from the request body. That is the whole point: the container is the
-  // untrusted party, so a grant it could supply is a grant it could forge.
-  // Only `gitCredentialRegister` writes one, and only the control-plane-gated
-  // `/git-credential/register` route can call it.
-
-  /** DO storage seam for the broker verbs (`GitCredentialHost`). */
-  async brokerRecordGet(): Promise<BrokerRunRecord | undefined> {
-    return this.ctx.storage.get<BrokerRunRecord>(BROKER_RECORD_KEY);
-  }
-
-  async brokerRecordPut(record: BrokerRunRecord): Promise<void> {
-    await this.ctx.storage.put(BROKER_RECORD_KEY, record);
-  }
-
-  async brokerRecordDelete(): Promise<void> {
-    await this.ctx.storage.delete(BROKER_RECORD_KEY);
-  }
-
-  /** RPC: register this run's grant + callback-capability fingerprint. */
-  async gitCredentialRegister(registration: unknown) {
-    return brokerRegister(this, registration);
-  }
-
-  /** RPC: authorize one helper callback, charge the budget, audit the row. */
-  async gitCredentialAuthorize(callback: unknown, capability: string, nowUnix: number) {
-    return brokerAuthorize(this, callback, capability, nowUnix);
-  }
-
-  /** RPC: retain the just-minted token as this run's revocation handle. */
-  async gitCredentialRecordMint(operationId: string, token: string, expiresAtUnix: number) {
-    return brokerRecordMint(this, operationId, token, expiresAtUnix);
-  }
-
-  /** RPC: close the grant and surrender the outstanding token for revocation. */
-  async gitCredentialClose() {
-    return brokerClose(this);
-  }
-
-  /** RPC: this run's material-free credential audit rows. */
-  async gitCredentialAudit() {
-    return brokerAudit(this);
-  }
+  /** The production addressing: the Agents SDK's own `getAgentByName`. */
+  const addressAgentByName: AgentAddressing = (namespace, name, options) =>
+    getAgentByName<Env, AgentGateway>(namespace, name, options);
 
   /**
-   * The ONE method name FerroGate-minted schedules call back into (pinned by
-   * `SCHEDULE_DISPATCH_METHOD` — callers can never schedule arbitrary agent
-   * methods). Logs the firing and re-arms emulated intervals; the pinned
-   * agents SDK (0.0.109) has NO `scheduleEvery`, so intervals are delayed
-   * one-shots that re-schedule themselves here.
+   * Explicit control routes. Each verb addresses an agent instance BY NAME and
+   * invokes an RPC method on it. This is the lifecycle surface FerroGate's Rust
+   * control-surface impl (#412/#414) calls. The routes map onto the ACTUAL
+   * Cloudflare agent primitives (issue #414), which are narrower than a typical
+   * lifecycle API:
+   *
+   *   POST /control/start   { ..., props }  -> { runRef, status }  (LAZY create via
+   *       getAgentByName + agent.start(props), which resolves model/tools/prompt)
+   *   POST /control/invoke  { runRef, workloadRef, args }  -> { runRef, status, exitCode, message }
+   *   POST /control/cancel  { runRef, reason }  -> { runRef, status, aborted, detail }
+   *       (COOPERATIVE AbortSignal cancel — the pinned SDK ships no fiber API;
+   *        NOT a "stop")
+   *   POST /control/destroy { runRef }  -> { runRef, status }  (this.destroy())
+   *   GET  /control/status?runRef=NAME  -> { runRef, status, message, resolvedModel, ... }
+   *       (CUSTOM status method — there is no getStatus primitive)
+   *
+   * Every verb but `start` refuses an unknown `runRef` with 404 `not_found`, and
+   * `start` refuses a conflicting re-bind with 409 `run_conflict`.
+   *
+   * There is deliberately NO stop/pause/resume/restart route: Cloudflare hibernates
+   * an idle agent automatically (zero compute, state retained) and wakes it on the
+   * next request. FerroGate models "stop" as hibernate + re-address, entirely
+   * client-side (see the Rust `stop_run`), so it needs no route here.
    */
-  async runScheduledTask(payload: unknown) {
-    await dispatchScheduledTask(this, payload);
-  }
-
-  /**
-   * DIY auth gate for path-routed agent traffic (`/agents/:agent/:name/...`).
-   * `routeAgentRequest` hands the request here after `onBeforeRequest`; we
-   * re-check the bearer token as defense-in-depth before any agent work.
-   */
-  override async onRequest(request: Request): Promise<Response> {
-    const denied = requireBearer(request, this.env.GATEWAY_CONTROL_TOKEN);
+  async function handleControl(
+    request: Request,
+    env: Env,
+    url: URL,
+    addressAgent: AgentAddressing,
+  ): Promise<Response> {
+    const denied = requireBearer(request, env.GATEWAY_CONTROL_TOKEN);
     if (denied) return denied;
-    return super.onRequest(request);
-  }
-}
 
-/**
- * Explicit control routes. Each verb addresses an agent instance BY NAME and
- * invokes an RPC method on it. This is the lifecycle surface FerroGate's Rust
- * control-surface impl (#412/#414) calls. The routes map onto the ACTUAL
- * Cloudflare agent primitives (issue #414), which are narrower than a typical
- * lifecycle API:
- *
- *   POST /control/start   { ..., props }  -> { runRef, status }  (LAZY create via
- *       getAgentByName + agent.start(props), which resolves model/tools/prompt)
- *   POST /control/invoke  { runRef, workloadRef, args }  -> { runRef, status, exitCode, message }
- *   POST /control/cancel  { runRef, reason }  -> { runRef, status, aborted, detail }
- *       (COOPERATIVE AbortSignal cancel — the pinned SDK ships no fiber API;
- *        NOT a "stop")
- *   POST /control/destroy { runRef }  -> { runRef, status }  (this.destroy())
- *   GET  /control/status?runRef=NAME  -> { runRef, status, message, resolvedModel, ... }
- *       (CUSTOM status method — there is no getStatus primitive)
- *
- * Every verb but `start` refuses an unknown `runRef` with 404 `not_found`, and
- * `start` refuses a conflicting re-bind with 409 `run_conflict`.
- *
- * There is deliberately NO stop/pause/resume/restart route: Cloudflare hibernates
- * an idle agent automatically (zero compute, state retained) and wakes it on the
- * next request. FerroGate models "stop" as hibernate + re-address, entirely
- * client-side (see the Rust `stop_run`), so it needs no route here.
- */
-async function handleControl(request: Request, env: Env, url: URL): Promise<Response> {
-  const denied = requireBearer(request, env.GATEWAY_CONTROL_TOKEN);
-  if (denied) return denied;
+    const verb = url.pathname.slice("/control/".length);
 
-  const verb = url.pathname.slice("/control/".length);
-
-  try {
-    switch (verb) {
-      case "start": {
-        const body = (await request.json()) as StartRequest;
-        const refusal = placementRefusal(body.props);
-        if (refusal) return json(refusal, 422);
-        // The run's agent instance is addressed by its runId. `locationHint` is
-        // applied HERE, at first addressing, because that is when Cloudflare
-        // places the Durable Object.
-        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runId, {
-          locationHint: body.props?.locationHint as DurableObjectLocationHint | undefined,
-        });
-        return controlJson(await agent.start(body));
-      }
-      case "invoke": {
-        const body = (await request.json()) as InvokeRequest;
-        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runRef);
-        return controlJson(await agent.invoke(body));
-      }
-      case "cancel": {
-        const body = (await request.json()) as { runRef: string; reason?: string };
-        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runRef);
-        return controlJson(await agent.cancel(body.reason ?? "unspecified"));
-      }
-      case "destroy": {
-        const body = (await request.json()) as { runRef: string };
-        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runRef);
-        try {
-          return controlJson(await agent.destroyRun());
-        } catch (err) {
-          // `this.destroy()` ends by aborting the Durable Object, which kills
-          // the RPC channel this call arrived on. See SDK_DESTROY_ABORT_REASON:
-          // this rejection means the teardown COMPLETED.
-          if ((err as Error).message !== SDK_DESTROY_ABORT_REASON) throw err;
-          return json({ runRef: body.runRef, status: "cleaned_up" satisfies RunStatus });
+    try {
+      switch (verb) {
+        case "start": {
+          const body = (await request.json()) as StartRequest;
+          const refusal = placementRefusal(body.props);
+          if (refusal) return json(refusal, 422);
+          // The run's agent instance is addressed by its runId. `locationHint` is
+          // applied HERE, at first addressing, because that is when Cloudflare
+          // places the Durable Object.
+          const agent = await addressAgent(env.AGENT_GATEWAY, body.runId, {
+            locationHint: body.props?.locationHint as DurableObjectLocationHint | undefined,
+          });
+          return controlJson(await agent.start(body));
         }
+        case "invoke": {
+          const body = (await request.json()) as InvokeRequest;
+          const agent = await addressAgent(env.AGENT_GATEWAY, body.runRef);
+          return controlJson(await agent.invoke(body));
+        }
+        case "cancel": {
+          const body = (await request.json()) as { runRef: string; reason?: string };
+          const agent = await addressAgent(env.AGENT_GATEWAY, body.runRef);
+          return controlJson(await agent.cancel(body.reason ?? "unspecified"));
+        }
+        case "destroy": {
+          const body = (await request.json()) as { runRef: string };
+          const agent = await addressAgent(env.AGENT_GATEWAY, body.runRef);
+          try {
+            return controlJson(await agent.destroyRun());
+          } catch (err) {
+            // `this.destroy()` ends by aborting the Durable Object, which kills
+            // the RPC channel this call arrived on. See SDK_DESTROY_ABORT_REASON:
+            // this rejection means the teardown COMPLETED.
+            if ((err as Error).message !== SDK_DESTROY_ABORT_REASON) throw err;
+            return json({ runRef: body.runRef, status: "cleaned_up" satisfies RunStatus });
+          }
+        }
+        case "status": {
+          const runRef = url.searchParams.get("runRef");
+          if (!runRef) return json({ error: "missing runRef" }, 400);
+          const agent = await addressAgent(env.AGENT_GATEWAY, runRef);
+          return controlJson(await agent.status());
+        }
+        default:
+          return json({ error: `unknown control verb: ${verb}` }, 404);
       }
-      case "status": {
-        const runRef = url.searchParams.get("runRef");
-        if (!runRef) return json({ error: "missing runRef" }, 400);
-        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, runRef);
-        return controlJson(await agent.status());
+    } catch (err) {
+      return json({ error: `control call failed: ${(err as Error).message}` }, 502);
+    }
+  }
+
+  /**
+   * Map a lifecycle verb's envelope onto an HTTP status: a {@link ControlRefusal}
+   * becomes 404/409, anything else 200.
+   */
+  function controlJson(result: unknown): Response {
+    if (isRefusal(result)) {
+      return json(result, result.error === "not_found" ? 404 : 409);
+    }
+    return json(result);
+  }
+
+  /**
+   * Fail a start whose placement props cannot be honored, instead of accepting
+   * and echoing them.
+   *
+   * `jurisdiction` is refused outright: `getAgentByName` applies it as
+   * `namespace.jurisdiction(j).idFromName(name)`, so honoring it would change the
+   * Durable Object's IDENTITY and leave the run unreachable from every FerroGate
+   * call site that does not also carry it — including the #428 over-budget kill
+   * switch. An unknown `locationHint` is refused because Cloudflare would reject
+   * it at `namespace.get(...)` anyway, and a 422 naming the bad value beats a 502.
+   */
+  function placementRefusal(props: RunProps | undefined): { error: string; detail: string } | null {
+    if (props?.jurisdiction) {
+      return {
+        error: "jurisdiction_unsupported",
+        detail:
+          `props.jurisdiction=${props.jurisdiction} is refused: a jurisdiction changes the ` +
+          "Durable Object's identity (namespace.jurisdiction(j).idFromName(name)), so a run " +
+          "started with one would be invisible to every caller that addresses it without one. " +
+          "Deploy a gateway Worker per jurisdiction instead of setting it per run.",
+      };
+    }
+    if (props?.locationHint && !LOCATION_HINTS.includes(props.locationHint)) {
+      return {
+        error: "unsupported_location_hint",
+        detail: `props.locationHint=${props.locationHint} is not one of ${LOCATION_HINTS.join("/")}`,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Build the Worker's fetch handler.
+   *
+   * A factory rather than an object literal so the ONE non-observable dependency —
+   * {@link AgentAddressing} — can be substituted without restating the routing
+   * table. A test entrypoint calls this with a recording addressing and gets the
+   * production handler otherwise verbatim; a second copy of the route table would
+   * drift from this one and stop proving anything about it.
+   */
+  export function createHandler(
+    addressAgent: AgentAddressing = addressAgentByName,
+  ): ExportedHandler<Env> {
+    return {
+    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+      const url = new URL(request.url);
+
+      // Unauthenticated liveness probe (no secret exposed).
+      if (url.pathname === "/healthz") {
+        return json({ ok: true, worker: "ferrogate-agent-gateway" });
       }
-      default:
-        return json({ error: `unknown control verb: ${verb}` }, 404);
-    }
-  } catch (err) {
-    return json({ error: `control call failed: ${(err as Error).message}` }, 502);
-  }
+
+      // 1. Explicit control routes (RPC to a named agent). Auth checked inside.
+      if (url.pathname.startsWith("/control/")) {
+        return handleControl(request, env, url, addressAgent);
+      }
+
+      // 1b. Memory routes (issue #427): governed read/write/query over the
+      //     agent's per-instance memory layers. Auth checked inside.
+      if (url.pathname.startsWith("/memory/")) {
+        return handleMemory(request, env, url);
+      }
+
+      // 1c. Schedule routes (issue #426): governed create/list/cancel over the
+      //     agent's in-DO SQLite scheduler. Auth checked inside. There is NO
+      //     external enqueue primitive — scheduling is in-agent only, so this
+      //     is the sole path FerroGate schedules future agent work through.
+      if (url.pathname.startsWith("/schedule/")) {
+        return handleSchedule(request, env, url);
+      }
+
+      // 1d. Container/sandbox routes (issue #415): governed
+      //     prepare/start/exec/stop/logs/artifacts/cleanup over a per-tenant
+      //     Cloudflare Container or @cloudflare/sandbox instance. Auth checked
+      //     inside. Cloudflare exposes NO public container lifecycle REST API, so
+      //     this is the sole tethered path FerroGate drives the isolation tier
+      //     through — egress deny-by-default (enableInternet=false unless a
+      //     governed allowlist is provided).
+      if (url.pathname.startsWith("/container/")) {
+        return handleContainer(request, env, url);
+      }
+
+      // 1e. Brokered git credential routes (issue #475): the container's git
+      //     credential helper calls back here PER GIT OPERATION instead of
+      //     holding a secret. The Worker authorizes the operation against the
+      //     grant REGISTERED IN THE RUN'S DURABLE OBJECT (never against a grant
+      //     the caller supplies), mints a repo-scoped GitHub App installation
+      //     token, answers git, and records a material-free audit row — so
+      //     nothing GitHub-shaped ever rests in the container, and every use is
+      //     counted. Auth is checked per verb INSIDE: `register`/`revoke`/`audit`
+      //     take GATEWAY_CONTROL_TOKEN, while `get` — the only verb the untrusted
+      //     container can reach — takes the run-scoped callback capability and
+      //     NOT the gateway control token. Fails closed (501) with no App bound.
+      if (url.pathname.startsWith("/git-credential/")) {
+        return handleGitCredential(request, env, url, ctx);
+      }
+
+      // 2. Path-routed agent traffic: /agents/:agent/:name/... — DIY-gated in
+      //    onBeforeRequest/onBeforeConnect BEFORE the Durable Object is touched.
+      const routed = await routeAgentRequest(request, env, {
+        cors: true,
+        onBeforeRequest: (req: Request) =>
+          requireBearer(req, env.GATEWAY_CONTROL_TOKEN) ?? undefined,
+        onBeforeConnect: (req: Request) =>
+          requireBearer(req, env.GATEWAY_CONTROL_TOKEN) ?? undefined,
+      });
+      return routed ?? json({ error: "not found" }, 404);
+    },
+  } satisfies ExportedHandler<Env>;
 }
 
-/**
- * Map a lifecycle verb's envelope onto an HTTP status: a {@link ControlRefusal}
- * becomes 404/409, anything else 200.
- */
-function controlJson(result: unknown): Response {
-  if (isRefusal(result)) {
-    return json(result, result.error === "not_found" ? 404 : 409);
-  }
-  return json(result);
-}
-
-/**
- * Fail a start whose placement props cannot be honored, instead of accepting
- * and echoing them.
- *
- * `jurisdiction` is refused outright: `getAgentByName` applies it as
- * `namespace.jurisdiction(j).idFromName(name)`, so honoring it would change the
- * Durable Object's IDENTITY and leave the run unreachable from every FerroGate
- * call site that does not also carry it — including the #428 over-budget kill
- * switch. An unknown `locationHint` is refused because Cloudflare would reject
- * it at `namespace.get(...)` anyway, and a 422 naming the bad value beats a 502.
- */
-function placementRefusal(props: RunProps | undefined): { error: string; detail: string } | null {
-  if (props?.jurisdiction) {
-    return {
-      error: "jurisdiction_unsupported",
-      detail:
-        `props.jurisdiction=${props.jurisdiction} is refused: a jurisdiction changes the ` +
-        "Durable Object's identity (namespace.jurisdiction(j).idFromName(name)), so a run " +
-        "started with one would be invisible to every caller that addresses it without one. " +
-        "Deploy a gateway Worker per jurisdiction instead of setting it per run.",
-    };
-  }
-  if (props?.locationHint && !LOCATION_HINTS.includes(props.locationHint)) {
-    return {
-      error: "unsupported_location_hint",
-      detail: `props.locationHint=${props.locationHint} is not one of ${LOCATION_HINTS.join("/")}`,
-    };
-  }
-  return null;
-}
-
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    // Unauthenticated liveness probe (no secret exposed).
-    if (url.pathname === "/healthz") {
-      return json({ ok: true, worker: "ferrogate-agent-gateway" });
-    }
-
-    // 1. Explicit control routes (RPC to a named agent). Auth checked inside.
-    if (url.pathname.startsWith("/control/")) {
-      return handleControl(request, env, url);
-    }
-
-    // 1b. Memory routes (issue #427): governed read/write/query over the
-    //     agent's per-instance memory layers. Auth checked inside.
-    if (url.pathname.startsWith("/memory/")) {
-      return handleMemory(request, env, url);
-    }
-
-    // 1c. Schedule routes (issue #426): governed create/list/cancel over the
-    //     agent's in-DO SQLite scheduler. Auth checked inside. There is NO
-    //     external enqueue primitive — scheduling is in-agent only, so this
-    //     is the sole path FerroGate schedules future agent work through.
-    if (url.pathname.startsWith("/schedule/")) {
-      return handleSchedule(request, env, url);
-    }
-
-    // 1d. Container/sandbox routes (issue #415): governed
-    //     prepare/start/exec/stop/logs/artifacts/cleanup over a per-tenant
-    //     Cloudflare Container or @cloudflare/sandbox instance. Auth checked
-    //     inside. Cloudflare exposes NO public container lifecycle REST API, so
-    //     this is the sole tethered path FerroGate drives the isolation tier
-    //     through — egress deny-by-default (enableInternet=false unless a
-    //     governed allowlist is provided).
-    if (url.pathname.startsWith("/container/")) {
-      return handleContainer(request, env, url);
-    }
-
-    // 1e. Brokered git credential routes (issue #475): the container's git
-    //     credential helper calls back here PER GIT OPERATION instead of
-    //     holding a secret. The Worker authorizes the operation against the
-    //     grant REGISTERED IN THE RUN'S DURABLE OBJECT (never against a grant
-    //     the caller supplies), mints a repo-scoped GitHub App installation
-    //     token, answers git, and records a material-free audit row — so
-    //     nothing GitHub-shaped ever rests in the container, and every use is
-    //     counted. Auth is checked per verb INSIDE: `register`/`revoke`/`audit`
-    //     take GATEWAY_CONTROL_TOKEN, while `get` — the only verb the untrusted
-    //     container can reach — takes the run-scoped callback capability and
-    //     NOT the gateway control token. Fails closed (501) with no App bound.
-    if (url.pathname.startsWith("/git-credential/")) {
-      return handleGitCredential(request, env, url, ctx);
-    }
-
-    // 2. Path-routed agent traffic: /agents/:agent/:name/... — DIY-gated in
-    //    onBeforeRequest/onBeforeConnect BEFORE the Durable Object is touched.
-    const routed = await routeAgentRequest(request, env, {
-      cors: true,
-      onBeforeRequest: (req: Request) =>
-        requireBearer(req, env.GATEWAY_CONTROL_TOKEN) ?? undefined,
-      onBeforeConnect: (req: Request) =>
-        requireBearer(req, env.GATEWAY_CONTROL_TOKEN) ?? undefined,
-    });
-    return routed ?? json({ error: "not found" }, 404);
-  },
-} satisfies ExportedHandler<Env>;
+export default createHandler();

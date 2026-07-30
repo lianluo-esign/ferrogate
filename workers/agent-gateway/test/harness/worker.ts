@@ -26,15 +26,76 @@
 //   asserting on the JSON the Worker sent.
 
 export * from "../../src/index";
-export { default } from "../../src/index";
 // Re-exported EXPLICITLY (not via `export *`): workerd only lists an entrypoint in
 // `ctx.exports` when the entry module names it, and `applyOutboundInterception` resolves
 // the interceptor through `ctx.exports.ContainerProxy`. Sourcing it from `../../src/index`
 // rather than from the SDK also means deleting the production re-export breaks this build.
 export { ContainerProxy } from "../../src/index";
 
-import { AgentGateway, AgentSandbox } from "../../src/index";
-import type { InvokeRequest } from "../../src/index";
+import { getAgentByName } from "agents";
+
+import { AgentGateway, AgentSandbox, createHandler } from "../../src/index";
+import type { AgentAddressingOptions, Env, InvokeRequest } from "../../src/index";
+
+/**
+ * Every `(name, options)` the control routes addressed an agent instance with,
+ * in call order.
+ *
+ * The addressing OPTIONS are consumed by `getAgentByName` before any agent code
+ * runs, so no response field can prove they were passed — `resolvedLocationHint`
+ * is copied out of `props` on a separate code path and reports the requested hint
+ * even with the options argument deleted. This is the only place the real
+ * argument is observable.
+ */
+export const addressingCalls: Array<{ name: string; options?: AgentAddressingOptions }> = [];
+
+/**
+ * The PRODUCTION handler with exactly one dependency substituted: the addressing
+ * function records its arguments and then delegates to the real
+ * `getAgentByName`. Every route, guard and status mapping is the shipped one —
+ * `createHandler` is called, not reimplemented.
+ */
+export default createHandler((namespace, name, options) => {
+  addressingCalls.push({ name, options });
+  return getAgentByName<Env, AgentGateway>(namespace, name, options);
+});
+
+/**
+ * Post-await side effects, and observed abort reasons, per run — keyed by
+ * instance name and held in MODULE scope rather than on the Durable Object.
+ *
+ * `destroyRun` ends in the SDK's `destroy()`, whose last step is
+ * `ctx.abort("destroyed")`: the instance and everything on it is gone, so a
+ * per-instance ledger read after a destroy always reads empty and "the workload
+ * did not run" would pass vacuously for the one case it exists to prove. Module
+ * scope outlives the aborted object, so both the presence and the absence of an
+ * effect are real observations.
+ */
+const completedWork = new Map<string, string[]>();
+const observedAbortReasons = new Map<string, string[]>();
+
+function record(ledger: Map<string, string[]>, runRef: string, entry: string): void {
+  const existing = ledger.get(runRef);
+  if (existing) existing.push(entry);
+  else ledger.set(runRef, [entry]);
+}
+
+/** The post-await side effects workloads on `runRef` actually performed. */
+export function sideEffects(runRef: string): string[] {
+  return completedWork.get(runRef) ?? [];
+}
+
+/**
+ * The abort reasons workloads on `runRef` actually OBSERVED, stringified.
+ *
+ * Distinct from "the run stopped": a Durable Object that is torn down stops its
+ * work whatever the code did, so `destroyRun`'s explicit
+ * `#inFlight.abort(...)` can only be pinned by the workload having seen the
+ * signal BEFORE the teardown. Deleting that line empties this ledger.
+ */
+export function observedAborts(runRef: string): string[] {
+  return observedAbortReasons.get(runRef) ?? [];
+}
 
 /**
  * `AgentGateway` with a workload that can actually be caught mid-flight
@@ -54,24 +115,33 @@ import type { InvokeRequest } from "../../src/index";
  * A plain `workloadRef` falls through to `super.dispatchWorkload`, so every
  * other control test still exercises the production dispatch verbatim.
  * `control.test.ts` asserts wrangler.toml binds the PRODUCTION `AgentGateway`.
+ *
+ * TWO PROBES, because cancellation here is COOPERATIVE and the two halves of
+ * that word need different workloads to be visible:
+ *
+ *   * `probe:sleep` observes the signal — the well-behaved workload a cancel
+ *     really does stop.
+ *   * `probe:defiant` ignores it entirely — the workload a cooperative cancel
+ *     CANNOT stop. It is the only shape that can tell whether `cancel` reports
+ *     an outcome it did not achieve, and it is what the #428 budget kill has to
+ *     escalate against.
  */
 export class ProbeAgentGateway extends AgentGateway {
-  /** Work that ran to completion despite (or before) a cancel. */
-  #completedWork: string[] = [];
-
-  /** RPC: the post-await side effects the workload actually performed. */
-  async sideEffects(): Promise<string[]> {
-    return this.#completedWork;
-  }
-
   protected override async dispatchWorkload(
     request: InvokeRequest,
     signal: AbortSignal,
   ): Promise<string> {
+    const delayMs = Number(request.args[0] ?? "50");
+    if (request.workloadRef === "probe:defiant") {
+      // No signal observation anywhere: this workload runs to the far side of
+      // its await no matter what was signalled.
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      record(completedWork, this.name, request.workloadRef);
+      return `defiant probe ran ${delayMs}ms`;
+    }
     if (request.workloadRef !== "probe:sleep") {
       return super.dispatchWorkload(request, signal);
     }
-    const delayMs = Number(request.args[0] ?? "50");
     // A signal-observing await: exactly the shape `dispatchWorkload`'s contract
     // requires of a real harness. Rejecting on abort is what makes the work stop.
     await new Promise<void>((resolve, reject) => {
@@ -81,13 +151,16 @@ export class ProbeAgentGateway extends AgentGateway {
       }, delayMs);
       const onAbort = () => {
         clearTimeout(timer);
+        // Recorded SYNCHRONOUSLY, inside the abort dispatch, so it lands before
+        // a `destroyRun` that aborts and then tears the object down.
+        record(observedAbortReasons, this.name, String(signal.reason));
         reject(signal.reason ?? new Error("aborted"));
       };
       if (signal.aborted) return onAbort();
       signal.addEventListener("abort", onAbort, { once: true });
     });
     // Reached ONLY when the workload was never cancelled.
-    this.#completedWork.push(request.workloadRef);
+    record(completedWork, this.name, request.workloadRef);
     return `probe slept ${delayMs}ms`;
   }
 }

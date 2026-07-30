@@ -275,6 +275,17 @@ pub enum CloudflareControlSurfaceError {
     /// already-destroyed `run_ref` returned `CleanedUp` and FerroGate recorded
     /// [`IsolationLifecycleEvidence`] for a run that never existed (issue #414).
     RunNotFound(String),
+    /// The run exists but has been cancelled, so it accepts no further work
+    /// (the gateway Worker's `run_cancelled` refusal, HTTP 409).
+    ///
+    /// Distinct from [`Self::ExecFailed`] because the run did not fail — it
+    /// refused, and refusing is not executing. The Worker used to answer a
+    /// latch-refused `invoke` with HTTP 200 and an exec success envelope whose
+    /// only distinguishing mark was its free-text `message`, so
+    /// [`CloudflareAgentControlClient::exec_or_attach`] recorded
+    /// [`IsolationLifecycleEvidence`] with `outcome = "executed"` for an
+    /// invocation that never ran (issue #414).
+    RunCancelled(String),
     /// Transport/decoding failure talking to the CF control API.
     Transport(String),
 }
@@ -288,6 +299,7 @@ impl fmt::Display for CloudflareControlSurfaceError {
             Self::StopFailed(m) => write!(f, "cloudflare run stop failed: {m}"),
             Self::CleanupFailed(m) => write!(f, "cloudflare run cleanup failed: {m}"),
             Self::RunNotFound(m) => write!(f, "cloudflare run not found: {m}"),
+            Self::RunCancelled(m) => write!(f, "cloudflare run already cancelled: {m}"),
             Self::Transport(m) => write!(f, "cloudflare control transport failed: {m}"),
         }
     }
