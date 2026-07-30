@@ -8,6 +8,7 @@ use crate::{
     cli::SupabaseLiveRestartArgs,
     constants::{ADMIN_AUTH, JSON_CONTENT},
     http::{free_addr, http_request_addr},
+    readiness::{require_gateway_ready_with_socket, GATEWAY_READINESS_TIMEOUT},
     supabase_schema::{
         connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
     },
@@ -25,8 +26,6 @@ use std::{
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::Path,
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 const TARGET_TENANT_ID: &str = "target-capability-tenant";
@@ -339,21 +338,17 @@ impl GatewayGuard {
         Ok(guard)
     }
 
+    /// Readiness is the shared identity-checked decision (#444): a non-FerroGate
+    /// process squatting this scenario's `free_addr()` port fails by name instead
+    /// of handing the whole RBAC-to-runtime contract to a mock that answers 200.
     fn wait_for_readiness(&mut self, gateway_addr: &str, socket: &Path) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(180) {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before target capability readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 && socket.exists() => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for target capability gateway: {last}")
+        require_gateway_ready_with_socket(
+            &mut self.child,
+            gateway_addr,
+            socket,
+            "target capability gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

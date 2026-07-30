@@ -13,9 +13,10 @@ use crate::{
         POSTGRES_MIGRATION_TARGET_CONTAINER,
     },
     fixtures::toml_basic_string,
-    http::{free_addr, free_port, http_request_addr, http_request_addr_with_timeout},
+    http::{free_addr, free_port, http_request_addr_with_timeout},
     mocks::spawn_local_provider_upstream,
     payment_attempt_restart::DurablePaymentAttemptFixture,
+    readiness::require_gateway_ready,
     supabase_schema::{LiveSupabaseScenario, LiveSupabaseSchema},
 };
 use anyhow::{bail, Context, Result};
@@ -1897,7 +1898,6 @@ pub(crate) struct TursoRestartHarness {
     _dir: tempfile::TempDir,
     gateway_addr: String,
     gateway: Child,
-    stderr: Option<std::process::ChildStderr>,
     expected_storage_provider: &'static str,
     expected_migration_mode: StorageMigrationMode,
     readiness_timeout: Duration,
@@ -1971,13 +1971,11 @@ impl TursoRestartHarness {
             _dir: dir,
             gateway_addr,
             gateway,
-            stderr: None,
             expected_storage_provider: storage.provider_name(),
             expected_migration_mode: migration_mode,
             readiness_timeout: storage.readiness_timeout(),
             request_timeout: storage.request_timeout(),
         };
-        harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
         Ok(harness)
     }
@@ -2052,48 +2050,33 @@ impl TursoRestartHarness {
             _dir: dir,
             gateway_addr,
             gateway,
-            stderr: None,
             expected_storage_provider: storage.provider_name(),
             expected_migration_mode: migration_mode,
             readiness_timeout: storage.readiness_timeout(),
             request_timeout: storage.request_timeout(),
         };
-        harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
         Ok(harness)
     }
 
+    /// Readiness is the shared identity-checked decision (#444): a non-FerroGate
+    /// process squatting this scenario's `free_addr()` port fails by name instead
+    /// of running the durability contract against a mock that answers 200. The
+    /// storage-specific ceiling is preserved, and the child's own stderr (drained
+    /// into the failure message by `crate::readiness`) is still asserted redacted.
     fn wait_for_gateway(&mut self) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < self.readiness_timeout {
-            if let Some(status) = self.gateway.try_wait()? {
-                let stderr = self.read_stderr();
-                assert_secret_redacted(&stderr);
-                bail!(
-                    "ferrogate process exited before readiness check: {status}; stderr: {stderr}"
-                );
-            }
-            match http_request_addr(&self.gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-        bail!(
-            "timed out waiting for durable-storage FerroGate on {}; last response: {last}",
-            self.gateway_addr
-        );
-    }
-
-    fn read_stderr(&mut self) -> String {
-        let Some(mut stderr) = self.stderr.take() else {
-            return String::new();
-        };
-        let mut output = String::new();
-        let _ = stderr.read_to_string(&mut output);
-        output
+        let gateway_addr = self.gateway_addr.clone();
+        let readiness_timeout = self.readiness_timeout;
+        require_gateway_ready(
+            &mut self.gateway,
+            &gateway_addr,
+            "durable-storage FerroGate",
+            readiness_timeout,
+        )
+        .map_err(|error| {
+            assert_secret_redacted(&format!("{error:#}"));
+            error
+        })
     }
 
     pub(crate) fn expect_json<F>(

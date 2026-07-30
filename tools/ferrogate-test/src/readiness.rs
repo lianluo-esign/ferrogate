@@ -8,6 +8,7 @@ use crate::http::{http_request_addr, HttpResponse};
 use anyhow::{bail, Result};
 use serde_json::Value;
 use std::{
+    path::Path,
     process::Child,
     thread,
     time::{Duration, Instant},
@@ -211,6 +212,62 @@ pub(crate) fn require_gateway_ready(
              port) holds the gateway port; refusing to run the scenario against it (#444)"
         ),
     }
+}
+
+/// Wait for a filesystem path that the gateway itself creates only once it is
+/// serving -- currently the managed-worker external-action-authorizer unix
+/// socket. Bails on child exit (with the child's own stderr, #264) and on the
+/// deadline; existence is observed, never inferred from elapsed time.
+fn wait_for_gateway_path(
+    gateway: &mut Child,
+    path: &Path,
+    label: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(status) = gateway.try_wait()? {
+            let stderr = drain_child_stderr(gateway); // #264
+            bail!(
+                "{label}: ferrogate exited before creating {}: {status}{}",
+                path.display(),
+                format_child_stderr(&stderr)
+            );
+        }
+        if started.elapsed() >= timeout {
+            bail!(
+                "{label}: timed out waiting for ferrogate to create {}",
+                path.display()
+            );
+        }
+        thread::sleep(READINESS_POLL_INTERVAL);
+    }
+}
+
+/// [`require_gateway_ready`] for a scenario whose gateway must also have
+/// published a unix socket before the scenario can drive it (the managed-worker
+/// external-action authorizer). Readiness is decided first -- so a squatter on
+/// the gateway port fails by name instead of being waited on until the socket
+/// deadline -- and both waits share the caller's single ceiling so composing
+/// them cannot double a scenario's start budget.
+pub(crate) fn require_gateway_ready_with_socket(
+    gateway: &mut Child,
+    gateway_addr: &str,
+    socket: &Path,
+    label: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    require_gateway_ready(gateway, gateway_addr, label, timeout)?;
+    wait_for_gateway_path(
+        gateway,
+        socket,
+        label,
+        timeout.saturating_sub(started.elapsed()),
+    )
 }
 
 #[cfg(test)]

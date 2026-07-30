@@ -8,6 +8,7 @@ use crate::{
     cli::LocalArgs,
     constants::{ADMIN_AUTH, JSON_CONTENT},
     http::{free_addr, http_request_addr},
+    readiness::require_gateway_ready_with_socket,
 };
 use anyhow::{bail, ensure, Context, Result};
 use ferrogate_guardrails::{
@@ -28,8 +29,7 @@ use std::{
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::Path,
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const RESOLVED_TENANT: &str = "managed-project-resolved-tenant";
@@ -43,6 +43,11 @@ const UNKNOWN_RESPONSE_TENANT: &str = "managed-project-unknown-response-tenant";
 const UNKNOWN_RESPONSE_PROJECT: &str = "managed-project-unknown-response-project";
 const MISMATCH_TENANT: &str = "managed-project-mismatch-tenant";
 const MISMATCH_PROJECT: &str = "managed-project-mismatch-project";
+/// In-memory storage and no migrations: this gateway is serving within seconds,
+/// so the pre-#444 ceiling is preserved rather than widened to the shared
+/// storage-backed default.
+const MANAGED_ACTION_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+
 const PERMISSION_ID: &str = "managed-project-permission";
 const PERMISSION_KEY: &str = "managed_actions.mcp.local_echo";
 const ROLE_ID: &str = "managed-project-role";
@@ -705,21 +710,19 @@ impl GatewayGuard {
         Ok(guard)
     }
 
+    /// Readiness is the shared identity-checked decision (#444): a non-FerroGate
+    /// process squatting this scenario's `free_addr()` port fails by name instead
+    /// of running the #519 attribution contract against a mock that answers 200.
+    /// This gateway uses in-memory storage, so it keeps its own tighter ceiling
+    /// rather than the storage-backed scenario default.
     fn wait_for_readiness(&mut self, gateway_addr: &str, socket: &Path) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(60) {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before managed-action-project readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 && socket.exists() => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for managed-action-project gateway: {last}")
+        require_gateway_ready_with_socket(
+            &mut self.child,
+            gateway_addr,
+            socket,
+            "managed-action-project gateway",
+            MANAGED_ACTION_READINESS_TIMEOUT,
+        )
     }
 }
 

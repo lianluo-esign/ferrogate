@@ -9,6 +9,7 @@ use crate::{
     cli::SupabaseLiveRestartArgs,
     http::{free_addr, http_request_addr, http_request_addr_after_write, HttpResponse},
     mocks::read_http_request,
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
     supabase_schema::{
         connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
     },
@@ -1520,21 +1521,23 @@ impl GatewayGuard {
             .spawn()
             .with_context(|| format!("failed to start {}", binary.display()))?;
         let mut guard = Self { child, process_log };
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(180) {
-            if let Some(status) = guard.child.try_wait()? {
-                let output = guard.read_process_log()?;
-                bail!("FerroGate exited before MCP identity readiness: {status}; output: {output}");
-            }
-            match http_request_addr(addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(guard),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
+        // Readiness is the shared identity-checked decision (#444): a non-FerroGate
+        // process squatting this scenario's `free_addr()` port fails by name instead
+        // of running the whole identity/RBAC contract against a mock that answers
+        // 200. Any start failure still reports the child's captured output (and
+        // asserts it stays redacted), which previously only happened on child exit.
+        if let Err(error) = require_gateway_ready(
+            &mut guard.child,
+            addr,
+            "MCP identity gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        ) {
+            let output = guard
+                .read_process_log()
+                .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+            return Err(error.context(format!("ferrogate output: {output}")));
         }
-        bail!("FerroGate MCP identity readiness timed out: {last}")
+        Ok(guard)
     }
 
     fn read_process_log(&mut self) -> Result<String> {
