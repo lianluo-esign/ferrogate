@@ -41,9 +41,17 @@ fn authenticate(
     ))
 }
 
-/// The ordinary static key most tests here need: it exists to make
-/// `auth_required()` true and to be authenticated as the root/bootstrap key the
-/// rest of this suite assumes.
+/// A static YAML-credential key, for the few tests that exercise the static
+/// credential input path itself or the explicit #542 `auth_required()`
+/// predicate guard. It authenticates as the root/bootstrap key the rest of
+/// this suite assumes.
+///
+/// It must NOT be dropped into a fixture merely to make `auth_required()` true.
+/// Since #542 the predicate is `!self.auth.disabled`, so
+/// `Config::default().auth_required()` is already true with no credentials at
+/// all; using this key as an auth-required switch is exactly the pre-#542
+/// convention #554 removed -- it would keep tests green even if someone
+/// reverted to credential-counting (`auth_service.enabled || !api_keys.is_empty()`).
 ///
 /// It declares `platform_operator = true` since #540. Before the flip, "the
 /// field is absent" and "this key is root" were the same fixture, so a helper
