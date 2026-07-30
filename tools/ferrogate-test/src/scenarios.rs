@@ -2445,13 +2445,36 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     let lifecycle_worker_id = RefCell::new(String::new());
     let lifecycle_worker_secret = RefCell::new(String::new());
 
+    // Self-hosted worker registration is plan-gated (#168, wired in #182): the
+    // gate fires as soon as a formal StoredTenantAccount exists for the tenant,
+    // and `POST /admin/v1/tenant-accounts` without `plan_id` defaults to `free`,
+    // which is not a plan row in this harness -- so the tenant resolves to no
+    // plan and the registration below would be refused
+    // `self_hosted_workers_disabled` (#592). Bind the tenant to a plan that
+    // enables the capability, the same way `agent_schedule_e2e` and the
+    // asset-hosting scenarios do, rather than loosening the gate. The refusal
+    // path itself stays covered by `rbac_enforcement_gates`.
+    case.expect_json(
+        "POST",
+        "/admin/v1/plans",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-plan","name":"Lifecycle plan","slug":"lifecycle-plan","self_hosted_workers_enabled":true}"#,
+        201,
+        |body| {
+            assert_eq!(body["plan"]["self_hosted_workers_enabled"], true);
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "POST",
         "/admin/v1/tenant-accounts",
         &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{"id":"org_demo","name":"Lifecycle tenant","slug":"lifecycle-tenant"}"#,
+        r#"{"id":"org_demo","name":"Lifecycle tenant","slug":"lifecycle-tenant","plan_id":"lifecycle-plan"}"#,
         201,
-        |_| Ok(()),
+        |body| {
+            assert_eq!(body["tenant"]["plan_id"], "lifecycle-plan");
+            Ok(())
+        },
     )?;
     case.expect_json(
         "POST",
