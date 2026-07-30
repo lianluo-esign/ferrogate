@@ -14,12 +14,24 @@ double.
 
 The revision is published: the release tag promotes the schema out of
 `schema/draft/` into `schema/2026-07-28/`. Against the pre-release artifact
-FerroGate previously pinned (`71e30695...`, then still `schema/draft/`), the only
-schema change is the `subscriptions/listen` result envelope, which FerroGate does
-not implement — so re-pinning to the release does not move the ingress contract.
-The SDK commit's generated
-`packages/core-internal/src/types/spec.types.2026-07-28.ts` is the SDK-side
-artifact for the same revision.
+FerroGate previously pinned (`71e306956a4959c9655e5036be215d41986596e6`, then
+still `schema/draft/`), the only schema change is the `subscriptions/listen`
+result envelope, which FerroGate does not implement — so re-pinning to the
+release does not move the ingress contract.
+
+Two commits under one revision name, recorded as two separate facts:
+
+- **ingress pin** (`provenance.json` → `protocol_artifact`): released
+  `5f5440bb26a62e2cf3440b92da5a667efa03b267`, `schema/2026-07-28/schema.ts`.
+- **opponent SDK's generated-from** (`provenance.json` →
+  `opponent_generated_from`): pre-release
+  `71e306956a4959c9655e5036be215d41986596e6`, `schema/draft/schema.ts`. The SDK
+  commit's `packages/core-internal/src/types/spec.types.2026-07-28.ts` names
+  this commit in its own file header.
+
+The pinned SDK was **not** generated from the released commit. Do not collapse
+these two fields; `final_spec_pin_and_sdk_generated_from_pin_stay_distinct`
+turns red if they are.
 
 The `mcp-candidate-client-official` command name is historical and predates the
 release; the artifact it pins and every claim it prints are final.

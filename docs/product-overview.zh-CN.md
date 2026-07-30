@@ -31,8 +31,10 @@
   （commit `5f5440bb26a62e2cf3440b92da5a667efa03b267`）固定的 MCP 2026-07-28 正式版规范：
   无状态 `server/discover` 和逐请求校验。入口和出站客户端切片已有仓库内聚焦
   对端覆盖；可选命令 `ferrogate-test mcp-candidate-client-official`（名称为历史
-  遗留）固定使用由该规范生成的官方 TypeScript client，并让无状态现代请求交替
-  经过两个网关实例。cacheable result 带短 `ttlMs` 和授权私有的 `cacheScope`。
+  遗留）固定使用该 revision 的官方 TypeScript client；该 client 的类型生成自发布前的
+  `schema/draft/` 产物（commit `71e306956a4959c9655e5036be215d41986596e6`），而非入口
+  pin 所指的正式版 `schema/2026-07-28/` 产物 —— 同一 revision 名下的两个不同产物。
+  该命令让无状态现代请求交替经过两个网关实例。cacheable result 带短 `ttlMs` 和授权私有的 `cacheScope`。
   现代请求体 schema 错误返回 `-32602`，
   Streamable-HTTP header 错误返回 `-32020`。命令已实现不等于已执行通过；已固定
   子集之外的全规范一致性仍需独立验证。

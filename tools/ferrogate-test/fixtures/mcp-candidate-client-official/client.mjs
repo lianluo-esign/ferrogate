@@ -3,7 +3,11 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 const SDK_PACKAGE = '@modelcontextprotocol/client';
 const SDK_VERSION = '2.0.0';
 const SDK_COMMIT = 'cc4b41617ce3601b1290d67216ea0b194a3cd9ac';
+// Ingress pin: the released `schema/2026-07-28/schema.ts` artifact.
 const SPEC_COMMIT = '5f5440bb26a62e2cf3440b92da5a667efa03b267';
+// The SDK's own types were generated from the pre-release `schema/draft/`
+// artifact of the same revision. Distinct fact; never fold it into SPEC_COMMIT.
+const SDK_SPEC_COMMIT = '71e306956a4959c9655e5036be215d41986596e6';
 const SPEC_VERSION = '2026-07-28';
 
 const endpoint = process.env.FERROGATE_MCP_OFFICIAL_ENDPOINT;
@@ -87,7 +91,8 @@ process.stdout.write(
             version: SDK_VERSION,
             commit: SDK_COMMIT,
             protocolArtifactCommit: SPEC_COMMIT,
-            protocolArtifactStatus: 'final'
+            protocolArtifactStatus: 'final',
+            sdkSpecCommit: SDK_SPEC_COMMIT
         },
         specVersion: SPEC_VERSION,
         modern,

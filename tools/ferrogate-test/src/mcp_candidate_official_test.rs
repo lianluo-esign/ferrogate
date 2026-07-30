@@ -55,7 +55,8 @@ fn valid_evidence() -> OpponentEvidence {
             "version": "2.0.0",
             "commit": "cc4b41617ce3601b1290d67216ea0b194a3cd9ac",
             "protocolArtifactCommit": "5f5440bb26a62e2cf3440b92da5a667efa03b267",
-            "protocolArtifactStatus": "final"
+            "protocolArtifactStatus": "final",
+            "sdkSpecCommit": "71e306956a4959c9655e5036be215d41986596e6"
         },
         "specVersion": "2026-07-28",
         "modern": {
@@ -109,6 +110,23 @@ fn valid_evidence() -> OpponentEvidence {
 fn committed_opponent_provenance_and_lockfile_hold_the_exact_pins() {
     let root = repository_root().unwrap();
     verify_provenance(&root.join(FIXTURE_DIRECTORY)).unwrap();
+}
+
+/// The ingress pin and the artifact the opponent SDK's types were generated
+/// from are two different commits under one revision name. Folding them back
+/// into a single value makes the recorded evidence assert something untrue,
+/// so the harness must fail rather than silently agree.
+#[test]
+fn final_spec_pin_and_sdk_generated_from_pin_stay_distinct() {
+    assert_ne!(SPEC_COMMIT, SDK_SPEC_COMMIT);
+    assert_ne!(SPEC_SCHEMA_PATH, SDK_SPEC_SCHEMA_PATH);
+
+    let mut folded = valid_evidence();
+    folded.opponent.sdk_spec_commit = SPEC_COMMIT.to_string();
+    assert!(validate_evidence(&folded)
+        .unwrap_err()
+        .to_string()
+        .contains("generated from"));
 }
 
 #[test]

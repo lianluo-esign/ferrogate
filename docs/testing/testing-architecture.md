@@ -157,7 +157,11 @@ through the admin API but the runtime only ever read the tenant scope.
   `@modelcontextprotocol/client@2.0.0` from a committed npm lockfile, verifies
   npm integrity plus SDK commit `cc4b41617ce3601b1290d67216ea0b194a3cd9ac`
   and released spec tag `2026-07-28`
-  (commit `5f5440bb26a62e2cf3440b92da5a667efa03b267`), then drives two real local
+  (commit `5f5440bb26a62e2cf3440b92da5a667efa03b267`). That released commit is the
+  ingress pin; the SDK's own `spec.types.2026-07-28.ts` was generated from the
+  pre-release `schema/draft/` artifact
+  (commit `71e306956a4959c9655e5036be215d41986596e6`), so the two commits are
+  separate facts and the harness asserts them separately. It then drives two real local
   FerroGate instances in official SDK `auto` mode and one of them in `legacy`
   mode. Modern discover/list/call requests alternate between instances. Rust
   independently checks that instance sequence, the observed headers and

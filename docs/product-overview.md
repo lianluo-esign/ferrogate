@@ -37,13 +37,18 @@ work belongs in [`roadmap.md`](roadmap.md).
   official tag `2026-07-28` (commit `5f5440bb26a62e2cf3440b92da5a667efa03b267`).
   Ingress and outbound-client slices have focused in-repo peer coverage, and the
   opt-in `ferrogate-test mcp-candidate-client-official` path (historical name)
-  pins the official TypeScript client generated from that revision and alternates
-  its stateless modern requests across two gateway instances. Cacheable
+  pins the official TypeScript client for that revision; the client's types were
+  generated from the pre-release `schema/draft/` artifact
+  (commit `71e306956a4959c9655e5036be215d41986596e6`), not from the released
+  `schema/2026-07-28/` artifact the ingress pin names — two distinct artifacts
+  under one revision. The command alternates its stateless modern requests
+  across two gateway instances. Cacheable
   results carry a short `ttlMs` and authorization-private
   `cacheScope`. Modern
   body-schema failures use `-32602`; Streamable-HTTP header failures use
-  `-32020`. Execution evidence and final-spec conformance remain separate from
-  the command's implementation and must not be inferred from compilation.
+  `-32020`. Execution evidence and whole-spec conformance beyond the pinned
+  ingress subset remain separate from the command's implementation and must
+  not be inferred from compilation.
 - **Hosted asset closed loop** at `/v1/assets/*`: versioned publish/pull/
   delete with tenant quota accounting, artifact-registry semantics (channels
   such as latest/stable/canary, semver resolution, platform/arch variants,

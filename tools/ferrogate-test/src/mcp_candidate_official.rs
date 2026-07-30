@@ -28,7 +28,16 @@ const SDK_REPOSITORY: &str = "modelcontextprotocol/typescript-sdk";
 const SDK_TAG: &str = "@modelcontextprotocol/client@2.0.0";
 const SDK_COMMIT: &str = "cc4b41617ce3601b1290d67216ea0b194a3cd9ac";
 const SDK_TAG_OBJECT: &str = "ba0cd9ba0c5d56d1cf5635adece92349dff5af38";
+/// Ingress pin: the released `schema/2026-07-28/schema.ts` artifact.
 const SPEC_COMMIT: &str = "5f5440bb26a62e2cf3440b92da5a667efa03b267";
+const SPEC_SCHEMA_PATH: &str = "schema/2026-07-28/schema.ts";
+/// The opponent SDK's checked-in types were generated from the pre-release
+/// `schema/draft/` artifact of the same revision, not from [`SPEC_COMMIT`].
+/// Two artifacts under one revision name; folding them makes the recorded
+/// evidence state something that is not true.
+const SDK_SPEC_COMMIT: &str = "71e306956a4959c9655e5036be215d41986596e6";
+const SDK_SPEC_SCHEMA_PATH: &str = "schema/draft/schema.ts";
+const SDK_SPEC_GENERATED_SOURCE: &str = "packages/core-internal/src/types/spec.types.2026-07-28.ts";
 const SPEC_TAG: &str = "2026-07-28";
 const SPEC_VERSION: &str = "2026-07-28";
 
@@ -77,7 +86,10 @@ pub(crate) fn run_mcp_candidate_client_official(args: &LocalArgs) -> Result<()> 
         "mcp-candidate-client-official: opponent={SDK_PACKAGE}@{SDK_VERSION} sdk_commit={SDK_COMMIT}"
     );
     println!(
-        "mcp-candidate-client-official: protocol_artifact=modelcontextprotocol/modelcontextprotocol@{SPEC_COMMIT} tag={SPEC_TAG} status=final"
+        "mcp-candidate-client-official: protocol_artifact=modelcontextprotocol/modelcontextprotocol@{SPEC_COMMIT} tag={SPEC_TAG} status=final schema_path={SPEC_SCHEMA_PATH}"
+    );
+    println!(
+        "mcp-candidate-client-official: opponent_generated_from=modelcontextprotocol/modelcontextprotocol@{SDK_SPEC_COMMIT} schema_path={SDK_SPEC_SCHEMA_PATH}"
     );
     println!(
         "mcp-candidate-client-official: modern={} legacy={} two-instance discover/list/call + no-session wire contract passed",
@@ -156,9 +168,12 @@ fn verify_provenance(source: &Path) -> Result<()> {
         ("/protocol_artifact/tag", SPEC_TAG),
         ("/protocol_artifact/revision", SPEC_VERSION),
         ("/protocol_artifact/commit", SPEC_COMMIT),
+        ("/protocol_artifact/schema_path", SPEC_SCHEMA_PATH),
+        ("/opponent_generated_from/commit", SDK_SPEC_COMMIT),
+        ("/opponent_generated_from/schema_path", SDK_SPEC_SCHEMA_PATH),
         (
-            "/protocol_artifact/sdk_generated_source",
-            "packages/core-internal/src/types/spec.types.2026-07-28.ts",
+            "/opponent_generated_from/sdk_generated_source",
+            SDK_SPEC_GENERATED_SOURCE,
         ),
     ] {
         ensure!(
@@ -280,6 +295,7 @@ struct OpponentIdentity {
     commit: String,
     protocol_artifact_commit: String,
     protocol_artifact_status: String,
+    sdk_spec_commit: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,6 +336,10 @@ fn validate_evidence(evidence: &OpponentEvidence) -> Result<()> {
             && evidence.opponent.protocol_artifact_status == "final"
             && evidence.spec_version == SPEC_VERSION,
         "opponent no longer reports the pinned final 2026-07-28 artifact"
+    );
+    ensure!(
+        evidence.opponent.sdk_spec_commit == SDK_SPEC_COMMIT,
+        "opponent no longer reports the pre-release artifact its types were generated from"
     );
     validate_leg_result(&evidence.modern, "modern", SPEC_VERSION)?;
     validate_leg_result(&evidence.legacy, "legacy", "2025-11-25")?;
