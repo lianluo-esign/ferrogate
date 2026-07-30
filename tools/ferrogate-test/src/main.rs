@@ -8,6 +8,9 @@ use anyhow::Result;
 
 mod admin_console_roles;
 mod agent_jobs;
+/// #353: the worker-side egress hold-edge discriminant, observed as the
+/// SHIPPED agent-worker binary's real output rather than in-crate only.
+mod agent_worker_egress_wire_stage;
 mod api_contract;
 mod assertions;
 /// #368: the size+checksum-bound presigned staging upload path.
@@ -53,6 +56,7 @@ mod x402_spend_policy;
 
 use admin_console_roles::run_admin_console_roles_supabase;
 use agent_jobs::run_agent_jobs_api;
+use agent_worker_egress_wire_stage::run_agent_worker_egress_wire_stage;
 use api_contract::run_api_contract;
 use asset_presign::{run_asset_buffer_admission, run_asset_presign_api};
 use asset_registry::run_asset_registry_api;
@@ -121,6 +125,7 @@ fn main() -> Result<()> {
         postgres_restart: run_postgres_restart,
         postgres_tls_restart: run_postgres_tls_restart,
         worker_release: run_worker_release,
+        agent_worker_egress_wire_stage: run_agent_worker_egress_wire_stage,
         docker: run_docker_scenario,
         run_all_admin_auth_gateway: |local, auth, include_docker, image| {
             run_admin_api(local)?;
@@ -136,8 +141,12 @@ fn main() -> Result<()> {
             }
             Ok(())
         },
-        ci: |local, auth| {
+        ci: |local, auth, agent_worker| {
             run_worker_release()?;
+            // #353: the only place the worker-side hold-edge discriminant is
+            // observed as a real process's output. Deterministic, no Docker,
+            // no network beyond a loopback listener the binary spawns itself.
+            run_agent_worker_egress_wire_stage(&agent_worker.agent_worker_bin)?;
             run_api_contract(local)?;
             run_component_compliance(local)?;
             run_admin_api(local)?;

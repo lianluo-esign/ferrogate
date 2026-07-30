@@ -155,3 +155,33 @@ fn official_mcp_candidate_client_is_a_named_external_opponent_scenario() {
     };
     assert_eq!(args.ferrogate_bin, PathBuf::from("target/debug/ferrogate"));
 }
+
+/// #353: the worker-side hold-edge discriminant is a named, deterministic
+/// scenario with an overridable binary path — it must not be reachable only as
+/// an unnamed step buried inside `ci`.
+#[test]
+fn agent_worker_egress_wire_stage_is_a_named_local_scenario() {
+    let cli = Cli::try_parse_from(["ferrogate-test", "agent-worker-egress-wire-stage"]).unwrap();
+    let Commands::AgentWorkerEgressWireStage(args) = cli.command else {
+        panic!("expected the agent-worker egress wire-stage scenario");
+    };
+    assert_eq!(
+        args.agent_worker_bin,
+        std::path::PathBuf::from("target/debug/agent-worker")
+    );
+
+    let overridden = Cli::try_parse_from([
+        "ferrogate-test",
+        "agent-worker-egress-wire-stage",
+        "--agent-worker-bin",
+        "/opt/ferrogate/agent-worker",
+    ])
+    .unwrap();
+    let Commands::AgentWorkerEgressWireStage(args) = overridden.command else {
+        panic!("expected the agent-worker egress wire-stage scenario");
+    };
+    assert_eq!(
+        args.agent_worker_bin,
+        std::path::PathBuf::from("/opt/ferrogate/agent-worker")
+    );
+}

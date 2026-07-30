@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrogate-test")]
@@ -100,6 +100,8 @@ pub(crate) enum Commands {
     PostgresTlsRestart(LocalArgs),
     /// Prove Worker lockfiles install, resolve, typecheck, and run from a clean checkout.
     WorkerRelease,
+    /// Prove the shipped agent-worker binary emits the typed egress hold-edge discriminant (#353).
+    AgentWorkerEgressWireStage(AgentWorkerArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
     Ci(CiArgs),
 }
@@ -155,6 +157,19 @@ pub(crate) struct CiArgs {
     pub(crate) local: LocalArgs,
     #[command(flatten)]
     pub(crate) auth: AuthArgs,
+    #[command(flatten)]
+    pub(crate) agent_worker: AgentWorkerArgs,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct AgentWorkerArgs {
+    /// Path to a built agent-worker binary. Defaults to target/debug/agent-worker.
+    #[arg(
+        long,
+        env = "FERROGATE_TEST_AGENT_WORKER_BIN",
+        default_value = "target/debug/agent-worker"
+    )]
+    pub(crate) agent_worker_bin: PathBuf,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -295,9 +310,10 @@ pub(crate) struct Dispatch {
     pub(crate) postgres_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) postgres_tls_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) worker_release: fn() -> Result<()>,
+    pub(crate) agent_worker_egress_wire_stage: fn(&Path) -> Result<()>,
     pub(crate) docker: fn(DockerScenario, &str) -> Result<()>,
     pub(crate) run_all_admin_auth_gateway: fn(&LocalArgs, &AuthArgs, bool, &str) -> Result<()>,
-    pub(crate) ci: fn(&LocalArgs, &AuthArgs) -> Result<()>,
+    pub(crate) ci: fn(&LocalArgs, &AuthArgs, &AgentWorkerArgs) -> Result<()>,
 }
 
 pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
@@ -362,7 +378,10 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::PostgresRestart(args) => (dispatch.postgres_restart)(&args),
         Commands::PostgresTlsRestart(args) => (dispatch.postgres_tls_restart)(&args),
         Commands::WorkerRelease => (dispatch.worker_release)(),
-        Commands::Ci(args) => (dispatch.ci)(&args.local, &args.auth),
+        Commands::AgentWorkerEgressWireStage(args) => {
+            (dispatch.agent_worker_egress_wire_stage)(&args.agent_worker_bin)
+        }
+        Commands::Ci(args) => (dispatch.ci)(&args.local, &args.auth, &args.agent_worker),
     }
 }
 
