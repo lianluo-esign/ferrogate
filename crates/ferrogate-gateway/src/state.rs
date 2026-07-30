@@ -67,7 +67,7 @@ use ferrogate_mcp::{
 };
 use ferrogate_observability::{
     GatewayMetricsSnapshot, McpMethodMetricTotal, ModelProviderMetricTotal, RequestStatusMetric,
-    TokenMetricTotals, UnjoinableActionMetricTotal,
+    TokenMetricTotals, UnjoinableActionMetricTotal, X402ReconcileMetricTotals,
 };
 use ferrogate_policy::{
     resolve_effective_quota, BasicPolicyEngine, EffectiveQuota, PolicyDecision, PolicyEngine,
@@ -3249,6 +3249,10 @@ struct GatewayMetricsAccumulator {
     asset_lifecycle_pruned_total: u64,
     /// #263: lifecycle prune/GC delete operations that failed.
     asset_lifecycle_failed_total: u64,
+    /// #354: the x402 settlement reconciler's cumulative per-outcome counters
+    /// plus the last tick's oldest-unresolved hold age (a GAUGE, overwritten per
+    /// tick rather than accumulated).
+    x402_reconcile_totals: X402ReconcileMetricTotals,
     /// #368: presigned staging upload intents issued with a bound PUT URL.
     asset_presign_intent_issued_total: u64,
     /// #368: intents refused by the gateway's own preflight.
@@ -3781,6 +3785,7 @@ impl GatewayMetricsAccumulator {
             asset_lifecycle_scanned_total: self.asset_lifecycle_scanned_total,
             asset_lifecycle_pruned_total: self.asset_lifecycle_pruned_total,
             asset_lifecycle_failed_total: self.asset_lifecycle_failed_total,
+            x402_reconcile_totals: self.x402_reconcile_totals.clone(),
             asset_presign_intent_issued_total: self.asset_presign_intent_issued_total,
             asset_presign_intent_rejected_total: self.asset_presign_intent_rejected_total,
             asset_presign_bucket_rejected_total: self.asset_presign_bucket_rejected_total,
@@ -3789,6 +3794,25 @@ impl GatewayMetricsAccumulator {
             asset_presign_aborted_total: self.asset_presign_aborted_total,
             asset_presign_abort_reclaim_failed_total: self.asset_presign_abort_reclaim_failed_total,
         }
+    }
+
+    /// #354: fold one reconcile pass into the cumulative x402 counters. The
+    /// outcome counters accumulate; `oldest_unresolved_hold_age_seconds` is a
+    /// GAUGE and is OVERWRITTEN, because the operator needs the current depth of
+    /// the oldest in-flight hold, not the worst value ever seen -- a max-forever
+    /// gauge would stay pinned at a spike that has since been reconciled.
+    fn record_x402_reconcile_tick(&mut self, report: &state_x402_reconciler::X402ReconcileReport) {
+        let totals = &mut self.x402_reconcile_totals;
+        totals.scanned = totals.scanned.saturating_add(report.scanned);
+        totals.settled = totals.settled.saturating_add(report.settled);
+        totals.overpaid = totals.overpaid.saturating_add(report.overpaid);
+        totals.failed = totals.failed.saturating_add(report.failed);
+        totals.pending = totals.pending.saturating_add(report.pending);
+        totals.mismatch = totals.mismatch.saturating_add(report.mismatch);
+        totals.unresolved = totals.unresolved.saturating_add(report.unresolved);
+        totals.skipped = totals.skipped.saturating_add(report.skipped);
+        totals.errored = totals.errored.saturating_add(report.errored);
+        totals.oldest_unresolved_hold_age_seconds = report.oldest_unresolved_hold_age_secs;
     }
 
     /// #368: fold one presigned-upload outcome into the cumulative counters.

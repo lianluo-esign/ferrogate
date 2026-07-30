@@ -112,6 +112,11 @@ pub struct GatewayMetricsSnapshot {
     /// refused is counted here *and* in
     /// `asset_presign_abort_reclaim_failed_total`.
     pub asset_presign_aborted_total: u64,
+    /// #354: the x402 on-chain settlement reconciler's own signal — the
+    /// per-outcome tick counters plus the oldest-unresolved hold age. Until this
+    /// existed the reconciler's only output was a `tracing` line, so "money is
+    /// stuck in `outcome_unknown`" was not alertable.
+    pub x402_reconcile_totals: X402ReconcileMetricTotals,
     /// #368: aborts that found staged bytes and failed to delete them, so the
     /// promised immediate reclamation did not happen and the lifecycle GC
     /// (`asset_lifecycle_pruned_total`) is the only remaining path. The
@@ -132,6 +137,54 @@ pub struct TokenMetricTotals {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+}
+
+/// #354 x402 settlement reconciler telemetry.
+///
+/// The counters are cumulative across ticks and mirror `X402ReconcileReport`'s
+/// disjointness: every scanned attempt bumps exactly one of
+/// `settled`/`failed`/`pending`/`mismatch`/`unresolved`/`skipped`/`errored`, so
+/// those seven sum to `scanned`. `overpaid` is the one deliberate exception — it
+/// is a breakout of `settled`, not an outcome of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct X402ReconcileMetricTotals {
+    /// Post-submission attempts fetched and driven across all ticks.
+    pub scanned: u64,
+    /// Confirmed transfers covering the owed amount, driven to `settled` (hold
+    /// captured).
+    pub settled: u64,
+    /// Breakout of `settled`: confirmed transfers that EXCEEDED the owed amount.
+    /// Not disjoint from `settled`.
+    pub overpaid: u64,
+    /// Definitive failures driven to `failed` (hold released).
+    pub failed: u64,
+    /// Re-parked `outcome_unknown` because the chain has not answered yet.
+    pub pending: u64,
+    /// Confirmed on-chain but short of (or unparseable against) the owed amount:
+    /// fail-closed, hold retained, needs an operator. Alert on any non-zero rate.
+    pub mismatch: u64,
+    /// The chosen edge could not be proven complete across an async boundary.
+    pub unresolved: u64,
+    /// Nothing to verify yet (no signature), or the attempt raced to a terminal.
+    pub skipped: u64,
+    /// Per-attempt RPC/storage errors, isolated so one failure never aborts a
+    /// batch.
+    pub errored: u64,
+    /// GAUGE, not a counter: the age in seconds of the oldest hold the LAST
+    /// completed tick scanned and did NOT resolve, measured from the attempt's
+    /// submission. This is the "money stuck in flight" signal box 5 of #354 asks
+    /// for — it grows without bound while an attempt cannot be resolved.
+    ///
+    /// It is a LOWER BOUND on the true population maximum, not the maximum
+    /// itself. A tick scans one page — at most `max_reconciles_per_tick`
+    /// attempts whose re-check cursor is older than `reconcile_check_delay_secs`
+    /// — so an older unresolved attempt outside that page is not observed by
+    /// this tick. Read it as "at least this old"; it is monotone enough to alert
+    /// on a threshold, and never proof that nothing older exists.
+    ///
+    /// Resets to 0 on a tick that resolved everything it scanned, that scanned
+    /// nothing, or that did not run (reconciler disabled / no RPC bound).
+    pub oldest_unresolved_hold_age_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

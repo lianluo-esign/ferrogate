@@ -1527,3 +1527,141 @@ fn reconcile_overpaid_settlement_is_never_captured_twice_on_a_later_tick() {
         "the hold is captured exactly once across ticks"
     );
 }
+
+// --------------------------------------------------------------------------
+// Box 5 of #354: the reconcile signal is a metric an operator can alert on,
+// not just a log line
+// --------------------------------------------------------------------------
+
+/// Park an attempt `outcome_unknown` at caller-chosen times, so a batch can hold
+/// attempts that have been in flight for different lengths of time.
+fn seed_outcome_unknown_at(
+    state: &AppState,
+    attempt_id: &str,
+    credits: i64,
+    signature: &str,
+    submit_at: i64,
+    park_at: i64,
+) {
+    let loop_ = state.x402_settlement_loop();
+    block_on(loop_.open(&open_request(attempt_id, credits), OPEN_AT)).expect("open");
+    block_on(loop_.submit(attempt_id, None, submit_at, submit_at)).expect("submit");
+    let header = merchant_success_header(signature, OWED_ATOMIC);
+    block_on(loop_.finalize(
+        attempt_id,
+        &SettlementEvidence::Unknown {
+            response: Some(&header),
+            transaction_signature: None,
+        },
+        park_at,
+    ))
+    .expect("park outcome_unknown");
+}
+
+/// The hold-age signal reports the OLDEST hold the tick left unresolved, dated
+/// from SUBMISSION, and it reaches the Prometheus snapshot.
+///
+/// This is the "money is stuck in flight" signal box 5 asks for. Before it
+/// existed the reconciler's only output was a `tracing` line, so an attempt
+/// stuck in `outcome_unknown` for hours was invisible to alerting.
+///
+/// Two attempts submitted at different times, both pending on-chain, pin three
+/// separate decisions at once:
+///   * oldest, not newest (`min` instead of `max` reports 10_000 here);
+///   * from submission, not creation (both were opened at `OPEN_AT`, so dating
+///     from creation reports 99_900 for both);
+///   * published to the metrics registry, not only to the log line.
+#[test]
+fn reconcile_reports_the_oldest_unresolved_hold_age_and_publishes_it() {
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let old_sig = signature(21);
+    let recent_sig = signature(22);
+    // In flight since 1_000 -> 99_000s old at RECONCILE_NOW.
+    seed_outcome_unknown_at(&state, "aged", 500, &old_sig, 1_000, 1_100);
+    // In flight since 90_000 -> 10_000s old.
+    seed_outcome_unknown_at(&state, "recent", 500, &recent_sig, 90_000, 90_100);
+
+    let rpc = FakeOnChainRpc::default()
+        .with(&old_sig, OnChainSettlementStatus::Pending)
+        .with(&recent_sig, OnChainSettlementStatus::Pending);
+    let report = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW));
+
+    assert_eq!(report.scanned, 2);
+    assert_eq!(report.pending, 2);
+    assert_eq!(
+        report.oldest_unresolved_hold_age_secs,
+        (RECONCILE_NOW - 1_000) as u64,
+        "the signal is the OLDEST in-flight hold, dated from its submission"
+    );
+
+    let snapshot = state.prometheus_metrics_snapshot();
+    let totals = &snapshot.x402_reconcile_totals;
+    assert_eq!(totals.scanned, 2);
+    assert_eq!(totals.pending, 2);
+    assert_eq!(totals.settled, 0);
+    assert_eq!(
+        totals.oldest_unresolved_hold_age_seconds,
+        (RECONCILE_NOW - 1_000) as u64,
+        "the reconcile signal must reach the metrics registry, not just the log"
+    );
+}
+
+/// A resolved attempt is not an in-flight hold, and the age is a GAUGE: a later
+/// tick that resolves everything it scanned takes it back to 0 rather than
+/// leaving the previous peak pinned forever.
+///
+/// A max-forever accumulation would look identical on the first tick and would
+/// then never recover, so the alert it feeds could never clear.
+#[test]
+fn a_resolved_attempt_clears_the_hold_age_gauge() {
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let stuck_sig = signature(31);
+    seed_outcome_unknown_at(&state, "stuck", 500, &stuck_sig, 1_000, 1_100);
+
+    // Tick 1: nothing resolves, so the gauge carries the age.
+    let pending_rpc = FakeOnChainRpc::default().with(&stuck_sig, OnChainSettlementStatus::Pending);
+    let first = block_on(state.reconcile_x402_settlements_once(&pending_rpc, RECONCILE_NOW));
+    assert_eq!(first.pending, 1);
+    assert_eq!(
+        first.oldest_unresolved_hold_age_secs,
+        (RECONCILE_NOW - 1_000) as u64
+    );
+    assert_eq!(
+        state
+            .prometheus_metrics_snapshot()
+            .x402_reconcile_totals
+            .oldest_unresolved_hold_age_seconds,
+        (RECONCILE_NOW - 1_000) as u64
+    );
+
+    // Tick 2: the chain confirms, the attempt settles, and nothing is left in
+    // flight. The backoff cursor moved to RECONCILE_NOW, so the second tick has
+    // to be far enough ahead for the attempt to be due again.
+    let later = RECONCILE_NOW + 10_000;
+    let confirmed_rpc = FakeOnChainRpc::default().with(
+        &stuck_sig,
+        OnChainSettlementStatus::Confirmed {
+            settled_atomic_amount: OWED_ATOMIC.to_string(),
+        },
+    );
+    let second = block_on(state.reconcile_x402_settlements_once(&confirmed_rpc, later));
+    assert_eq!(second.settled, 1);
+    assert_eq!(
+        second.oldest_unresolved_hold_age_secs, 0,
+        "a settled attempt is no longer an in-flight hold"
+    );
+    assert_eq!(
+        block_on(attempt_state(&state, "stuck")),
+        PAYMENT_ATTEMPT_SETTLED
+    );
+
+    let totals = state.prometheus_metrics_snapshot().x402_reconcile_totals;
+    assert_eq!(
+        totals.oldest_unresolved_hold_age_seconds, 0,
+        "the age is a gauge: it must fall back to 0, not stay pinned at the peak"
+    );
+    // The outcome counters, by contrast, ARE cumulative across the two ticks.
+    assert_eq!(totals.scanned, 2);
+    assert_eq!(totals.pending, 1);
+    assert_eq!(totals.settled, 1);
+}

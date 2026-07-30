@@ -1229,3 +1229,177 @@ fn reported_amount_decision_table() {
     );
     assert_eq!(classify_reported_amount("", Some(u64::MAX)), short(&max));
 }
+
+// --------------------------------------------------------------------------
+// Box 3 of #354: one authorized payment is signed exactly once, even when the
+// negotiation is replayed
+// --------------------------------------------------------------------------
+
+/// Replaying a negotiation for an attempt that is already resolved must not
+/// reach the signer.
+///
+/// `loop_.open` is idempotent on `attempt_id`, so the second negotiation gets
+/// the FIRST one's `settled` attempt back rather than a fresh `authorized` one.
+/// Before the short-circuit, that `Opened(_)` was discarded and the code walked
+/// straight on into `build_payment_signature` + `submit`: a SECOND signed
+/// transfer proof for one authorized payment, on an attempt whose hold had
+/// already been captured.
+///
+/// The signer is shared across both calls, so `call_count()` counts proofs
+/// built for this payment across the whole replay — the exact quantity box 3
+/// bounds. Deleting the short-circuit makes it 2.
+#[test]
+fn a_replayed_negotiation_never_signs_a_second_proof() {
+    let state = seed_state(10_000);
+    let policy = allowing_policy();
+    let signer = FakeSigner::allowing();
+    let loop_ = state.x402_settlement_loop();
+
+    // First negotiation: pays and settles.
+    let first = FakeTransport::new(vec![
+        payment_required_response(),
+        success_response(Some(settled_payment_response())),
+    ]);
+    let outcome = block_on(negotiate_paid_egress(
+        &loop_,
+        &policy,
+        &SpendSnapshot::default(),
+        &context(),
+        &first,
+        &signer,
+        300,
+    ))
+    .expect("first negotiation succeeds");
+    let attempt_id = match outcome {
+        X402Negotiation::Paid { attempt_id, .. } => attempt_id,
+        other => panic!("expected Paid, got {other:?}"),
+    };
+    assert_eq!(signer.call_count(), 1);
+    let balance_after_first = block_on(wallet_balance(&state));
+
+    // Second negotiation: SAME idempotency key and SAME challenge, so the same
+    // attempt id. The merchant 402s again (it has no idea the first payment
+    // settled); only the second dispatch would be the paid replay.
+    let replay = FakeTransport::new(vec![
+        payment_required_response(),
+        success_response(Some(settled_payment_response())),
+    ]);
+    let error = block_on(negotiate_paid_egress(
+        &loop_,
+        &policy,
+        &SpendSnapshot::default(),
+        &context(),
+        &replay,
+        &signer,
+        400,
+    ))
+    .expect_err("a replayed negotiation is a typed failure, not a second payment");
+
+    match &error {
+        X402NegotiationError::DuplicateNegotiation {
+            attempt_id: replayed_id,
+            state: replayed_state,
+            authorization,
+        } => {
+            assert_eq!(replayed_id, &attempt_id);
+            assert_eq!(replayed_state, PAYMENT_ATTEMPT_SETTLED);
+            // The policy still ran and still allowed: the refusal is about the
+            // attempt already existing, not about authority.
+            assert!(authorization.is_allowed());
+        }
+        other => panic!("expected DuplicateNegotiation, got {other:?}"),
+    }
+
+    // The proof count for this payment did not move.
+    assert_eq!(
+        signer.call_count(),
+        1,
+        "a replayed negotiation must not build a second transfer proof"
+    );
+    // No paid replay: the replay's transport saw only the unpaid dispatch, so
+    // the merchant was never handed a second PAYMENT-SIGNATURE.
+    assert_eq!(replay.calls(), vec![false]);
+    // The settled attempt is untouched and no second hold was captured.
+    let attempt = block_on(attempt(&state, &attempt_id));
+    assert_eq!(attempt.state, PAYMENT_ATTEMPT_SETTLED);
+    assert_eq!(
+        block_on(wallet_balance(&state)),
+        balance_after_first,
+        "a replayed negotiation must not move money"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, &attempt_id)).as_deref(),
+        Some(WALLET_RESERVATION_SETTLED)
+    );
+}
+
+/// The same short-circuit protects the genuinely dangerous case: an attempt
+/// parked `outcome_unknown` with its hold RETAINED, whose money may be moving
+/// on-chain right now. Signing again here would put a second transfer on-chain
+/// for a payment that is already in flight.
+#[test]
+fn a_replayed_negotiation_over_an_unresolved_attempt_never_signs_again() {
+    let state = seed_state(10_000);
+    let policy = allowing_policy();
+    let signer = FakeSigner::allowing();
+    let loop_ = state.x402_settlement_loop();
+
+    // First negotiation: 2xx with NO settlement evidence -> outcome_unknown,
+    // hold retained.
+    let first = FakeTransport::new(vec![payment_required_response(), success_response(None)]);
+    let outcome = block_on(negotiate_paid_egress(
+        &loop_,
+        &policy,
+        &SpendSnapshot::default(),
+        &context(),
+        &first,
+        &signer,
+        300,
+    ))
+    .expect("first negotiation succeeds");
+    let attempt_id = match outcome {
+        X402Negotiation::Paid { attempt_id, .. } => attempt_id,
+        other => panic!("expected Paid, got {other:?}"),
+    };
+    assert_eq!(
+        block_on(attempt(&state, &attempt_id)).state,
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    );
+    assert_eq!(signer.call_count(), 1);
+
+    let replay = FakeTransport::new(vec![
+        payment_required_response(),
+        success_response(Some(settled_payment_response())),
+    ]);
+    let error = block_on(negotiate_paid_egress(
+        &loop_,
+        &policy,
+        &SpendSnapshot::default(),
+        &context(),
+        &replay,
+        &signer,
+        400,
+    ))
+    .expect_err("a replay over an unresolved attempt is a typed failure");
+
+    assert!(
+        matches!(
+            &error,
+            X402NegotiationError::DuplicateNegotiation { state, .. }
+                if state == PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+        ),
+        "{error:?}"
+    );
+    assert_eq!(signer.call_count(), 1);
+    assert_eq!(replay.calls(), vec![false]);
+    // The hold is still RETAINED for the reconciler: the replay neither
+    // captured nor released it.
+    assert_eq!(
+        block_on(reservation_status(&state, &attempt_id)).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE)
+    );
+    assert_eq!(
+        block_on(attempt(&state, &attempt_id)).state,
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    );
+}

@@ -281,8 +281,16 @@ pub(crate) fn run_x402_paid_egress_chain(args: &LocalArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Acceptance: "Happy path produces exactly one origin side effect, one on-chain
-/// settlement evidence record, and one internal wallet capture" and "Duplicate
-/// request/idempotency replay cannot sign, settle, or capture twice".
+/// settlement evidence record, and one internal wallet capture", plus the
+/// SETTLE and CAPTURE halves of "duplicate request/idempotency replay cannot
+/// sign, settle, or capture twice".
+///
+/// The SIGN half is deliberately not claimed here and is not proven by this
+/// chain: there is no signer anywhere in it. It is proven at the negotiation
+/// core instead, by `a_replayed_negotiation_never_signs_a_second_proof` in
+/// `crates/ferrogate-gateway/src/state_x402_negotiation_test.rs`, which counts
+/// proofs built across a replay against an instrumented signer. Quoting the box
+/// verbatim here previously implied this leg covered signing (#354 doc nit).
 fn run_settled_leg(
     gateway_addr: &str,
     origin: &PaidOriginDouble,

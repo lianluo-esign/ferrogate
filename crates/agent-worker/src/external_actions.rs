@@ -1395,8 +1395,14 @@ impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
                 format!("gateway external action HTTP authorizer request shutdown failed: {error}"),
             );
         }
+        // Bounded like the paid-egress read below (#354 box 8): the length check
+        // that follows bounds the ACCEPTED size, not the memory, so on its own it
+        // still lets the peer decide how much the worker buffers before the
+        // refusal. Reading one byte past the cap keeps the refusal identical
+        // while making the buffer bounded by the cap rather than by the peer.
         let mut response = Vec::new();
-        if let Err(error) = stream.read_to_end(&mut response) {
+        let mut bounded = Read::take(&mut stream, over_cap_probe_limit());
+        if let Err(error) = bounded.read_to_end(&mut response) {
             return transport_failure_decision(
                 &request,
                 format!("gateway external action HTTP authorizer response read failed: {error}"),
@@ -4049,12 +4055,31 @@ fn run_authorized_rest_action(
             "managed REST action request shutdown failed: {error}"
         ))
     })?;
+    // The MERCHANT chooses this body, so the read is bounded rather than
+    // read-to-end (#354 box 8). An unbounded `read_to_end` let a remote peer
+    // size the worker's heap: measured `VmHWM` deltas of +4 MB / +65 MB / +196 MB
+    // for served bodies of 1 / 64 / 256 MiB -- peak RSS tracking the served body
+    // roughly 1:1, with the only existing limit (`recorded_http_excerpt`'s
+    // 512-char cap) applied cosmetically AFTER the whole body was already
+    // resident. Read one byte past the cap so an over-cap body is REFUSED rather
+    // than silently truncated into the status/header parse below.
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).map_err(|error| {
+    let mut bounded = Read::take(&mut stream, over_cap_probe_limit());
+    bounded.read_to_end(&mut response).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
             "managed REST action response read failed: {error}"
         ))
     })?;
+    if response.len() > EXTERNAL_ACTION_MAX_MESSAGE_BYTES {
+        // The request is already on the wire, so this is `SentOrUnknown` via
+        // `From` like every other post-write failure: the merchant may well have
+        // served (and charged for) the resource we are refusing to buffer.
+        return Err(FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action response exceeds the {EXTERNAL_ACTION_MAX_MESSAGE_BYTES}-byte \
+             maximum message size"
+        ))
+        .into());
+    }
     let response = String::from_utf8_lossy(&response);
     let status_code = parse_smoke_http_status(response.lines().next().unwrap_or_default())?;
     if status_code == STATUS_PAYMENT_REQUIRED {
@@ -4261,8 +4286,20 @@ fn smoke_session(mode: FrameworkAdapterMode) -> FrameworkAdapterSession {
     }
 }
 
+/// The read budget every bounded external-action read shares: the cap plus ONE
+/// byte, so an over-cap message is detected as over-cap instead of arriving
+/// truncated to exactly the cap and being parsed as if it were complete.
+///
+/// This is the memory bound, not the acceptance bound. It caps what a peer can
+/// make this process buffer; the caller still compares the result against
+/// [`EXTERNAL_ACTION_MAX_MESSAGE_BYTES`] and refuses. It is a PER-READ bound with
+/// no admission control, so N concurrent dispatches can hold N times this much.
+fn over_cap_probe_limit() -> u64 {
+    (EXTERNAL_ACTION_MAX_MESSAGE_BYTES as u64).saturating_add(1)
+}
+
 fn read_external_action_stream<R: Read>(reader: &mut R, output: &mut String) -> Result<()> {
-    let mut limited = reader.take((EXTERNAL_ACTION_MAX_MESSAGE_BYTES + 1) as u64);
+    let mut limited = reader.take(over_cap_probe_limit());
     limited.read_to_string(output)?;
     if output.len() > EXTERNAL_ACTION_MAX_MESSAGE_BYTES {
         anyhow::bail!("agent-worker external action request exceeds maximum message size");

@@ -34,6 +34,11 @@
 //     any wallet hold, signer call, or dispatch -- the signer is never invoked
 //     for a payment policy did not allow, and insufficient funds never reaches
 //     the signer either (the hold is opened before the proof is built).
+//   * SINGLE proof per authorized payment. `open` is idempotent on `attempt_id`,
+//     so a replayed negotiation gets the first one's attempt back. Any state
+//     other than `authorized` means a proof already exists, and the replay fails
+//     closed BEFORE the signer (`DuplicateNegotiation`) rather than signing a
+//     second transfer for one authorized payment.
 //   * Fail closed on ambiguity. After the proof is submitted (`submit`), any
 //     outcome that is not durable on-chain-settlement proof is parked
 //     `outcome_unknown` with the hold RETAINED (never a false release that could
@@ -65,7 +70,7 @@ use ferrogate_policy::{
     authorize_x402_payment, PaymentAuthorization, PaymentAuthorizationRequest, PaymentDecision,
     SpendScope, SpendSnapshot, ValidatedX402SpendPolicy,
 };
-use ferrogate_storage::StorageError;
+use ferrogate_storage::{StorageError, PAYMENT_ATTEMPT_AUTHORIZED};
 
 use super::state_x402_settlement::{
     classify_settled_amount, AmountCoverage, EdgeOutcome, OpenOutcome, PaidEgressOpen,
@@ -273,6 +278,20 @@ pub(crate) enum X402NegotiationError {
         rejection: FundingRejection,
         authorization: Box<PaymentAuthorization>,
     },
+    /// This negotiation replayed an `attempt_id` whose durable attempt has
+    /// already moved past `authorized`, so the proof for it was built (and very
+    /// likely submitted) by the first negotiation. Returned BEFORE the signer is
+    /// reached: signing again would produce a second transfer proof for one
+    /// authorized payment, which is the one thing acceptance box 3 of #354
+    /// forbids. Nothing is signed, submitted or replayed, and the existing
+    /// attempt is left exactly as the first negotiation (or the reconciler) left
+    /// it -- its outcome is read from `state`, never re-driven from here.
+    DuplicateNegotiation {
+        attempt_id: String,
+        /// The existing attempt's durable state at the moment of the replay.
+        state: String,
+        authorization: Box<PaymentAuthorization>,
+    },
     /// The injected signer refused to build the proof. The pre-submission hold
     /// was released; nothing was submitted.
     SignerRejected {
@@ -343,6 +362,13 @@ impl fmt::Display for X402NegotiationError {
                     write!(f, "x402 payment unfunded: no wallet governs the tenant")
                 }
             },
+            Self::DuplicateNegotiation {
+                attempt_id, state, ..
+            } => write!(
+                f,
+                "x402 payment attempt {attempt_id} is already {state}; a replayed negotiation \
+                 never signs or submits a second proof"
+            ),
             Self::SignerRejected { reason, .. } => {
                 write!(f, "x402 signer refused to build the proof: {reason}")
             }
@@ -463,8 +489,8 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
     let credits_amount = credits_i64(&authorization)?;
     let attempt_id = format!("{}:{}", ctx.idempotency_key, selected.challenge_hash_hex());
     let open = build_open(ctx, &selected, &authorization, &attempt_id, credits_amount);
-    match loop_.open(&open, now_unix).await? {
-        OpenOutcome::Opened(_) => {}
+    let opened = match loop_.open(&open, now_unix).await? {
+        OpenOutcome::Opened(attempt) => attempt,
         OpenOutcome::Insufficient {
             available_credits,
             requested_credits,
@@ -483,6 +509,25 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
                 authorization,
             });
         }
+    };
+
+    // 4b. `open` is idempotent on `attempt_id`, so a REPLAYED negotiation for the
+    //     same idempotency key + challenge gets the FIRST negotiation's attempt
+    //     back instead of a fresh `authorized` one -- with no second hold and no
+    //     second row. Anything other than `authorized` therefore means a proof
+    //     for this payment already exists, so the signer must not run again:
+    //     signing twice is a second transfer proof for one authorized payment,
+    //     and the `submitted`/`outcome_unknown` cases have money that may already
+    //     be moving on-chain. Fail closed BEFORE the signer, leaving the existing
+    //     attempt and its hold exactly as the first negotiation (or the
+    //     reconciler) left them -- the replay never re-drives a finalize edge,
+    //     because it has no fresh on-chain evidence to justify one.
+    if opened.state != PAYMENT_ATTEMPT_AUTHORIZED {
+        return Err(X402NegotiationError::DuplicateNegotiation {
+            attempt_id,
+            state: opened.state,
+            authorization,
+        });
     }
 
     // 5. Build the proof via the injected signer (#350/#353). A refusal releases
