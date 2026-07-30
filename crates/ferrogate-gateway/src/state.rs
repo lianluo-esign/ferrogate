@@ -828,6 +828,37 @@ impl SharedAppState {
             .source_path()
             .ok_or_else(|| anyhow::anyhow!("runtime was not started from a config file"))?;
         let mut candidate = Config::load(path)?;
+        // #555: run the #542 startup auth-posture gate on the FILE-declared
+        // credentials, BEFORE the control-plane reconcile below. Startup refuses
+        // the contradiction `[auth] disabled = true` alongside a declared static
+        // credential (`[[api_keys]]`/`[auth_service]`); a `POST
+        // /admin/v1/config/reload` with `source=file` must refuse it too, or the
+        // operator can reintroduce at runtime a posture the gateway would never
+        // boot into. The check MUST see the file config, not the post-reconcile
+        // one: `apply_control_plane_snapshot_to_config` REPLACES
+        // `candidate.api_keys` with the durable control-plane documents (and sets
+        // `api_keys_are_control_plane_documents`), so running the same predicate
+        // after it would both MISS a file-declared `[[api_keys]]` contradiction
+        // (the file keys are gone) and WRONGLY reject a legitimate durable
+        // deployment whose merged keys sit next to a deliberately-open `[auth]
+        // disabled = true` (the allowed-but-warned case). This mirrors the inline
+        // payload path, which already runs the gate in `config_from_admin_payload`
+        // before applying the operator-supplied config. Refusals return an error
+        // to the caller (surfaced as a failed reload) -- NEVER a process exit:
+        // the running config stays live and untouched.
+        match crate::lifecycle::ensure_auth_posture_is_declared(&candidate) {
+            Ok(warnings) => {
+                for warning in warnings {
+                    warn!("{warning}");
+                }
+            }
+            Err(refusal) => {
+                return Err(refusal.context(
+                    "config reload rejected: the candidate config on disk fails the #542 \
+                     auth-posture gate that startup enforces; the running config is unchanged",
+                ));
+            }
+        }
         // Reconcile the durable control-plane snapshot into the file-loaded
         // config BEFORE applying it -- exactly as startup and every other reload
         // path do. Without this, a file reload wholesale-replaces the control
@@ -7599,6 +7630,119 @@ mod tests {
         assert_eq!(plan.mode, RELOAD_MODE_LISTENER_LEVEL_REQUIRED);
         assert!(plan.listener_reload_required);
         assert_eq!(plan.reason.as_deref(), Some(rejection.as_str()));
+    }
+
+    /// #555: `POST /admin/v1/config/reload` with `source=file` used to skip the
+    /// #542 auth-posture gate, so a file edit could reintroduce at runtime the
+    /// contradiction startup refuses -- `[auth] disabled = true` next to a
+    /// file-declared `[[api_keys]]`, which silently ignores the key and admits
+    /// every caller as platform root. The file reload must be REJECTED and the
+    /// running config left exactly as it was.
+    ///
+    /// Not-tested mutation: delete the `ensure_auth_posture_is_declared` block
+    /// added to `reload_from_source_path` -- without it the reload commits the
+    /// contradiction and this test reds (the `Err` becomes `Ok`, and the running
+    /// config flips to `auth.disabled = true`).
+    #[test]
+    fn file_reload_rejects_the_auth_disabled_plus_file_key_contradiction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "listen = \"127.0.0.1:8080\"\n\n[auth]\ndisabled = true\n\n[[api_keys]]\n\
+             id = \"operator\"\nname = \"Operator\"\nkey = \"operator-secret\"\n\
+             platform_operator = true\n",
+        )
+        .unwrap();
+
+        // Running deployment: authentication required (the default), holding a
+        // live static credential.
+        let active = Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            api_keys: vec![test_api_key("live")],
+            ..Config::default()
+        };
+        let shared = SharedAppState::with_source_path(active, Some(path.clone()));
+
+        let error = shared
+            .reload_from_source_path()
+            .expect_err(
+                "a file reload that reintroduces the #542 startup contradiction must be rejected",
+            )
+            .to_string();
+        assert!(error.contains("[auth] disabled = true"), "{error}");
+        assert!(error.contains("credential source"), "{error}");
+
+        // The rejected candidate never swapped in: still auth-required, still
+        // holding the live key.
+        let running = shared.current();
+        assert!(running.config.auth_required());
+        assert!(!running.config.auth.disabled);
+        assert!(running.config.api_keys.iter().any(|key| key.id == "live"));
+    }
+
+    /// #555, the discriminating case: a durable-key deployment reloading from a
+    /// file whose only auth statement is a deliberately-open `[auth] disabled =
+    /// true` (no file-declared `[[api_keys]]`) must still SUCCEED, even though
+    /// the control-plane merge injects durable keys into the candidate. The gate
+    /// runs against the FILE-declared credentials, BEFORE the merge -- reusing
+    /// the startup predicate on the POST-merge candidate would see the merged
+    /// keys next to `disabled = true` and wrongly reject this legitimate reload.
+    ///
+    /// Not-tested mutation: move the `ensure_auth_posture_is_declared` call to
+    /// AFTER `apply_control_plane_snapshot_to_config` (or point it at the
+    /// post-merge `candidate.api_keys`) and this test reds -- the merged durable
+    /// key makes it read as the case-2 contradiction and the reload errors.
+    #[test]
+    fn file_reload_allows_open_posture_with_control_plane_merged_durable_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // File declares an intentionally-open posture and NO static credential.
+        std::fs::write(
+            &path,
+            "listen = \"127.0.0.1:8080\"\n\n[auth]\ndisabled = true\n",
+        )
+        .unwrap();
+
+        // Running deployment already in the allowed open-posture state, its keys
+        // living in the (in-memory) durable control plane -- seeded here via the
+        // active config, which `runtime_storage_repositories` writes into the
+        // control-plane store and `apply_control_plane_snapshot_to_config` reads
+        // back as control-plane documents.
+        let mut active = Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            api_keys: vec![test_api_key("durable")],
+            ..Config::default()
+        };
+        active.auth.disabled = true;
+        let shared = SharedAppState::with_source_path(active, Some(path.clone()));
+        // Precondition: the durable key really is present post-merge, so the
+        // naive post-merge check would have something to trip on.
+        assert!(shared
+            .current()
+            .config
+            .api_keys
+            .iter()
+            .any(|key| key.id == "durable"));
+
+        let result = shared
+            .reload_from_source_path()
+            .expect("an open-posture reload carrying only control-plane-merged keys must succeed");
+        assert!(
+            result.committed,
+            "the reload must commit, not be rejected: {:?}",
+            result.reason
+        );
+        // The merged durable key survives; the posture stays as declared.
+        let running = shared.current();
+        assert!(running.config.auth.disabled);
+        assert!(running
+            .config
+            .api_keys
+            .iter()
+            .any(|key| key.id == "durable"));
     }
 }
 
