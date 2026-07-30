@@ -7,18 +7,24 @@
 use crate::{
     cli::SupabaseLiveRestartArgs,
     http::{free_addr, http_request_addr},
+    readiness::{require_service_ready, AUTH},
     supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
 use std::{
     path::Path,
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const JSON_CONTENT: &str = "Content-Type: application/json";
+/// Readiness ceiling for this scenario's `ferrogate-auth` child, preserved from
+/// the status-only loop this replaced: live Supabase startup opens a remote
+/// TLS/SCRAM pool and initializes the isolated schema before the listener binds,
+/// which can exceed the 30-second per-acquire ceiling once migrations are
+/// included.
+const AUTH_READINESS_TIMEOUT: Duration = Duration::from_secs(90);
 const ADMIN_JWT_SECRET_ENV: &str = "FERROGATE_TEST_ADMIN_CONSOLE_JWT_SECRET";
 
 pub(crate) fn run_admin_console_roles_supabase(args: &SupabaseLiveRestartArgs) -> Result<()> {
@@ -308,29 +314,22 @@ impl AdminConsoleHarness {
         Ok(harness)
     }
 
+    /// Readiness is the shared identity-checked decision (#444): `addr` comes from
+    /// `free_addr()`, so a mock in a parallel harness can win it inside the
+    /// release->rebind window and answer 200 to anything -- which previously
+    /// started this scenario against the squatter instead of `ferrogate-auth`.
+    /// The service proves itself with `service: ferrogate-auth` on `/healthz`.
     fn wait_until_ready(&mut self) -> Result<()> {
-        let started = Instant::now();
-        let mut last_status = None;
-        // Live Supabase startup opens a remote TLS/SCRAM pool and initializes
-        // the isolated schema before the listener binds. That path can exceed
-        // the 30-second per-acquire ceiling once migrations are included.
-        while started.elapsed() < Duration::from_secs(90) {
-            if let Some(status) = self
-                .child
+        let addr = self.addr.clone();
+        require_service_ready(
+            AUTH,
+            self.child
                 .as_mut()
-                .context("auth service process is missing")?
-                .try_wait()?
-            {
-                bail!("auth service exited before readiness with status {status}");
-            }
-            match http_request_addr(&self.addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last_status = Some(response.status),
-                Err(_) => {}
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for auth service readiness; last HTTP status: {last_status:?}")
+                .context("auth service process is missing")?,
+            &addr,
+            "admin-console auth service",
+            AUTH_READINESS_TIMEOUT,
+        )
     }
 
     fn stop(&mut self) -> Result<()> {

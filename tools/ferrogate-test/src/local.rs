@@ -18,7 +18,7 @@ use crate::{
         spawn_mock_mcp_server, spawn_mock_otlp_server, MockBillingServer, MockOtlpServer,
     },
     readiness::{
-        drain_child_stderr, format_child_stderr, wait_for_gateway_start, GatewayStartOutcome,
+        require_service_ready, wait_for_gateway_start, ServiceStartOutcome, AUTH, BILLING,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -40,6 +40,10 @@ use std::{
 /// no storage bootstrap to wait on, and a short deadline is what lets a hijacked
 /// port be rotated instead of eating the scenario's whole budget (#444).
 const LOCAL_GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Readiness ceiling for the local harness `ferrogate-auth` child; preserved from
+/// the status-only loop this replaced.
+const AUTH_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) struct AuthHarness {
     _dir: tempfile::TempDir,
@@ -83,28 +87,21 @@ impl AuthHarness {
         Ok(harness)
     }
 
+    /// Readiness is the shared identity-checked decision (#444). `auth_addr` comes
+    /// from `free_addr()`, so it carries the same release->rebind window as the
+    /// gateway port: a parallel harness mock that wins it answers 200 to anything,
+    /// and accepting that handed the whole scenario to a squatter. `ferrogate-auth`
+    /// proves itself with `service: ferrogate-auth`, not the gateway's runtime
+    /// header, so it is checked against its own identity.
     fn wait_for_auth(&mut self) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(20) {
-            if let Some(status) = self.auth.try_wait()? {
-                let stderr = drain_child_stderr(&mut self.auth); // #264
-                bail!(
-                    "ferrogate-auth process exited before readiness check: {status}{}",
-                    format_child_stderr(&stderr)
-                );
-            }
-            match http_request_addr(&self.auth_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!(
-            "timed out waiting for ferrogate-auth on {}; last response: {last}",
-            self.auth_addr
-        );
+        let auth_addr = self.auth_addr.clone();
+        require_service_ready(
+            AUTH,
+            &mut self.auth,
+            &auth_addr,
+            "local harness auth service",
+            AUTH_READINESS_TIMEOUT,
+        )
     }
 
     pub(crate) fn expect_json<F>(
@@ -249,31 +246,21 @@ impl BillingHarness {
         ))
     }
 
+    /// Readiness is the shared identity-checked decision (#444); see
+    /// `AuthHarness::wait_for_auth` for why a bare 200 on a `free_addr()` port is
+    /// not proof of identity. `/healthz` is exempt from the billing shared secret
+    /// (#136), so a live service always answers it with its own identity. The
+    /// caller's storage-derived ceiling is preserved, and the child's own stderr
+    /// still reaches the failure message through `crate::readiness` (#264).
     fn wait_for_billing(&mut self, readiness_timeout: Duration) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < readiness_timeout {
-            if let Some(status) = self.billing.try_wait()? {
-                // #264: surface the child's own error instead of just its exit
-                // status, so a failed billing start is diagnosable without
-                // re-running under FERROGATE_TEST_DEBUG_STDERR.
-                let stderr = drain_child_stderr(&mut self.billing);
-                bail!(
-                    "ferrogate-billing process exited before readiness check: {status}{}",
-                    format_child_stderr(&stderr)
-                );
-            }
-            match http_request_addr(&self.billing_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!(
-            "timed out waiting for ferrogate-billing on {}; last response: {last}",
-            self.billing_addr
-        );
+        let billing_addr = self.billing_addr.clone();
+        require_service_ready(
+            BILLING,
+            &mut self.billing,
+            &billing_addr,
+            "local harness billing service",
+            readiness_timeout,
+        )
     }
 
     /// Poll `GET /v1/billing/ledger` until an entry matching `matches` appears,
@@ -600,8 +587,8 @@ impl LocalHarness {
                 "local harness gateway",
                 LOCAL_GATEWAY_READINESS_TIMEOUT,
             )? {
-                GatewayStartOutcome::Ready => break (gateway, gateway_addr),
-                GatewayStartOutcome::PortHijacked => {
+                ServiceStartOutcome::Ready => break (gateway, gateway_addr),
+                ServiceStartOutcome::PortHijacked => {
                     let _ = gateway.kill();
                     let _ = gateway.wait();
                     hijacked_addrs.push(gateway_addr);

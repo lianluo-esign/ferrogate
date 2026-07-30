@@ -95,6 +95,16 @@ impl StubServer {
         )
     }
 
+    /// A live `ferrogate-auth`: `route_request` answers `GET /healthz` with this
+    /// body before any auth/CORS gate, and the service stamps no runtime header.
+    fn spawn_auth_healthz() -> Self {
+        Self::spawn(
+            200,
+            &["content-type: application/json"],
+            r#"{"service":"ferrogate-auth","status":"ok"}"#,
+        )
+    }
+
     fn addr(&self) -> &str {
         &self.addr
     }
@@ -150,8 +160,8 @@ fn ok(status: u16, body: &str) -> Result<HttpResponse> {
     Ok(response(status, body))
 }
 
-/// A response the way FerroGate actually writes one: every gateway-authored
-/// answer carries `x-ferrogate-runtime: pingora`.
+/// A response the way the FerroGate *gateway* actually writes one: every
+/// gateway-authored answer carries `x-ferrogate-runtime: pingora`.
 fn ferrogate_stamped(status: u16, body: &str) -> Result<HttpResponse> {
     Ok(HttpResponse {
         status,
@@ -170,10 +180,13 @@ fn readiness_accepts_only_a_live_ferrogate_healthz() {
     // must treat a live FerroGate as ready. If the gate regresses to status-only,
     // the hijack cases below go red, not this one.
     assert_eq!(
-        classify_gateway_readiness(&healthz),
-        GatewayReadiness::Ready
+        classify_readiness(GATEWAY, &healthz),
+        ServiceReadiness::Ready
     );
-    assert!(healthz_identifies_ferrogate(healthz.as_ref().unwrap()));
+    assert!(healthz_identifies_service(
+        GATEWAY,
+        healthz.as_ref().unwrap()
+    ));
 }
 
 #[test]
@@ -186,10 +199,10 @@ fn readiness_flags_a_squatting_mock_models_200_as_port_hijack_not_ready() {
     // (LocalHarness) or fail by name (scenario-owned gateways).
     let provider_models = ok(200, r#"{"object":"list","data":[{"id":"provider-chat"}]}"#);
 
-    let verdict = classify_gateway_readiness(&provider_models);
+    let verdict = classify_readiness(GATEWAY, &provider_models);
 
-    assert_eq!(verdict, GatewayReadiness::PortHijacked);
-    assert_ne!(verdict, GatewayReadiness::Ready);
+    assert_eq!(verdict, ServiceReadiness::PortHijacked);
+    assert_ne!(verdict, ServiceReadiness::Ready);
 }
 
 #[test]
@@ -199,16 +212,16 @@ fn readiness_flags_any_non_ferrogate_positive_answer_as_port_hijack() {
     let mock_404 = ok(404, r#"{"error":"not found"}"#);
 
     assert_eq!(
-        classify_gateway_readiness(&wrong_service),
-        GatewayReadiness::PortHijacked
+        classify_readiness(GATEWAY, &wrong_service),
+        ServiceReadiness::PortHijacked
     );
     assert_eq!(
-        classify_gateway_readiness(&plain_200),
-        GatewayReadiness::PortHijacked
+        classify_readiness(GATEWAY, &plain_200),
+        ServiceReadiness::PortHijacked
     );
     assert_eq!(
-        classify_gateway_readiness(&mock_404),
-        GatewayReadiness::PortHijacked
+        classify_readiness(GATEWAY, &mock_404),
+        ServiceReadiness::PortHijacked
     );
 }
 
@@ -219,8 +232,8 @@ fn readiness_keeps_polling_when_nobody_has_bound_the_port_yet() {
     let refused: Result<HttpResponse> = Err(anyhow::anyhow!("connection refused"));
 
     assert_eq!(
-        classify_gateway_readiness(&refused),
-        GatewayReadiness::Pending
+        classify_readiness(GATEWAY, &refused),
+        ServiceReadiness::Pending
     );
 }
 
@@ -238,8 +251,8 @@ fn readiness_treats_a_ferrogate_stamped_error_answer_as_pending_not_hijack() {
     );
 
     assert_eq!(
-        classify_gateway_readiness(&rate_limited),
-        GatewayReadiness::Pending
+        classify_readiness(GATEWAY, &rate_limited),
+        ServiceReadiness::Pending
     );
 }
 
@@ -255,7 +268,7 @@ fn wait_for_gateway_start_reports_a_squatting_mock_as_a_port_hijack() {
     let outcome = wait_for_gateway_start(&mut child.child, squatter.addr(), LABEL, UNIT_TIMEOUT)
         .expect("a squatting responder is a classification, not an error");
 
-    assert_eq!(outcome, GatewayStartOutcome::PortHijacked);
+    assert_eq!(outcome, ServiceStartOutcome::PortHijacked);
 }
 
 #[test]
@@ -363,16 +376,97 @@ fn require_gateway_ready_with_socket_waits_for_the_gateway_created_socket() {
 }
 
 #[test]
+fn readiness_is_decided_against_the_expected_service_not_any_ferrogate() {
+    // Every harness service address comes from `free_addr()`, so the auth and
+    // billing ports carry the same release->rebind window as the gateway port
+    // (#444). What makes a responder legitimate there is that service's OWN
+    // identity: `ferrogate-auth` on the auth port is ready, and the GATEWAY
+    // answering on the auth port is a foreign process for that harness -- even
+    // though it is FerroGate, and even though it stamps the runtime header, which
+    // is gateway-only evidence and must not vouch for another service.
+    let auth_healthz = ok(200, r#"{"service":"ferrogate-auth","status":"ok"}"#);
+    let billing_healthz = ok(200, r#"{"service":"ferrogate-billing","status":"ok"}"#);
+    let gateway_healthz = ferrogate_stamped(200, r#"{"service":"ferrogate","status":"ok"}"#);
+
+    assert_eq!(
+        classify_readiness(AUTH, &auth_healthz),
+        ServiceReadiness::Ready
+    );
+    assert_eq!(
+        classify_readiness(BILLING, &billing_healthz),
+        ServiceReadiness::Ready
+    );
+
+    // Cross-service answers are hijacks in every direction.
+    assert_eq!(
+        classify_readiness(AUTH, &gateway_healthz),
+        ServiceReadiness::PortHijacked
+    );
+    assert_eq!(
+        classify_readiness(AUTH, &billing_healthz),
+        ServiceReadiness::PortHijacked
+    );
+    assert_eq!(
+        classify_readiness(BILLING, &auth_healthz),
+        ServiceReadiness::PortHijacked
+    );
+    assert_eq!(
+        classify_readiness(GATEWAY, &auth_healthz),
+        ServiceReadiness::PortHijacked
+    );
+}
+
+#[test]
+fn readiness_flags_a_squatting_mock_on_the_auth_port_as_a_port_hijack() {
+    // The #444 class at the auth gate: the squatting mock answers 200 to whatever
+    // the probe asks, which is what the status-only loop accepted.
+    let squatter = StubServer::spawn_squatting_mock();
+    let mut child = LiveChild::spawn();
+
+    let error = require_service_ready(
+        AUTH,
+        &mut child.child,
+        squatter.addr(),
+        LABEL,
+        Duration::from_secs(2),
+    )
+    .expect_err("a scenario must not be run against a non-ferrogate-auth responder");
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(LABEL) && message.contains(squatter.addr()),
+        "start failure must name the scenario and the hijacked address: {message}"
+    );
+    assert!(
+        message.contains("ferrogate-auth"),
+        "start failure must name the service that was expected: {message}"
+    );
+}
+
+#[test]
+fn require_service_ready_accepts_a_live_auth_service_on_the_auth_port() {
+    // The control for the refusal above: the refusal is conditional on identity,
+    // not on "a responder answered", so a real `ferrogate-auth` healthz starts the
+    // scenario.
+    let auth = StubServer::spawn_auth_healthz();
+    let mut child = LiveChild::spawn();
+
+    require_service_ready(AUTH, &mut child.child, auth.addr(), LABEL, UNIT_TIMEOUT)
+        .expect("a live ferrogate-auth healthz on the auth port is ready");
+}
+
+#[test]
 fn readiness_treats_our_own_gateway_answering_not_ready_as_pending_not_hijack() {
     // Defensive: a body that claims `service:ferrogate` but is not a ready 200 is
     // still our process, so keep polling instead of rotating ports away from it.
     let ours_not_ready = ok(503, r#"{"service":"ferrogate","status":"starting"}"#);
 
-    assert!(!healthz_identifies_ferrogate(
+    assert!(!healthz_identifies_service(
+        GATEWAY,
         ours_not_ready.as_ref().unwrap()
     ));
     assert_eq!(
-        classify_gateway_readiness(&ours_not_ready),
-        GatewayReadiness::Pending
+        classify_readiness(GATEWAY, &ours_not_ready),
+        ServiceReadiness::Pending
     );
 }
