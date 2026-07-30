@@ -41,6 +41,7 @@ use crate::{
     cli::LocalArgs,
     constants::JSON_CONTENT,
     http::{free_addr, http_request_addr},
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -48,8 +49,6 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 const ADMIN_KEY: &str = "receipt-e2e-admin-secret";
@@ -57,7 +56,6 @@ const ADMIN_AUTH: &str = "Authorization: Bearer receipt-e2e-admin-secret";
 const TOKEN_ENV_VAR: &str = "FERROGATE_RECEIPT_E2E_TOKEN";
 const POLICY_ID: &str = "receipt-e2e-policy";
 const TENANT: &str = "org_receipt_e2e";
-const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 const CLIENT_ACTION_TIME_SIGNING_KEY: &str = "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=";
 
 pub(crate) fn run_cli_mutation_receipt(args: &LocalArgs) -> Result<()> {
@@ -599,20 +597,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < GATEWAY_READINESS_TIMEOUT {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before cli-mutation-receipt readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for the cli-mutation-receipt gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "cli-mutation-receipt gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

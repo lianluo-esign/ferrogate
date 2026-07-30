@@ -2,7 +2,7 @@
 // Developed by the commercial cloud service company represented by https://token4ai.cloud.
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-29
-// description: Regression tests for ferrogate-test local harness readiness identity + port-hijack classification.
+// description: Regression tests for the shared harness gateway readiness identity + port-hijack classification.
 
 use super::*;
 
@@ -18,13 +18,25 @@ fn ok(status: u16, body: &str) -> Result<HttpResponse> {
     Ok(response(status, body))
 }
 
+/// A response the way FerroGate actually writes one: every gateway-authored
+/// answer carries `x-ferrogate-runtime: pingora`.
+fn ferrogate_stamped(status: u16, body: &str) -> Result<HttpResponse> {
+    Ok(HttpResponse {
+        status,
+        body: body.to_string(),
+        raw: format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\nx-ferrogate-runtime: pingora\r\n\r\n{body}"
+        ),
+    })
+}
+
 #[test]
 fn readiness_accepts_only_a_live_ferrogate_healthz() {
     let healthz = ok(200, r#"{"service":"ferrogate","status":"ok"}"#);
 
-    // The readiness *decision* — the only thing `wait_for_gateway` acts on — must
-    // treat a live FerroGate as ready. If the gate regresses to status-only, the
-    // hijack cases below go red, not this one.
+    // The readiness *decision* — the only thing `wait_for_gateway_start` acts on —
+    // must treat a live FerroGate as ready. If the gate regresses to status-only,
+    // the hijack cases below go red, not this one.
     assert_eq!(
         classify_gateway_readiness(&healthz),
         GatewayReadiness::Ready
@@ -38,7 +50,8 @@ fn readiness_flags_a_squatting_mock_models_200_as_port_hijack_not_ready() {
     // gateway port answers with HTTP 200 and a valid body that is not FerroGate's
     // healthz (here a provider `/v1/models` list). Accepting it as ready is the
     // original flake, so the readiness decision must classify it as a port hijack
-    // — never Ready — which is what drives the harness to rotate to a fresh port.
+    // — never Ready — which is what drives the harness to rotate to a fresh port
+    // (LocalHarness) or fail by name (scenario-owned gateways).
     let provider_models = ok(200, r#"{"object":"list","data":[{"id":"provider-chat"}]}"#);
 
     let verdict = classify_gateway_readiness(&provider_models);
@@ -75,6 +88,25 @@ fn readiness_keeps_polling_when_nobody_has_bound_the_port_yet() {
 
     assert_eq!(
         classify_gateway_readiness(&refused),
+        GatewayReadiness::Pending
+    );
+}
+
+#[test]
+fn readiness_treats_a_ferrogate_stamped_error_answer_as_pending_not_hijack() {
+    // Our own gateway can legitimately answer a readiness probe with something
+    // other than a ready healthz: an unauthenticated rate limit, an IP deny, any
+    // error envelope. Those bodies carry no `service` field, so only the runtime
+    // header FerroGate stamps on every response it writes tells them apart from a
+    // squatting mock. Misreading one as a hijack would fail the scenario at start
+    // on the gateway's own answer.
+    let rate_limited = ferrogate_stamped(
+        429,
+        r#"{"error":{"code":"unauthenticated_rate_limited","type":"ferrogate_error"}}"#,
+    );
+
+    assert_eq!(
+        classify_gateway_readiness(&rate_limited),
         GatewayReadiness::Pending
     );
 }

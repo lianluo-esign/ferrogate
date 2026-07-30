@@ -10,6 +10,7 @@ use crate::{
     http::http_request_addr,
     local::{BillingHarness, LocalHarness},
     mocks::spawn_local_provider_upstream_with_timeout,
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
     supabase_schema::{
         connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
     },
@@ -32,9 +33,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    thread,
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const PROVIDER_ATTEMPT_V29_FIXTURE_SQL: &str = r#"
@@ -1182,20 +1182,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(180) {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before compliance readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for compliance gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "component-compliance gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

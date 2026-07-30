@@ -23,6 +23,7 @@ use crate::{
     cli::LocalArgs,
     constants::JSON_CONTENT,
     http::{free_addr, http_request_addr, HttpResponse},
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -30,8 +31,6 @@ use std::{
     env, fs,
     path::Path,
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 const ADMIN_AUTH: &str = "Authorization: Bearer site-e2e-admin-secret";
@@ -45,7 +44,6 @@ const LEGACY_SITE: &str = "legacy-blob-site";
 const NESTED_PATH: &str = "docs/deep/readme.md";
 const NESTED_PATH_ENCODED: &str = "docs%2Fdeep%2Freadme.md";
 const NESTED_CONTENT: &[u8] = b"# deep readme for the #402 remap";
-const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub(crate) fn run_static_site_api(args: &LocalArgs) -> Result<()> {
     if !args.ferrogate_bin.exists() {
@@ -1195,20 +1193,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < GATEWAY_READINESS_TIMEOUT {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before static-site E2E readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for the static-site E2E gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "static-site E2E gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

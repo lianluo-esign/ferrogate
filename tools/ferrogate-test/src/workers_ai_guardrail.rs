@@ -30,6 +30,7 @@ use crate::{
     constants::JSON_CONTENT,
     http::{free_addr, http_request_addr, HttpResponse},
     mocks::read_http_request,
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -54,7 +55,6 @@ const CF_ACCOUNT_ID: &str = "wa-llama-e2e-account";
 const CF_API_TOKEN: &str = "wa-llama-e2e-cf-token";
 const DEFAULT_MODEL_SLUG: &str = "@cf/meta/llama-guard-3-8b";
 const FINGERPRINT_SECRET: &str = "wa-llama-guard-fingerprint-secret";
-const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 const MOCK_LIFETIME: Duration = Duration::from_secs(90);
 
 pub(crate) fn run_workers_ai_llama_guard(args: &LocalArgs) -> Result<()> {
@@ -677,20 +677,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < GATEWAY_READINESS_TIMEOUT {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before Workers AI Llama Guard E2E readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for the Workers AI Llama Guard E2E gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "Workers AI Llama Guard E2E gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

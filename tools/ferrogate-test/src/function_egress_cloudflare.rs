@@ -19,6 +19,7 @@ use crate::{
     cli::LocalArgs,
     constants::JSON_CONTENT,
     http::{free_addr, http_request_addr, HttpResponse},
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -26,13 +27,10 @@ use std::{
     env, fs,
     path::Path,
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 const CLIENT_AUTH: &str = "Authorization: Bearer cf-fn-client-secret";
 const WORKER_BASE: &str = "https://127.0.0.1:1";
-const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub(crate) fn run_function_egress_cloudflare_api(args: &LocalArgs) -> Result<()> {
     if !args.ferrogate_bin.exists() {
@@ -191,20 +189,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < GATEWAY_READINESS_TIMEOUT {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before CF function egress E2E readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for the CF function egress E2E gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "CF function egress E2E gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

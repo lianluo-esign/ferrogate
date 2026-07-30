@@ -12,10 +12,13 @@ use crate::{
     fixtures::{
         auth_service_config, blocking_stdio_mcp_script, local_gateway_config, LocalGatewayConfig,
     },
-    http::{free_addr, http_request_addr, HttpResponse},
+    http::{free_addr, http_request_addr},
     mocks::{
         spawn_local_provider_upstream, spawn_mock_agent_server, spawn_mock_billing_server,
         spawn_mock_mcp_server, spawn_mock_otlp_server, MockBillingServer, MockOtlpServer,
+    },
+    readiness::{
+        drain_child_stderr, format_child_stderr, wait_for_gateway_start, GatewayStartOutcome,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -32,32 +35,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// #264: drain a child's piped stderr (best-effort) so a start failure can be
-/// reported with the child's own diagnostics. Empty when stderr was not piped.
-fn drain_child_stderr(child: &mut Child) -> String {
-    use std::io::Read as _;
-    child
-        .stderr
-        .take()
-        .map(|mut stderr| {
-            let mut buffer = String::new();
-            let _ = stderr.read_to_string(&mut buffer);
-            buffer
-        })
-        .unwrap_or_default()
-}
-
-/// Format drained child stderr as a bail-message suffix: the last few non-empty
-/// lines, or nothing when stderr was empty/unpiped.
-fn format_child_stderr(stderr: &str) -> String {
-    let trimmed = stderr.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let tail: Vec<&str> = trimmed.lines().rev().take(20).collect();
-    let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-    format!("\n--- child stderr ---\n{tail}")
-}
+/// Readiness ceiling for the in-process local harness gateway. Deliberately much
+/// tighter than [`crate::readiness::GATEWAY_READINESS_TIMEOUT`]: this gateway has
+/// no storage bootstrap to wait on, and a short deadline is what lets a hijacked
+/// port be rotated instead of eating the scenario's whole budget (#444).
+const LOCAL_GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) struct AuthHarness {
     _dir: tempfile::TempDir,
@@ -601,17 +583,23 @@ impl LocalHarness {
         // released port, but a mock in *another* parallel harness can still win it
         // inside that release->rebind window (#444). A squatter that wins the port
         // holds it for its whole lifetime while Pingora retries its bind forever,
-        // so polling that address can never reach FerroGate. The readiness check
-        // now identifies the responder, and a proven hijack rotates to a fresh
-        // gateway port under a bounded retry instead of silently trusting the
-        // squatter (the original flake) or hanging until the readiness deadline.
+        // so polling that address can never reach FerroGate. `crate::readiness`
+        // identifies the responder for every harness-started gateway, and here a
+        // proven hijack rotates to a fresh gateway port under a bounded retry
+        // instead of silently trusting the squatter (the original flake) or
+        // hanging until the readiness deadline.
         const MAX_GATEWAY_START_ATTEMPTS: usize = 5;
         let mut hijacked_addrs: Vec<String> = Vec::new();
         let (gateway, gateway_addr) = loop {
             let gateway_addr = free_addr()?;
             std::fs::write(&config_path, build_config(&gateway_addr)?)?;
             let mut gateway = spawn_gateway(&config_path)?;
-            match Self::wait_for_gateway(&mut gateway, &gateway_addr)? {
+            match wait_for_gateway_start(
+                &mut gateway,
+                &gateway_addr,
+                "local harness gateway",
+                LOCAL_GATEWAY_READINESS_TIMEOUT,
+            )? {
                 GatewayStartOutcome::Ready => break (gateway, gateway_addr),
                 GatewayStartOutcome::PortHijacked => {
                     let _ = gateway.kill();
@@ -643,40 +631,6 @@ impl LocalHarness {
             observability: Some(observability),
         };
         Ok(harness)
-    }
-
-    /// Poll `/healthz` until a live FerroGate answers (`Ready`), the configured
-    /// port is proven to be held by a non-FerroGate squatter (`PortHijacked`),
-    /// the child exits, or the 20s deadline passes. The per-probe decision is
-    /// delegated in full to [`classify_gateway_readiness`] so the readiness gate
-    /// cannot silently regress to accepting any HTTP 200 (#444).
-    fn wait_for_gateway(gateway: &mut Child, gateway_addr: &str) -> Result<GatewayStartOutcome> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(20) {
-            if let Some(status) = gateway.try_wait()? {
-                let stderr = drain_child_stderr(gateway); // #264
-                bail!(
-                    "ferrogate process exited before readiness check: {status}{}",
-                    format_child_stderr(&stderr)
-                );
-            }
-            let probe = http_request_addr(gateway_addr, "GET", "/healthz", &[], "");
-            match classify_gateway_readiness(&probe) {
-                GatewayReadiness::Ready => return Ok(GatewayStartOutcome::Ready),
-                // A squatter holds the port and will not yield it; stop polling now
-                // and let the caller rotate ports rather than burn the deadline.
-                GatewayReadiness::PortHijacked => return Ok(GatewayStartOutcome::PortHijacked),
-                GatewayReadiness::Pending => {
-                    last = match &probe {
-                        Ok(response) => response.raw.clone(),
-                        Err(error) => error.to_string(),
-                    };
-                }
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for ferrogate on {gateway_addr}; last response: {last}");
     }
 
     pub(crate) fn expect_json<F>(
@@ -960,70 +914,6 @@ tick_interval_secs = {tick_interval_secs}
     }
 }
 
-fn healthz_identifies_ferrogate(response: &HttpResponse) -> bool {
-    if response.status != 200 {
-        return false;
-    }
-    let Ok(body) = serde_json::from_str::<Value>(&response.body) else {
-        return false;
-    };
-    body["service"] == "ferrogate" && body["status"] == "ok"
-}
-
-/// Does this response body claim to be the FerroGate gateway at all, regardless
-/// of readiness? Used to tell "our gateway answered but is not ready yet" apart
-/// from "a foreign process holds the port". FerroGate's `/healthz` is a static
-/// 200, so in practice a claiming-but-not-ready body never occurs; this keeps
-/// the classifier from ever misreading our own process as a squatter.
-fn response_claims_ferrogate(response: &HttpResponse) -> bool {
-    serde_json::from_str::<Value>(&response.body)
-        .map(|body| body["service"] == "ferrogate")
-        .unwrap_or(false)
-}
-
-/// The single per-probe readiness decision for a gateway `/healthz` response.
-/// `wait_for_gateway` acts only on this value, so the identity gate cannot
-/// silently regress to status-only acceptance (#444). Covered directly in
-/// `local_test.rs` so a regression to "any HTTP 200 is ready" reddens a test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GatewayReadiness {
-    /// A live FerroGate answered `/healthz` with `status:ok`; proceed.
-    Ready,
-    /// No usable HTTP answer yet (connection refused / read timeout), or our own
-    /// gateway answering before it is ready. Pingora has not served a ready
-    /// `/healthz` on this port; keep polling the same address.
-    Pending,
-    /// A non-FerroGate process answered `/healthz` on the configured gateway
-    /// port. FerroGate serves `/healthz` only after Pingora binds, so any parsed
-    /// HTTP answer that does not claim the FerroGate service identity is a
-    /// squatter that won the released ephemeral port (#444). It will not yield
-    /// the port, so polling it can never succeed.
-    PortHijacked,
-}
-
-/// Terminal outcome of one gateway spawn + readiness wait. `Pending` is not a
-/// terminal state: [`LocalHarness::wait_for_gateway`] keeps polling until the
-/// gateway is `Ready`, the port is proven hijacked, the child exits, or the
-/// deadline passes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GatewayStartOutcome {
-    Ready,
-    PortHijacked,
-}
-
-fn classify_gateway_readiness(probe: &Result<HttpResponse>) -> GatewayReadiness {
-    let Ok(response) = probe else {
-        return GatewayReadiness::Pending;
-    };
-    if healthz_identifies_ferrogate(response) {
-        return GatewayReadiness::Ready;
-    }
-    if response_claims_ferrogate(response) {
-        return GatewayReadiness::Pending;
-    }
-    GatewayReadiness::PortHijacked
-}
-
 impl Drop for LocalHarness {
     fn drop(&mut self) {
         let _ = self.gateway.kill();
@@ -1051,7 +941,3 @@ impl Drop for LocalHarness {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "local_test.rs"]
-mod local_test;

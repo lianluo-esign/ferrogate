@@ -39,6 +39,7 @@ use crate::{
     cli::LocalArgs,
     constants::JSON_CONTENT,
     http::{free_addr, http_request_addr, HttpResponse},
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -56,7 +57,6 @@ const INTRUDER_AUTH: &str = "Authorization: Bearer job-e2e-intruder-secret";
 const TENANT: &str = "org_job_e2e";
 const WORKSPACE: &str = "ws_job_e2e";
 const WORKER_FINGERPRINT: &str = "sha256:job-e2e-worker";
-const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 const TRANSPORT_SECURITY: &str = "x-ferrogate-transport-security: mutual_tls";
 
 pub(crate) fn run_agent_jobs_api(args: &LocalArgs) -> Result<()> {
@@ -975,20 +975,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < GATEWAY_READINESS_TIMEOUT {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before agent-jobs E2E readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for the agent-jobs E2E gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "agent-jobs E2E gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

@@ -36,6 +36,10 @@ mod observed_activity_d1;
 /// `*-restart` scenarios' verified set.
 mod payment_attempt_restart;
 mod provider_compliance;
+/// #444: the one readiness decision every harness-started FerroGate child goes
+/// through, so a squatting mock on a released ephemeral port can never be
+/// mistaken for the gateway under test.
+mod readiness;
 mod scenarios;
 mod static_site;
 mod storage;

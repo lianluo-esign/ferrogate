@@ -36,6 +36,7 @@ use crate::{
     cli::LocalArgs,
     constants::JSON_CONTENT,
     http::{free_addr, http_request_addr, HttpResponse},
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
 };
 use anyhow::{bail, Context, Result};
 use ferrogate_providers::{
@@ -1003,20 +1004,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(180) {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before asset-presign E2E readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for the asset-presign E2E gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "asset-presign E2E gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 

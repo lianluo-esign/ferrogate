@@ -9,6 +9,7 @@ use crate::{
     compliance::{assert_component_contract, ComponentContract},
     http::{free_addr, http_request_addr, HttpResponse},
     mocks::read_http_request,
+    readiness::{require_gateway_ready, GATEWAY_READINESS_TIMEOUT},
     supabase_schema::{
         connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
     },
@@ -43,7 +44,6 @@ const UNGUARDED_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-unguarded-c
 const ADMIN_AUTH: &str = "Authorization: Bearer guardrail-admin-secret";
 const JSON_CONTENT: &str = "Content-Type: application/json";
 const DETECTOR_SECRET: &str = "guardrail-detector-e2e-secret";
-const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 const DYNAMIC_TENANT_ID: &str = "org_dynamic_guardrail_e2e";
 const COMPLIANCE_ALLOW_CONTENT: &str = "guardrail compliance benign input";
 const COMPLIANCE_BLOCK_CONTENT: &str = "contains dynamic-secret-v1";
@@ -1989,20 +1989,12 @@ impl GatewayGuard {
     }
 
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < GATEWAY_READINESS_TIMEOUT {
-            if let Some(status) = self.child.try_wait()? {
-                bail!("FerroGate exited before Guardrail E2E readiness: {status}");
-            }
-            match http_request_addr(gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("timed out waiting for Guardrail E2E gateway: {last}")
+        require_gateway_ready(
+            &mut self.child,
+            gateway_addr,
+            "Guardrail E2E gateway",
+            GATEWAY_READINESS_TIMEOUT,
+        )
     }
 }
 
