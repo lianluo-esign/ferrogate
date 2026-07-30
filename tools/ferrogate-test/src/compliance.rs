@@ -1069,20 +1069,30 @@ providers:
   - name: "backup-openai"
     kind: "openai"
     base_url: "http://{provider_addr}/v1"
+# Every route below declares its own capabilities and context window rather than
+# leaning on the fully-undeclared legacy exemption. That exemption only covers a
+# chat request with no feature and no explicit output bound, so a settlement case
+# that adds `stream` or `max_tokens` would silently make the route unroutable.
 models:
   - name: "fast-chat"
     provider: "openai"
     provider_model: "gpt-4o-mini"
+    capabilities: ["chat", "streaming"]
+    context_window: 8192
     input_price_per_1m: 1.0
     output_price_per_1m: 2.0
   - name: "fallback-chat"
     provider: "openai"
     provider_model: "gpt-4o-mini-failover-primary"
+    capabilities: ["chat", "streaming"]
+    context_window: 8192
     input_price_per_1m: 1.0
     output_price_per_1m: 2.0
     fallbacks:
       - provider: "backup-openai"
         provider_model: "gpt-4o-mini-fallback"
+        capabilities: ["chat", "streaming"]
+        context_window: 8192
         input_price_per_1m: 1.0
         output_price_per_1m: 2.0
         priority: 0
@@ -1090,6 +1100,8 @@ models:
   - name: "gpt-5.5-chat"
     provider: "openai"
     provider_model: "gpt-5.5"
+    capabilities: ["chat", "streaming"]
+    context_window: 8192
     input_price_per_1m: 5.0
     output_price_per_1m: 15.0
 api_keys:

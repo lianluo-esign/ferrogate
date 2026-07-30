@@ -281,14 +281,20 @@ output_price_per_1m = 2.0
 name = "fallback-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini-failover-primary"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
 
+# Capabilities belong to the provider/model pair, not the logical model, so a
+# fallback route must declare its own set (docs/model-route-capabilities.md).
+# Leaving this route undeclared only kept it eligible for feature-free chat;
+# this fixture configures `[[mcp_servers]]`, so every chat request requires
+# `tools` and the failover leg would never be reachable.
 [[models.fallbacks]]
 provider = "backup-openai"
 provider_model = "gpt-4o-mini-fallback"
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -299,7 +305,7 @@ weight = 1
 name = "blocked-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
-capabilities = ["chat"]
+capabilities = ["chat", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -308,7 +314,7 @@ output_price_per_1m = 2.0
 name = "gpt-5.5-chat"
 provider = "openai"
 provider_model = "gpt-5.5"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 5.0
 output_price_per_1m = 15.0
@@ -317,7 +323,7 @@ output_price_per_1m = 15.0
 name = "anthropic-chat"
 provider = "anthropic"
 provider_model = "claude-3-5-sonnet-latest"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -326,7 +332,7 @@ output_price_per_1m = 2.0
 name = "gemini-chat"
 provider = "gemini"
 provider_model = "gemini-2.5-flash"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -335,7 +341,7 @@ output_price_per_1m = 2.0
 name = "grok-chat"
 provider = "xai"
 provider_model = "grok-4.20-fast"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -344,7 +350,7 @@ output_price_per_1m = 2.0
 name = "openrouter-chat"
 provider = "openrouter"
 provider_model = "openai/gpt-4o-mini"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -353,7 +359,7 @@ output_price_per_1m = 2.0
 name = "azure-openai-chat"
 provider = "azure-openai"
 provider_model = "azure-gpt-4o"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -362,7 +368,7 @@ output_price_per_1m = 2.0
 name = "bedrock-chat"
 provider = "bedrock"
 provider_model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-capabilities = ["chat"]
+capabilities = ["chat", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -371,7 +377,7 @@ output_price_per_1m = 2.0
 name = "vertex-chat"
 provider = "vertex"
 provider_model = "gemini-2.5-flash"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -568,6 +574,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
+context_window = 8192
 
 [[api_keys]]
 id = "key_dev"
@@ -611,6 +618,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
+context_window = 8192
 
 [[api_keys]]
 id = "client"
@@ -673,6 +681,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
+context_window = 8192
 
 [[api_keys]]
 id = "client"
@@ -736,6 +745,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat", "streaming"]
+context_window = 8192
 
 [[api_keys]]
 id = "client"
@@ -846,6 +856,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
+context_window = 8192
 
 [[api_keys]]
 id = "redis_rate"
@@ -909,6 +920,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
+context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
 
@@ -965,6 +977,7 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
+context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
 

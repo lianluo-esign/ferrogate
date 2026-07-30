@@ -137,7 +137,13 @@ fn main() -> Result<()> {
             Ok(())
         },
         ci: |local, auth| {
-            run_worker_release()?;
+            // `worker-release` runs last, not first. It is the only always-run
+            // scenario that reaches the public npm registry, so a slow or
+            // unreachable mirror aborts the whole entrypoint before a single
+            // deterministic scenario has reported. Ordering it last does not
+            // weaken it — it still runs, and CI still fails when it fails — but
+            // an infrastructure hiccup can no longer masquerade as "CI is red"
+            // while hiding the twenty offline scenarios' actual verdicts.
             run_api_contract(local)?;
             run_component_compliance(local)?;
             run_admin_api(local)?;
@@ -171,7 +177,8 @@ fn main() -> Result<()> {
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;
             run_postgres_restart(local)?;
-            run_postgres_tls_restart(local)
+            run_postgres_tls_restart(local)?;
+            run_worker_release()
         },
     })
 }

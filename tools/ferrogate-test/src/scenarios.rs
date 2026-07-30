@@ -15,7 +15,7 @@ use crate::{
     local::{AuthHarness, LocalHarness},
     mocks::spawn_mock_third_party_auth_server,
 };
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ferrogate_runtime::{
     SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
 };
@@ -2477,11 +2477,15 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
         201,
         |_| Ok(()),
     )?;
-    case.expect_json(
-        "POST",
-        "/admin/v1/self-hosted-workers",
-        &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{
+    // --- #182 self-hosted-worker entitlement, proved in both directions. ---
+    //
+    // Registering `org_demo` above created a real tenant row, which arms the
+    // entitlement gate: the tenant now sits on the seeded `free` plan, whose
+    // `self_hosted_workers_enabled` is false by design. Registration must be
+    // refused until an explicit grant exists, so the refusal is asserted first
+    // rather than being assumed — otherwise a gate that silently stopped firing
+    // would still let the positive case below pass.
+    let worker_registration = r#"{
           "tenant": {
             "organization_id": "org_demo",
             "project_id": "project_gateway",
@@ -2493,7 +2497,65 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
           "identity_expires_at_unix": 9999999999,
           "orchestration_enabled": true,
           "capability_envelope_json": "{\"frameworks\":[\"native-harness\"],\"capabilities\":[\"shell\"]}"
-        }"#,
+        }"#;
+
+    case.expect_json(
+        "POST",
+        "/admin/v1/self-hosted-workers",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        worker_registration,
+        403,
+        |body| {
+            let code = body["error"]["code"].as_str().unwrap_or_default();
+            if code != "self_hosted_workers_disabled" {
+                bail!(
+                    "un-entitled self-hosted worker registration must be refused with \
+                     self_hosted_workers_disabled, got {code}: {body}"
+                );
+            }
+            Ok(())
+        },
+    )?;
+
+    case.expect_json(
+        "POST",
+        "/admin/v1/permissions",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"key":"workers.self_hosted","name":"Register self-hosted workers"}"#,
+        200,
+        |_| Ok(()),
+    )?;
+    let registrar_role_id = RefCell::new(String::new());
+    case.expect_json(
+        "POST",
+        "/admin/v1/roles",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"name":"Lifecycle worker registrar","slug":"lifecycle-worker-registrar","permission_keys":["workers.self_hosted"]}"#,
+        200,
+        |body| {
+            let id = body["role"]["id"]
+                .as_str()
+                .context("role creation returned no role id")?;
+            *registrar_role_id.borrow_mut() = id.to_string();
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/tenant-roles/org_demo",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &format!(r#"{{"role_id":"{}"}}"#, registrar_role_id.borrow().as_str()),
+        200,
+        |_| Ok(()),
+    )?;
+
+    // The bound role now grants `workers.self_hosted`, so the identical request
+    // that was refused above must succeed.
+    case.expect_json(
+        "POST",
+        "/admin/v1/self-hosted-workers",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        worker_registration,
         201,
         |body| {
             let worker_id = body["worker"]["id"]

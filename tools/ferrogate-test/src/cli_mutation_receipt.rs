@@ -24,13 +24,16 @@
 //!    typed by hand.** The harness takes `rollback.command` out of the receipt
 //!    and executes it verbatim as argv. No policy id, revision number, or path
 //!    is written into this file for the reversal step.
-//! 4. **The audit id gap is recorded, not papered over.** The receipt's
-//!    `audit_id` must be `null` carrying the `endpoint_returns_no_audit_id`
-//!    code — this is the enumerated finding of #505 acceptance box 6, and the
-//!    scenario fails if the field is ever silently omitted instead. When the
-//!    control plane starts returning an audit id, this assertion flips to the
-//!    "follow it to the audit row" branch, which is why the branch is written
-//!    out rather than left as a TODO.
+//! 4. **The audit id is stated either way, never silently omitted.** The
+//!    receipt's `audit_id` must be present as a field: either carrying a real
+//!    identifier, or `null` with the `endpoint_returns_no_audit_id` code — the
+//!    enumerated finding of #505 acceptance box 6. Since #552 made
+//!    `guardrail-policies activate`/`rollback` return an audit id, this
+//!    scenario now takes the "follow it to the audit row" branch, which is why
+//!    that branch was written out rather than left as a TODO. The table
+//!    assertion checks the *field name* survives rendering; it must not pin the
+//!    absent-reason code, or a control plane that starts supplying the id would
+//!    fail the gate for improving.
 //!
 //! It is Docker-free and deterministic (one local gateway process, the shipped
 //! `ferrogate` binary acting as its own client), so it is in the always-run
@@ -277,7 +280,6 @@ pub(crate) fn run_cli_mutation_receipt(args: &LocalArgs) -> Result<()> {
         "mutation_receipt",
         "dry_run",
         "audit_id",
-        "endpoint_returns_no_audit_id",
         "target.action_fingerprint",
     ] {
         if !table.contains(marker) {

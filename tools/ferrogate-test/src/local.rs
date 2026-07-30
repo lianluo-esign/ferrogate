@@ -734,9 +734,23 @@ tick_interval_secs = {tick_interval_secs}
             &payload,
             200,
             |body| {
-                assert_eq!(body["valid"], true);
-                assert_eq!(body["committed"], true);
-                assert_eq!(body["listener_reload_required"], false);
+                // Assert the reload contract, not the validate one.
+                // `listener_reload_required` belongs to
+                // `AdminConfigValidateResponse`; `AdminConfigReloadResponse`
+                // declares only `valid`, `committed`, and `mode`
+                // (docs/openapi/admin-api.openapi.json). Reading it here always
+                // yielded JSON null, so the old `assert_eq!(.., false)` could
+                // never hold — it simply sat behind an earlier failure. Compare
+                // typed values and report the whole body, so a future contract
+                // drift is diagnosable instead of a bare `left: Null`.
+                if body["valid"].as_bool() != Some(true)
+                    || body["committed"].as_bool() != Some(true)
+                {
+                    bail!("config reload was not committed: {body}");
+                }
+                if body["mode"].as_str().is_none() {
+                    bail!("config reload response omitted the required `mode` field: {body}");
+                }
                 Ok(())
             },
         )

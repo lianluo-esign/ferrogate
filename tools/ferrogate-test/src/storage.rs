@@ -1802,6 +1802,12 @@ models:
     provider_model: gpt-4o-mini
     capabilities:
       - chat
+      # This fixture optionally appends an `mcp_servers` block, and gateway-injected
+      # tools require the `tools` capability just as caller-supplied ones do. Declaring
+      # it unconditionally keeps the route eligible in both shapes; a capability the
+      # request does not require is simply unused.
+      - tools
+    context_window: 8192
 
 api_keys:
   - id: admin
@@ -1847,6 +1853,7 @@ models:
     provider_model: "{provider_model}"
     capabilities:
       - chat
+    context_window: 8192
 
 api_keys:
   - id: "{client_id}"

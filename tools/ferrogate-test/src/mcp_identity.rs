@@ -2174,6 +2174,7 @@ models:
     provider: "unused"
     provider_model: "unused"
     capabilities: ["chat"]
+    context_window: 8192
 api_keys:
   - id: "mcp-e2e-admin"
     name: "MCP E2E admin"

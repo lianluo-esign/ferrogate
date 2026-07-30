@@ -460,6 +460,11 @@ models:
     provider: "openai"
     provider_model: "gpt-4o-mini"
     capabilities: ["chat"]
+    # A declared route must declare its own context window: the legacy
+    # "undeclared route" exemption only covers a route that declares nothing at
+    # all, so `capabilities` without `context_window` excludes the route from
+    # every chat request (docs/model-route-capabilities.md).
+    context_window: 8192
 api_keys:
   - id: "wa-llama-host-admin"
     name: "Workers AI Llama Guard host operator"
