@@ -2723,6 +2723,22 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     )?;
     case.enable_scheduler(1)?;
 
+    // KNOWN FAILURE — blocked on #605, and deliberately left asserting the
+    // correct behavior rather than relaxed to match the bug.
+    //
+    // `enable_scheduler` above posts an *inline* config reload, and an inline
+    // reload replaces the durable control-plane document set with a projection
+    // of the payload alone. The project-scoped key was minted through
+    // `POST /admin/v1/api-keys`, which is a control-plane `api_keys` document,
+    // so the reload destroys it and the third iteration answers
+    // `401 invalid_api_key` instead of `403 tenancy_suspended`.
+    //
+    // Note what this loop can and cannot prove while #605 is open: the 401
+    // masks the tenancy answer, so it cannot distinguish "the tenancy gate did
+    // not fire" from "the credential vanished". Once #605 lands, assert that
+    // each key still authenticates before asserting the suspension, so a
+    // credential-loss regression fails as credential loss.
+    //
     // Labelled, because "expected 403, got 401" from a bare loop does not say
     // which credential broke the contract, and the three differ in kind: a
     // config-seeded key, an admin-issued virtual key, and a project-scoped key.
