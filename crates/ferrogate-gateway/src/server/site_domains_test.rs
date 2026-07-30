@@ -8,6 +8,8 @@
 
 use super::*;
 
+use crate::server::site_domain_verification::DisplacedProofDisposition;
+
 #[test]
 fn valid_hostnames_normalize_to_lowercase_without_port() {
     assert_eq!(
@@ -132,6 +134,43 @@ fn every_bind_terminal_is_declared_in_the_openapi_document() {
          can produce -- a declared-but-unreachable success code is drift in the \
          other direction"
     );
+}
+
+/// #488: a verified takeover is a cross-tenant side effect, so the tenant it was
+/// done TO gets evidence in its own trail -- the `site_domain.verify` line is
+/// drafted from the caller's auth context and lands in the claimant's tenant
+/// only.
+///
+/// Asserted on the row's typed fields, not on its prose: the event must be
+/// attributed to the DISPLACED tenant, and it must not carry the claimant's
+/// actor identity across the tenant boundary.
+#[test]
+fn the_displaced_tenant_gets_the_takeover_in_its_own_audit_trail() {
+    let ctx = ProxyContext {
+        request_id: "req-488".into(),
+        trace_id: Some("trace-488".into()),
+        ..ProxyContext::default()
+    };
+    let cleanup = DisplacedProofCleanup::Displaced {
+        tenant: "org_a".to_string(),
+        disposition: DisplacedProofDisposition::Dropped,
+    };
+    let event = displaced_takeover_audit_event(&ctx, "org_a", "grabbed.example.com", &cleanup);
+
+    assert_eq!(
+        event.tenant.organization_id.as_deref(),
+        Some("org_a"),
+        "the row must land in the displaced tenant's trail, not the caller's",
+    );
+    assert_eq!(event.action, "site_domain.displaced");
+    assert_eq!(event.target, "grabbed.example.com");
+    assert_eq!(event.request_id, "req-488");
+    assert_eq!(event.trace_id.as_deref(), Some("trace-488"));
+    assert_eq!(
+        event.actor_api_key_id, None,
+        "the claimant's actor identity must not cross the tenant boundary",
+    );
+    assert_eq!(event.tenant.api_key_id, None, "nor its key attribution",);
 }
 
 /// Sibling audit: `verifySiteDomain` answers `400 invalid_site_domain` when

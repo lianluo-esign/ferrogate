@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ferrogate_storage::{
-    sha256_hex, SiteDomainVerificationAttempt, SiteDomainVerificationState,
+    sha256_hex, SiteDomainVerificationAttempt, SiteDomainVerificationState, StoredSiteDomain,
     StoredSiteDomainVerification,
 };
 
@@ -707,6 +707,176 @@ pub(super) fn holder_blocks_verified_takeover(
     holder.is_some_and(|holder| holder.has_live_dns_ownership_proof(now_unix))
 }
 
+/// Whether `tenant_id` is the tenant that CURRENTLY holds the servable
+/// `site_domains` row.
+///
+/// One definition, shared by the re-bind reuse rule and by
+/// [`displaced_binding_holder`], so "the caller still holds this binding" and
+/// "this other tenant is the one being displaced" cannot drift into two
+/// different comparisons.
+pub(super) fn holds_binding(binding: Option<&StoredSiteDomain>, tenant_id: &str) -> bool {
+    binding.is_some_and(|binding| binding.tenant_id == tenant_id)
+}
+
+/// The tenant a completed ownership proof is about to displace, if any.
+///
+/// `binding` is the PRE-claim read of the `site_domains` row: after
+/// `claim_verified_site_domain` the row names the claimant, so the loser is no
+/// longer recoverable from it.
+///
+/// `None` when the hostname was unbound or the claimant already held it. The
+/// same-tenant filter is load-bearing, not decoration: without it an ordinary
+/// verify (the caller proving a hostname it already holds) would delete the
+/// winner's OWN freshly written `verified` row, so the hostname would stop
+/// serving the instant it was proved -- a worse failure than the land-grab this
+/// cleanup closes.
+pub(super) fn displaced_binding_holder<'a>(
+    binding: Option<&'a StoredSiteDomain>,
+    claimant: &str,
+) -> Option<&'a str> {
+    binding
+        .filter(|binding| binding.tenant_id != claimant)
+        .map(|binding| binding.tenant_id.as_str())
+}
+
+/// What happened to the displaced tenant's stored proof, once there WAS a
+/// displaced tenant.
+///
+/// Three dispositions rather than a boolean: "there was nothing to drop" and
+/// "the drop FAILED" are different facts for an operator, and only the last one
+/// can leave a stale serving signal behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DisplacedProofDisposition {
+    /// The row existed and is gone.
+    Dropped,
+    /// There was no verification row for the displaced tenant (nothing to do).
+    Absent,
+    /// The store refused the delete. The takeover is already durable, so this
+    /// can only be reported, never turned into an error response.
+    DropFailed,
+}
+
+impl DisplacedProofDisposition {
+    /// The stable audit/log spelling.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            DisplacedProofDisposition::Dropped => "dropped",
+            DisplacedProofDisposition::Absent => "absent",
+            DisplacedProofDisposition::DropFailed => "drop_failed",
+        }
+    }
+}
+
+/// The whole outcome of the post-takeover cleanup: WHO was displaced (nobody,
+/// in the common same-tenant case) and what happened to their proof. Returned
+/// as one value so the audit line and the displaced tenant's own evidence read
+/// the same decision the cleanup actually made instead of re-deriving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DisplacedProofCleanup {
+    /// The claimant already held the binding, or the hostname was unbound: no
+    /// other tenant's proof is involved and NOTHING is deleted.
+    NoDisplacement,
+    Displaced {
+        tenant: String,
+        disposition: DisplacedProofDisposition,
+    },
+}
+
+impl DisplacedProofCleanup {
+    /// The displaced tenant, or `None` when nobody was displaced.
+    pub(super) fn displaced_tenant(&self) -> Option<&str> {
+        match self {
+            DisplacedProofCleanup::NoDisplacement => None,
+            DisplacedProofCleanup::Displaced { tenant, .. } => Some(tenant.as_str()),
+        }
+    }
+
+    /// The suffix appended to the `site_domain.verify` audit line. Empty when
+    /// nothing was displaced, so an ordinary verify's audit record is unchanged.
+    pub(super) fn audit_detail(&self) -> String {
+        match self {
+            DisplacedProofCleanup::NoDisplacement => String::new(),
+            DisplacedProofCleanup::Displaced {
+                tenant,
+                disposition,
+            } => format!(
+                ", displaced_tenant={tenant}, displaced_proof={}",
+                disposition.as_str()
+            ),
+        }
+    }
+}
+
+/// Drop the displaced tenant's ownership proof after a verified takeover moved
+/// the servable binding away from it (#488).
+///
+/// WHY: an ownership signal must never outlive the binding it backed. The
+/// takeover moves the `site_domains` row, but the loser's own
+/// `site_domain_verifications` row used to survive it -- and a `grandfathered`
+/// row never expires (`verification_expires_at_unix` is `None`), so the
+/// displaced squatter only had to wait for the proven owner to unbind, re-bind,
+/// and be served again with nothing proved. The unbind handler already drops the
+/// proof together with the binding for exactly this reason; this is the same
+/// invariant on the path that moves a binding BETWEEN tenants.
+///
+/// ORDER: the caller runs this AFTER the claim commits. Until then we do not
+/// know the binding moved, and deleting another tenant's proof for a takeover
+/// that then 409s would destroy state on a request that changed nothing.
+///
+/// FAILURE: a failed drop cannot fail the request -- the takeover is already
+/// durable, so a 5xx would misreport committed state. It is reported
+/// ([`DisplacedProofDisposition::DropFailed`]) instead of hidden. The invariant
+/// does NOT depend on this write succeeding: [`reusable_on_rebind`] refuses to
+/// carry a `grandfathered` proof forward for a tenant that no longer holds the
+/// binding, so an orphaned row cannot resurrect serving even if every delete
+/// here fails. This cleanup is hygiene on top of that fail-closed rule, which is
+/// also what makes naming the displaced tenant from the PRE-claim read
+/// acceptable under concurrency. If the holder changed between that read and the
+/// claim, the delete targets the EARLIER holder -- whose row its own unbind
+/// already removed, so the disposition is `Absent` -- and the row the actual
+/// loser keeps is at worst a non-serving `pending_verification` challenge (a
+/// `grandfathered` orphan is refused by [`reusable_on_rebind`], and a holder with
+/// a live `verified` proof cannot be displaced at all: the claim CAS refuses that
+/// takeover).
+pub(super) async fn drop_displaced_ownership_proof(
+    state: &crate::state::AppState,
+    hostname: &str,
+    pre_claim_binding: Option<&StoredSiteDomain>,
+    claimant: &str,
+) -> DisplacedProofCleanup {
+    let Some(displaced) = displaced_binding_holder(pre_claim_binding, claimant) else {
+        return DisplacedProofCleanup::NoDisplacement;
+    };
+    let deleted = state
+        .delete_site_domain_verification(displaced, hostname)
+        .await;
+    if let Err(error) = &deleted {
+        tracing::error!(
+            hostname = %hostname,
+            displaced_tenant = %displaced,
+            "took over the site-domain binding after a DNS ownership proof but could not drop \
+             the displaced tenant's stale verification row; remove it so the row cannot be \
+             read as evidence later (#488): {error}"
+        );
+    }
+    DisplacedProofCleanup::Displaced {
+        tenant: displaced.to_string(),
+        disposition: displaced_proof_disposition(deleted.map_err(|error| error.to_string())),
+    }
+}
+
+/// Fold the store's answer to the cleanup delete into a disposition. Pure, so
+/// all three arms are assertable without an injectable failing store.
+pub(super) fn displaced_proof_disposition(
+    deleted: Result<bool, String>,
+) -> DisplacedProofDisposition {
+    match deleted {
+        Ok(true) => DisplacedProofDisposition::Dropped,
+        Ok(false) => DisplacedProofDisposition::Absent,
+        Err(_) => DisplacedProofDisposition::DropFailed,
+    }
+}
+
 /// The bound hostnames that currently hold a LIVE ownership proof.
 ///
 /// This is what the ACME domain set is built from at startup (#488): an
@@ -852,11 +1022,42 @@ impl AdminSiteDomainVerification {
 /// HOSTNAME, not of the site it points at) and an unexpired pending challenge
 /// keeps its token so an operator who already published the TXT is not sent
 /// back to DNS. Anything expired gets a fresh token.
-pub(super) fn reusable_on_rebind(record: &StoredSiteDomainVerification, now_unix: i64) -> bool {
-    !matches!(
-        record.effective_state(now_unix),
-        SiteDomainVerificationState::Expired
-    )
+///
+/// `binding` is the CURRENT `site_domains` row for the hostname, because
+/// `grandfathered` is the one state whose reusability depends on it. That state
+/// is not evidence of control -- it is a migration availability exception, and
+/// it only ever covered the binding that existed when #488 landed. Once that
+/// binding is gone (unbound, or taken over by a tenant that DID prove
+/// ownership), an orphaned `grandfathered` row must not resurrect serving on the
+/// next bind: that is precisely the land-grab this issue closes, arriving one
+/// hop later. So it is reusable only while the record's own tenant still holds
+/// the binding.
+///
+/// This is structurally fail-closed, which is why the post-takeover cleanup in
+/// [`drop_displaced_ownership_proof`] is allowed to be best-effort: if the
+/// delete fails, or names the wrong loser because the holder changed between the
+/// pre-claim read and the claim, the stale row is still not reusable. A
+/// legitimate pre-#488 re-bind is unaffected -- it holds its binding by
+/// definition -- and `verified` stays reusable regardless, since a live DNS proof
+/// IS evidence of control and expires on its own 90-day clock.
+///
+/// BE PRECISE ABOUT REACHABILITY: from the bind handler the interesting input is
+/// `None` (the hostname is unbound and the caller carries an orphaned row),
+/// because a caller that does not hold an EXISTING binding is refused with a 409
+/// before this is consulted. The rule is still stated over the binding rather
+/// than over a "caller holds it" boolean, so it cannot silently become wrong if
+/// that preflight changes.
+pub(super) fn reusable_on_rebind(
+    record: &StoredSiteDomainVerification,
+    binding: Option<&StoredSiteDomain>,
+    now_unix: i64,
+) -> bool {
+    match record.effective_state(now_unix) {
+        SiteDomainVerificationState::Expired => false,
+        SiteDomainVerificationState::Grandfathered => holds_binding(binding, &record.tenant_id),
+        SiteDomainVerificationState::PendingVerification
+        | SiteDomainVerificationState::Verified => true,
+    }
 }
 
 #[cfg(test)]

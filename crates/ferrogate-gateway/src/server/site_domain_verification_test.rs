@@ -10,6 +10,22 @@
 
 use super::*;
 
+use ferrogate_config::Config;
+use ferrogate_sync_bridge::block_on_sync_bridge;
+
+use crate::state::AppState;
+
+/// A servable binding row, the shape the bind/verify handlers read and write.
+fn binding(tenant: &str, hostname: &str, site: &str, now_unix: i64) -> StoredSiteDomain {
+    StoredSiteDomain {
+        hostname: hostname.to_string(),
+        tenant_id: tenant.to_string(),
+        site: site.to_string(),
+        created_at_unix: now_unix,
+        updated_at_unix: now_unix,
+    }
+}
+
 /// Scripted resolver: the seam's whole point. Returns a canned answer per
 /// looked-up name, so ownership verification is exercised without DNS.
 struct ScriptedTxtResolver {
@@ -611,20 +627,336 @@ fn grandfathering_defaults_on_and_is_switchable_off() {
 
 #[test]
 fn a_rebind_reuses_a_live_proof_but_not_an_expired_one() {
+    let held = binding("org_a", "example.com", "docs", 1_000);
     let mut record =
         StoredSiteDomainVerification::pending("org_a", "example.com", "docs", "tok", 1_000);
     assert!(
-        reusable_on_rebind(&record, 1_100),
+        reusable_on_rebind(&record, Some(&held), 1_100),
         "an operator who already published the TXT is not sent back to DNS",
     );
     record.mark_verified(1_100);
     assert!(
-        reusable_on_rebind(&record, 1_200),
+        reusable_on_rebind(&record, Some(&held), 1_200),
         "ownership is of the hostname, not of the site it points at",
     );
     assert!(
-        !reusable_on_rebind(&record, 1_100 + 400 * 24 * 60 * 60),
+        !reusable_on_rebind(&record, Some(&held), 1_100 + 400 * 24 * 60 * 60),
         "an aged-out proof must be re-earned, not carried forward",
+    );
+}
+
+/// The re-bind reuse rule for the ONE state that is serving without being proof.
+///
+/// `grandfathered` is a migration availability exception attached to the binding
+/// that existed when #488 landed -- it is not evidence of control, and it never
+/// expires on its own. So once its tenant no longer holds the binding (unbound,
+/// or taken over by a tenant that actually proved ownership) the row is an
+/// orphan, and carrying it forward on the next bind would serve the hostname
+/// again with nothing proved: the #488 land-grab, one hop later.
+///
+/// This is what makes the post-takeover cleanup allowed to be best-effort:
+/// widening this rule back to "anything unexpired is reusable" reds the middle
+/// two assertions, which are exactly the states a failed (or wrongly targeted)
+/// cleanup leaves behind.
+#[test]
+fn a_grandfathered_proof_is_only_reusable_while_its_tenant_still_holds_the_binding() {
+    let now = 1_000;
+    let host = "legacy.example.com";
+    let grandfathered =
+        StoredSiteDomainVerification::grandfathered("org_a", host, "docs", "tok", now);
+    assert!(grandfathered.serves(now), "precondition: it does serve");
+
+    assert!(
+        reusable_on_rebind(
+            &grandfathered,
+            Some(&binding("org_a", host, "docs", now)),
+            now
+        ),
+        "a legitimate pre-#488 re-bind still holds its own binding and must not be forced back \
+         through DNS",
+    );
+    assert!(
+        !reusable_on_rebind(
+            &grandfathered,
+            Some(&binding("org_b", host, "site", now)),
+            now
+        ),
+        "once another tenant holds the binding, the migration exception is not the squatter's \
+         to carry forward",
+    );
+    assert!(
+        !reusable_on_rebind(&grandfathered, None, now),
+        "an orphaned migration exception must not resurrect serving on a fresh bind",
+    );
+
+    // A live DNS proof IS evidence of control, so it survives regardless of who
+    // currently holds the binding row, and it has its own 90-day clock.
+    let mut verified = StoredSiteDomainVerification::pending("org_a", host, "docs", "tok", now);
+    verified.mark_verified(now);
+    assert!(reusable_on_rebind(&verified, None, now));
+    assert!(!reusable_on_rebind(
+        &verified,
+        None,
+        now + ferrogate_storage::SITE_DOMAIN_VERIFICATION_TTL_SECONDS
+    ));
+    // An unexpired challenge keeps its token: it does not serve, so there is
+    // nothing to fail closed about.
+    let pending = StoredSiteDomainVerification::pending("org_a", host, "docs", "tok", now);
+    assert!(!pending.serves(now));
+    assert!(reusable_on_rebind(&pending, None, now));
+}
+
+/// Who a completed proof displaces, as a value.
+///
+/// The same-tenant `None` is the dangerous half: the verify handler runs the
+/// cleanup on every successful proof, so a selector that named the CLAIMANT
+/// would delete the winner's own freshly written `verified` row and the hostname
+/// would stop serving the instant it was proved.
+#[test]
+fn only_another_tenants_binding_is_ever_displaced() {
+    let now = 1_000;
+    let host = "contested.example.com";
+    let squatter = binding("org_a", host, "docs", now);
+
+    assert_eq!(
+        displaced_binding_holder(Some(&squatter), "org_b"),
+        Some("org_a"),
+        "the tenant losing the binding is the one whose proof must go with it",
+    );
+    assert_eq!(
+        displaced_binding_holder(Some(&squatter), "org_a"),
+        None,
+        "a tenant proving a hostname it already holds displaces nobody",
+    );
+    assert_eq!(
+        displaced_binding_holder(None, "org_b"),
+        None,
+        "an unbound hostname displaces nobody",
+    );
+
+    assert!(holds_binding(Some(&squatter), "org_a"));
+    assert!(!holds_binding(Some(&squatter), "org_b"));
+    assert!(!holds_binding(None, "org_a"));
+}
+
+/// The #488 regression this cleanup exists for, over the real store: a
+/// grandfathered squatter that loses the binding to a completed DNS proof must
+/// not keep a serving signal it can re-bind into later.
+#[test]
+fn a_verified_takeover_drops_the_displaced_tenants_serving_proof() {
+    let now = 1_000;
+    let host = "grabbed.example.com";
+    let state = AppState::new(Config::default());
+
+    // org_a is the pre-#488 squatter: it holds the binding and a grandfathered
+    // (never-proven) verification row, so today the hostname serves for it.
+    let squatter_binding = binding("org_a", host, "docs", now);
+    block_on_sync_bridge(state.claim_site_domain(squatter_binding.clone()))
+        .expect("seed the squatter's binding");
+    let squatter_proof =
+        StoredSiteDomainVerification::grandfathered("org_a", host, "docs", "tok_a", now);
+    assert!(
+        squatter_proof.serves(now),
+        "precondition: the squatter is serving"
+    );
+    block_on_sync_bridge(state.upsert_site_domain_verification(squatter_proof))
+        .expect("seed the squatter's proof");
+
+    // org_b completes the DNS-TXT proof and takes the binding over.
+    let mut proved = StoredSiteDomainVerification::pending("org_b", host, "site", "tok_b", now);
+    proved.mark_verified(now);
+    block_on_sync_bridge(state.upsert_site_domain_verification(proved))
+        .expect("seed the winner's proof");
+    let claimed = block_on_sync_bridge(
+        state.claim_verified_site_domain(binding("org_b", host, "site", now), now),
+    )
+    .expect("a proved challenger takes over an unproven holder");
+    assert_eq!(claimed.tenant_id, "org_b");
+
+    // The cleanup the verify handler runs, with the PRE-claim binding it read.
+    let cleanup = block_on_sync_bridge(drop_displaced_ownership_proof(
+        &state,
+        host,
+        Some(&squatter_binding),
+        "org_b",
+    ));
+    assert_eq!(
+        cleanup,
+        DisplacedProofCleanup::Displaced {
+            tenant: "org_a".to_string(),
+            disposition: DisplacedProofDisposition::Dropped,
+        },
+    );
+
+    // The displaced tenant's serving signal is gone from the store...
+    assert_eq!(
+        block_on_sync_bridge(state.get_site_domain_verification("org_a", host))
+            .expect("read the displaced tenant's proof"),
+        None,
+        "an ownership signal must not outlive the binding it backed (#488)",
+    );
+    // ...and the winner's own proof is untouched.
+    assert!(
+        block_on_sync_bridge(state.get_site_domain_verification("org_b", host))
+            .expect("read the winner's proof")
+            .is_some_and(|record| record.has_live_dns_ownership_proof(now)),
+    );
+
+    // Even if that delete had failed, the squatter's next bind cannot inherit
+    // the orphan: the binding is org_b's now, so the row is not reusable and the
+    // re-bind issues a fresh, non-serving challenge instead.
+    let orphan = StoredSiteDomainVerification::grandfathered("org_a", host, "docs", "tok_a", now);
+    assert!(!reusable_on_rebind(&orphan, Some(&claimed), now));
+    assert!(
+        !StoredSiteDomainVerification::pending("org_a", host, "docs", "fresh", now).serves(now),
+        "the record a displaced tenant's re-bind gets does not serve",
+    );
+}
+
+/// The other half of the same cleanup: an ordinary verify -- the caller proving a
+/// hostname it already holds -- must delete NOTHING. Naming the claimant as the
+/// displaced tenant would take a hostname offline the moment it was proved,
+/// which is worse than the bug the cleanup fixes, so it is pinned here.
+#[test]
+fn a_same_tenant_verification_deletes_nobodys_proof() {
+    let now = 1_000;
+    let host = "own.example.com";
+    let state = AppState::new(Config::default());
+
+    let held = binding("org_a", host, "docs", now);
+    block_on_sync_bridge(state.claim_site_domain(held.clone())).expect("seed the binding");
+    let mut proof = StoredSiteDomainVerification::pending("org_a", host, "docs", "tok", now);
+    proof.mark_verified(now);
+    block_on_sync_bridge(state.upsert_site_domain_verification(proof)).expect("seed the proof");
+
+    assert_eq!(
+        block_on_sync_bridge(drop_displaced_ownership_proof(
+            &state,
+            host,
+            Some(&held),
+            "org_a"
+        )),
+        DisplacedProofCleanup::NoDisplacement,
+    );
+    let survived = block_on_sync_bridge(state.get_site_domain_verification("org_a", host))
+        .expect("read back")
+        .expect("a tenant's own fresh proof must survive its own verify");
+    assert!(survived.has_live_dns_ownership_proof(now));
+
+    // An unbound hostname is the same story: nothing to displace, nothing to
+    // delete.
+    assert_eq!(
+        block_on_sync_bridge(drop_displaced_ownership_proof(&state, host, None, "org_a")),
+        DisplacedProofCleanup::NoDisplacement,
+    );
+    assert!(
+        block_on_sync_bridge(state.get_site_domain_verification("org_a", host))
+            .expect("read back")
+            .is_some(),
+    );
+}
+
+/// Three dispositions, not a boolean: only `drop_failed` can leave a stale
+/// signal behind, and an operator has to be able to tell it apart from "there
+/// was nothing to drop".
+#[test]
+fn the_cleanup_reports_what_the_store_actually_did() {
+    assert_eq!(
+        displaced_proof_disposition(Ok(true)),
+        DisplacedProofDisposition::Dropped,
+    );
+    assert_eq!(
+        displaced_proof_disposition(Ok(false)),
+        DisplacedProofDisposition::Absent,
+    );
+    assert_eq!(
+        displaced_proof_disposition(Err("control-plane store unavailable".to_string())),
+        DisplacedProofDisposition::DropFailed,
+        "a store that refused the delete must never be reported as a completed drop",
+    );
+    assert_eq!(DisplacedProofDisposition::Dropped.as_str(), "dropped");
+    assert_eq!(DisplacedProofDisposition::Absent.as_str(), "absent");
+    assert_eq!(
+        DisplacedProofDisposition::DropFailed.as_str(),
+        "drop_failed"
+    );
+
+    // The `absent` arm through the real store: a displaced tenant that never had
+    // a verification row at all.
+    let now = 1_000;
+    let host = "rowless.example.com";
+    let state = AppState::new(Config::default());
+    let squatter_binding = binding("org_a", host, "docs", now);
+    block_on_sync_bridge(state.claim_site_domain(squatter_binding.clone()))
+        .expect("seed the binding");
+    assert_eq!(
+        block_on_sync_bridge(drop_displaced_ownership_proof(
+            &state,
+            host,
+            Some(&squatter_binding),
+            "org_b",
+        )),
+        DisplacedProofCleanup::Displaced {
+            tenant: "org_a".to_string(),
+            disposition: DisplacedProofDisposition::Absent,
+        },
+    );
+
+    // Nobody displaced contributes nothing to the audit line, so an ordinary
+    // verify's record is unchanged.
+    assert!(DisplacedProofCleanup::NoDisplacement
+        .audit_detail()
+        .is_empty());
+    assert_eq!(
+        DisplacedProofCleanup::NoDisplacement.displaced_tenant(),
+        None
+    );
+}
+
+/// The verify path's certificate-order decision.
+///
+/// `handle_admin_site_domain_verify` promotes the record with `mark_verified`
+/// and then hands `acme_order_action(&verification, now)` to
+/// `apply_site_domain_acme_action`, so this is the policy that call applies: a
+/// completed proof is what enrolls a hostname, and a promotion whose proof is no
+/// longer live withholds instead.
+///
+/// WHAT THIS DOES NOT CATCH, stated plainly: no test drives the handler arm, so
+/// replacing its argument with a hand-picked `AcmeOrderAction::Enroll` would
+/// leave this green. Closing that needs either the `BindTerminal` sealing
+/// treatment on `AcmeOrderAction` or an in-process admin-request test over the
+/// verify handler; neither is done here.
+#[test]
+fn a_completed_proof_is_what_enrolls_a_hostname_in_the_acme_order_set() {
+    let now = 1_000;
+    let mut verification =
+        StoredSiteDomainVerification::pending("org_b", "proved.example.com", "site", "tok", now);
+    assert_eq!(
+        acme_order_action(&verification, now),
+        AcmeOrderAction::Withhold {
+            serving: false,
+            verification_state: "pending_verification",
+        },
+        "an unproven hostname must not be in the certificate order set",
+    );
+
+    verification.mark_verified(now);
+    assert_eq!(
+        acme_order_action(&verification, now),
+        AcmeOrderAction::Enroll,
+        "a completed DNS proof is the only thing that enrolls a hostname",
+    );
+
+    // The promotion starts a 90-day clock; past it the same call withholds.
+    assert_eq!(
+        acme_order_action(
+            &verification,
+            now + ferrogate_storage::SITE_DOMAIN_VERIFICATION_TTL_SECONDS
+        ),
+        AcmeOrderAction::Withhold {
+            serving: false,
+            verification_state: "expired",
+        },
     );
 }
 

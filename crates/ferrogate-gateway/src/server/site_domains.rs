@@ -43,9 +43,10 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::route_groups::RequestParts;
 use super::site_domain_verification::{
-    acme_order_action, challenge_record_name, challenge_txt_value, holder_blocks_verified_takeover,
-    new_challenge_token, resolve_challenge_within_rate_limit, reusable_on_rebind, AcmeOrderAction,
-    AdminSiteDomainVerification, ChallengeOutcome, GatedChallengeCheck, SiteDomainResolverBackend,
+    acme_order_action, challenge_record_name, challenge_txt_value, drop_displaced_ownership_proof,
+    holder_blocks_verified_takeover, new_challenge_token, resolve_challenge_within_rate_limit,
+    reusable_on_rebind, AcmeOrderAction, AdminSiteDomainVerification, ChallengeOutcome,
+    DisplacedProofCleanup, GatedChallengeCheck, SiteDomainResolverBackend,
 };
 use super::{FerroGateway, ProxyContext};
 use crate::auth::{authorize_tenant_scope, enforce_tenant_filter};
@@ -436,6 +437,13 @@ impl FerroGateway {
         // unexpired challenge) survives a re-bind -- ownership is of the
         // HOSTNAME, not of the site it points at -- so an operator who already
         // published the TXT record is not sent back to DNS.
+        //
+        // The CURRENT binding is part of that decision (#488): a `grandfathered`
+        // record is a migration exception attached to the binding that existed
+        // at upgrade, not evidence of control, so an orphaned one -- left behind
+        // by an unbind or by a takeover whose cleanup did not land -- is NOT
+        // carried forward. Its owner gets a fresh challenge and does not serve
+        // until it proves control.
         let caller_proof = match state
             .get_site_domain_verification(&tenant_id, &hostname)
             .await
@@ -444,7 +452,7 @@ impl FerroGateway {
             Err(error) => return storage_error(session, ctx, error.to_string()).await,
         };
         let verification = match caller_proof {
-            Some(mut record) if reusable_on_rebind(&record, now) => {
+            Some(mut record) if reusable_on_rebind(&record, existing.as_ref(), now) => {
                 record.site = site.clone();
                 record.updated_at_unix = now;
                 record
@@ -790,14 +798,6 @@ impl FerroGateway {
                     Ok(existing) => existing,
                     Err(error) => return storage_error(session, ctx, error.to_string()).await,
                 };
-                // Whose binding this proof is about to displace, if anyone's.
-                // Captured from the PRE-claim read, because after the claim the
-                // row names the new holder and the displaced tenant is no
-                // longer recoverable from it.
-                let displaced_tenant = existing
-                    .as_ref()
-                    .map(|existing| existing.tenant_id.clone())
-                    .filter(|holder| holder != &tenant_id);
                 if let Some(existing) = existing.as_ref() {
                     if existing.tenant_id != tenant_id {
                         let holder = match state
@@ -879,54 +879,30 @@ impl FerroGateway {
                 };
 
                 // #488: an ownership signal must never outlive the binding it
-                // backed. The claim above moved the servable row away from the
-                // displaced tenant, but that tenant's own verification row
-                // survived it -- and a `grandfathered` row never expires
-                // (`verification_expires_at_unix` is `None`) and is carried
-                // forward verbatim by `reusable_on_rebind`. So a displaced
-                // squatter only had to wait for the proven owner to unbind and
-                // then re-bind to serve the hostname again with no proof at
-                // all: the land-grab this issue exists to close, restored
-                // through the takeover path. The unbind handler already drops
-                // the proof together with the binding for exactly this reason;
-                // this is the same invariant on the path that moves a binding
-                // between tenants.
-                //
-                // Dropped AFTER the claim, deliberately: until the claim commits
-                // we do not know the binding moved, and deleting another
-                // tenant's proof for a takeover that then failed would destroy
-                // state on a request that changed nothing. A failed drop cannot
-                // fail the request either -- the takeover is already durable --
-                // so it is reported rather than hidden.
-                let takeover_detail = match displaced_tenant.as_deref() {
-                    None => String::new(),
-                    Some(displaced) => {
-                        // Three distinct dispositions, not one boolean: "there
-                        // was nothing to drop" and "the drop failed" are
-                        // different facts for an operator reading this line,
-                        // and only the last one leaves a stale signal behind.
-                        let disposition = match state
-                            .delete_site_domain_verification(displaced, &hostname)
-                            .await
-                        {
-                            Ok(true) => "dropped",
-                            Ok(false) => "absent",
-                            Err(error) => {
-                                tracing::error!(
-                                    hostname = %hostname,
-                                    displaced_tenant = %displaced,
-                                    "took over the site-domain binding after a DNS ownership \
-                                     proof but could not drop the displaced tenant's stale \
-                                     verification row; remove it before that tenant re-binds \
-                                     the hostname, or the re-bind inherits a serving signal it \
-                                     never proved (#488): {error}"
-                                );
-                                "drop_failed"
-                            }
-                        };
-                        format!(", displaced_tenant={displaced}, displaced_proof={disposition}")
-                    }
-                };
+                // backed. The claim above may have moved the servable row away
+                // from another tenant; that tenant's own verification row is
+                // dropped here, from the PRE-claim read (after the claim the row
+                // names the new holder). The decision -- including "nobody was
+                // displaced", which must delete NOTHING or an ordinary verify
+                // would erase the winner's own fresh proof -- lives in
+                // `drop_displaced_ownership_proof`, not in this handler arm.
+                let cleanup = drop_displaced_ownership_proof(
+                    &state,
+                    &hostname,
+                    existing.as_ref(),
+                    &tenant_id,
+                )
+                .await;
+                // The cross-tenant side effect leaves evidence in the DISPLACED
+                // tenant's own audit trail too: the caller-scoped line below is
+                // written against the claimant's tenant, so without this the
+                // tenant whose domain stopped serving has no record of why.
+                if let Some(displaced) = cleanup.displaced_tenant() {
+                    state.record_admin_audit_event(displaced_takeover_audit_event(
+                        ctx, displaced, &hostname, &cleanup,
+                    ));
+                }
+                let takeover_detail = cleanup.audit_detail();
 
                 // The order-set decision is derived from the STORED proof here
                 // too, never from a literal at the call site: `acme_order_action`
@@ -1215,6 +1191,51 @@ fn admin_site_domain(
         serving: verification.is_some_and(|record| record.serves(now_unix)),
         created_at_unix: domain.created_at_unix,
         updated_at_unix: domain.updated_at_unix,
+    }
+}
+
+/// The audit row the DISPLACED tenant gets when a completed DNS-TXT proof moves
+/// its site-domain binding to another tenant (#488).
+///
+/// The `site_domain.verify` line is drafted from the CALLER's auth context, so
+/// it lands in the claimant's tenant trail only. A tenant whose hostname stopped
+/// serving because somebody else proved ownership has to be able to see that in
+/// its OWN evidence -- "do not hide operational decisions" applies to the tenant
+/// the decision was made about, not only to the one who asked for it.
+///
+/// Deliberately carries no identity from the other side: no actor API key, and
+/// the claimant tenant is not named. The displaced tenant learns that its
+/// binding was taken over by a completed ownership proof and what happened to
+/// its own verification row -- what it needs in order to act -- without learning
+/// who holds the hostname now.
+fn displaced_takeover_audit_event(
+    ctx: &ProxyContext,
+    displaced_tenant: &str,
+    hostname: &str,
+    cleanup: &DisplacedProofCleanup,
+) -> crate::state::AdminAuditEventDraft {
+    crate::state::AdminAuditEventDraft {
+        action_identity: Default::default(),
+        request_id: ctx.request_id.clone(),
+        trace_id: ctx.trace_id.clone(),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        actor_api_key_id: None,
+        tenant: ferrogate_core::TenantContext {
+            organization_id: Some(displaced_tenant.to_string()),
+            ..Default::default()
+        },
+        action: "site_domain.displaced".to_string(),
+        target: hostname.to_string(),
+        outcome: "committed".to_string(),
+        message: format!(
+            "site domain {hostname} was taken over by a tenant that completed the DNS-TXT \
+             ownership proof for it; this tenant's binding no longer serves the hostname and a \
+             re-bind must prove control{}",
+            cleanup.audit_detail()
+        ),
     }
 }
 
