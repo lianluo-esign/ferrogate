@@ -7,7 +7,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, ExitStatus},
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -17,6 +17,18 @@ const WRANGLER_VERSION: &str = "4.107.1";
 const WORKERS_TYPES_VERSION: &str = "4.20260702.1";
 const VITEST_POOL_VERSION: &str = "0.18.1";
 const AGENTS_VERSION: &str = "0.0.109";
+
+/// Overrides the npm cache this gate installs from.
+const NPM_CACHE_ENV: &str = "FERROGATE_TEST_NPM_CACHE";
+/// Overrides the wall-clock budget for a single npm invocation, in seconds.
+const NPM_TIMEOUT_ENV: &str = "FERROGATE_TEST_NPM_TIMEOUT";
+/// Budget applied when `NPM_TIMEOUT_ENV` is unset. Interpolated into the gate's
+/// shell line *and* into the failure hint, so the number the hint blames is
+/// always the number that actually killed the command.
+const DEFAULT_NPM_TIMEOUT_SECS: &str = "600";
+/// Cache location when `NPM_CACHE_ENV` is unset, relative to the repository
+/// root. Under `target/`, which is already gitignored.
+const DEFAULT_NPM_CACHE_DIR: &str = "target/ferrogate-test/npm-cache";
 
 pub(crate) fn run_worker_release() -> Result<()> {
     let root = repository_root()?;
@@ -29,11 +41,20 @@ pub(crate) fn run_worker_release() -> Result<()> {
     run_workers_gate_contract(&root)?;
 
     let temp = tempfile::tempdir().context("create the clean Worker release checkout")?;
-    let cache = env::var_os("FERROGATE_TEST_NPM_CACHE")
+    // #595: the npm *cache* is not part of the clean-checkout contract — the
+    // checkout is (`copy_worker` excludes node_modules, and `npm ci` wipes and
+    // reinstalls strictly from the lockfile whose integrity hashes are verified
+    // above). Cache entries are content-addressed and integrity-checked on read,
+    // so persisting them across runs cannot smuggle in a package the lockfile
+    // does not pin. Defaulting to a per-run temp directory did make every
+    // invocation re-download the whole pinned wrangler/workerd tree, which is
+    // what pushed `npm ci` past the timeout below and, as the first link in the
+    // `ci` chain, took every Rust scenario down with it.
+    let cache = env::var_os(NPM_CACHE_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| temp.path().join("npm-cache"));
+        .unwrap_or_else(|| root.join(DEFAULT_NPM_CACHE_DIR));
     fs::create_dir_all(&cache)
-        .with_context(|| format!("create isolated npm cache at {}", cache.display()))?;
+        .with_context(|| format!("create the npm cache at {}", cache.display()))?;
 
     let agent = copy_worker(&root, temp.path(), "agent-gateway")?;
     let d1_proxy = copy_worker(&root, temp.path(), "d1-proxy")?;
@@ -309,11 +330,34 @@ fn run_npm(node_env: &Path, cache: &Path, worker: &Path, arguments: &[&str]) -> 
         .with_context(|| format!("run npm {} in {}", arguments.join(" "), worker.display()))?;
     ensure!(
         status.success(),
-        "npm {} failed in {} with {status}",
+        "npm {} failed in {} with {status}{}",
         arguments.join(" "),
-        worker.display()
+        worker.display(),
+        npm_timeout_hint(&status)
     );
     Ok(())
+}
+
+/// Explains an npm exit that came from `timeout` rather than from npm itself.
+///
+/// `timeout` reports its own kill as 124, or as 128 + the signal it sent — 137
+/// for the `--signal=KILL` this gate uses. Both surface as a bare numeric exit
+/// status that reads like an npm crash, which is how the #595 report arrived:
+/// the gate had been dying on a cold-cache download that never fit in the
+/// budget, and nothing in the output said so.
+fn npm_timeout_hint(status: &ExitStatus) -> String {
+    if !matches!(status.code(), Some(124) | Some(137)) {
+        return String::new();
+    }
+    let budget = env::var(NPM_TIMEOUT_ENV).unwrap_or_else(|_| DEFAULT_NPM_TIMEOUT_SECS.to_string());
+    format!(
+        "\n\
+         this is the {NPM_TIMEOUT_ENV} kill at {budget}s, not an npm failure: the command was \
+         still running when the budget expired.\n\
+         A cold npm cache has to re-download the whole pinned tree; keep the cache warm (default \
+         <repository root>/{DEFAULT_NPM_CACHE_DIR}, override with {NPM_CACHE_ENV}) or raise \
+         {NPM_TIMEOUT_ENV}."
+    )
 }
 
 fn verify_dependency_tree(node_env: &Path, cache: &Path, worker: &Path) -> Result<()> {
@@ -349,10 +393,11 @@ fn run_npm_quiet(node_env: &Path, cache: &Path, worker: &Path, arguments: &[&str
         .with_context(|| format!("run npm {} in {}", arguments.join(" "), worker.display()))?;
     ensure!(
         output.status.success(),
-        "npm {} failed in {} with {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        "npm {} failed in {} with {}{}\n--- stdout ---\n{}\n--- stderr ---\n{}",
         arguments.join(" "),
         worker.display(),
         output.status,
+        npm_timeout_hint(&output.status),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -384,22 +429,25 @@ fn verify_vitest_result(path: &Path) -> Result<()> {
 }
 
 fn npm_command(node_env: &Path, cache: &Path, worker: &Path, arguments: &[&str]) -> Command {
+    // Built with `format!` rather than `concat!` so the timeout budget has one
+    // definition: `npm_timeout_hint` names this exact number when it blames the
+    // timeout, and a literal duplicated here would let the hint drift into
+    // reporting a budget that is not the one enforcing.
+    let script = format!(
+        ". \"$1\"; \
+         ferrogate_require_node \"worker-release gate\" || exit 1; \
+         shift; \
+         if command -v timeout >/dev/null 2>&1; then \
+         exec timeout --signal=KILL \"${{{NPM_TIMEOUT_ENV}:-{DEFAULT_NPM_TIMEOUT_SECS}}}\" npm \"$@\"; \
+         fi; \
+         echo \"WARNING: worker-release gate has no timeout binary; npm is unbounded\" >&2; \
+         exec npm \"$@\""
+    );
     let mut command = Command::new("bash");
     command
-        .args([
-            "-c",
-            concat!(
-                ". \"$1\"; ",
-                "ferrogate_require_node \"worker-release gate\" || exit 1; ",
-                "shift; ",
-                "if command -v timeout >/dev/null 2>&1; then ",
-                "exec timeout --signal=KILL \"${FERROGATE_TEST_NPM_TIMEOUT:-600}\" npm \"$@\"; ",
-                "fi; ",
-                "echo \"WARNING: worker-release gate has no timeout binary; npm is unbounded\" >&2; ",
-                "exec npm \"$@\""
-            ),
-            "ferrogate-test",
-        ])
+        .arg("-c")
+        .arg(script)
+        .arg("ferrogate-test")
         .arg(node_env)
         .args(arguments)
         .current_dir(worker)

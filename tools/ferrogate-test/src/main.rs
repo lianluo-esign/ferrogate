@@ -137,7 +137,6 @@ fn main() -> Result<()> {
             Ok(())
         },
         ci: |local, auth| {
-            run_worker_release()?;
             run_api_contract(local)?;
             run_component_compliance(local)?;
             run_admin_api(local)?;
@@ -171,7 +170,17 @@ fn main() -> Result<()> {
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;
             run_postgres_restart(local)?;
-            run_postgres_tls_restart(local)
+            run_postgres_tls_restart(local)?;
+            // #595: last, deliberately. Every scenario above is Rust plus local
+            // processes; this one is the chain's only step that needs Node, npm
+            // and the network, so it is also the only one that can fail for a
+            // reason having nothing to do with the commit under test. Running it
+            // first meant a slow registry or a missing toolchain reported one
+            // opaque failure and left every Rust scenario unexecuted — the whole
+            // chain's signal lost to an environment problem. Last, the same
+            // failure still fails `ci` (the `?` chain is unchanged), but only
+            // after the deterministic gates have all reported.
+            run_worker_release()
         },
     })
 }
