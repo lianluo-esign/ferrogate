@@ -736,7 +736,15 @@ tick_interval_secs = {tick_interval_secs}
             |body| {
                 assert_eq!(body["valid"], true);
                 assert_eq!(body["committed"], true);
-                assert_eq!(body["listener_reload_required"], false);
+                // #605: this used to assert `listener_reload_required == false`,
+                // a field only `/admin/v1/config/validate` declares. On the
+                // reload response it decodes as JSON null, `null != false`, and
+                // every caller of `enable_scheduler` panicked here -- which is
+                // why the inline-reload credential loss below it was unreachable
+                // in CI. `mode` is the reload contract's own statement that the
+                // candidate was swapped in-process rather than deferred to a
+                // listener-level restart.
+                assert_eq!(body["mode"], "process-local");
                 Ok(())
             },
         )

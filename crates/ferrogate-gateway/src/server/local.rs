@@ -11893,14 +11893,21 @@ fn reload_from_admin_payload(
         // API (or dropping durable-only resources). See #80.
         return state.reload_from_source_path();
     }
-    // Inline (toml/yaml/caddyfile) payload: the caller is explicitly supplying
-    // the complete desired control-plane config, so it is authoritative -- it
-    // MUST be able to introduce new api-keys/tenants/policies. Reconciling the
-    // durable snapshot here would wholesale-discard the operator's new
-    // resources (the snapshot's `config.api_keys = snapshot.api_keys` replace),
-    // so we apply the supplied config directly. Any key the payload re-lists is
-    // added by the caller's explicit choice, not silently resurrected.
-    Ok(state.reload_process_local(config_from_admin_payload(payload, state)?))
+    // Inline (toml/yaml/caddyfile) payload: the caller supplies control-plane
+    // config explicitly, so it MUST be able to introduce new
+    // api-keys/tenants/policies and to update existing ones by id. Reconciling
+    // the durable snapshot by REPLACE (as the `source=file` branch does) would
+    // wholesale-discard the operator's new resources.
+    //
+    // #605: but applying the payload directly, which this branch used to do, is
+    // not the other option -- it is a silent revoke. `with_reloaded_config` ends
+    // in `sync_control_plane_storage_from_config`, and `replace_control_plane`
+    // replaces each document class wholesale, so a payload that simply does not
+    // mention `api_keys` DELETED every key minted through `POST
+    // /admin/v1/api-keys`, permanently, behind `200 {"committed":true}`. The
+    // payload is authoritative for what it NAMES, not for what it omits, so the
+    // reconcile is a union -- see `SharedAppState::reload_from_inline_config`.
+    state.reload_from_inline_config(config_from_admin_payload(payload, state)?)
 }
 
 fn admin_audit_event_draft(

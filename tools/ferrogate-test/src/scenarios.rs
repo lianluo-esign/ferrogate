@@ -2661,6 +2661,36 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     )?;
     case.enable_scheduler(1)?;
 
+    // #605: `enable_scheduler` posts an INLINE `/admin/v1/config/reload` whose
+    // payload mentions no api-key at all. That used to delete every key minted
+    // through `POST /admin/v1/api-keys` -- `lifecycle-project-only` above among
+    // them -- from durable storage, permanently, behind
+    // `200 {"committed":true}`. The suspended-tenancy assertions below happen to
+    // catch it (a destroyed key answers `401 invalid_api_key` instead of `403
+    // tenancy_suspended`), but only by accident of what this scenario is
+    // otherwise testing, and only for one key. Assert the registry directly, so
+    // the invariant is pinned by something that names it.
+    case.expect_json(
+        "GET",
+        "/admin/v1/api-keys",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let ids: Vec<&str> = body["data"]
+                .as_array()
+                .context("api-key list should carry a data array")?
+                .iter()
+                .filter_map(|key| key["id"].as_str())
+                .collect();
+            assert!(
+                ids.contains(&"lifecycle-project-only"),
+                "an inline config reload that never mentioned this key must not revoke it: {ids:?}"
+            );
+            Ok(())
+        },
+    )?;
+
     for auth in [CLIENT_AUTH, live_auth.as_str(), project_only_auth] {
         case.expect_json("GET", "/v1/models", &[auth], "", 403, |body| {
             assert_eq!(body["error"]["code"], "tenancy_suspended");

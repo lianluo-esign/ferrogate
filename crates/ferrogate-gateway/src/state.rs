@@ -872,6 +872,27 @@ impl SharedAppState {
         Ok(self.reload_process_local(candidate))
     }
 
+    /// #605: process-local reload for an operator-supplied INLINE config payload
+    /// (`config_toml` / `config_yaml` / `config_caddyfile`).
+    ///
+    /// The counterpart to [`Self::reload_from_source_path`], and it exists for
+    /// the same reason that one does: no reload may reach
+    /// `sync_control_plane_storage_from_config` with a candidate that was never
+    /// reconciled against durable storage, because that function replaces every
+    /// control-plane document class wholesale. The file path reconciles by
+    /// REPLACE (the caller re-specified nothing, so storage is authoritative);
+    /// the inline path reconciles by UNION (the caller re-specified some things,
+    /// so the payload wins where it speaks and storage holds where it is
+    /// silent). See [`AppState::merge_control_plane_snapshot_into_config`].
+    pub(crate) fn reload_from_inline_config(
+        &self,
+        mut candidate: Config,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        self.current()
+            .merge_control_plane_snapshot_into_config(&mut candidate)?;
+        Ok(self.reload_process_local(candidate))
+    }
+
     pub(crate) fn reload_plan_for_candidate(&self, candidate: &Config) -> RuntimeReloadPlan {
         let active = self.current();
         reload_plan_for_configs(&active.config, candidate)
@@ -2057,6 +2078,39 @@ fn apply_tenant_refs_to_api_keys(
             key.user_id = tenant.user_id;
         }
     }
+}
+
+/// Overlays operator-declared control-plane documents onto the durable ones by
+/// identity, for one document class (#605).
+///
+/// The asymmetry is the whole point. A declared document whose id matches a
+/// durable one REPLACES it (the operator asked for an update by id); a declared
+/// document with a new id is APPENDED (the operator asked to introduce it); and
+/// a durable document the payload never mentions is KEPT. Absence is never read
+/// as a delete request -- removal stays with the explicit `DELETE
+/// /admin/v1/<class>/{id}` handlers, which speak to durable storage directly.
+///
+/// Declared order is preserved only for genuinely new documents; an update
+/// lands in the durable document's slot so a reload cannot silently reorder a
+/// class whose evaluation is position-sensitive (routes-by-first-match style
+/// classes such as `policies`).
+fn merge_control_plane_documents<T>(
+    durable: Vec<T>,
+    declared: Vec<T>,
+    id: impl Fn(&T) -> String,
+) -> Vec<T> {
+    let mut merged = durable;
+    for document in declared {
+        let declared_id = id(&document);
+        match merged
+            .iter_mut()
+            .find(|existing| id(existing) == declared_id)
+        {
+            Some(existing) => *existing = document,
+            None => merged.push(document),
+        }
+    }
+    merged
 }
 
 fn upsert_or_replace_plugin_registration(
@@ -4933,7 +4987,21 @@ impl AppState {
         next.acme_renewal = self.acme_renewal.clone();
         next.unauth_rate_limiter = Arc::clone(&self.unauth_rate_limiter);
         self.apply_analytics_config(&next.config.analytics);
-        let _ = self.sync_control_plane_storage_from_config(&next.config);
+        // #605: this write is DESTRUCTIVE -- `replace_control_plane` replaces
+        // each document class wholesale -- so discarding its error (`let _ =`)
+        // meant a reload could report `committed: true` while durable storage
+        // held a half-written or unchanged control plane, with the process now
+        // serving a config that no longer matches it. It runs BEFORE the
+        // in-memory swap in `reload_process_local`, so failing here leaves the
+        // previously active state live and untouched, and the caller renders
+        // `committed: false` with this reason.
+        self.sync_control_plane_storage_from_config(&next.config)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "config reload rejected: the candidate could not be persisted to the \
+                     durable control plane, so the running config is unchanged: {error}"
+                )
+            })?;
         Ok(next)
     }
 
@@ -4954,6 +5022,111 @@ impl AppState {
     fn sync_control_plane_storage_from_config(&self, config: &Config) -> anyhow::Result<()> {
         self.repositories
             .replace_control_plane(control_plane_documents_from_config(config))?;
+        Ok(())
+    }
+
+    /// Reconciles the durable control-plane snapshot into an operator-supplied
+    /// INLINE reload candidate by UNION rather than by replace (#605).
+    ///
+    /// [`Self::apply_control_plane_snapshot_to_config`] is the wrong tool for an
+    /// inline payload in both directions: it discards every document the
+    /// operator just supplied. But applying the payload raw -- what the inline
+    /// reload branch used to do -- is worse, because
+    /// [`Self::sync_control_plane_storage_from_config`] runs at the end of
+    /// [`Self::with_reloaded_config`] and `replace_control_plane` writes each
+    /// document class WHOLESALE. A payload that never mentions `api_keys`
+    /// therefore deleted every key minted through `POST /admin/v1/api-keys`, so
+    /// an operator appending `[scheduler] enabled = true` revoked credentials
+    /// they never named, permanently and behind a `200 {"committed":true}`.
+    ///
+    /// The union keeps the payload's explicit powers -- introduce a document,
+    /// update one by id -- and drops only the inference that omission means
+    /// deletion. Deletion stays with `DELETE /admin/v1/<class>/{id}`.
+    ///
+    /// Runs AFTER `config_from_admin_payload`, so the #542 auth-posture gate and
+    /// `Config::validate` have already judged the operator's document on its own
+    /// terms; merging durable rows in cannot retroactively excuse a static key
+    /// the payload declared. This mirrors
+    /// [`SharedAppState::reload_from_source_path`], which likewise gates the
+    /// declared config before reconciling the snapshot on top.
+    fn merge_control_plane_snapshot_into_config(&self, config: &mut Config) -> anyhow::Result<()> {
+        let previous_skill_packages = config.skill_packages.clone();
+        let snapshot = self.repositories.control_plane_snapshot()?;
+        // The payload restates these ids, so the durable tenants documents must
+        // NOT be replayed over them below: for a restated key the payload IS the
+        // more recent statement of tenancy. `apply_tenant_refs_to_api_keys` is
+        // documented as letting the tenants document win unconditionally, which
+        // is right when every key came from storage (nothing newer exists) and
+        // wrong here, where it would silently ignore a tenancy the operator just
+        // wrote and answer `committed: true`.
+        let restated_api_key_ids: HashSet<String> =
+            config.api_keys.iter().map(|key| key.id.clone()).collect();
+        // `plugin_registrations()` is `plugins` + `extensions`, and the durable
+        // class stores that union under one key, so the declared side must be
+        // read as the union too or a payload-declared `[[extensions]]` entry is
+        // dropped by the `extensions.clear()` normalization below.
+        let declared_plugins = config.plugin_registrations();
+
+        // #540 rework: the merged `api_keys` are durable control-plane rows, not
+        // a document the operator can edit in place. See
+        // `Config::api_keys_are_control_plane_documents`.
+        config.api_keys_are_control_plane_documents = true;
+        config.api_keys = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.api_keys)?,
+            std::mem::take(&mut config.api_keys),
+            |key| key.id.clone(),
+        );
+        let tenant_refs: Vec<crate::responses::AdminTenantRef> =
+            deserialize_control_plane_documents(snapshot.tenants)?;
+        config.policies = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.policies)?,
+            std::mem::take(&mut config.policies),
+            |policy| policy.name.clone(),
+        );
+        config.gateway_configs = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.gateway_configs)?,
+            std::mem::take(&mut config.gateway_configs),
+            |profile| profile.id.clone(),
+        );
+        config.agent_workflows = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.agent_workflows)?,
+            std::mem::take(&mut config.agent_workflows),
+            workflow_resource_id,
+        );
+        config.skill_packages = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.skill_packages)?,
+            std::mem::take(&mut config.skill_packages),
+            |package| package.id.clone(),
+        );
+        config.prompt_templates = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.prompt_templates)?,
+            std::mem::take(&mut config.prompt_templates),
+            |template| template.id.clone(),
+        );
+        config.plugins = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.plugin_registrations)?,
+            declared_plugins,
+            |plugin| plugin.id.clone(),
+        );
+        config.extensions.clear();
+        config.mcp_servers = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.mcp_servers)?,
+            std::mem::take(&mut config.mcp_servers),
+            |server| server.name.clone(),
+        );
+        config.agent_upstreams = merge_control_plane_documents(
+            deserialize_control_plane_documents(snapshot.agent_upstreams)?,
+            std::mem::take(&mut config.agent_upstreams),
+            |upstream| upstream.id.clone(),
+        );
+        let tenant_refs: Vec<crate::responses::AdminTenantRef> = tenant_refs
+            .into_iter()
+            .filter(|tenant| !restated_api_key_ids.contains(&tenant.api_key_id))
+            .collect();
+        if !tenant_refs.is_empty() {
+            apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
+        }
+        config.materialize_skill_package_resources_with_previous(&previous_skill_packages);
         Ok(())
     }
 
@@ -7788,6 +7961,10 @@ mod state_billing_outbox_test;
 #[cfg(test)]
 #[path = "state_reload_test.rs"]
 mod state_reload_test;
+
+#[cfg(test)]
+#[path = "state_inline_reload_control_plane_test.rs"]
+mod state_inline_reload_control_plane_test;
 
 #[cfg(test)]
 #[path = "state_workers_ai_llama_guard_test.rs"]
