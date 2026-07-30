@@ -11,17 +11,22 @@
 mod support;
 
 use std::{
+    path::Path,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use support::{free_addr, http_request, start_gateway, wait_for_gateway};
 
 /// W3C traceparent whose trace-id half is `TRACE_ID`.
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 const RUN_ID: &str = "run-corr-305";
+
+/// Declared run ids for the #522 MCP and asset ingress legs (below).
+const MCP_RUN_ID: &str = "run-corr-mcp-522";
+const ASSET_RUN_ID: &str = "run-corr-asset-522";
 
 /// Scenario 1 (issue #305 acceptance): one governed agent-run tool action that
 /// requires approval. The approval record, every timeline (agent_run_events)
@@ -299,6 +304,325 @@ fn run_now_dispatch_lease_carries_the_admin_requests_correlation_triple() {
     gateway.wait().unwrap();
 }
 
+/// Scenario 3 (issue #522 acceptance #1, the MCP leg): a real MCP `tools/call`
+/// carrying `x-ferrogate-agent-run-id` is driven through the PRODUCTION ingress
+/// path — `HTTP header -> declared_agent_run_id parser -> mcp_rpc::handle_request`
+/// (local.rs threads `agent_run_id.as_deref()` into `handle_request`). The
+/// governed chokepoint's `tool.execute` audit row must then carry the SAME
+/// declared `{request_id, trace_id, agent_run_id}` triple, and the #199
+/// investigation view must join that row when selected by ANY one coordinate of
+/// the triple.
+///
+/// This is the seam the mcp_rpc unit tests cannot reach: they inject `Some(RUN)`
+/// directly into `tools_call`/the sub-handlers, so the wiring that the parser's
+/// output actually reaches the handler over a real HTTP request is unproven
+/// there. Mutation (per #500): changing `agent_run_id.as_deref()` to `None` at
+/// the `mcp_rpc::handle_request` call site in `local.rs` (or reverting
+/// `declared_agent_run_id` to yield `None`) reds every triple assertion below —
+/// the `tool.execute` row loses its run id and no investigation selector joins.
+#[test]
+fn governed_mcp_tools_call_audit_joins_on_the_declared_correlation_triple() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("stdio_mcp.py");
+    write_stdio_mcp_script(&script);
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, mcp_run_id_config(&gateway_addr, &script)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+    wait_for_tool(&gateway_addr, "local-echo");
+
+    // Drive a real MCP `tools/call` over HTTP with the declared run id + a known
+    // traceparent. The header travels the full production ingress seam.
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+            &format!("x-ferrogate-agent-run-id: {MCP_RUN_ID}"),
+            &format!("traceparent: {TRACEPARENT}"),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "local-echo", "arguments": { "message": "governed mcp call" } }
+        })
+        .to_string(),
+    );
+    let request_id = response_header(&response, "x-request-id")
+        .expect("the MCP response exposes its request id");
+    let call = response_json(response);
+    // Guard: the governed call actually executed end to end (the success row we
+    // assert on below is the executed row, not an error row on a divergent path).
+    assert!(call.get("error").is_none(), "{call}");
+    assert_eq!(
+        call["result"]["content"][0]["text"], "governed mcp call",
+        "the governed tools/call must run and echo its argument: {call}"
+    );
+
+    // The governed chokepoint's `tool.execute` success row carries the declared
+    // triple: request_id (THIS request), trace_id (the traceparent), and
+    // agent_run_id (the header) — the id threaded through the ingress seam.
+    let events = admin_audit_events(&gateway_addr);
+    let executed = events
+        .iter()
+        .find(|event| {
+            event["action"] == "tool.execute"
+                && event["outcome"] == "success"
+                && event["target"] == "mcp:local/tool:echo"
+        })
+        .unwrap_or_else(|| {
+            panic!("missing successful tool.execute row for the MCP call: {events:?}")
+        });
+    assert_eq!(
+        executed["agent_run_id"], MCP_RUN_ID,
+        "the tool.execute row must carry the declared run id threaded through the ingress (#522): {executed}"
+    );
+    assert_eq!(executed["trace_id"], TRACE_ID, "{executed}");
+    assert_eq!(
+        executed["request_id"], request_id,
+        "the audit row's request id IS this MCP request's id: {executed}"
+    );
+
+    // The one triple joins: selecting the investigation by agent_run_id ALONE, by
+    // trace_id ALONE, and by request_id ALONE each returns the SAME tool.execute
+    // row — the three coordinates of the declared triple all resolve to one
+    // action's evidence.
+    for selector in [
+        format!("agent_run_id={MCP_RUN_ID}"),
+        format!("trace_id={TRACE_ID}"),
+        format!("request_id={request_id}"),
+    ] {
+        let investigation = response_json(http_request(
+            &gateway_addr,
+            "GET",
+            &format!("/admin/v1/investigations?{selector}"),
+            &["Authorization: Bearer admin-secret"],
+            "",
+        ));
+        assert_eq!(investigation["selector"], selector, "{investigation}");
+        let row = investigation["audit_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| {
+                event["action"] == "tool.execute" && event["target"] == "mcp:local/tool:echo"
+            })
+            .unwrap_or_else(|| {
+                panic!("investigation by {selector} did not join the tool.execute row: {investigation}")
+            });
+        assert_eq!(row["agent_run_id"], MCP_RUN_ID, "{investigation}");
+        assert_eq!(row["trace_id"], TRACE_ID, "{investigation}");
+        assert_eq!(row["request_id"], request_id, "{investigation}");
+    }
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+/// Scenario 4 (issue #522 acceptance #2, the asset leg): real asset PUSH and
+/// inline-PULL requests carrying `x-ferrogate-agent-run-id` are driven through
+/// the production asset ingress (`HTTP header -> declared_agent_run_id parser
+/// (via resolve_asset_action_id) -> handler`). The `asset.push`/`committed` and
+/// `asset.pull` audit rows each carry the declared `{request_id, trace_id,
+/// agent_run_id}` triple; because push and pull are SEPARATE requests with
+/// distinct request ids, the only thing that joins them into one action chain is
+/// the shared declared `{trace_id, agent_run_id}` — which is exactly what the
+/// investigation view joins on.
+///
+/// The test gate noted only the pull leg was read-side-asserted before; this
+/// pins BOTH the write-side (push) and read-side (pull) audit rows.
+///
+/// Mutation (per #500): replacing the push handler's resolved run id with `None`
+/// (assets.rs, the `AssetActionIdOutcome::Proceed(id) => id` for the push
+/// surface) reds the `asset.push` assertions; the same on the pull surface
+/// (whose id flows into `record_asset_egress`) reds the `asset.pull` assertions
+/// and drops each leg out of the run-id / trace-id investigation join.
+#[test]
+fn governed_asset_push_and_pull_audit_join_on_the_declared_correlation_triple() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, asset_run_id_config(&gateway_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    // The in-memory control plane seeds the default free plan
+    // (asset_hosting_enabled = true); register the asset key's tenant onto it.
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"org_demo","name":"Org Demo","slug":"org-demo"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    // --- Asset PUSH carrying the declared run id + traceparent. A small payload
+    //     scans inline (default async threshold is off) and publishes visible. ---
+    let content = "hello from the #522 asset correlation e2e\n";
+    let push = http_request(
+        &gateway_addr,
+        "PUT",
+        "/v1/assets/cli_tool/corr-asset/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: text/plain",
+            &format!("x-ferrogate-agent-run-id: {ASSET_RUN_ID}"),
+            &format!("traceparent: {TRACEPARENT}"),
+        ],
+        content,
+    );
+    assert!(
+        push.contains("HTTP/1.1 200"),
+        "the small asset scans inline and publishes visible: {push}"
+    );
+
+    // --- Asset inline PULL carrying the same declared run id + traceparent. This
+    //     is a SEPARATE request: its own request id, but the same trace + run. ---
+    let pull = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/cli_tool/corr-asset/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            &format!("x-ferrogate-agent-run-id: {ASSET_RUN_ID}"),
+            &format!("traceparent: {TRACEPARENT}"),
+        ],
+        "",
+    );
+    assert!(pull.contains("HTTP/1.1 200"), "pull failed: {pull}");
+    assert!(pull.ends_with(content), "pull body mismatch: {pull}");
+
+    // Both legs' audit rows carry the declared run id + trace id — the ingress
+    // seam threading the parser's output onto each handler's audit draft.
+    let events = admin_audit_events(&gateway_addr);
+    let push_row = events
+        .iter()
+        .find(|event| event["action"] == "asset.push" && event["outcome"] == "committed")
+        .unwrap_or_else(|| panic!("missing asset.push/committed audit row: {events:?}"));
+    assert_eq!(push_row["agent_run_id"], ASSET_RUN_ID, "{push_row}");
+    assert_eq!(push_row["trace_id"], TRACE_ID, "{push_row}");
+    let push_request_id = push_row["request_id"].as_str().unwrap().to_string();
+    assert!(!push_request_id.is_empty(), "{push_row}");
+
+    let pull_row = events
+        .iter()
+        .find(|event| event["action"] == "asset.pull")
+        .unwrap_or_else(|| panic!("missing asset.pull audit row: {events:?}"));
+    assert_eq!(pull_row["agent_run_id"], ASSET_RUN_ID, "{pull_row}");
+    assert_eq!(pull_row["trace_id"], TRACE_ID, "{pull_row}");
+    let pull_request_id = pull_row["request_id"].as_str().unwrap().to_string();
+
+    // Push and pull are distinct requests: distinct request ids. The only thing
+    // that joins them into one chain is the shared declared {trace_id,
+    // agent_run_id} — the join #522 delivers.
+    assert_ne!(
+        push_request_id, pull_request_id,
+        "push and pull are separate requests with distinct request ids"
+    );
+
+    // Investigation by agent_run_id ALONE joins BOTH legs (the cross-request
+    // join), and by trace_id ALONE too; each joined row still carries the triple.
+    for selector in [
+        format!("agent_run_id={ASSET_RUN_ID}"),
+        format!("trace_id={TRACE_ID}"),
+    ] {
+        let investigation = response_json(http_request(
+            &gateway_addr,
+            "GET",
+            &format!("/admin/v1/investigations?{selector}"),
+            &["Authorization: Bearer admin-secret"],
+            "",
+        ));
+        assert_eq!(investigation["selector"], selector, "{investigation}");
+        let joined = investigation["audit_events"].as_array().unwrap();
+        for action in ["asset.push", "asset.pull"] {
+            let row = joined
+                .iter()
+                .find(|event| event["action"] == action)
+                .unwrap_or_else(|| {
+                    panic!("investigation by {selector} did not join the {action} row: {investigation}")
+                });
+            assert_eq!(row["agent_run_id"], ASSET_RUN_ID, "{investigation}");
+            assert_eq!(row["trace_id"], TRACE_ID, "{investigation}");
+        }
+    }
+
+    // Investigation by the push's OWN request id joins its leg (the within-leg
+    // request_id join) and the joined row carries the full triple.
+    let by_request = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={push_request_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let push_join = by_request["audit_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["action"] == "asset.push")
+        .unwrap_or_else(|| {
+            panic!("investigation by push request id missed the push row: {by_request}")
+        });
+    assert_eq!(push_join["agent_run_id"], ASSET_RUN_ID, "{by_request}");
+    assert_eq!(push_join["trace_id"], TRACE_ID, "{by_request}");
+    assert_eq!(push_join["request_id"], push_request_id, "{by_request}");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+/// The admin audit-event feed as a plain array (newest-first), for the #522 MCP
+/// and asset legs that assert on run-scoped audit rows.
+fn admin_audit_events(gateway_addr: &str) -> Vec<Value> {
+    let body = response_json(http_request(
+        gateway_addr,
+        "GET",
+        "/admin/v1/audit-events?limit=200",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    body["data"].as_array().cloned().unwrap_or_default()
+}
+
+/// Poll `GET /v1/tools` until the named MCP tool is registered by the stdio
+/// server. (Mirrors action_identity_join_e2e / mcp_jsonrpc_tool_governance_e2e.)
+fn wait_for_tool(gateway_addr: &str, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = Value::Null;
+    while Instant::now() < deadline {
+        let body = response_json(http_request(
+            gateway_addr,
+            "GET",
+            "/v1/tools",
+            &["Authorization: Bearer tool-secret"],
+            "",
+        ));
+        if body["data"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == name))
+        {
+            return;
+        }
+        last = body;
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("MCP tool {name} did not register: {last}");
+}
+
 fn wait_for_pending_approval(gateway_addr: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -523,4 +847,104 @@ enabled = true
 tick_interval_secs = 3600
 "#
     )
+}
+
+/// #522 MCP leg: a gateway with a live stdio MCP server exposing `echo`
+/// (registered `local-echo`), a tools client, and an admin key. (Mirrors the
+/// proven mcp_jsonrpc_tool_governance_e2e / action_identity_join_e2e config.)
+fn mcp_run_id_config(gateway_addr: &str, script: &Path) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+platform_operator = true
+
+[[api_keys]]
+id = "tool-client"
+name = "Tool client"
+key = "tool-secret"
+scopes = ["tools.read", "tools.execute"]
+platform_operator = true
+
+[[mcp_servers]]
+name = "local"
+transport = "stdio"
+command = "python3"
+args = ["{}"]
+tools_to_execute = ["echo"]
+timeout_ms = 3000
+"#,
+        script.display()
+    )
+}
+
+/// #522 asset leg: no `storage` section -> the default in-memory control plane,
+/// which seeds the default free plan (asset_hosting_enabled = true). One asset
+/// tenant (org_demo) plus an admin key.
+fn asset_run_id_config(gateway_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+platform_operator = true
+
+[[api_keys]]
+id = "asset-client"
+name = "Asset client"
+key = "asset-secret"
+scopes = ["assets.read", "assets.write"]
+organization_id = "org_demo"
+"#
+    )
+}
+
+/// A minimal line-delimited JSON-RPC stdio MCP server exposing a single `echo`
+/// tool. (Copied from the agentic-lite `p3` stdio harness, as the sibling MCP
+/// e2e suites do.)
+fn write_stdio_mcp_script(path: &Path) {
+    std::fs::write(
+        path,
+        r#"
+import json
+import sys
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": True}},
+            "serverInfo": {"name": "stdio-mcp", "version": "1.0.0"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [{
+                "name": "echo",
+                "description": "Echo a message",
+                "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}},
+            }]
+        }
+    elif method == "tools/call":
+        args = req.get("params", {}).get("arguments", {})
+        result = {"content": [{"type": "text", "text": args.get("message", "")}]}
+    elif method == "ping":
+        result = {}
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32601, "message": "unknown method"}}), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": result}), flush=True)
+"#,
+    )
+    .unwrap();
 }
