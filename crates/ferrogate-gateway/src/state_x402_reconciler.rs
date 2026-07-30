@@ -334,6 +334,16 @@ pub(crate) struct X402ReconcileReport {
     /// Per-attempt errors (RPC failures, storage errors), isolated so one failure
     /// never aborts the batch. Hold retained, attempt untouched.
     pub(crate) errored: u64,
+    /// Age in seconds of the OLDEST attempt this pass scanned and left
+    /// unresolved (`pending`/`mismatch`/`unresolved`/`skipped`/`errored`),
+    /// measured from its submission. 0 when the pass resolved everything it
+    /// scanned, or scanned nothing.
+    ///
+    /// Deliberately NOT a population maximum: the pass sees one bounded,
+    /// cursor-filtered page, so an older unresolved attempt outside it is not
+    /// observed here. It is a lower bound — "money has been in flight at least
+    /// this long" — which is what makes it alertable without a second query.
+    pub(crate) oldest_unresolved_hold_age_secs: u64,
 }
 
 /// The per-attempt reconcile outcome, folded into [`X402ReconcileReport`]. Errors
@@ -445,9 +455,24 @@ impl AppState {
             unresolved = report.unresolved,
             skipped = report.skipped,
             errored = report.errored,
+            oldest_unresolved_hold_age_secs = report.oldest_unresolved_hold_age_secs,
             "x402 settlement reconcile complete"
         );
+        // #354 box 5: the reconcile signal has to be alertable, not just
+        // greppable. A tick that ran is the only thing that publishes it, so a
+        // disabled/unbound reconciler leaves the previous values in place rather
+        // than reporting a fabricated zero.
+        self.record_x402_reconcile_metrics(&report);
         report
+    }
+
+    /// Fold one reconcile pass into the Prometheus metrics
+    /// (`ferrogate_x402_reconcile_attempts_total{outcome=…}` and the
+    /// `ferrogate_x402_oldest_unresolved_hold_age_seconds` gauge).
+    fn record_x402_reconcile_metrics(&self, report: &X402ReconcileReport) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_x402_reconcile_tick(report);
+        }
     }
 
     /// Drives the reconcile trust order for one already-fetched batch, with
@@ -469,6 +494,24 @@ impl AppState {
             let outcome = self
                 .reconcile_one_attempt(rpc, &loop_, attempt, now_unix, confirmation_deadline_secs)
                 .await;
+            // Every non-terminal outcome leaves the hold in flight, so its age is
+            // the operator's "money is stuck" signal. Measured from the
+            // SUBMISSION, not from creation: before submit nothing is on-chain
+            // and the TTL sweeper still owns the hold, so pre-submission age
+            // would report a wait that is not in flight at all.
+            if matches!(
+                &outcome,
+                ReconcileOutcome::Pending
+                    | ReconcileOutcome::Mismatch
+                    | ReconcileOutcome::Unresolved
+                    | ReconcileOutcome::Skipped
+                    | ReconcileOutcome::Errored
+            ) {
+                let since = attempt.submitted_at_unix.unwrap_or(attempt.created_at_unix);
+                let age = u64::try_from(now_unix.saturating_sub(since)).unwrap_or(0);
+                report.oldest_unresolved_hold_age_secs =
+                    report.oldest_unresolved_hold_age_secs.max(age);
+            }
             match outcome {
                 ReconcileOutcome::Settled { overpaid } => {
                     report.settled = report.settled.saturating_add(1);

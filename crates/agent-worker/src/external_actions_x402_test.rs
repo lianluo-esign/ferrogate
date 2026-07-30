@@ -854,3 +854,133 @@ fn a_gate_refusal_is_typed_as_proven_unsent() {
         "a refused action was never executed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4. Box 8 of #354: the merchant does not get to size this process's heap
+// ---------------------------------------------------------------------------
+
+/// A merchant that keeps serving until the client stops reading, counting the
+/// bytes it actually got onto the wire.
+///
+/// The count is what makes the test non-vacuous. The refusal message alone
+/// cannot distinguish a bounded read from `read_to_end` followed by a length
+/// check — both refuse — so the assertion has to be about how much the peer was
+/// ABLE to push, not about the error text.
+struct FirehoseOrigin {
+    endpoint: SocketAddr,
+    served_bytes: mpsc::Receiver<usize>,
+}
+
+impl FirehoseOrigin {
+    /// Serves `200 OK` with a `body_bytes`-long body written in 64 KiB chunks,
+    /// stopping early if the client hangs up. Nothing here allocates the body:
+    /// one chunk is reused, so an unbounded reader is what pays for the size.
+    fn spawn(body_bytes: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let (tx, served_bytes) = mpsc::channel();
+        thread::spawn(move || {
+            let Some(Ok(mut stream)) = listener.incoming().next() else {
+                return;
+            };
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\n\
+                 content-length: {body_bytes}\r\nconnection: close\r\n\r\n"
+            );
+            let mut written = 0_usize;
+            if stream.write_all(head.as_bytes()).is_ok() {
+                written += head.len();
+                let chunk = vec![b'a'; 64 * 1024];
+                while written < body_bytes {
+                    let take = chunk.len().min(body_bytes - written);
+                    // A broken pipe here is the SUCCESS signal: the reader
+                    // stopped at its bound and hung up.
+                    if stream.write_all(&chunk[..take]).is_err() {
+                        break;
+                    }
+                    written += take;
+                }
+            }
+            let _ = tx.send(written);
+        });
+        Self {
+            endpoint,
+            served_bytes,
+        }
+    }
+
+    /// Bytes the merchant got onto the wire before the reader hung up. Waits for
+    /// the serving thread rather than sampling it, so there is no timing race.
+    fn served_bytes(self) -> usize {
+        self.served_bytes
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the merchant thread reports what it managed to serve")
+    }
+}
+
+/// The paid-egress read is bounded by FerroGate's cap, not by the merchant's
+/// `content-length`.
+///
+/// Before this was bounded, `run_authorized_rest_action` called
+/// `stream.read_to_end` with no cap and the only limit — the 512-character
+/// excerpt — was applied AFTER the whole body was already resident. Measured
+/// `VmHWM` deltas on the unbounded path were +4 MB / +65 MB / +196 MB for served
+/// bodies of 1 / 64 / 256 MiB: peak RSS tracked the served body roughly 1:1, so
+/// a merchant chose the worker's heap size.
+///
+/// Two independent assertions, because either alone is satisfiable by code that
+/// does not bound the read:
+///
+///  1. the dispatch is REFUSED by name, and
+///  2. the merchant could not push the whole body — it is stopped near the cap,
+///     nowhere near the 64 MiB it advertised.
+///
+/// Deleting the `Read::take` reddens (2) while leaving (1) green, which is
+/// exactly the mutation this test exists to catch.
+#[test]
+fn a_merchant_cannot_make_the_worker_buffer_more_than_the_message_cap() {
+    const SERVED_BYTES: usize = 64 * 1024 * 1024;
+    let origin = FirehoseOrigin::spawn(SERVED_BYTES);
+    let endpoint = origin.endpoint;
+
+    let failure = run_authorized_rest_action(&rest_action(endpoint, 30_000)).unwrap_err();
+
+    let message = failure.error.to_string();
+    assert!(
+        message.contains("exceeds the") && message.contains("maximum message size"),
+        "an over-cap response must be refused by name: {message}"
+    );
+    // The request is on the wire and the merchant may have served (and charged
+    // for) the resource, so refusing to buffer it is never grounds to release a
+    // hold.
+    assert_eq!(failure.stage, RequestWireStage::SentOrUnknown);
+    assert_eq!(
+        failure.stage.hold_disposition(),
+        HoldDisposition::RetainOutcomeUnknown
+    );
+
+    // The bound is the memory claim. The reader takes the cap plus one byte and
+    // hangs up; what the merchant additionally lands is bounded by the kernel's
+    // socket buffers, not by anything this process chose. 16 MiB is a ceiling
+    // far above any plausible loopback buffer and far below the 64 MiB an
+    // unbounded `read_to_end` would drain in full.
+    let served = origin.served_bytes();
+    assert!(
+        served < 16 * 1024 * 1024,
+        "the merchant pushed {served} bytes of the {SERVED_BYTES} it advertised; \
+         the paid response read is not bounded by the gateway's own cap"
+    );
+}
+
+/// The bound is one byte past the cap, deliberately: a read stopped at exactly
+/// the cap is indistinguishable from a complete message and would be parsed as
+/// one, which is how a truncated body becomes a silently accepted response.
+#[test]
+fn the_read_budget_is_one_byte_past_the_cap_so_over_cap_is_detectable() {
+    assert_eq!(
+        over_cap_probe_limit(),
+        EXTERNAL_ACTION_MAX_MESSAGE_BYTES as u64 + 1
+    );
+}

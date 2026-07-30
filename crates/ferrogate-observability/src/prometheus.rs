@@ -480,6 +480,54 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
         snapshot.asset_presign_abort_reclaim_failed_total
     ));
 
+    // #354 box 5: the on-chain settlement reconciler's signal. `outcome` is a
+    // closed, code-defined label set (no tenant, no attempt id, no merchant
+    // value), so the cardinality is fixed at eight series regardless of traffic.
+    // `overpaid` is a BREAKOUT of `settled`, so summing every outcome
+    // double-counts overpayments -- sum the seven disjoint ones to recover
+    // `scanned`.
+    let x402 = &snapshot.x402_reconcile_totals;
+    push_help(
+        &mut output,
+        "ferrogate_x402_reconcile_attempts_total",
+        "Total post-submission x402 payment attempts driven by the settlement reconciler, by outcome; outcome=overpaid is a breakout of outcome=settled, not a disjoint class.",
+        "counter",
+    );
+    for (outcome, value) in [
+        ("settled", x402.settled),
+        ("overpaid", x402.overpaid),
+        ("failed", x402.failed),
+        ("pending", x402.pending),
+        ("mismatch", x402.mismatch),
+        ("unresolved", x402.unresolved),
+        ("skipped", x402.skipped),
+        ("errored", x402.errored),
+    ] {
+        output.push_str(&format!(
+            "ferrogate_x402_reconcile_attempts_total{{outcome=\"{outcome}\"}} {value}\n"
+        ));
+    }
+    push_help(
+        &mut output,
+        "ferrogate_x402_reconcile_scanned_total",
+        "Total post-submission x402 payment attempts the reconciler fetched and drove.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_x402_reconcile_scanned_total {}\n",
+        x402.scanned
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_x402_oldest_unresolved_hold_age_seconds",
+        "Age of the oldest wallet hold the last reconcile tick scanned and left unresolved, measured from submission; a LOWER BOUND on the true oldest, because a tick scans one bounded page.",
+        "gauge",
+    );
+    output.push_str(&format!(
+        "ferrogate_x402_oldest_unresolved_hold_age_seconds {}\n",
+        x402.oldest_unresolved_hold_age_seconds
+    ));
+
     push_help(
         &mut output,
         "ferrogate_tokens_total",

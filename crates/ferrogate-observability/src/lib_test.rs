@@ -181,6 +181,18 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         asset_presign_commit_rejected_total: 5,
         asset_presign_aborted_total: 6,
         asset_presign_abort_reclaim_failed_total: 2,
+        x402_reconcile_totals: X402ReconcileMetricTotals {
+            scanned: 9,
+            settled: 4,
+            overpaid: 1,
+            failed: 2,
+            pending: 1,
+            mismatch: 1,
+            unresolved: 0,
+            skipped: 1,
+            errored: 0,
+            oldest_unresolved_hold_age_seconds: 930,
+        },
     };
 
     let text = render_prometheus_text(&snapshot);
@@ -241,6 +253,24 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(
         text.contains("ferrogate_mcp_requests_total{method=\"tools/call\",name=\"srv-search\"} 3")
     );
+    // #354 box 5: the reconciler's outcomes are exported per outcome, and the
+    // fail-closed class an operator must alert on (`mismatch` -- confirmed
+    // on-chain but SHORT of what was owed) is its own series rather than being
+    // folded into `pending`. `overpaid` renders as a breakout of `settled`, so
+    // both appear and the two must not be summed with the disjoint classes.
+    assert!(text.contains("# TYPE ferrogate_x402_reconcile_attempts_total counter"));
+    assert!(text.contains("ferrogate_x402_reconcile_attempts_total{outcome=\"settled\"} 4"));
+    assert!(text.contains("ferrogate_x402_reconcile_attempts_total{outcome=\"overpaid\"} 1"));
+    assert!(text.contains("ferrogate_x402_reconcile_attempts_total{outcome=\"failed\"} 2"));
+    assert!(text.contains("ferrogate_x402_reconcile_attempts_total{outcome=\"mismatch\"} 1"));
+    assert!(text.contains("ferrogate_x402_reconcile_attempts_total{outcome=\"pending\"} 1"));
+    assert!(text.contains("ferrogate_x402_reconcile_attempts_total{outcome=\"skipped\"} 1"));
+    assert!(text.contains("ferrogate_x402_reconcile_scanned_total 9"));
+    // The hold-age signal is a GAUGE, not a counter: an operator alerting on
+    // "money has been in flight too long" needs the current depth, and a
+    // counter-typed series would be rendered as a rate by every dashboard.
+    assert!(text.contains("# TYPE ferrogate_x402_oldest_unresolved_hold_age_seconds gauge"));
+    assert!(text.contains("ferrogate_x402_oldest_unresolved_hold_age_seconds 930"));
 }
 
 #[test]
