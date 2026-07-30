@@ -506,6 +506,100 @@ fn only_a_live_verified_record_is_eligible_for_acme() {
     );
 }
 
+/// The bind handler's runtime ACME decision, as a value.
+///
+/// This is the exact decision `handle_admin_site_domain_bind` applies (it calls
+/// `acme_order_action` and hands the result to `apply_site_domain_acme_action`
+/// without re-deriving anything), so flipping the policy back to "serving means
+/// enrolled" reds here: `grandfathered` serves AND withholds in the same
+/// assertion, which no single boolean can satisfy.
+#[test]
+fn a_grandfathered_rebind_keeps_serving_but_never_enters_the_acme_order_set() {
+    let now = 1_000;
+    let grandfathered =
+        StoredSiteDomainVerification::grandfathered("org_a", "legacy.example", "docs", "tok", now);
+    assert_eq!(
+        acme_order_action(&grandfathered, now),
+        AcmeOrderAction::Withhold {
+            serving: true,
+            verification_state: "grandfathered",
+        },
+        "a pre-#488 migration record keeps answering traffic, but re-binding it must not put \
+         an unproven hostname back into the certificate order set",
+    );
+    assert!(!acme_order_action(&grandfathered, now).enrolls());
+
+    let mut verified =
+        StoredSiteDomainVerification::pending("org_a", "verified.example", "docs", "tok", now);
+    verified.mark_verified(now);
+    assert_eq!(acme_order_action(&verified, now), AcmeOrderAction::Enroll);
+    assert!(acme_order_action(&verified, now).enrolls());
+
+    let pending =
+        StoredSiteDomainVerification::pending("org_a", "pending.example", "docs", "tok", now);
+    assert_eq!(
+        acme_order_action(&pending, now),
+        AcmeOrderAction::Withhold {
+            serving: false,
+            verification_state: "pending_verification",
+        },
+    );
+
+    // An aged-out proof is not a proof, and stops serving too.
+    let expired_at = now + ferrogate_storage::SITE_DOMAIN_VERIFICATION_TTL_SECONDS;
+    assert_eq!(
+        acme_order_action(&verified, expired_at),
+        AcmeOrderAction::Withhold {
+            serving: false,
+            verification_state: "expired",
+        },
+    );
+}
+
+/// The verify handler's cross-tenant conflict decision, as a value.
+///
+/// `handle_admin_site_domain_verify` reads the incumbent's record and asks this
+/// predicate; the storage-level `claim_verified_site_domain` CAS applies the
+/// same rule. Widening either back to "the holder serves" reds the first
+/// assertion below -- which is the land-grab #488 exists to close: the squatter
+/// keeps the hostname and the tenant that completed the DNS proof gets the 409.
+#[test]
+fn only_a_live_proof_defends_an_incumbent_against_a_proved_challenger() {
+    let now = 1_000;
+
+    let grandfathered =
+        StoredSiteDomainVerification::grandfathered("org_a", "legacy.example", "docs", "tok", now);
+    assert!(grandfathered.serves(now), "precondition: it does serve");
+    assert!(
+        !holder_blocks_verified_takeover(Some(&grandfathered), now),
+        "a never-proven incumbent must not permanently block the tenant that actually owns \
+         the hostname and completed the challenge",
+    );
+
+    let mut verified =
+        StoredSiteDomainVerification::pending("org_a", "legacy.example", "docs", "tok", now);
+    verified.mark_verified(now);
+    assert!(
+        holder_blocks_verified_takeover(Some(&verified), now),
+        "two live proofs for one hostname resolve first-proof-wins, not last-write",
+    );
+    assert!(
+        !holder_blocks_verified_takeover(
+            Some(&verified),
+            now + ferrogate_storage::SITE_DOMAIN_VERIFICATION_TTL_SECONDS
+        ),
+        "an expired proof stops defending the binding",
+    );
+
+    let pending =
+        StoredSiteDomainVerification::pending("org_a", "legacy.example", "docs", "tok", now);
+    assert!(!holder_blocks_verified_takeover(Some(&pending), now));
+    assert!(
+        !holder_blocks_verified_takeover(None, now),
+        "no record at all is not ownership proof",
+    );
+}
+
 #[test]
 fn grandfathering_defaults_on_and_is_switchable_off() {
     // Default (env unset in this process): grandfather, so an upgrade does not

@@ -618,13 +618,93 @@ pub(super) fn now_unix_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+/// What one site-domain mutation must do to the ACME certificate order set.
+///
+/// Typed, and derived from the STORED proof rather than from a caller-supplied
+/// flag, on purpose. The #488 regression this replaces was not a wrong
+/// predicate -- it was a correct predicate the call site could pick wrongly:
+/// the bind handler held two booleans (`serving` and `live_ownership_proof`)
+/// that differ for exactly one state, `grandfathered`, and chose between them
+/// by hand at the `refresh_acme_after_domain_change` call. Twice, the choice
+/// collapsed back to `serving` and a grandfathered land-grab re-entered the
+/// certificate order set. With the decision expressed as a value there is no
+/// serving boolean left at the ACME call site to swap in, and
+/// [`acme_order_action`] is the single place the policy exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AcmeOrderAction {
+    /// The record carries a LIVE DNS ownership proof: the hostname may enter
+    /// the certificate order set. This is the ONLY variant that enrolls.
+    Enroll,
+    /// No live proof, so the hostname stays out of the order set. `serving`
+    /// carries WHY it may still answer traffic (the `grandfathered` migration
+    /// exception), and `verification_state` names the state for the operator
+    /// log -- neither is an input to the enrollment decision.
+    Withhold {
+        serving: bool,
+        verification_state: &'static str,
+    },
+}
+
+impl AcmeOrderAction {
+    /// Whether this action enrolls the hostname. The audit/response wording
+    /// reads this rather than re-deriving it, so the line an operator reads
+    /// cannot disagree with what was actually done to the order set.
+    pub(super) fn enrolls(self) -> bool {
+        matches!(self, AcmeOrderAction::Enroll)
+    }
+}
+
+/// The #488 ACME order-set policy, in one place: a hostname enters a
+/// certificate order only on a live `verified` DNS proof.
+///
+/// `grandfathered` deliberately withholds even though it keeps serving --
+/// migration availability is not evidence that FerroGate may request a
+/// certificate for the hostname, and an unowned hostname in the order set burns
+/// the ACME account's per-account failed-order rate limit for every legitimate
+/// domain sharing it.
+pub(super) fn acme_order_action(
+    record: &StoredSiteDomainVerification,
+    now_unix: i64,
+) -> AcmeOrderAction {
+    if record.has_live_dns_ownership_proof(now_unix) {
+        AcmeOrderAction::Enroll
+    } else {
+        AcmeOrderAction::Withhold {
+            serving: record.serves(now_unix),
+            verification_state: record.effective_state(now_unix).as_str(),
+        }
+    }
+}
+
 /// Whether a verification record is a live proof eligible for ACME enrollment.
 ///
 /// `grandfathered` deliberately returns false even though it may keep serving:
 /// migration availability is not evidence that FerroGate may request a
 /// certificate for the hostname.
 pub(super) fn eligible_for_acme(record: &StoredSiteDomainVerification, now_unix: i64) -> bool {
-    record.has_live_dns_ownership_proof(now_unix)
+    acme_order_action(record, now_unix).enrolls()
+}
+
+/// Whether the tenant currently holding a hostname blocks a challenger that has
+/// just completed its own DNS-TXT proof.
+///
+/// Only a LIVE `verified` proof defends a binding. A `grandfathered` incumbent
+/// is a pre-#488 land-grab candidate by construction -- it was never asked to
+/// prove anything -- so it must not be able to permanently block the tenant that
+/// actually owns the hostname and did the work. That is the first-come-first-
+/// served land-grab this issue exists to close; defending it with the 409 would
+/// keep the squatter and reject the owner.
+///
+/// This mirrors the storage-level conditional claim in
+/// `claim_verified_site_domain` (memory/Postgres/D1) exactly, and exists so the
+/// handler's preflight refusal and the atomic write cannot drift apart into two
+/// different definitions of "the holder owns this". `None` (no record at all)
+/// is not proof either, so it never blocks.
+pub(super) fn holder_blocks_verified_takeover(
+    holder: Option<&StoredSiteDomainVerification>,
+    now_unix: i64,
+) -> bool {
+    holder.is_some_and(|holder| holder.has_live_dns_ownership_proof(now_unix))
 }
 
 /// The bound hostnames that currently hold a LIVE ownership proof.

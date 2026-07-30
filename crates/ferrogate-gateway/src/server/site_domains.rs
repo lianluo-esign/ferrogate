@@ -43,9 +43,9 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::route_groups::RequestParts;
 use super::site_domain_verification::{
-    challenge_record_name, challenge_txt_value, eligible_for_acme, new_challenge_token,
-    resolve_challenge_within_rate_limit, reusable_on_rebind, AdminSiteDomainVerification,
-    ChallengeOutcome, GatedChallengeCheck, SiteDomainResolverBackend,
+    acme_order_action, challenge_record_name, challenge_txt_value, holder_blocks_verified_takeover,
+    new_challenge_token, resolve_challenge_within_rate_limit, reusable_on_rebind, AcmeOrderAction,
+    AdminSiteDomainVerification, ChallengeOutcome, GatedChallengeCheck, SiteDomainResolverBackend,
 };
 use super::{FerroGateway, ProxyContext};
 use crate::auth::{authorize_tenant_scope, enforce_tenant_filter};
@@ -460,8 +460,13 @@ impl FerroGateway {
                 StoredSiteDomainVerification::pending(&tenant_id, &hostname, &site, token, now)
             }
         };
+        // Two DIFFERENT questions, deliberately answered by two different
+        // predicates and never by one boolean (#488): `serving` is HTTP
+        // availability, which the `grandfathered` migration exception
+        // satisfies; `acme_action` is certificate-issuance policy, which only a
+        // live DNS proof satisfies.
         let serving = verification.serves(now);
-        let live_ownership_proof = eligible_for_acme(&verification, now);
+        let acme_action = acme_order_action(&verification, now);
         if let Err(error) = state
             .upsert_site_domain_verification(verification.clone())
             .await
@@ -513,12 +518,11 @@ impl FerroGateway {
 
         // #488: an unproven hostname must NOT enter the ACME order set. That is
         // both the certificate-issuance rate-limit pollution the issue calls
-        // out and a second place an unowned hostname would become real.
-        let acme = if live_ownership_proof {
-            self.refresh_acme_after_domain_change(&state, &hostname, true)
-        } else {
-            self.site_domain_acme_state(&state)
-        };
+        // out and a second place an unowned hostname would become real. The
+        // handler does not re-decide that here -- it applies the action derived
+        // from the stored proof above.
+        let acme = self.apply_site_domain_acme_action(&state, &hostname, acme_action);
+        let live_ownership_proof = acme_action.enrolls();
         let admin_verification = AdminSiteDomainVerification::new(&verification, now);
         state.record_admin_audit_event(admin_audit_event_draft_for_target(
             ctx,
@@ -788,17 +792,22 @@ impl FerroGateway {
                 };
                 if let Some(existing) = existing.as_ref() {
                     if existing.tenant_id != tenant_id {
-                        let holder_has_live_dns_proof = match state
+                        let holder = match state
                             .get_site_domain_verification(&existing.tenant_id, &hostname)
                             .await
                         {
-                            Ok(Some(holder)) => eligible_for_acme(&holder, now),
-                            Ok(None) => false,
+                            Ok(holder) => holder,
                             Err(error) => {
                                 return storage_error(session, ctx, error.to_string()).await
                             }
                         };
-                        if holder_has_live_dns_proof {
+                        // Only a LIVE proof defends the incumbent. A
+                        // grandfathered (never-proven) holder must not block the
+                        // tenant that just proved ownership -- that is the
+                        // land-grab this issue is about. Same predicate the
+                        // storage claim CAS applies, so the preflight refusal
+                        // and the atomic write cannot disagree.
+                        if holder_blocks_verified_takeover(holder.as_ref(), now) {
                             audit(
                                 "rejected",
                                 format!(
@@ -973,6 +982,40 @@ impl FerroGateway {
             }
             Ok(false) => domain_not_found(session, ctx, &hostname).await,
             Err(error) => storage_error(session, ctx, error.to_string()).await,
+        }
+    }
+
+    /// Applies the #488 certificate-order policy for a bind.
+    ///
+    /// The caller passes the ACTION derived from the stored ownership proof,
+    /// not a boolean it computed itself, so "is this hostname serving?" is no
+    /// longer available at this call as an answer to "may FerroGate order a
+    /// certificate for it?". The withheld case is logged with the state that
+    /// caused it: a grandfathered hostname answering traffic while staying out
+    /// of the order set is an operational decision, not something to hide.
+    fn apply_site_domain_acme_action(
+        &self,
+        state: &crate::state::AppState,
+        hostname: &str,
+        action: AcmeOrderAction,
+    ) -> AdminSiteDomainAcme {
+        match action {
+            AcmeOrderAction::Enroll => self.refresh_acme_after_domain_change(state, hostname, true),
+            AcmeOrderAction::Withhold {
+                serving,
+                verification_state,
+            } => {
+                tracing::info!(
+                    hostname = %hostname,
+                    verification_state = %verification_state,
+                    serving = serving,
+                    "withholding a site custom domain from the ACME certificate order set: \
+                     it carries no live DNS ownership proof (#488). Complete \
+                     POST /admin/v1/site-domains/{{hostname}}/verify before FerroGate can \
+                     manage this hostname's certificate"
+                );
+                self.site_domain_acme_state(state)
+            }
         }
     }
 
