@@ -213,6 +213,19 @@ fn send_request_writes_the_identity_onto_the_socket() {
     let endpoint = GatewayEndpoint::parse(&gateway_url).expect("a loopback URL parses");
     let identity = mint_action_identity(&gateway_url, API_KEY)
         .expect("the OS random source is available in the test env");
+    // Pre-load an authoritative time token so `send_request` skips the mandatory
+    // GET /healthz challenge (`ensure_server_time`): the single-connection
+    // loopback server below answers exactly ONE request, and this test is about
+    // what the API request itself puts on the socket, not the challenge. This is
+    // the same setup `lifecycle_admin_reload_test` uses; the client accepts a
+    // token by action-id and TTL, not signature, so a fixture sig suffices.
+    let issued_at = identity.client_clock().unverified_unix_seconds();
+    identity
+        .accept_server_time(&format!(
+            "v1;issued_at={issued_at};ttl=300;action_id={};sig=preloaded",
+            identity.action_id()
+        ))
+        .expect("a token bound to this action inside its TTL is accepted");
     let expected_action_id = identity.action_id().to_string();
     let expected_client_clock = identity.client_clock().render();
 
@@ -337,8 +350,12 @@ fn send_request_writes_the_identity_onto_the_socket() {
 /// Two entries, each with a reason, so a new one is a decision someone has to
 /// write down rather than a count someone has to bump:
 ///
-/// * `assets_cli.rs::send_request` — the attributed raw client. Takes a
-///   `&ClientActionIdentity` and writes its headers into the request.
+/// * `assets_cli.rs::send_request_once` — the attributed raw client, and the
+///   site that actually opens the socket. It is reached only through
+///   `send_request`, which first threads the `&ClientActionIdentity` (running
+///   the health-challenge preflight when no token is held yet) and passes that
+///   same identity down; `send_request_once` renders its headers into the
+///   request before it connects, so the connect site is attributed.
 /// * `admin_api.rs::connect_upstream` — **not** an originating CLI action.
 ///   `ferrogate admin-api` is a reverse proxy: it relays a request the admin
 ///   console made, and minting an `action_id` there would attribute the
@@ -378,7 +395,7 @@ fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
     /// Every sanctioned client site, and why each one is allowed.
     const SANCTIONED: [&str; 2] = [
         "admin_api.rs::connect_upstream",
-        "assets_cli.rs::send_request",
+        "assets_cli.rs::send_request_once",
     ];
 
     // Assembled at runtime so the lines below are not hits on themselves. The
@@ -449,7 +466,7 @@ fn every_outbound_http_call_goes_through_an_attributed_chokepoint() {
     // crate and the scan must be finding it, or `connects` could be empty for a
     // reason that has nothing to do with the rule.
     assert!(
-        connects.contains(&"assets_cli.rs::send_request".to_string()),
+        connects.contains(&"assets_cli.rs::send_request_once".to_string()),
         "the scan did not find the raw client it is written around; the needles no longer match \
          anything and this guard is green over a tree it cannot see: {connects:?}"
     );
