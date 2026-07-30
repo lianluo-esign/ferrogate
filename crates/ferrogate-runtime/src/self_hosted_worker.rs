@@ -1075,6 +1075,47 @@ impl InMemorySelfHostedRunQueue {
             .collect()
     }
 
+    /// Dispatch ids of the UNLEASED, UNACKNOWLEDGED submit-surface `StartRun`
+    /// dispatches `tenant_id` holds (id prefixed by `dispatch_id_prefix`) whose
+    /// `queued_at_unix` is at least `ttl_secs` old as of `now_unix`.
+    ///
+    /// The read side of the dispatch-row TTL (#502 -- the retention gap
+    /// recorded as a `Constraint:` in commit `928e82c`). The three on-demand
+    /// releases the open-job 429 names -- worker settlement, the runtime ack,
+    /// and cancel -- ALL require some actor to touch the run. A tenant with NO
+    /// registered worker has none of them: it fills its budget with
+    /// never-leased, never-acked start dispatches and is then locked out for the
+    /// lifetime of the deployment. Aging those rows out is the backstop that
+    /// drains the backlog without operator action.
+    ///
+    /// "Unleased" is `assigned_worker_id.is_none()`, i.e. never handed to a
+    /// worker -- deliberately the same subset [`Self::withdraw_unleased_run`]
+    /// reclaims, and for the same reason: a dispatch a worker has taken may be
+    /// executing for hours and still owes an ack, so age alone must never
+    /// withdraw it out from under its holder. Only the prefix's own producer's
+    /// rows are eligible, so a schedule fire (#426) or a worker-registration
+    /// seed is never reclaimed by the caller surface's TTL.
+    pub fn expired_unleased_start_dispatch_ids(
+        &self,
+        tenant_id: &str,
+        dispatch_id_prefix: &str,
+        ttl_secs: u64,
+        now_unix: u64,
+    ) -> Vec<String> {
+        self.runs
+            .values()
+            .filter(|queued| {
+                queued.acknowledged_status.is_none()
+                    && queued.assigned_worker_id.is_none()
+                    && queued.dispatch.action == SelfHostedRunAction::StartRun
+                    && queued.dispatch.tenant_id == tenant_id
+                    && queued.dispatch.dispatch_id.starts_with(dispatch_id_prefix)
+                    && now_unix.saturating_sub(queued.dispatch.queued_at_unix) >= ttl_secs
+            })
+            .map(|queued| queued.dispatch.dispatch_id.clone())
+            .collect()
+    }
+
     /// Dispatch ids of every entry carrying `run_id`, whatever its action or
     /// ack state. The reclaim path (#502) uses this to drain a settled run's
     /// rows out of the queue.

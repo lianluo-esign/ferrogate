@@ -67,7 +67,11 @@
 //! unleased cancel first withdraws only its node-local copy, then reclaims the
 //! shared row as settled work -- never on the false claim that the local copy
 //! was unique. Keying slot release on the runtime ack was wrong: the production
-//! completion path does not write that ack, so slots leaked.
+//! completion path does not write that ack, so slots leaked. A tenant with NO
+//! worker triggers none of those releases, so an unacknowledged, never-leased
+//! start dispatch is also aged out by a dispatch-row TTL
+//! ([`AGENT_JOB_DISPATCH_TTL_SECS`]) swept on the submit path: the backlog
+//! drains without operator action instead of locking the tenant out forever.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,6 +141,26 @@ const AGENT_JOB_MAX_OPEN_PER_TENANT: usize = 200;
 /// Error code of the retention refusal. Named once so the handler, the
 /// contract and the tests that hold the boundary all spell it the same way.
 const AGENT_JOB_OPEN_LIMIT_CODE: &str = "agent_job_open_limit_reached";
+
+/// Age, in seconds, at which an unacknowledged submit-surface `StartRun`
+/// dispatch that NO worker ever leased is reclaimed from the queue and the
+/// durable table -- the dispatch-row TTL (#502; the retention gap recorded as a
+/// `Constraint:` in commit `928e82c`).
+///
+/// The three releases the open-job 429 names -- worker settlement, the runtime
+/// ack, and cancel -- all require some actor to touch the run. A tenant with NO
+/// registered worker has none of them: it fills [`AGENT_JOB_MAX_OPEN_PER_TENANT`]
+/// with start dispatches nothing will ever lease or ack and is then locked out
+/// for the lifetime of the deployment. This TTL is the backstop that drains
+/// that backlog without operator action -- the submit path sweeps the tenant's
+/// aged never-leased dispatches BEFORE it counts, so a workerless tenant
+/// self-heals a TTL after its last accepted submit.
+///
+/// 24h is comfortably longer than the minutes-to-hours a real coding-agent job
+/// runs, so a worker that legitimately leases a job late is not raced; and the
+/// sweep only touches dispatches NO worker has leased, so a job already running
+/// (assigned, not yet acked) is never withdrawn by age regardless.
+const AGENT_JOB_DISPATCH_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// Run statuses that mean "this job will not change again". A caller polling
 /// status stops here; `.../result` only answers 200 in these states.
@@ -646,6 +670,20 @@ impl FerroGateway {
             // the parent stays an explicit None (never fabricated).
             parent_action_fingerprint: None,
         };
+        // The dispatch-row TTL (#502), applied BEFORE the budget is counted:
+        // reclaim this tenant's aged, never-leased start dispatches so a
+        // workerless backlog drains without operator action. The three
+        // on-demand releases the 429 names all need an actor to touch the run;
+        // a tenant with no worker has none, so without this sweep it fills the
+        // cap once and is locked out forever. Running it here means the very
+        // submit that would be refused first drains the aged rows and can then
+        // be admitted.
+        state.sweep_expired_agent_job_dispatches(
+            &tenant_id,
+            AGENT_JOB_START_DISPATCH_PREFIX,
+            AGENT_JOB_DISPATCH_TTL_SECS,
+            now,
+        );
         // The concurrency gate and the enqueue, as ONE operation (#502 rework),
         // and BEFORE the run row is claimed -- the same ordering the scheduler
         // uses. If the row were written first and the enqueue then failed,

@@ -1832,6 +1832,58 @@ impl AppState {
             .count()
     }
 
+    /// Reclaim `tenant_id`'s aged, never-leased, unacknowledged submit-surface
+    /// start dispatches -- the dispatch-row TTL (#502; the retention gap
+    /// recorded as a `Constraint:` in commit `928e82c`).
+    ///
+    /// The open-job 429 promises three on-demand releases -- worker settlement,
+    /// the runtime ack, and cancel -- and every one of them needs some actor to
+    /// touch the run. A tenant with NO registered worker has none: it fills its
+    /// budget with start dispatches nothing will ever lease or ack, and is then
+    /// locked out permanently. This is the only release that fires without an
+    /// actor. It is called from the submit path itself, BEFORE the budget is
+    /// counted, so the very submit that would be refused first drains the aged
+    /// backlog: a workerless tenant self-heals a TTL after its last accepted
+    /// submit instead of needing an operator.
+    ///
+    /// Reclaim, not just an in-memory drop: each expired row is removed through
+    /// [`AppState::discard_self_hosted_dispatch`], so the durable
+    /// `self_hosted_run_dispatches` row goes with the queue entry and the
+    /// backlog does not return on the next reload. Only never-leased
+    /// (`assigned_worker_id.is_none()`) prefix-matched start dispatches are
+    /// eligible, so a job a worker is running is never withdrawn by age and a
+    /// schedule fire (#426) or worker-registration seed is never charged to --
+    /// or reclaimed by -- the caller surface. Returns how many rows it drained.
+    pub(crate) fn sweep_expired_agent_job_dispatches(
+        &self,
+        tenant_id: &str,
+        dispatch_id_prefix: &str,
+        ttl_secs: u64,
+        now_unix: u64,
+    ) -> usize {
+        let expired = match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime.queue.expired_unleased_start_dispatch_ids(
+                tenant_id,
+                dispatch_id_prefix,
+                ttl_secs,
+                now_unix,
+            ),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .queue
+                .expired_unleased_start_dispatch_ids(
+                    tenant_id,
+                    dispatch_id_prefix,
+                    ttl_secs,
+                    now_unix,
+                ),
+        };
+        expired
+            .iter()
+            .filter(|dispatch_id| self.discard_self_hosted_dispatch(dispatch_id))
+            .count()
+    }
+
     /// The subset of `run_ids` whose canonical `agent_runs` row has reached a
     /// TERMINAL state.
     ///

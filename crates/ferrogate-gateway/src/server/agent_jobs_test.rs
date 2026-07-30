@@ -2066,3 +2066,140 @@ fn background_start_dispatches_do_not_consume_the_callers_submit_budget() {
     // The caller's own last slot still closes the gate.
     assert!(try_submit_job(&state, "tenant-a", "budget-over").is_err());
 }
+
+#[test]
+fn the_dispatch_ttl_drains_a_workerless_backlog_and_frees_the_budget() {
+    // The #502 permanent lockout the TTL exists to break: no worker is ever
+    // registered, so settlement and ack never fire and -- absent a caller
+    // cancelling each job by hand -- the tenant fills the cap with never-leased
+    // start dispatches and can never submit again. Every test start dispatch is
+    // queued at unix 100 (see `start_dispatch`).
+    let state = AppState::new(Config::default());
+    submit_open_jobs(&state, "tenant-a", "ttl", AGENT_JOB_MAX_OPEN_PER_TENANT);
+    assert!(
+        try_submit_job(&state, "tenant-a", "at-cap").is_err(),
+        "the workerless tenant is at the cap before the TTL elapses"
+    );
+
+    // A sweep one second BEFORE the TTL elapses reclaims nothing and the lockout
+    // holds, so the reclaim is genuinely age-gated -- not a blanket clear.
+    let within_ttl = 100 + AGENT_JOB_DISPATCH_TTL_SECS - 1;
+    assert_eq!(
+        state.sweep_expired_agent_job_dispatches(
+            "tenant-a",
+            AGENT_JOB_START_DISPATCH_PREFIX,
+            AGENT_JOB_DISPATCH_TTL_SECS,
+            within_ttl,
+        ),
+        0,
+        "nothing may be reclaimed one second before the TTL elapses"
+    );
+    assert!(
+        try_submit_job(&state, "tenant-a", "still-at-cap").is_err(),
+        "a sweep within the TTL leaves the tenant locked out"
+    );
+
+    // A sweep exactly at (queued_at + TTL) reclaims the whole aged backlog...
+    let at_ttl = 100 + AGENT_JOB_DISPATCH_TTL_SECS;
+    assert_eq!(
+        state.sweep_expired_agent_job_dispatches(
+            "tenant-a",
+            AGENT_JOB_START_DISPATCH_PREFIX,
+            AGENT_JOB_DISPATCH_TTL_SECS,
+            at_ttl,
+        ),
+        AGENT_JOB_MAX_OPEN_PER_TENANT,
+        "every aged, never-leased start dispatch is reclaimed once the TTL elapses"
+    );
+    // ...durably, so the backlog does not return on the next reload...
+    assert!(
+        durable_dispatch_ids(&state).is_empty(),
+        "the TTL reclaims the durable rows too, not just the in-memory queue"
+    );
+    // ...and the surface re-opens with no operator action at all.
+    try_submit_job(&state, "tenant-a", "after-ttl")
+        .expect("the TTL must re-open a surface a workerless tenant could otherwise never regain");
+}
+
+#[test]
+fn the_dispatch_ttl_never_withdraws_a_job_a_worker_is_running() {
+    // Age alone must never reclaim a dispatch a worker has taken: it may be
+    // executing for hours and it still owes an ack. Only NEVER-leased rows are
+    // eligible, exactly as the withdrawable-cancel arm is.
+    let state = AppState::new(Config::default());
+    let (_worker_id, identity) = register_job_worker(&state, "tenant-a");
+    let run_id = try_submit_job(&state, "tenant-a", "leased-then-aged").expect("submitted");
+    let start_dispatch_id = agent_job_start_dispatch_id(&run_id);
+
+    let lease =
+        poll_for_lease(&state, &identity, 150).expect("the worker leases the start dispatch");
+    assert_eq!(
+        lease.dispatch_id, start_dispatch_id,
+        "the worker holds this run's start dispatch"
+    );
+
+    // Long past the TTL, the leased dispatch is still NOT reclaimed...
+    let past_ttl = 100 + AGENT_JOB_DISPATCH_TTL_SECS + 1;
+    assert_eq!(
+        state.sweep_expired_agent_job_dispatches(
+            "tenant-a",
+            AGENT_JOB_START_DISPATCH_PREFIX,
+            AGENT_JOB_DISPATCH_TTL_SECS,
+            past_ttl,
+        ),
+        0,
+        "a dispatch a worker has leased is never reclaimed by age -- its holder may still ack it"
+    );
+    // ...it is still in the queue, waiting for its holder to ack.
+    assert!(
+        state.self_hosted_dispatch_unacked(&start_dispatch_id),
+        "the leased dispatch survives the TTL so the worker can still ack it"
+    );
+}
+
+#[test]
+fn the_dispatch_ttl_reclaims_only_the_named_tenants_own_submit_dispatches() {
+    // The sweep is driven per-tenant from the submit path, so it must touch
+    // neither another tenant's backlog nor the SAME tenant's background
+    // (schedule / seed) dispatches -- both share this queue and both are aged.
+    let state = AppState::new(Config::default());
+    submit_open_jobs(&state, "tenant-a", "mine", 3);
+    submit_open_jobs(&state, "tenant-b", "theirs", 3);
+    // A #426 schedule fire for tenant-a, aged (queued at 100) but NOT
+    // caller-submitted, so its prefix keeps it out of the caller surface's TTL.
+    let background_id = crate::state::scheduled_dispatch_id("nightly", 1_700_000_000);
+    state
+        .enqueue_scheduled_self_hosted_dispatch(SelfHostedRunDispatch {
+            dispatch_id: background_id.clone(),
+            run_id: "schedule-run-nightly".to_string(),
+            agent_run_id: Some("schedule-run-nightly".to_string()),
+            ..start_dispatch("unused", "tenant-a")
+        })
+        .expect("the schedule fire shares the queue");
+
+    let past_ttl = 100 + AGENT_JOB_DISPATCH_TTL_SECS + 1;
+    assert_eq!(
+        state.sweep_expired_agent_job_dispatches(
+            "tenant-a",
+            AGENT_JOB_START_DISPATCH_PREFIX,
+            AGENT_JOB_DISPATCH_TTL_SECS,
+            past_ttl,
+        ),
+        3,
+        "only tenant-a's three own submit dispatches are reclaimed"
+    );
+    // tenant-b's backlog is untouched by tenant-a's sweep.
+    for index in 0..3 {
+        let foreign =
+            agent_job_start_dispatch_id(&agent_job_run_id("tenant-b", &format!("theirs-{index}")));
+        assert!(
+            state.self_hosted_dispatch_unacked(&foreign),
+            "tenant-b's dispatch {index} must survive tenant-a's sweep"
+        );
+    }
+    // ...and so is tenant-a's own background schedule dispatch.
+    assert!(
+        state.self_hosted_dispatch_unacked(&background_id),
+        "a schedule fire is not caller-submitted, so the caller-surface TTL must not reclaim it"
+    );
+}
