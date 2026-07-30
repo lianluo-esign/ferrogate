@@ -9620,9 +9620,9 @@ export interface operations {
                 "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
                 /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
                 "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
-                /** @description Required for modern candidate requests and must match params._meta.io.modelcontextprotocol/protocolVersion; legacy initialize-based requests retain their revision-specific behavior. */
+                /** @description Required for modern 2026-07-28 requests and must match params._meta.io.modelcontextprotocol/protocolVersion; legacy initialize-based requests retain their revision-specific behavior. */
                 "MCP-Protocol-Version"?: string;
-                /** @description Required for modern candidate requests and must match the JSON-RPC method. */
+                /** @description Required for modern 2026-07-28 requests and must match the JSON-RPC method. */
                 "Mcp-Method"?: string;
                 /** @description Required for modern tools/call, resources/read, and prompts/get requests; Base64 sentinel values are decoded before body comparison. */
                 "Mcp-Name"?: string;

@@ -40,7 +40,7 @@ work belongs in [`roadmap.md`](roadmap.md).
   pins the official TypeScript client generated from that revision and alternates
   its stateless modern requests across two gateway instances. Cacheable
   results carry a short `ttlMs` and authorization-private
-  `cacheScope`. Candidate
+  `cacheScope`. Modern
   body-schema failures use `-32602`; Streamable-HTTP header failures use
   `-32020`. Execution evidence and final-spec conformance remain separate from
   the command's implementation and must not be inferred from compilation.

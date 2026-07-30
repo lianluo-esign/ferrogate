@@ -348,7 +348,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Required for modern candidate requests and must match params._meta.io.modelcontextprotocol/protocolVersion; legacy initialize-based requests retain their revision-specific behavior."
+            "description": "Required for modern 2026-07-28 requests and must match params._meta.io.modelcontextprotocol/protocolVersion; legacy initialize-based requests retain their revision-specific behavior."
           },
           {
             "name": "Mcp-Method",
@@ -357,7 +357,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Required for modern candidate requests and must match the JSON-RPC method."
+            "description": "Required for modern 2026-07-28 requests and must match the JSON-RPC method."
           },
           {
             "name": "Mcp-Name",
