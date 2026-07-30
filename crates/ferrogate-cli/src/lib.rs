@@ -55,6 +55,8 @@ mod ctl;
 mod plans_cli;
 #[cfg(test)]
 mod reference;
+#[cfg(test)]
+mod release;
 mod storage;
 
 use anyhow::{Context, Result as AnyResult};

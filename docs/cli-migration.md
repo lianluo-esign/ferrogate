@@ -99,6 +99,12 @@ New in this slice:
   ferrogate completions zsh  > "${fpath[1]}/_ferrogate"
   ```
 
+- [`docs/cli-compatibility.md`](cli-compatibility.md) is the release and
+  deprecation contract behind this migration: which targets a release publishes,
+  what each operator-visible surface promises, the frozen exit codes, and the
+  three-stage path (deprecate → migrate → remove) the `admin-api` rename below
+  is following.
+
 - [`docs/cli-reference.md`](cli-reference.md) is a generated, drift-checked
   reference of the complete command tree. Regenerate it after any command-surface
   change with:

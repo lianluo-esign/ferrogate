@@ -61,6 +61,13 @@ jobs:
       - name: Test workers gate contract
         run: ./scripts/test-check-workers.sh
 
+      # #365: the CLI packaging contract — plan resolution from the generated
+      # target manifest, archive/checksum layout, reproducibility, and refusal
+      # of an undeclared triple. Runs from stub binaries, so it needs no cargo
+      # build and no cross toolchain.
+      - name: Test CLI packaging contract
+        run: ./scripts/test-package-cli.sh
+
       # These named `-p ferrogate-cli` until #561's rework, and had selected
       # ZERO tests since #553 stage 1 moved the config module into its own
       # crate: `cargo test <filter>` exits 0 when the filter matches nothing,

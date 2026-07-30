@@ -53,7 +53,7 @@ if ! command -v docker >/dev/null; then
   echo "NOTE: docker not found -> using no-daemon musl+crane image path (scripts/build-image-crane.sh)."
 fi
 
-echo "== 1/5 local gate =="
+echo "== 1/6 local gate =="
 if [ "$SKIP_TESTS" = "true" ]; then
   echo "   (skipped --skip-tests)"
 else
@@ -122,7 +122,7 @@ fi
 if [ "$ENGINE" = "crane" ]; then
   # No-daemon path: musl-static build + crane assemble + push. Handles its own
   # build/stage/push (and GHCR_TOKEN / write:packages requirement).
-  echo "== 2-3/5 musl+crane image build =="
+  echo "== 2-3/6 musl+crane image build =="
   CRANE_ARGS=(--tag "$TAG" --owner "$OWNER")
   [ "$DO_PUSH" = "true" ] && CRANE_ARGS+=(--push)
   "$ROOT/scripts/build-image-crane.sh" "${CRANE_ARGS[@]}"
@@ -132,11 +132,11 @@ if [ "$ENGINE" = "crane" ]; then
     DIGEST="sha256:LOCAL-DRY-RUN"
   fi
 else
-  echo "== 2/5 docker build =="
+  echo "== 2/6 docker build =="
   # --provenance / --sbom off here; SBOM is produced explicitly in step 4.
   docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
 
-  echo "== 3/5 push to GHCR =="
+  echo "== 3/6 push to GHCR =="
   if [ "$DO_PUSH" = "true" ]; then
     # gh auth token -> GHCR login (or set CR_PAT and: echo "$CR_PAT" | docker login ghcr.io -u <user> --password-stdin)
     gh auth token | docker login ghcr.io -u "${OWNER}" --password-stdin
@@ -150,7 +150,7 @@ else
   fi
 fi
 
-echo "== 4/5 SBOM + sign =="
+echo "== 4/6 SBOM + sign =="
 case "$SIGN" in
   none) echo "   (--sign none: no signature/SBOM)";;
   local-key)
@@ -167,11 +167,37 @@ case "$SIGN" in
   *) echo "ERROR: --sign must be local-key or none" >&2; exit 2;;
 esac
 
-echo "== 5/5 verify =="
+echo "== 5/6 verify =="
 if [ "$DO_PUSH" = "true" ] && [ "$SIGN" = "local-key" ] && command -v cosign >/dev/null && [ -f "${COSIGN_KEY}.pub" ]; then
   cosign verify --key "${COSIGN_KEY}.pub" "${IMAGE}@${DIGEST}" && echo "   local-key signature verifies."
   echo "   NOTE: the release-mode GitHub-provenance verifier (scripts/verify-image-supply-chain.sh --mode release) will NOT pass on a local-key signature by design."
 else
   echo "   (skipped)"
 fi
+
+# The CLI is a released artifact in its own right (#365), not only the
+# /usr/local/bin/ferrogate inside the image. The musl triples this packages are
+# the same ones the image build above already produced, so on the crane path
+# the cross toolchain is warm and this step is nearly free.
+echo "== 6/6 CLI archives =="
+# Only sign the archives when a local key is actually usable; the image step
+# above degrades the same way rather than failing a release over a missing
+# cosign.
+CLI_SIGN="none"
+if [ "$SIGN" = "local-key" ] && command -v cosign >/dev/null && [ -f "$COSIGN_KEY" ]; then
+  CLI_SIGN="local-key"
+fi
+if ! [[ "$TAG" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+  echo "   (tag '$TAG' is not vYYYY.MM.DD: skipping CLI archives)"
+elif [ "$ENGINE" = "crane" ] || [ -n "${FERROGATE_PACKAGE_CLI:-}" ]; then
+  COSIGN_KEY="$COSIGN_KEY" "$ROOT/scripts/package-cli.sh" \
+    --version "$TAG" --out "$ROOT/dist/cli" --sign "$CLI_SIGN" \
+    || { echo "ERROR: CLI packaging failed" >&2; exit 1; }
+else
+  # The docker path builds glibc binaries inside the image and never produces
+  # the musl triples the CLI policy releases, so packaging here would have to
+  # start a second, cold cross build. Opt in explicitly when that is wanted.
+  echo "   (docker path: set FERROGATE_PACKAGE_CLI=1 to also build the musl CLI archives)"
+fi
+
 echo "done: ${IMAGE}:${TAG}${DIGEST:+ @ }${DIGEST:-}"
