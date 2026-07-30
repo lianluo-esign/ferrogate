@@ -4069,6 +4069,42 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    // #582/#591: prove the typed capability filter still EXCLUDES an
+    // under-declared route end to end. `bedrock-chat` is in `client`'s
+    // allowed_models and declares `["chat", "tools"]` — no `streaming`.
+    //
+    // The `fast-chat` streaming case directly above is the control: same key,
+    // same scope, same streaming request shape, and it returns 200 because
+    // `fast-chat` declares `streaming`. The only difference here is the
+    // route's capability declaration, so the 400 below isolates the typed
+    // capability filter from scope, allowlist and upstream health. The
+    // excluded request is rejected BEFORE dispatch, so it never depends on a
+    // provider being reachable.
+    //
+    // Without this case the suite could be turned green again by blanket-
+    // declaring every capability on every fixture route — exactly what the
+    // #582 fail-closed contract must not permit.
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"bedrock-chat","stream":true,"messages":[{"role":"user","content":"capability exclusion streaming"}]}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["type"], "ferrogate_error");
+            assert_eq!(body["error"]["code"], "invalid_request");
+            assert!(
+                body["error"]["message"].as_str().is_some_and(|message| {
+                    message.contains(
+                        "no physical route for model bedrock-chat satisfies the request requirements",
+                    )
+                }),
+                "expected typed-capability exclusion, got: {body}"
+            );
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "POST",
         "/v1/chat/completions",
