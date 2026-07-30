@@ -18,12 +18,16 @@
 //!
 //! 1. **Synced JSON state** — whole-object replace, server-side validated
 //!    (`state_get` / `state_set`).
-//! 2. **Embedded per-agent SQLite** — arbitrary tables, 10 GB/DO, 2 MB
+//! 2. **Embedded per-agent SQLite** — FerroGate's own tables, 10 GB/DO, 2 MB
 //!    row/value limit (`sql_query`). On `SQLITE_FULL` writes fail but reads
 //!    and `DELETE` still succeed — the prune path relies on that
-//!    ([`AgentMemoryClient::sql_query_with_prune_on_full`]).
-//! 3. **Chat history** — the SDK's persisted message table with a retention
-//!    cap (`chat_history_get` / `chat_history_prune`).
+//!    ([`AgentMemoryClient::sql_query_with_prune_on_full`]). The Agents SDK's
+//!    control tables (`cf_agents_*`) are OUT of reach here: they hold the
+//!    storage behind governance decisions the dedicated routes make, so the
+//!    Worker refuses any statement naming one
+//!    ([`AgentMemoryError::SqlForbidden`]).
+//! 3. **Chat history** — the persisted message table with a retention cap
+//!    (`chat_history_append` / `chat_history_get` / `chat_history_prune`).
 //!
 //! Optional: **semantic memory** over Vectorize + Workers AI embeddings —
 //! open **beta**, piloted behind a default-off flag on BOTH sides (the
@@ -51,8 +55,9 @@
 //! control surface, so every verb is unit-tested against a scripted mock with
 //! no network — matching how #414 tested its lifecycle verbs.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{error::Error, fmt};
 
 use crate::cloudflare_gateway_control::GatewayControlTransport;
@@ -65,6 +70,41 @@ pub const AGENT_INSTANCE_NAME_PREFIX: &str = "fg";
 pub const AGENT_INSTANCE_NAME_SEPARATOR: char = '.';
 /// Maximum length of one identity component.
 pub const AGENT_INSTANCE_COMPONENT_MAX_LEN: usize = 64;
+
+/// Vectorize's hard cap on a namespace name, in **bytes**.
+pub const VECTORIZE_NAMESPACE_MAX_BYTES: usize = 64;
+
+/// Prefix marking a hashed Vectorize namespace. A minted instance name always
+/// starts `fg.`, and `.` is outside this prefix, so a hashed namespace can
+/// never collide with a verbatim one.
+const HASHED_NAMESPACE_PREFIX: &str = "fgh_";
+
+/// Map an agent instance name onto the Vectorize namespace that isolates its
+/// vectors.
+///
+/// The namespace is the ONLY isolation mechanism semantic memory has, and
+/// Vectorize caps it at [`VECTORIZE_NAMESPACE_MAX_BYTES`] — but a minted
+/// `fg.{tenant}.{session}.{run}` name reaches 195 bytes (a realistic UUID
+/// triple is ~110), so the name cannot be the namespace verbatim. Names that
+/// fit are used as-is; longer ones collapse to `fgh_` + 60 hex characters of
+/// their SHA-256, which is exactly 64 bytes.
+///
+/// **This must stay byte-identical to `vectorizeNamespace` in
+/// `workers/agent-gateway/src/memory.ts`** — the two sides independently derive
+/// the namespace, and a divergence would silently partition writes from reads
+/// rather than fail.
+pub fn vectorize_namespace(instance: &str) -> String {
+    if instance.len() <= VECTORIZE_NAMESPACE_MAX_BYTES {
+        return instance.to_string();
+    }
+    let digest = Sha256::digest(instance.as_bytes());
+    let hex = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let keep = VECTORIZE_NAMESPACE_MAX_BYTES - HASHED_NAMESPACE_PREFIX.len();
+    format!("{HASHED_NAMESPACE_PREFIX}{}", &hex[..keep])
+}
 
 /// The FerroGate identity triple an agent instance name is minted from.
 ///
@@ -139,6 +179,10 @@ pub enum AgentMemoryError {
     InvalidIdentity(String),
     /// The Worker rejected the bearer credential (HTTP 401/403).
     Denied(String),
+    /// The statement named an Agents SDK control table and was refused by the
+    /// Worker's governance guard (HTTP 403 `sql_forbidden`). Distinct from
+    /// [`Self::Denied`]: the credential was accepted, the STATEMENT was not.
+    SqlForbidden(String),
     /// The instance's embedded SQLite hit its 10 GB limit (`SQLITE_FULL`,
     /// HTTP 507). Reads and DELETEs still work — run the prune path.
     SqliteFull(String),
@@ -160,6 +204,7 @@ impl fmt::Display for AgentMemoryError {
         match self {
             Self::InvalidIdentity(m) => write!(f, "invalid agent instance identity: {m}"),
             Self::Denied(m) => write!(f, "agent memory access denied: {m}"),
+            Self::SqlForbidden(m) => write!(f, "agent memory statement refused: {m}"),
             Self::SqliteFull(m) => write!(f, "agent sqlite storage full: {m}"),
             Self::SemanticDisabled(m) => write!(f, "semantic memory pilot disabled: {m}"),
             Self::RequestFailed { verb, status, body } => {
@@ -207,6 +252,27 @@ pub struct AgentChatHistory {
     pub count: u64,
 }
 
+/// One chat message handed to [`AgentMemoryClient::chat_history_append`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentChatMessageInput {
+    /// Primary key of the row; re-appending the same id REPLACEs it, so the id
+    /// is the caller's idempotency key.
+    pub id: String,
+    /// Message payload, persisted as JSON text exactly as the SDK stores it.
+    pub message: serde_json::Value,
+}
+
+/// Layer-3 append outcome. The retention cap is applied in the same call, so
+/// the eviction counters describe the state after the append.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AgentChatAppendOutcome {
+    pub instance: String,
+    pub appended: u64,
+    pub cap: u64,
+    pub pruned: u64,
+    pub remaining: u64,
+}
+
 /// Layer-3 eviction outcome (`maxPersistedMessages` cap enforcement).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AgentChatPruneOutcome {
@@ -229,6 +295,12 @@ pub struct AgentSemanticMatch {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AgentSemanticMatches {
     pub instance: String,
+    /// Vectorize namespace the query actually searched — the instance name when
+    /// it fits Vectorize's 64-byte cap, otherwise its hashed form. Reported so
+    /// a caller can confirm which namespace a result came from rather than
+    /// assume it equals the instance name. See [`vectorize_namespace`].
+    #[serde(default)]
+    pub namespace: Option<String>,
     pub matches: Vec<AgentSemanticMatch>,
 }
 
@@ -377,6 +449,26 @@ impl<T: GatewayControlTransport> AgentMemoryClient<T> {
         }
     }
 
+    /// Layer 3: append messages to the instance's persisted chat history.
+    ///
+    /// This is what makes layer 3 non-empty on the deployed plain-`Agent`
+    /// class, and therefore what makes
+    /// [`Self::sql_query_with_prune_on_full`]'s recovery able to free bytes at
+    /// all. The Worker enforces the retention cap in the same call, so history
+    /// never exceeds `maxPersistedMessages` between an append and a prune.
+    pub fn chat_history_append(
+        &self,
+        identity: &AgentInstanceIdentity,
+        messages: &[AgentChatMessageInput],
+    ) -> Result<AgentChatAppendOutcome, AgentMemoryError> {
+        let instance = identity.instance_name()?;
+        self.call(
+            "chat_history_append",
+            "memory/chat/append",
+            json!({ "instance": instance, "messages": messages }),
+        )
+    }
+
     /// Layer 3: read up to `limit` newest persisted chat messages
     /// (oldest-first in the result).
     pub fn chat_history_get(
@@ -445,6 +537,10 @@ fn map_error(verb: &'static str, response: &HttpResponse) -> AgentMemoryError {
         parsed.message
     };
     match (response.status, parsed.error.as_str()) {
+        // Checked BEFORE the 401/403 arm: a refused statement also arrives as
+        // 403, and reporting it as a credential denial would send an operator
+        // hunting a token problem that does not exist.
+        (_, "sql_forbidden") => AgentMemoryError::SqlForbidden(detail),
         (401 | 403, _) => {
             AgentMemoryError::Denied(format!("HTTP {}: {body_text}", response.status))
         }
