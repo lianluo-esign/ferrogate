@@ -164,12 +164,10 @@ pub fn build_crud_with_item_segments(
     let segments = input.segment_refs();
     match verb {
         "list" => api.read(&segments, &input.list),
-        "get" => api.get(require_target_segments(
-            api,
-            verb,
-            &segments,
-            required_item_segments,
-        )?),
+        "get" => api.get(
+            require_target_segments(api, verb, &segments, required_item_segments)?,
+            &input.list,
+        ),
         "create" => api.create(input.require_body(verb)?),
         "replace" => api.replace(
             require_target_segments(api, verb, &segments, required_item_segments)?,

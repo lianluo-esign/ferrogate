@@ -148,12 +148,6 @@ pub const REVIEWED_EXCLUSIONS: &[ReviewedExclusion] = &[
         reason:
             "self-hosted worker registration verb not yet implemented; tracked as #362 follow-up",
     },
-    // Asset visibility promotion verb — not yet built. Owner: asset family track (#363 follow-up).
-    ReviewedExclusion {
-        operation_id: "promoteAssetVisibility",
-        owner: "asset family (#363)",
-        reason: "asset visibility-promotion verb not yet implemented; tracked as #363 follow-up",
-    },
     // Scoped control-plane overview read (#339): a single aggregate read whose
     // consumer is the admin-console dashboard (#343), not an operator CLI verb.
     // A `ctl overview` convenience verb, if wanted, is orthogonal follow-up work;

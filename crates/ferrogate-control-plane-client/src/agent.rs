@@ -274,9 +274,9 @@ impl CommandGroup for AgentJobsGroup {
 pub fn build_agent_jobs(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "submit" => AGENT_JOBS.create(input.require_body(verb)?),
-        "get" => AGENT_JOBS.get(&[first_segment(input, "agent-job")?]),
+        "get" => AGENT_JOBS.get(&[first_segment(input, "agent-job")?], &input.list),
         "events" => AGENT_JOBS.read(&[first_segment(input, "agent-job")?, "events"], &input.list),
-        "result" => AGENT_JOBS.get(&[first_segment(input, "agent-job")?, "result"]),
+        "result" => AGENT_JOBS.get(&[first_segment(input, "agent-job")?, "result"], &input.list),
         "cancel" => build_item_action(&AGENT_JOBS, "agent-job", "cancel", input),
         other => Err(crate::error::CliError::usage(format!(
             "verb '{other}' is not an agent-jobs verb"
