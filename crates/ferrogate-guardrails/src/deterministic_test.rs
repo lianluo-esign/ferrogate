@@ -347,7 +347,7 @@ fn patches_preserve_model_and_reject_protected_or_escaped_paths() {
         &response,
         &envelope,
         &[ContentSource::Assistant],
-        &[patch.clone()],
+        std::slice::from_ref(&patch),
     )
     .unwrap();
     assert_eq!(transformed["model"], "protected-model");

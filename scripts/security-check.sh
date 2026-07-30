@@ -32,49 +32,73 @@ if [[ "${#missing_tools[@]}" -ne 0 ]]; then
   exit 1
 fi
 
-echo "==> cargo fmt"
-cargo fmt --check
+# Un-suppressable secret scan (#525): the secret scan is the security-critical
+# heart of this gate, yet it used to run LAST under `set -e`, so ANY earlier
+# fmt/clippy/build hiccup aborted the script before the scan ever executed --
+# "the scan silently never runs". We now record each step's failure into
+# `overall_status` WITHOUT aborting, ALWAYS run the secret scan, and only then
+# exit non-zero if anything (the scan or an earlier step) failed. A future
+# fmt/clippy/metadata failure can therefore never again suppress the scan.
+overall_status=0
 
-echo "==> cargo clippy"
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+# Run a labelled step, capturing (not propagating) its failure. errexit is
+# suspended for the command itself via the `if !` guard, so a red step marks
+# `overall_status` and the script keeps going to the secret scan.
+run_step() {
+  local label="$1"
+  shift
+  echo "==> $label"
+  if ! "$@"; then
+    echo "FAILED: $label" >&2
+    overall_status=1
+  fi
+}
 
-echo "==> cargo metadata --locked"
-cargo metadata --locked --format-version=1 >/dev/null
+cargo_metadata_locked() {
+  cargo metadata --locked --format-version=1 >/dev/null
+}
 
-echo "==> vendored Pingora integrity"
-python3 scripts/check-pingora-vendor.py
+run_step "cargo fmt" cargo fmt --check
+# Reconciled to the repo's pinned clippy toolchain (see release-local.sh); the
+# default (1.97) toolchain surfaced lints nothing else in the repo enforces.
+run_step "cargo clippy" cargo +1.88.0 clippy --workspace --all-targets --all-features -- -D warnings
+run_step "cargo metadata --locked" cargo_metadata_locked
+run_step "vendored Pingora integrity" python3 scripts/check-pingora-vendor.py
+run_step "protobuf advisory floor" python3 scripts/check-protobuf-advisory.py
 
-echo "==> protobuf advisory floor"
-python3 scripts/check-protobuf-advisory.py
+# The security-critical secret scan ALWAYS runs, regardless of any failure
+# above. It lives in its own script so it is drivable (and testable) without a
+# full cargo build; see scripts/test-check-secret-scan.sh.
+echo "==> secret scan"
+if ! bash scripts/check-secret-scan.sh; then
+  echo "FAILED: secret scan" >&2
+  overall_status=1
+fi
 
-# Secret scan lives in its own script so it is drivable (and testable) without
-# a full cargo build; see scripts/test-check-secret-scan.sh.
-bash scripts/check-secret-scan.sh
-
-echo "==> cargo-audit exception policy"
-python3 scripts/check-audit-exceptions.py
-
-echo "==> immutable GitHub Actions references"
-python3 scripts/check-workflow-action-pins.py
+run_step "cargo-audit exception policy" python3 scripts/check-audit-exceptions.py
+run_step "immutable GitHub Actions references" python3 scripts/check-workflow-action-pins.py
 
 if cargo deny --version >/dev/null 2>&1; then
-  echo "==> cargo deny"
-  cargo deny check licenses bans sources
+  run_step "cargo deny" cargo deny check licenses bans sources
 elif [[ "$require_supply_chain_tools" == "1" ]]; then
   echo "cargo deny is required when FERROGATE_SECURITY_REQUIRE_TOOLS=1" >&2
-  exit 1
+  overall_status=1
 else
   echo "==> cargo deny not installed; skipping"
 fi
 
 if cargo audit --version >/dev/null 2>&1; then
-  echo "==> cargo audit"
-  cargo audit
+  run_step "cargo audit" cargo audit
 elif [[ "$require_supply_chain_tools" == "1" ]]; then
   echo "cargo audit is required when FERROGATE_SECURITY_REQUIRE_TOOLS=1" >&2
-  exit 1
+  overall_status=1
 else
   echo "==> cargo audit not installed; skipping"
+fi
+
+if [[ "$overall_status" -ne 0 ]]; then
+  echo "security check FAILED" >&2
+  exit "$overall_status"
 fi
 
 echo "security check passed"

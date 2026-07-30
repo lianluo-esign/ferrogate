@@ -63,6 +63,9 @@ fn spawn_reported_gateway() -> std::process::Child {
 /// tests.
 #[test]
 #[ignore = "fixture: driven by panicking_test_leaves_no_gateway_behind"]
+// Not waiting on the child is the whole point: this fixture must leave a live
+// gateway behind for the outer test to prove it gets reaped anyway (#568).
+#[allow(clippy::zombie_processes)]
 fn inner_spawn_then_panic() {
     let _child = spawn_reported_gateway();
     panic!("#568 fixture: this gateway must not outlive the test that spawned it");
@@ -72,6 +75,9 @@ fn inner_spawn_then_panic() {
 /// outer test is certainly the one that ends this process.
 #[test]
 #[ignore = "fixture: driven by sigkilled_test_binary_leaves_no_gateway_behind"]
+// Not waiting on the child is the whole point: this fixture must leave a live
+// gateway behind for the outer test to prove it gets reaped anyway (#568).
+#[allow(clippy::zombie_processes)]
 fn inner_spawn_then_hang() {
     let _child = spawn_reported_gateway();
     std::thread::sleep(Duration::from_secs(600));

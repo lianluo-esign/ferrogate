@@ -2873,12 +2873,10 @@ fn only_the_audited_allowlist_of_mutating_operations_returns_an_audit_id() {
                         return true;
                     }
                 }
-                Some(value) => {
-                    if declares_audit_property(value, components, depth + 1) {
-                        return true;
-                    }
+                Some(value) if declares_audit_property(value, components, depth + 1) => {
+                    return true;
                 }
-                None => {}
+                _ => {}
             }
         }
         false
@@ -2929,9 +2927,14 @@ fn only_the_audited_allowlist_of_mutating_operations_returns_an_audit_id() {
         mutating.len()
     );
     // Non-vacuity: the allowlist is a real, non-empty set, and it is meaningful
-    // only if each of its operations exists as a mutating operation.
+    // only if each of its operations exists as a mutating operation. The
+    // const-ness is deliberate: this is a guard that a future edit cannot
+    // silently empty the allowlist and degenerate the test, so the compile-time
+    // `is_empty()` (clippy::const_is_empty) is intentional here.
+    #[allow(clippy::const_is_empty)]
+    let allowlist_is_populated = !AUDITED_ALLOWLIST.is_empty();
     assert!(
-        !AUDITED_ALLOWLIST.is_empty(),
+        allowlist_is_populated,
         "the audited allowlist must name at least one operation, or this test degenerates back \
          into 'nothing returns an audit id'"
     );

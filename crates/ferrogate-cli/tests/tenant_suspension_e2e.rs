@@ -599,7 +599,7 @@ fn a_tenant_can_re_enable_the_project_it_disabled() {
 
     let disabled = as_key(
         &gateway_addr,
-        &console,
+        console,
         "PUT",
         "/admin/v1/projects/proj-off",
         r#"{"tenant_id":"tenant-off","name":"P","slug":"proj-off","status":"disabled"}"#,
@@ -611,14 +611,14 @@ fn a_tenant_can_re_enable_the_project_it_disabled() {
 
     // The switch is real: ordinary traffic under the disabled project stops.
     assert_suspended_rejection(
-        &as_key(&gateway_addr, &console, "GET", "/v1/models", ""),
+        &as_key(&gateway_addr, console, "GET", "/v1/models", ""),
         "tenancy_disabled",
     );
 
     // ...and it is reversible with the same key, which is the whole point.
     let re_enabled = as_key(
         &gateway_addr,
-        &console,
+        console,
         "PUT",
         "/admin/v1/projects/proj-off",
         r#"{"tenant_id":"tenant-off","name":"P","slug":"proj-off","status":"active"}"#,
@@ -628,7 +628,7 @@ fn a_tenant_can_re_enable_the_project_it_disabled() {
         "the tenant must be able to re-enable its own project: {re_enabled}"
     );
     assert!(
-        status_line(&as_key(&gateway_addr, &console, "GET", "/v1/models", "")).contains("200"),
+        status_line(&as_key(&gateway_addr, console, "GET", "/v1/models", "")).contains("200"),
         "traffic must resume once the project is re-enabled"
     );
 
@@ -648,7 +648,7 @@ fn a_tenant_can_re_enable_the_project_it_disabled() {
     assert_suspended_rejection(
         &as_key(
             &gateway_addr,
-            &console,
+            console,
             "PUT",
             "/admin/v1/projects/proj-off",
             r#"{"tenant_id":"tenant-off","name":"P","slug":"proj-off","status":"active"}"#,

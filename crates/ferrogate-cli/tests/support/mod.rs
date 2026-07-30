@@ -21,7 +21,7 @@ const TEST_GUARDIAN_FD_ENV: &str = "FERROGATE_TEST_GUARDIAN_FD";
 
 #[cfg(target_os = "linux")]
 thread_local! {
-    static TEST_GUARDIAN_FDS: RefCell<Vec<std::os::fd::OwnedFd>> = RefCell::new(Vec::new());
+    static TEST_GUARDIAN_FDS: RefCell<Vec<std::os::fd::OwnedFd>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn free_addr() -> String {

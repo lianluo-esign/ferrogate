@@ -1613,9 +1613,11 @@ fn build_messages_request_plan(
         auth.api_key_id.as_deref(),
         Some(MESSAGES_ROUTE),
     );
-    let injected_tool_token_upper_bound = (!gateway_tools.is_empty())
-        .then(|| conservative_input_token_upper_bound(&gateway_tools))
-        .unwrap_or_default();
+    let injected_tool_token_upper_bound = if !gateway_tools.is_empty() {
+        conservative_input_token_upper_bound(&gateway_tools)
+    } else {
+        Default::default()
+    };
     let requirements = ModelRouteRequirements::from_request(
         ModelEndpointKind::AnthropicMessages,
         &chat_body,

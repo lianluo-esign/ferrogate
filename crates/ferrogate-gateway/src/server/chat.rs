@@ -3001,9 +3001,11 @@ fn build_ai_request_plan(
             auth.api_key_id.as_deref(),
             Some(endpoint.route()),
         );
-        (!tools.is_empty())
-            .then(|| conservative_input_token_upper_bound(&tools))
-            .unwrap_or_default()
+        if !tools.is_empty() {
+            conservative_input_token_upper_bound(&tools)
+        } else {
+            Default::default()
+        }
     } else {
         0
     };

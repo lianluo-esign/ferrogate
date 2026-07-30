@@ -938,6 +938,10 @@ impl AppState {
     /// the same action does not double-settle: `append_billing_event` returns
     /// `recorded = false` on a same-settlement replay and the row is never
     /// duplicated.
+    // Each parameter is a distinct billing input (transport/trace/run ids, tenant,
+    // and the action's class/target/fingerprint); bundling them into a struct
+    // would add churn without clarifying the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_managed_external_action_event(
         &self,
         request_id: &str,

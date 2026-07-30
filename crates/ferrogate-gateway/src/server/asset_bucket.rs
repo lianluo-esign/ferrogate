@@ -347,6 +347,10 @@ fn object_over_buffer_budget(size_bytes: u64, limit_bytes: u64) -> String {
 /// to three copies of it at once and says so
 /// ([`ReadResidency::InlinedInJsonResponse`](super::asset_admission::ReadResidency::InlinedInJsonResponse));
 /// one that writes the buffer straight out holds one.
+// Each parameter is a distinct, load-bearing input (store handle, key, two size
+// bounds, budget, residency, and two ids for accounting); bundling them into a
+// struct would add churn without clarifying the call sites.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_object_bounded(
     bucket: &dyn AssetObjectStore,
     key: &str,
