@@ -39,8 +39,8 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         .block_on(future)
 }
 
-fn reader_state(tenant: Option<&str>) -> AppState {
-    AppState::new(Config {
+fn reader_config(tenant: Option<&str>) -> Config {
+    Config {
         api_keys: vec![ApiKey {
             region_allowlist: Vec::new(),
             id: "reader".into(),
@@ -69,7 +69,11 @@ fn reader_state(tenant: Option<&str>) -> AppState {
             cache_enabled: None,
         }],
         ..Config::default()
-    })
+    }
+}
+
+fn reader_state(tenant: Option<&str>) -> AppState {
+    AppState::new(reader_config(tenant))
 }
 
 fn reader_auth(state: &AppState) -> AuthContext {
@@ -475,4 +479,127 @@ fn modern_cache_metadata_is_limited_to_cacheable_results() {
     let value = serde_json::to_value(call).unwrap();
     assert!(value["result"].get("ttlMs").is_none());
     assert!(value["result"].get("cacheScope").is_none());
+}
+
+/// #522: the MCP ingress sub-handlers stamp the caller's DECLARED
+/// `x-ferrogate-agent-run-id` onto every audit row they emit, so a `tools/list`
+/// / `resources/list` / `resources/read` joins the same correlation chain as
+/// the chat / agent-run / A2A surfaces. This is the mirror of the asset leg's
+/// `record_asset_egress_emits_metering_counter_and_pull_audit` (which pins the
+/// pull row's `agent_run_id`) for the primary surface this issue exists to fix.
+///
+/// It drives the exact production sub-handlers `mcp_rpc.rs` dispatches from
+/// `handle_request`, at the layer the surrounding tests already exercise, with a
+/// declared run id and asserts each ingress row carries it. Reverting the
+/// `audit_event` field at `mcp_rpc.rs:752` to `agent_run_id: None` reds every
+/// assertion below.
+#[test]
+fn mcp_ingress_audit_rows_join_the_declared_agent_run_id() {
+    const RUN: &str = "run-mcp-ingress-1";
+
+    let state = reader_state(Some("tenant-1"));
+    seed(
+        &state,
+        "tenant-1",
+        "cli_tool",
+        "deploy",
+        "1.0.0",
+        b"echo hello",
+    );
+    let auth = reader_auth(&state);
+    let ctx = test_ctx();
+
+    // `tools/list`.
+    let _ = tools_list(&state, &ctx, &auth, Some(RUN), None, Some(json!(1)));
+    // `resources/list`.
+    let _ = block_on(resources_list(
+        &state,
+        &ctx,
+        &auth,
+        Some(RUN),
+        Some(json!(2)),
+    ));
+    // `resources/read`.
+    let read = block_on(resources_read(
+        &state,
+        &ctx,
+        &auth,
+        Some(RUN),
+        Some(json!(3)),
+        &json!({ "uri": "asset://cli_tool/deploy/1.0.0" }),
+    ));
+    // Guard: the read succeeded, so the row we assert on below is the success
+    // row this issue threads — not an error row on a divergent path.
+    assert!(serde_json::to_value(&read).unwrap()["result"]["contents"].is_array());
+
+    let audit = state.audit_events();
+    for action in ["tool.list", "resource.list", "resource.read"] {
+        let row = audit
+            .iter()
+            .find(|event| event.action == action)
+            .unwrap_or_else(|| panic!("a {action} ingress audit row must be recorded"));
+        assert_eq!(
+            row.agent_run_id.as_deref(),
+            Some(RUN),
+            "the {action} ingress row must carry the declared correlation id (#522)"
+        );
+    }
+}
+
+/// #522: a `tools/call` threads the caller's declared `agent_run_id` into the
+/// governed `ToolExecutionContext` handed to
+/// `execute_tool_request_with_governance`, which stamps it onto the
+/// `tool.execute` audit row (and every guardrail / approval / identity row) the
+/// governed chokepoint records for the call. This is what joins a `tools/call`
+/// into its correlation chain.
+///
+/// Driving an UNALLOWLISTED MCP tool reaches the chokepoint's `tool.execute`
+/// audit emission on the shortest governed path (no live MCP upstream, guardrail
+/// config, or approval store needed) while still flowing through the exact
+/// production `tools_call` -> `execute_tool_request_with_governance` handoff.
+/// Dropping the `agent_run_id` field from the `ToolExecutionContext` built at
+/// `mcp_rpc.rs:629` reds the final assertion.
+#[test]
+fn tools_call_threads_declared_agent_run_id_into_governed_tool_execution() {
+    const RUN: &str = "run-mcp-call-1";
+
+    // A platform-operator (no-tenant) key clears the plan/RBAC entitlement gate
+    // without a StoredTenantAccount, so the call reaches the governed chokepoint.
+    let gateway = FerroGateway {
+        state: crate::state::SharedAppState::with_source_path(reader_config(None), None),
+    };
+    let state = gateway.state.current();
+    let auth = reader_auth(&state);
+    let ctx = test_ctx();
+
+    let response = block_on(tools_call(
+        &gateway,
+        &state,
+        &ctx,
+        &auth,
+        Some(RUN),
+        None,
+        None,
+        Some(json!(9)),
+        // A dashed name resolves to an MCP server/tool pair, so the unallowlisted
+        // tool is denied at the governed chokepoint (which audits `tool.execute`)
+        // rather than short-circuiting earlier.
+        &json!({ "name": "srv-missing", "arguments": {} }),
+    ));
+    // Guard: the call was denied at the chokepoint (the tool is not allowlisted),
+    // which is exactly the arm that records the `tool.execute` row below.
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(value["error"]["code"], mcp_error_code("tool_denied"));
+
+    let audit = state.audit_events();
+    let executed = audit
+        .iter()
+        .find(|event| event.action == "tool.execute")
+        .expect("the governed chokepoint must record a tool.execute audit row");
+    assert_eq!(
+        executed.agent_run_id.as_deref(),
+        Some(RUN),
+        "the tool.execute row must carry the declared id threaded through the \
+         ToolExecutionContext (#522)"
+    );
 }
