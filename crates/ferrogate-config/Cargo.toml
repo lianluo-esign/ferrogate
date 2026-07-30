@@ -39,6 +39,12 @@ ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
 ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
+# The inbound (#356) monetization model: this crate owns only the operator
+# document and the secret-by-reference indirection, and pre-flights the billing
+# crate's own constructors, so config validity cannot drift from what the
+# runtime enforces. `ferrogate-billing` does not depend on this crate, so the
+# edge is not a cycle.
+ferrogate-billing = { path = "../ferrogate-billing" }
 # Reuse the frozen #351 policy model (types + `validate()` + structured
 # `X402PolicyConfigError`) instead of re-implementing it here; this crate only
 # owns the operator-facing config surface and parse/validate wiring.

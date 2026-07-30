@@ -1,0 +1,76 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-30
+# description: Example pay.sh `pay server` sidecar spec for the single inbound
+# fixed-price FerroGate route (issue #356).
+#
+# ---------------------------------------------------------------------------
+# SCHEMA STATUS: NOT VERIFIED AGAINST A PINNED `pay` RELEASE.
+#
+# This file has not been executed by a pinned `pay server` build in CI. Treat
+# every key below as a starting point to be reconciled against `pay server
+# --help` / the pay.sh docs for the exact image you deploy, NOT as a validated
+# schema. Concretely, before any non-sandbox use:
+#
+#   1. Pin `PAY_SIDECAR_IMAGE` to a digest.
+#   2. Run `pay server --config pay-server.yaml --dry-run` (or the equivalent
+#      for that build) and fix whatever it rejects.
+#
+# NO SECURITY PROPERTY OF THIS DEPLOYMENT DEPENDS ON THIS FILE. The two that
+# matter are enforced elsewhere and are independently checkable:
+#
+#   - "the public cannot reach the protected upstream" — no published port plus
+#     `internal: true` in docker-compose.yaml, AND the upstream's own admission
+#     gate, which refuses any request that is not a credentialed sidecar forward
+#     (`SidecarTransport::Untrusted` -> 403).
+#   - "the sidecar cannot reach the Admin API" — the admin service shares no
+#     Docker network with the sidecar (docker-compose.yaml).
+#
+# Deliberately absent: any upstream-denylist key. A previous revision invented
+# one and leaned on it for the admin-isolation claim; a key that the running
+# binary may silently ignore cannot carry a security claim.
+# ---------------------------------------------------------------------------
+
+listen: 0.0.0.0:8402
+
+# Exactly ONE route. Adding a second here would monetize a surface the FerroGate
+# side has no fixed price for: `InboundX402Config.endpoint` is a single struct,
+# so the upstream can only ever quote and settle this one.
+routes:
+  - path: /v1/priced/report
+    methods: [POST]
+    upstream: http://ferrogate-paid:8080/v1/priced/report
+    # Non-streaming only. Streaming usage settlement is explicitly out of scope
+    # for this slice; a streamed response cannot be settled at a flat price
+    # without a usage model this slice deliberately does not have.
+    streaming: false
+    price:
+      # Flat per-call price. This is NOT token-metered inference billing and must
+      # not be advertised as such. Keep in lockstep with
+      # `price_atomic_amount` / `mint` in ferrogate-x402-inbound.toml — the
+      # upstream re-verifies the settled amount against its own fixed price and
+      # fails closed on any mismatch, so a drift here shows up as refused calls,
+      # not as mispriced revenue.
+      amount: "10000"
+      asset: 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+      decimals: 6
+    max_timeout_seconds: 120
+
+# Solana devnet by default (see PAY_NETWORK in docker-compose.yaml). Mainnet is a
+# separate, explicit operator decision.
+network: ${PAY_NETWORK}
+recipient: ${PAY_RECIPIENT}
+facilitator_url: ${PAY_FACILITATOR_URL}
+
+# Headers the sidecar adds when forwarding to the private upstream. The
+# credential authenticates the hop; the request id is what makes a sidecar retry
+# distinguishable from a replayed proof, so it MUST be stable across the
+# sidecar's own retries of one logical call and unique across different calls.
+forward_headers:
+  x-ferrogate-sidecar-credential: ${PAY_UPSTREAM_CREDENTIAL}
+  x-ferrogate-sidecar-request-id: ${PAY_REQUEST_ID}
+
+health:
+  path: /healthz
+  interval_seconds: 10

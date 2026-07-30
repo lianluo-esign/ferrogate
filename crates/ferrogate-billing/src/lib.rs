@@ -26,6 +26,9 @@ pub mod ledger;
 pub mod pricing;
 pub mod service;
 pub mod x402_inbound;
+pub mod x402_inbound_admission;
+pub mod x402_inbound_forward;
+pub mod x402_inbound_gate;
 
 pub use ledger::{
     charge, same_provider_attempt_settlement, CostSource, InMemoryLedgerSink, LedgerEntry,
@@ -38,6 +41,20 @@ pub use x402_inbound::{
     InboundX402ConfigError, InboundX402Endpoint, InboundX402RevenueRecord,
     InboundX402SettlementError, RevenueSink, RevenueSource, RevenueTotals,
     ValidatedInboundX402Endpoint, PAYMENT_REQUIRED_STATUS,
+};
+pub use x402_inbound_admission::{
+    constant_time_eq, AdmittedRequest, ForwardedRequest, InboundX402AdmissionError,
+    SidecarAdmissionPolicy, SidecarCredential, SidecarCredentialError, SidecarCredentialMatch,
+    SidecarPolicyError, SidecarTransport, HEADER_SIDECAR_CREDENTIAL, HEADER_SIDECAR_REQUEST_ID,
+    MAX_SIDECAR_REQUEST_ID_BYTES, MIN_CREDENTIAL_BYTES, RESERVED_ATTRIBUTION_HEADERS,
+};
+pub use x402_inbound_forward::{
+    ClaimOutcome, ForwardClaimGuard, ForwardClaimGuardError, InMemoryForwardClaimGuard,
+    DEFAULT_CLAIM_CAPACITY,
+};
+pub use x402_inbound_gate::{
+    ForwardAuthorization, InboundCallIdentity, InboundX402Decision, InboundX402Gate,
+    InboundX402Refusal,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

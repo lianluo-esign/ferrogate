@@ -44,6 +44,7 @@ mod diagnostic;
 mod loader;
 mod types;
 mod x402;
+mod x402_inbound;
 mod x402_scope;
 
 pub use caddyfile::parse_caddyfile;
@@ -133,6 +134,11 @@ pub use x402::{
     default_x402_spend_policy, load_x402_spend_policy_toml, AllowedAsset, ApprovalPolicy,
     ConversionRule, PolicyNetwork, ResourceRule, Rounding, ValidatedX402SpendPolicy,
     X402ConfigError, X402PolicyConfigError, X402SpendCaps, X402SpendPolicy, X402SpendPolicyConfig,
+};
+pub use x402_inbound::{
+    load_inbound_x402_toml, InboundX402AttributionConfig, InboundX402Config,
+    InboundX402SectionError, InboundX402SidecarConfig, InboundX402TomlError,
+    ResolvedInboundX402Config, ValidatedInboundX402Config, DEFAULT_FORWARD_CLAIM_CAPACITY,
 };
 pub use x402_scope::{
     normalize_x402_scope_id, resolve_effective_x402_spend_policy,

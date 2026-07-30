@@ -1,0 +1,106 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-30
+# description: Local/sandbox topology for the inbound x402 fixed-price route
+# (issue #356): external client -> pay.sh `pay server` sidecar -> PRIVATE
+# FerroGate upstream, with the admin listener on a network the sidecar cannot
+# reach.
+#
+# The network layout below IS the security claim. Read it as three disjoint
+# blast radii:
+#
+#   edge          : the only network with a published port. Sidecar only.
+#   paid-upstream : sidecar <-> the monetized FerroGate listener. Internal.
+#   admin         : operator <-> the FerroGate admin listener. Internal.
+#
+# `ferrogate-admin` is joined to `admin` ONLY. It is deliberately NOT dual-homed
+# onto `paid-upstream`: a service that sits on the sidecar's network is reachable
+# from the sidecar regardless of which networks the sidecar itself is "not joined
+# to". A previous revision of this file made exactly that mistake while its own
+# comment claimed the opposite (see the "Sidecar compromise" row in
+# docs/x402-inbound-sidecar.md).
+#
+# Verify the boundary rather than trusting this comment:
+#   docker compose exec pay-sidecar sh -c 'getent hosts ferrogate-admin' ; # must fail
+#   docker compose exec pay-sidecar sh -c 'wget -T2 -qO- http://ferrogate-admin:8081/health' ; # must fail
+
+name: ferrogate-x402-sidecar
+
+services:
+  # The ONLY internet-facing service. Speaks x402 to external clients, verifies
+  # and settles payment, then forwards to the private upstream.
+  pay-sidecar:
+    image: ${PAY_SIDECAR_IMAGE:-ghcr.io/paydotsh/pay:latest}
+    command: ["server", "--config", "/etc/pay/pay-server.yaml"]
+    ports:
+      - "${PAY_SIDECAR_PORT:-8402}:8402"
+    volumes:
+      - ./pay-server.yaml:/etc/pay/pay-server.yaml:ro
+    environment:
+      # Solana devnet by default. A sandbox topology must never default to a
+      # network where a misconfiguration spends real funds.
+      PAY_NETWORK: ${PAY_NETWORK:-solana-devnet}
+      PAY_RECIPIENT: ${PAY_RECIPIENT:?set the USDC recipient wallet}
+      PAY_FACILITATOR_URL: ${PAY_FACILITATOR_URL:-https://facilitator.sandbox.pay.sh}
+      # The shared secret the sidecar presents to the private upstream. Same
+      # value as FERROGATE_X402_INBOUND_SIDECAR_SECRET below; supplied by the
+      # environment, never written into a committed file.
+      PAY_UPSTREAM_CREDENTIAL: ${FERROGATE_X402_INBOUND_SIDECAR_SECRET:?set the sidecar shared secret}
+    networks:
+      - edge
+      - paid-upstream
+    depends_on:
+      ferrogate-paid:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The protected upstream. No `ports:` — it is unreachable from the host and
+  # from the internet; the only route to it is the sidecar's, over an internal
+  # network. Its own admission gate refuses anything that is not a credentialed
+  # sidecar forward, so the network boundary is defence in depth, not the only
+  # defence.
+  ferrogate-paid:
+    image: ${FERROGATE_IMAGE:-ghcr.io/lianluo-esign/ferrogate:latest}
+    command: ["run", "--config", "/etc/ferrogate/ferrogate-x402-inbound.toml"]
+    volumes:
+      - ./ferrogate-x402-inbound.toml:/etc/ferrogate/ferrogate-x402-inbound.toml:ro
+    environment:
+      FERROGATE_X402_INBOUND_SIDECAR_SECRET: ${FERROGATE_X402_INBOUND_SIDECAR_SECRET:?set the sidecar shared secret}
+      # During a credential rotation, also set:
+      # FERROGATE_X402_INBOUND_SIDECAR_SECRET_PREVIOUS: ${FERROGATE_X402_INBOUND_SIDECAR_SECRET_PREVIOUS}
+      FERROGATE_LOG_FORMAT: json
+    networks:
+      - paid-upstream
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ferrogate", "health", "--addr", "127.0.0.1:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Admin/console API. Joined to `admin` and NOTHING else. The operator reaches
+  # it by attaching to the `admin` network (or by publishing a port in a local
+  # override that is not committed); the sidecar has no route to it at all,
+  # because it shares no network with it.
+  ferrogate-admin:
+    image: ${FERROGATE_IMAGE:-ghcr.io/lianluo-esign/ferrogate:latest}
+    command: ["admin", "--listen", "0.0.0.0:8081"]
+    environment:
+      FERROGATE_ADMIN_JWT_SECRET_ENV: FERROGATE_ADMIN_JWT_SECRET
+      FERROGATE_ADMIN_JWT_SECRET: ${FERROGATE_ADMIN_JWT_SECRET:?set the admin JWT secret}
+      FERROGATE_LOG_FORMAT: json
+    networks:
+      - admin
+    restart: unless-stopped
+
+networks:
+  edge:
+    driver: bridge
+  paid-upstream:
+    driver: bridge
+    internal: true
+  admin:
+    driver: bridge
+    internal: true

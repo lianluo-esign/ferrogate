@@ -22,6 +22,10 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# Constant-time credential comparison for the inbound sidecar shared secret
+# (#356). Single-purpose, no_std-friendly, already in the workspace dependency
+# set; hand-rolling a timing-safe compare here would be the worse choice.
+subtle.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

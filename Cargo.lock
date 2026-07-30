@@ -1183,6 +1183,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "subtle",
  "tracing",
 ]
 
@@ -1247,6 +1248,7 @@ dependencies = [
  "anyhow",
  "base64",
  "ed25519-dalek",
+ "ferrogate-billing",
  "ferrogate-cloudflare",
  "ferrogate-core",
  "ferrogate-guardrails",

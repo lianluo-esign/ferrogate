@@ -1,0 +1,70 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-30
+# description: Reviewed example FerroGate config for the inbound (merchant-side)
+# fixed-price x402 route served behind a pay.sh `pay server` sidecar (issue #356).
+#
+# This exact file is loaded and validated by a committed test
+# (`crates/ferrogate-config/src/x402_inbound_test.rs`), so it cannot rot away
+# from the schema it claims to demonstrate.
+#
+# NOTE ON SECRETS: there is deliberately no field here that can hold a secret
+# value. The sidecar shared secret is referenced by environment-variable NAME
+# only; `ValidatedInboundX402Config::resolve` is the single path from a name to a
+# value. Committing this file leaks nothing.
+
+[x402_inbound]
+enabled = true
+
+# How long a settled payment's forward-once claim is held. Must be >= the
+# endpoint's `max_timeout_seconds` below: a claim that expired while its own
+# payment was still spendable would re-open the replay window it exists to close.
+forward_claim_ttl_secs = 300
+forward_claim_capacity = 16384
+
+# Exactly one fixed-price, non-streaming route. This is a struct, not a list —
+# "only one route is enabled" is enforced by the type, not by operator
+# discipline. The price is a flat per-call amount in the mint's atomic units; it
+# is NOT token-metered inference billing and must not be described as such.
+[x402_inbound.endpoint]
+resource_url = "https://api.ferrogate.example/v1/priced/report"
+resource_description = "Fixed-price FerroGate report endpoint"
+resource_mime_type = "application/json"
+# Devnet by default: a sandbox topology must never default to a network where a
+# misconfiguration spends real funds.
+network_caip2 = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+# USDC devnet mint.
+mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+recipient = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+fee_payer = "So11111111111111111111111111111111111111112"
+# 0.01 USDC at 6 decimals.
+price_atomic_amount = 10000
+max_timeout_seconds = 120
+memo = "ferrogate-paid-report"
+challenge_error = "payment required for this fixed-price endpoint"
+
+# Sidecar admission. The upstream is private; this section is what makes
+# "private" enforceable rather than aspirational.
+[x402_inbound.sidecar]
+credential_secret_env = "FERROGATE_X402_INBOUND_SIDECAR_SECRET"
+# Set this to the variable holding the OLD secret during a rotation, and remove
+# it once the `sidecar_credential=rotating_out` evidence field stops appearing.
+# rotating_out_secret_env = "FERROGATE_X402_INBOUND_SIDECAR_SECRET_PREVIOUS"
+#
+# The local sandbox topology runs the sidecar and the upstream on a private
+# Docker network with no published ports, so the shared credential is the
+# authenticator. For a production deployment where the network is not a trust
+# boundary, set `require_mutual_tls = true` and pin the sidecar's client
+# certificate subject — the config refuses one without the other, because mTLS
+# with no pin accepts any certificate the trust store chains and a pin without
+# mTLS is never consulted.
+require_mutual_tls = false
+pinned_client_subjects = []
+
+# The FerroGate identity paid calls are attributed to. The payer's wallet is
+# recorded as evidence on the revenue record and is NEVER mapped to a tenant:
+# inbound x402 maps to this pre-existing product tenant, it does not mint one.
+[x402_inbound.attribution]
+tenant_id = "tenant-public-paid-api"
+project_id = "project-x402-inbound"
