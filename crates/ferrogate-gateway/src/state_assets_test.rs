@@ -79,6 +79,45 @@ fn only_an_enabled_s3_section_builds_the_runtime_bucket_client() {
     std::env::remove_var(SECRET_ENV);
 }
 
+/// #411: the Cloudflare publish target is NOT reachable through the object-store
+/// seam. Cloudflare has no keyed GET/DELETE/LIST for published assets, so a
+/// store handed out here would make every asset read fail, retention prune and
+/// tenant purge unable to erase bytes, and blob GC permanently broken -- after
+/// the write path had already dropped the inline copy. The bytes stay in
+/// FerroGate; only the site publish target is exposed, and only for the one
+/// `{tenant}/{site}` its Worker script belongs to.
+#[test]
+fn the_workers_static_assets_section_yields_a_publish_target_and_no_object_store() {
+    let state = AppState::new(Config {
+        asset_bucket: ferrogate_config::AssetBucketConfig {
+            enabled: true,
+            backend: ferrogate_config::AssetBucketBackend::WorkersStaticAssets,
+            cf_account_id: Some("cf-account".into()),
+            cf_api_token: Some("plaintext-token".into()),
+            cf_script_name: Some("ferrogate-site".into()),
+            cf_publish_tenant: Some("acme".into()),
+            cf_publish_site: Some("docs".into()),
+            ..ferrogate_config::AssetBucketConfig::default()
+        },
+        ..Config::default()
+    });
+
+    assert!(
+        state.asset_bucket_client().is_none(),
+        "the Cloudflare publish target must never stand behind the asset object-store seam"
+    );
+    let target = state
+        .static_site_publish_target()
+        .expect("a fully configured workers-static-assets section must build a publish target");
+    assert!(target.publishes("acme", "docs"));
+    assert!(!target.publishes("other-tenant", "docs"));
+
+    // The default S3 section configures no publish target at all.
+    assert!(AppState::new(Config::default())
+        .static_site_publish_target()
+        .is_none());
+}
+
 fn bucket_backed_asset(tenant: &str, name: &str, size_bytes: u64) -> StoredAsset {
     StoredAsset {
         id: stored_asset_id(tenant, "cli_tool", name, "1.0.0"),

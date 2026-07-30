@@ -637,11 +637,61 @@ fn workers_static_assets_backend_with_an_r2_endpoint_skips_the_r2_rules() {
     asset_bucket.cf_account_id = Some("cf-account".into());
     asset_bucket.cf_api_token = Some("env://FERROGATE_CF_TOKEN".into());
     asset_bucket.cf_script_name = Some("ferrogate-assets".into());
+    asset_bucket.cf_publish_tenant = Some("acme".into());
+    asset_bucket.cf_publish_site = Some("docs".into());
     let config = Config {
         asset_bucket,
         ..Config::default()
     };
     config.validate().unwrap();
+}
+
+/// #411: a Cloudflare deploy replaces the Worker's whole asset version, so the
+/// one script a `workers-static-assets` section names carries exactly one site.
+/// That binding is required at load time -- otherwise the first two sites to
+/// publish would silently overwrite each other on the edge.
+#[test]
+fn workers_static_assets_backend_requires_the_site_its_script_publishes() {
+    let complete = || {
+        let mut asset_bucket = crate::config::AssetBucketConfig {
+            enabled: true,
+            backend: crate::config::AssetBucketBackend::WorkersStaticAssets,
+            ..Default::default()
+        };
+        asset_bucket.cf_account_id = Some("cf-account".into());
+        asset_bucket.cf_api_token = Some("env://FERROGATE_CF_TOKEN".into());
+        asset_bucket.cf_script_name = Some("ferrogate-site".into());
+        asset_bucket.cf_publish_tenant = Some("acme".into());
+        asset_bucket.cf_publish_site = Some("docs".into());
+        asset_bucket
+    };
+    let validate = |asset_bucket| {
+        Config {
+            asset_bucket,
+            ..Config::default()
+        }
+        .validate()
+    };
+    validate(complete()).unwrap();
+
+    for (field, blanked) in [
+        ("cf_publish_tenant", {
+            let mut bucket = complete();
+            bucket.cf_publish_tenant = None;
+            bucket
+        }),
+        ("cf_publish_site", {
+            let mut bucket = complete();
+            bucket.cf_publish_site = Some("   ".into());
+            bucket
+        }),
+    ] {
+        let error = validate(blanked).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("asset_bucket.{field}")),
+            "{field}: unexpected error {error}"
+        );
+    }
 }
 
 /// The load-time guard and the runtime signer agree, end to end: every endpoint

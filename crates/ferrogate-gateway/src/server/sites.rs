@@ -32,6 +32,7 @@ use ferrogate_storage::{
     StoredAsset, StoredAssetChannel,
 };
 
+use super::asset_bucket::{PublishedSite, SitePublishFile};
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
@@ -157,6 +158,60 @@ pub(super) struct SiteBundlePublish {
     pub(super) spa_fallback: bool,
     pub(super) cache_control: Option<String>,
     pub(super) project_id: Option<String>,
+}
+
+/// What the Cloudflare static-site mirror did for one bundle publish (#411).
+/// A mirror never changes the publish's own verdict — the bundle is committed
+/// and served from the gateway either way — so a failure is carried here to be
+/// reported rather than turned into an error.
+enum CloudflareSitePublish {
+    /// No `workers-static-assets` publish target is configured.
+    NotConfigured,
+    /// A target is configured, but for a different site.
+    NotThisSite,
+    /// The whole bundle is live as a new Cloudflare asset version.
+    Published(PublishedSite),
+    /// The mirror failed. FerroGate still serves the committed bundle; the
+    /// Cloudflare edge keeps whatever version it had.
+    Failed(String),
+}
+
+impl CloudflareSitePublish {
+    /// `(outcome, detail)` for the admin audit trail, or `None` when no mirror
+    /// was configured for this site and there is nothing to record.
+    fn audit_entry(&self) -> Option<(&'static str, String)> {
+        match self {
+            Self::NotConfigured | Self::NotThisSite => None,
+            Self::Published(published) => Some((
+                "published",
+                format!(
+                    "mirrored {} files to Cloudflare Worker {}",
+                    published.file_count, published.script_name
+                ),
+            )),
+            Self::Failed(error) => Some((
+                "failed",
+                format!("Cloudflare mirror failed (bundle is committed and served): {error}"),
+            )),
+        }
+    }
+
+    /// The `cloudflare_publish` field of the publish response, or `None` when
+    /// no mirror was configured for this site.
+    fn response_field(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::NotConfigured | Self::NotThisSite => None,
+            Self::Published(published) => Some(serde_json::json!({
+                "status": "published",
+                "script_name": published.script_name,
+                "file_count": published.file_count,
+            })),
+            Self::Failed(error) => Some(serde_json::json!({
+                "status": "failed",
+                "error": error,
+            })),
+        }
+    }
 }
 
 /// Definitive, non-error outcome of [`FerroGateway::commit_site_bundle`] (#397).
@@ -651,7 +706,25 @@ impl FerroGateway {
             ),
         ));
 
-        let body = serde_json::json!({
+        // The bundle is committed and the gateway is already serving it. The
+        // Cloudflare mirror is an additional, opt-in destination for exactly one
+        // configured site, so its outcome is reported -- in the audit trail and
+        // in the response -- and never allowed to retract a publish that landed.
+        let cloudflare = self
+            .mirror_bundle_to_cloudflare(tenant_id, site, &prepared)
+            .await;
+        if let Some((outcome, detail)) = cloudflare.audit_entry() {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                auth,
+                "site.publish.cloudflare",
+                &manifest_id,
+                outcome,
+                detail,
+            ));
+        }
+
+        let mut body = serde_json::json!({
             "object": "static_site",
             "tenant": tenant_id,
             "site": site,
@@ -666,7 +739,43 @@ impl FerroGateway {
                 .map(|entry| entry.path.clone())
                 .collect::<Vec<_>>(),
         });
+        if let Some(report) = cloudflare.response_field() {
+            body["cloudflare_publish"] = report;
+        }
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+    }
+
+    /// Mirrors a just-committed bundle to the configured Cloudflare
+    /// static-site publish target (issue #411).
+    ///
+    /// Publishes the WHOLE bundle in one Cloudflare asset version, because a
+    /// deploy replaces the version wholesale. Only the single `{tenant}/{site}`
+    /// the target names is mirrored — another site pushing to the same Worker
+    /// script would delete this one's files from the edge.
+    async fn mirror_bundle_to_cloudflare(
+        &self,
+        tenant_id: &str,
+        site: &str,
+        prepared: &[(String, String, Vec<u8>)],
+    ) -> CloudflareSitePublish {
+        let Some(target) = self.state.current().static_site_publish_target() else {
+            return CloudflareSitePublish::NotConfigured;
+        };
+        if !target.publishes(tenant_id, site) {
+            return CloudflareSitePublish::NotThisSite;
+        }
+        let files: Vec<SitePublishFile<'_>> = prepared
+            .iter()
+            .map(|(path, content_type, content)| SitePublishFile {
+                path,
+                content_type,
+                body: content,
+            })
+            .collect();
+        match target.publish_site(&files).await {
+            Ok(published) => CloudflareSitePublish::Published(published),
+            Err(error) => CloudflareSitePublish::Failed(error.to_string()),
+        }
     }
 
     /// Session-free core of a static-site publish (#397): the immutability guard,

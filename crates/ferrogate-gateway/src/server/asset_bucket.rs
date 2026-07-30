@@ -1046,6 +1046,16 @@ impl AssetBucketClient {
 
 // ---- Cloudflare Workers Static Assets backend (issue #411) ------------------
 
+/// One file of a static-site bundle offered to the Cloudflare publish target:
+/// its site-root-relative path, the `Content-Type` Cloudflare echoes when the
+/// asset is later fetched, and its bytes. Borrowed rather than owned so the
+/// caller's already-materialized bundle is published without a second copy.
+pub(crate) struct SitePublishFile<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) content_type: &'a str,
+    pub(crate) body: &'a [u8],
+}
+
 /// One entry in a Workers Static Assets upload manifest: the content hash the
 /// direct-upload session is keyed on plus the file's byte length.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1073,21 +1083,38 @@ pub(crate) struct AssetUploadManifest {
 const CF_ASSET_HASH_HEX_LEN: usize = 32;
 
 impl AssetUploadManifest {
-    /// A single-file manifest for `path` holding `body` — the shape a
-    /// per-object publish negotiates. `path` is normalized to a leading `/`.
-    pub(crate) fn single(path: &str, body: &[u8]) -> Self {
-        let mut files = BTreeMap::new();
-        let normalized = normalize_asset_path(path);
-        let entry = AssetManifestEntry::for_file(&normalized, body);
-        files.insert(normalized, entry);
-        Self { files }
+    /// The manifest for a complete site bundle — every file the published
+    /// version serves, in one declaration.
+    ///
+    /// Cloudflare treats the manifest as the **whole** asset set of the Worker
+    /// version it deploys: a path the manifest omits is not carried forward
+    /// from the previous version, it is gone. So a manifest may only ever be
+    /// built from a full bundle, never from one file at a time — a per-file
+    /// manifest would publish that file and delete every other file the site
+    /// serves.
+    ///
+    /// Paths are normalized to a leading `/`. Two files normalizing to the same
+    /// path are a caller bug (the bundle would silently lose one), so they are
+    /// rejected rather than deduplicated.
+    pub(crate) fn for_bundle(files: &[SitePublishFile<'_>]) -> anyhow::Result<Self> {
+        let mut manifest_files = BTreeMap::new();
+        for file in files {
+            let normalized = normalize_asset_path(file.path);
+            let entry = AssetManifestEntry::for_file(&normalized, file.body);
+            if manifest_files.insert(normalized.clone(), entry).is_some() {
+                anyhow::bail!(
+                    "workers-static-assets: bundle declares {normalized} twice; a manifest path \
+                     maps to exactly one file"
+                );
+            }
+        }
+        Ok(Self {
+            files: manifest_files,
+        })
     }
 
     /// The number of files described. (Kept small on purpose — the manifest is
-    /// a plan, not the bytes.) Retained as part of the manifest's public shape
-    /// and asserted by the manifest tests, though the single-object publish path
-    /// gates on [`is_empty`](Self::is_empty).
-    #[allow(dead_code)]
+    /// a plan, not the bytes.)
     pub(crate) fn len(&self) -> usize {
         self.files.len()
     }
@@ -1279,11 +1306,21 @@ fn build_deploy_body(completion_token: &str) -> Vec<u8> {
     body.into_bytes()
 }
 
-/// A Cloudflare-native static-asset publish backend built on Workers Static
-/// Assets (issue #411). NOT S3-shaped: it publishes a bundle through the CF
-/// direct-upload flow rather than exposing arbitrary object GET/HEAD/LIST or
-/// SigV4 presign. Wired through the shared [`CloudflareClient`] so the whole
-/// publish is unit-testable against a mocked transport.
+/// A Cloudflare-native static-**site** publish target built on Workers Static
+/// Assets (issue #411). Deliberately NOT an
+/// [`AssetObjectStore`]: Cloudflare has no keyed GET/HEAD/LIST/DELETE for
+/// published assets and a deploy replaces the Worker's whole asset version, so
+/// standing this behind the `/v1/assets/*` object seam would make that store
+/// write-only, make erasure and blob GC unachievable, and let one publish
+/// delete another site's bytes. It publishes whole bundles and nothing else.
+///
+/// FerroGate's own copy of the bundle stays the source of truth and the gateway
+/// path (`/sites/{tenant}/{site}/…`) stays the default serving mode; this is a
+/// mirror of an already-committed bundle, not a storage backend (scoping
+/// decision recorded on #411 / #523).
+///
+/// Wired through the shared [`CloudflareClient`] so the whole publish is
+/// unit-testable against a mocked transport.
 ///
 /// Publish is a 3-step flow, all issued through [`CloudflareClient`]:
 /// 1. **Negotiate** an upload session against a file manifest
@@ -1347,27 +1384,32 @@ impl WorkersStaticAssetsStore {
         Ok(session)
     }
 
-    /// The full publish path for a single asset: negotiate (step 1), upload the
-    /// pending bytes (step 2), and deploy the Worker script that redeems the
+    /// Publish a complete static-site bundle as one Cloudflare asset version:
+    /// negotiate the whole-bundle manifest (step 1), upload whichever bytes CF
+    /// still needs (step 2), and deploy the Worker script that redeems the
     /// completion token (step 3). Only a `success: true` deploy marks the
     /// publish durable; any failure along the way surfaces as an error and does
     /// NOT claim a publish that did not complete.
-    async fn publish_object(
+    ///
+    /// `files` MUST be the site's whole file set. Cloudflare's asset version is
+    /// declarative — publishing a subset deletes the omitted files from the
+    /// edge — so there is deliberately no single-file entry point here.
+    pub(crate) async fn publish_site(
         &self,
-        key: &str,
-        body: &[u8],
-        content_type: &str,
-    ) -> anyhow::Result<()> {
-        let path = normalize_asset_path(key);
-        let manifest = AssetUploadManifest::single(&path, body);
+        files: &[SitePublishFile<'_>],
+    ) -> anyhow::Result<PublishedSite> {
+        let manifest = AssetUploadManifest::for_bundle(files)?;
         if manifest.is_empty() {
-            anyhow::bail!("workers-static-assets: refusing to publish an empty manifest");
+            anyhow::bail!("workers-static-assets: refusing to publish an empty bundle");
         }
+        let file_count = manifest.len();
         let session = self.create_upload_session(&manifest).await?;
-        let completion_token = self
-            .resolve_completion_token(&path, body, content_type, &session)
-            .await?;
-        self.deploy_static_worker(&completion_token).await
+        let completion_token = self.resolve_completion_token(files, &session).await?;
+        self.deploy_static_worker(&completion_token).await?;
+        Ok(PublishedSite {
+            script_name: self.script_name.clone(),
+            file_count,
+        })
     }
 
     /// Resolve the assets **completion token** to redeem at deploy. When the
@@ -1377,9 +1419,7 @@ impl WorkersStaticAssetsStore {
     /// used.
     async fn resolve_completion_token(
         &self,
-        path: &str,
-        body: &[u8],
-        content_type: &str,
+        files: &[SitePublishFile<'_>],
         session: &UploadSession,
     ) -> anyhow::Result<String> {
         let pending_count = session
@@ -1402,39 +1442,49 @@ impl WorkersStaticAssetsStore {
                  upload but no jwt to authorize the byte upload"
             )
         })?;
-        self.upload_pending_buckets(path, body, content_type, session, session_jwt)
+        self.upload_pending_buckets(files, session, session_jwt)
             .await
     }
 
     /// Step 2: upload the pending file bytes referenced by `session.buckets`,
     /// authenticated with the session JWT, returning the completion token
-    /// Cloudflare hands back once the final batch lands. A single-object publish
-    /// carries exactly one file, so its hash is the only one the buckets may
-    /// reference — a bucket naming any other hash is a protocol violation and is
-    /// rejected rather than silently uploaded.
+    /// Cloudflare hands back once the final batch lands. Only hashes the
+    /// published manifest declared may be asked for — a bucket naming any other
+    /// hash is a protocol violation and is rejected rather than silently
+    /// uploaded.
+    ///
+    /// Bytes are base64-encoded per pending file, at the moment its batch is
+    /// built, and dropped with the batch: a file Cloudflare already has (the
+    /// common case for a re-publish) is never encoded at all, and no encoded
+    /// copy outlives the request that carries it.
     async fn upload_pending_buckets(
         &self,
-        path: &str,
-        body: &[u8],
-        content_type: &str,
+        files: &[SitePublishFile<'_>],
         session: &UploadSession,
         session_jwt: &str,
     ) -> anyhow::Result<String> {
-        let hash = cf_asset_hash(path, body);
-        let base64_body = BASE64_STANDARD.encode(body);
+        // Content hash -> the manifest file that produced it. Two bundle files
+        // with identical bytes AND extension hash the same and Cloudflare asks
+        // for the hash once, so the first file carrying it answers for both.
+        let mut by_hash: BTreeMap<String, &SitePublishFile<'_>> = BTreeMap::new();
+        for file in files {
+            let hash = cf_asset_hash(&normalize_asset_path(file.path), file.body);
+            by_hash.entry(hash).or_insert(file);
+        }
         let mut completion_token: Option<String> = None;
         for bucket in session.buckets.iter().filter(|bucket| !bucket.is_empty()) {
             let mut parts = Vec::with_capacity(bucket.len());
             for pending_hash in bucket {
-                anyhow::ensure!(
-                    pending_hash == &hash,
-                    "workers-static-assets: upload session referenced hash {pending_hash} which is \
-                     not in the published manifest"
-                );
+                let file = by_hash.get(pending_hash.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "workers-static-assets: upload session referenced hash {pending_hash} \
+                         which is not in the published manifest"
+                    )
+                })?;
                 parts.push(UploadPart {
                     hash: pending_hash.clone(),
-                    base64_body: base64_body.clone(),
-                    content_type: content_type.to_string(),
+                    base64_body: BASE64_STANDARD.encode(file.body),
+                    content_type: file.content_type.to_string(),
                 });
             }
             let ack: AssetUploadAck = self
@@ -1488,82 +1538,51 @@ impl WorkersStaticAssetsStore {
     }
 }
 
-/// The clear error the CF-native backend returns for an S3-only operation it
-/// structurally cannot serve (arbitrary GET/HEAD/LIST/DELETE by key, or SigV4
-/// presign). CF Workers Static Assets serves published bundles from the edge
-/// under a route/custom domain, not as a keyed private object store.
-fn workers_static_assets_unsupported(operation: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "workers-static-assets backend does not support {operation}: it is a static-site publish \
-         target served from Cloudflare's edge, not an S3-style keyed object store or a SigV4 \
-         presign source"
-    )
+/// What a completed [`WorkersStaticAssetsStore::publish_site`] durably put on
+/// Cloudflare's edge: the Worker script the bundle now serves from, and how
+/// many files that version declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishedSite {
+    pub(crate) script_name: String,
+    pub(crate) file_count: usize,
 }
 
-#[async_trait]
-impl AssetObjectStore for WorkersStaticAssetsStore {
-    async fn put_object(&self, key: &str, body: &[u8], content_type: &str) -> anyhow::Result<()> {
-        self.publish_object(key, body, content_type).await
+/// The single static-site publish target a `workers-static-assets`
+/// `[asset_bucket]` section configures (issue #411): the Cloudflare publish
+/// client plus the one `{tenant}/{site}` whose bundles it mirrors.
+///
+/// The binding is one script to one site by construction. A Cloudflare deploy
+/// replaces the Worker's entire asset version, so a second site publishing to
+/// the same script would delete the first site's files from the edge; pairing
+/// the client with its owning site is what makes
+/// [`publishes`](Self::publishes) the only gate a caller needs.
+pub(crate) struct StaticSitePublishTarget {
+    store: WorkersStaticAssetsStore,
+    tenant_id: String,
+    site: String,
+}
+
+impl StaticSitePublishTarget {
+    pub(crate) fn new(store: WorkersStaticAssetsStore, tenant_id: String, site: String) -> Self {
+        Self {
+            store,
+            tenant_id,
+            site,
+        }
     }
-    async fn put_object_owned(
+
+    /// Whether this target is the Cloudflare mirror of `{tenant_id}/{site}`.
+    pub(crate) fn publishes(&self, tenant_id: &str, site: &str) -> bool {
+        self.tenant_id == tenant_id && self.site == site
+    }
+
+    /// Publish `files` — the site's complete bundle — as one Cloudflare asset
+    /// version. See [`WorkersStaticAssetsStore::publish_site`].
+    pub(crate) async fn publish_site(
         &self,
-        key: &str,
-        body: Vec<u8>,
-        content_type: &str,
-    ) -> anyhow::Result<()> {
-        self.publish_object(key, &body, content_type).await
-    }
-    async fn get_object(&self, _key: &str, _max_bytes: u64) -> anyhow::Result<Vec<u8>> {
-        Err(workers_static_assets_unsupported("object GET by key"))
-    }
-    async fn get_object_if_present(
-        &self,
-        _key: &str,
-        _max_bytes: u64,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
-        Err(workers_static_assets_unsupported("object GET by key"))
-    }
-    async fn get_object_stream(&self, _key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
-        Err(workers_static_assets_unsupported("streaming object GET"))
-    }
-    async fn put_object_stream(
-        &self,
-        _key: &str,
-        _content_type: &str,
-        _content_length: u64,
-        _content_sha256_hex: &str,
-        _body: ObjectByteStream,
-    ) -> anyhow::Result<()> {
-        Err(workers_static_assets_unsupported("streaming object PUT"))
-    }
-    async fn delete_object(&self, _key: &str) -> anyhow::Result<()> {
-        Err(workers_static_assets_unsupported("object DELETE by key"))
-    }
-    async fn head_object(&self, _key: &str) -> anyhow::Result<Option<u64>> {
-        Err(workers_static_assets_unsupported("object HEAD by key"))
-    }
-    async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
-        Err(workers_static_assets_unsupported("object listing"))
-    }
-    fn presign_put(
-        &self,
-        _key: &str,
-        _expires_secs: u64,
-        _timestamp_unix: u64,
-        _size_bytes: u64,
-        _content_sha256_hex: &str,
-    ) -> anyhow::Result<PresignedUpload> {
-        Err(workers_static_assets_unsupported("SigV4 presigned upload"))
-    }
-    fn presign_get(
-        &self,
-        _key: &str,
-        _expires_secs: u64,
-        _timestamp_unix: u64,
-    ) -> anyhow::Result<String> {
-        Err(workers_static_assets_unsupported(
-            "SigV4 presigned download",
-        ))
+        files: &[SitePublishFile<'_>],
+    ) -> anyhow::Result<PublishedSite> {
+        self.store.publish_site(files).await
     }
 }
 
@@ -3877,13 +3896,23 @@ mod tests {
         cf_ok(&format!(r#"{{"jwt":"{jwt}","buckets":[["{hash}"]]}}"#))
     }
 
+    /// One bundle file, content-typed as HTML (the publish path never inspects
+    /// the type beyond echoing it into the byte-upload part).
+    fn site_file<'a>(path: &'a str, body: &'a [u8]) -> SitePublishFile<'a> {
+        SitePublishFile {
+            path,
+            content_type: "text/html",
+            body,
+        }
+    }
+
     #[test]
     fn asset_upload_manifest_is_a_leading_slash_path_map() {
         let empty = AssetUploadManifest::default();
         assert!(empty.is_empty());
         assert_eq!(empty.len(), 0);
 
-        let manifest = AssetUploadManifest::single("index.html", b"abc");
+        let manifest = AssetUploadManifest::for_bundle(&[site_file("index.html", b"abc")]).unwrap();
         assert!(!manifest.is_empty());
         assert_eq!(manifest.len(), 1);
 
@@ -3896,12 +3925,56 @@ mod tests {
         assert_eq!(entry["hash"].as_str().unwrap().len(), CF_ASSET_HASH_HEX_LEN);
     }
 
+    #[test]
+    fn a_bundle_manifest_declares_every_file_of_the_bundle() {
+        // #411 regression pin. Cloudflare's manifest is the WHOLE asset set of
+        // the version it deploys: a path it omits is deleted from the edge, not
+        // carried forward. So the manifest a publish negotiates must name every
+        // file of the bundle -- the earlier per-file manifest published one file
+        // and erased the rest of the site.
+        let manifest = AssetUploadManifest::for_bundle(&[
+            site_file("/index.html", b"<html>home</html>"),
+            site_file("assets/app.js", b"console.log(1)"),
+            site_file("/img/logo.png", b"\x89PNG"),
+        ])
+        .unwrap();
+        assert_eq!(manifest.len(), 3);
+
+        let body = manifest.request_body();
+        let declared = body["manifest"].as_object().unwrap();
+        let mut paths: Vec<&str> = declared.keys().map(String::as_str).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec!["/assets/app.js", "/img/logo.png", "/index.html"]
+        );
+        assert_eq!(declared["/assets/app.js"]["size"], 14);
+    }
+
+    #[test]
+    fn a_bundle_declaring_one_path_twice_is_rejected() {
+        // Two files normalizing to the same manifest path would silently drop
+        // one from the published version; that is a caller bug, not something to
+        // paper over.
+        let error = AssetUploadManifest::for_bundle(&[
+            site_file("index.html", b"first"),
+            site_file("/index.html", b"second"),
+        ])
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("declares /index.html twice"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn workers_static_assets_constructs_the_upload_session_request() {
         // #411: the publish request (step 1 of the 3-step direct upload) is
         // constructed correctly against a MOCKED CloudflareClient transport.
         let (store, last) = cf_store(200, UPLOAD_SESSION_OK);
-        let manifest = AssetUploadManifest::single("/index.html", b"<html>hi</html>");
+        let manifest =
+            AssetUploadManifest::for_bundle(&[site_file("/index.html", b"<html>hi</html>")])
+                .unwrap();
 
         let session = store.create_upload_session(&manifest).await.unwrap();
         assert_eq!(session.jwt.as_deref(), Some("upload-jwt"));
@@ -3944,32 +4017,58 @@ mod tests {
 
     #[tokio::test]
     async fn workers_static_assets_publishes_through_all_three_steps() {
-        // #411: put drives the full 3-step direct upload — session negotiation,
-        // JWT-authenticated byte upload of the pending bucket, and the Worker
-        // script deploy redeeming the completion token — all through the mocked
-        // CloudflareClient transport.
+        // #411: a bundle publish drives the full 3-step direct upload — session
+        // negotiation for the WHOLE file set, JWT-authenticated byte upload of
+        // the pending bucket, and the Worker script deploy redeeming the
+        // completion token — all through the mocked CloudflareClient transport.
+        // The bundle carries a second file CF already has, to pin that one
+        // session + one deploy covers the whole set regardless of what is
+        // pending.
         let body = b"<html>hi</html>";
+        let styles = b"body{}";
         let hash = cf_asset_hash("/index.html", body);
         let (store, requests) = cf_store_scripted(vec![
             (200, session_result("session-jwt", &hash)),
             (201, cf_ok(r#"{"jwt":"completion-token"}"#)),
             (200, cf_ok(r#"{"id":"my-worker"}"#)),
         ]);
-        let store_dyn: &dyn AssetObjectStore = &store;
-        store_dyn
-            .put_object("/index.html", body, "text/html")
+        let published = store
+            .publish_site(&[
+                site_file("/index.html", body),
+                site_file("/styles.css", styles),
+            ])
             .await
             .unwrap();
+        assert_eq!(
+            published,
+            PublishedSite {
+                script_name: "my-worker".to_string(),
+                file_count: 2,
+            }
+        );
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3, "session + upload + deploy");
 
-        // Step 1: JSON session negotiation under the account token.
+        // Step 1: JSON session negotiation under the account token, declaring
+        // EVERY file of the bundle (not just the ones needing bytes).
         let session = &requests[0];
         assert_eq!(session.method, HttpMethod::Post);
         assert!(session
             .url
             .ends_with("/workers/scripts/my-worker/assets-upload-session"));
+        let declared: serde_json::Value =
+            serde_json::from_slice(session.body.as_deref().unwrap()).unwrap();
+        let declared = declared["manifest"].as_object().unwrap();
+        assert_eq!(declared.len(), 2);
+        assert_eq!(
+            declared["/index.html"]["hash"].as_str().unwrap(),
+            hash.as_str()
+        );
+        assert_eq!(
+            declared["/styles.css"]["hash"].as_str().unwrap(),
+            cf_asset_hash("/styles.css", styles).as_str()
+        );
 
         // Step 2: multipart byte upload to /workers/assets/upload?base64=true,
         // authenticated with the SESSION JWT (not the account token).
@@ -3990,6 +4089,8 @@ mod tests {
         assert!(upload_body.contains(&format!("name=\"{hash}\"; filename=\"{hash}\"")));
         assert!(upload_body.contains("Content-Type: text/html"));
         assert!(upload_body.contains(&BASE64_STANDARD.encode(body)));
+        // Only the pending file's bytes go up; the deduped one is not re-sent.
+        assert!(!upload_body.contains(&BASE64_STANDARD.encode(styles)));
 
         // Step 3: multipart Worker script PUT under the account token, carrying
         // the completion token in the assets binding + a main module.
@@ -4016,9 +4117,8 @@ mod tests {
             (200, cf_ok(r#"{"jwt":"already-complete","buckets":[]}"#)),
             (200, cf_ok(r#"{"id":"my-worker"}"#)),
         ]);
-        let store_dyn: &dyn AssetObjectStore = &store;
-        store_dyn
-            .put_object("/index.html", b"<html>hi</html>", "text/html")
+        store
+            .publish_site(&[site_file("/index.html", b"<html>hi</html>")])
             .await
             .unwrap();
 
@@ -4047,9 +4147,8 @@ mod tests {
                     .to_string(),
             ),
         ]);
-        let store_dyn: &dyn AssetObjectStore = &store;
-        let error = store_dyn
-            .put_object("/index.html", body, "text/html")
+        let error = store
+            .publish_site(&[site_file("/index.html", body)])
             .await
             .unwrap_err();
         assert!(
@@ -4069,9 +4168,8 @@ mod tests {
             200,
             cf_ok(&format!(r#"{{"buckets":[["{hash}"]]}}"#)),
         )]);
-        let store_dyn: &dyn AssetObjectStore = &store;
-        let error = store_dyn
-            .put_object("/index.html", body, "text/html")
+        let error = store
+            .publish_site(&[site_file("/index.html", body)])
             .await
             .unwrap_err();
         assert!(
@@ -4095,9 +4193,8 @@ mod tests {
             200,
             session_result("session-jwt", "ffffffffffffffffffffffffffffffff"),
         )]);
-        let store_dyn: &dyn AssetObjectStore = &store;
-        let error = store_dyn
-            .put_object("/index.html", b"<html>hi</html>", "text/html")
+        let error = store
+            .publish_site(&[site_file("/index.html", b"<html>hi</html>")])
             .await
             .unwrap_err();
         assert!(
@@ -4107,45 +4204,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workers_static_assets_reports_s3_only_operations_unsupported() {
-        // #411: presign + arbitrary keyed GET/HEAD/LIST/DELETE are structurally
-        // unsupported on this CF-native publish target and return a clear error.
-        let (store, _last) = cf_store(200, UPLOAD_SESSION_OK);
-        let store_dyn: &dyn AssetObjectStore = &store;
+    async fn workers_static_assets_refuses_an_empty_bundle() {
+        // An empty manifest would deploy a version serving nothing, i.e. erase
+        // the site. Refuse before any request is issued.
+        let (store, requests) = cf_store_scripted(vec![]);
+        let error = store.publish_site(&[]).await.unwrap_err();
+        assert!(
+            error.to_string().contains("refusing to publish an empty"),
+            "unexpected error: {error}"
+        );
+        assert!(requests.lock().unwrap().is_empty());
+    }
 
-        assert!(store_dyn
-            .get_object("k", TEST_READ_BUDGET)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("does not support"));
-        assert!(store_dyn
-            .head_object("k")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("does not support"));
-        assert!(store_dyn
-            .list_objects()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("does not support"));
-        assert!(store_dyn
-            .delete_object("k")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("does not support"));
-
-        let presign_get_err = store_dyn.presign_get("k", 300, 1).unwrap_err().to_string();
-        assert!(presign_get_err.contains("presign"), "{presign_get_err}");
-        // `PresignedUpload` is not `Debug`, so match rather than `unwrap_err`.
-        let presign_put_err = match store_dyn.presign_put("k", 300, 1, 5, &"a".repeat(64)) {
-            Ok(_) => panic!("expected presign_put to be unsupported on the CF backend"),
-            Err(error) => error.to_string(),
-        };
-        assert!(presign_put_err.contains("presign"), "{presign_put_err}");
+    #[test]
+    fn the_publish_target_only_publishes_its_own_site() {
+        // #411: one Worker script carries one site, because a deploy replaces
+        // the script's whole asset version. A bundle for any other tenant/site
+        // must not be mirrored onto it.
+        let (store, _requests) = cf_store_scripted(vec![]);
+        let target =
+            StaticSitePublishTarget::new(store, "tenant-a".to_string(), "docs".to_string());
+        assert!(target.publishes("tenant-a", "docs"));
+        assert!(!target.publishes("tenant-b", "docs"));
+        assert!(!target.publishes("tenant-a", "marketing"));
     }
 
     #[tokio::test]
@@ -4154,7 +4235,7 @@ mod tests {
         // silent success.
         let error_body = r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[],"result":null}"#;
         let (store, _last) = cf_store(403, error_body);
-        let manifest = AssetUploadManifest::single("/index.html", b"x");
+        let manifest = AssetUploadManifest::for_bundle(&[site_file("/index.html", b"x")]).unwrap();
         let error = store.create_upload_session(&manifest).await.unwrap_err();
         assert!(
             error
@@ -4228,9 +4309,12 @@ mod tests {
         let body =
             format!("<!doctype html><html><body>ferrogate wsa live probe {stamp}</body></html>")
                 .into_bytes();
-        let store_dyn: &dyn AssetObjectStore = &store;
-        store_dyn
-            .put_object("/index.html", &body, "text/html")
+        store
+            .publish_site(&[SitePublishFile {
+                path: "/index.html",
+                content_type: "text/html",
+                body: &body,
+            }])
             .await
             .expect("live Workers Static Assets publish failed");
 

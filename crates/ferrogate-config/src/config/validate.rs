@@ -541,6 +541,33 @@ impl Config {
                 "field asset_bucket.cf_script_name: required when asset_bucket.backend = \"workers-static-assets\""
             );
         }
+        // A Cloudflare deploy replaces the Worker's whole asset version, so the
+        // one script this section names can carry exactly one site. Requiring
+        // the owning `{tenant}/{site}` at load time is what makes that
+        // one-script-one-site binding checkable before a second tenant's
+        // publish could overwrite the first's bytes.
+        if bucket
+            .cf_publish_tenant
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            bail!(
+                "field asset_bucket.cf_publish_tenant: required when asset_bucket.backend = \"workers-static-assets\" (a Worker script publishes exactly one site)"
+            );
+        }
+        if bucket
+            .cf_publish_site
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            bail!(
+                "field asset_bucket.cf_publish_site: required when asset_bucket.backend = \"workers-static-assets\" (a Worker script publishes exactly one site)"
+            );
+        }
         Ok(())
     }
 

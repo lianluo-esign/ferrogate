@@ -767,10 +767,15 @@ impl Default for X402ReconcilerConfig {
 /// any other S3-compatible service (MinIO, etc.), not only Supabase.
 /// Which object-storage backend `[asset_bucket]` drives (issue #411). The
 /// default `s3` covers every S3-compatible service (AWS S3, Supabase Storage,
-/// MinIO, Cloudflare R2) through the one SigV4 client. `workers-static-assets`
-/// selects a Cloudflare-native publish backend that is NOT S3-shaped and is
-/// wired through the shared [`ferrogate_cloudflare::CloudflareClient`] instead;
-/// it uses the `cf_*` fields below rather than the S3 credential pieces.
+/// MinIO, Cloudflare R2) through the one SigV4 client.
+///
+/// `workers-static-assets` does NOT select an object store. Cloudflare Workers
+/// Static Assets is a whole-site *publish* target — a deploy replaces the
+/// Worker's entire asset version, and there is no keyed GET/DELETE/LIST — so it
+/// cannot stand behind the `/v1/assets/*` read, erase and GC seam. Selecting it
+/// keeps every asset's bytes in FerroGate (the same shape as an unconfigured
+/// `[asset_bucket]`) and additionally configures the static-site publish target
+/// described by the `cf_*` fields below.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssetBucketBackend {
@@ -778,7 +783,9 @@ pub enum AssetBucketBackend {
     /// historical and default behavior — unchanged by #411.
     #[default]
     S3,
-    /// Cloudflare Workers Static Assets direct-upload publish backend (#411).
+    /// No object store; a Cloudflare Workers Static Assets *site publish*
+    /// target instead (#411). Asset bytes stay inline in FerroGate, which
+    /// remains the source of truth for the gateway serve path.
     WorkersStaticAssets,
 }
 
@@ -876,10 +883,27 @@ pub struct AssetBucketConfig {
     /// backend.
     #[serde(default)]
     pub cf_api_token: Option<String>,
-    /// The Worker script name the uploaded static assets attach to for the
+    /// The Worker script name the published site attaches to for the
     /// `workers-static-assets` backend (#411). Ignored by the S3 backend.
+    ///
+    /// A publish REPLACES this Worker's script and asset version, so it must
+    /// name a Worker dedicated to this one site — never an existing Worker
+    /// carrying bindings or logic (the agent-gateway or MCP Workers, say).
     #[serde(default)]
     pub cf_script_name: Option<String>,
+    /// Tenant id of the single site mirrored to `cf_script_name` (#411).
+    ///
+    /// A Cloudflare deploy replaces the Worker's whole asset version, so one
+    /// Worker script can carry exactly one site. Naming the tenant and site the
+    /// script belongs to is what keeps a second tenant's publish from
+    /// overwriting the first tenant's bytes on a shared script; a bundle push
+    /// for any other `{tenant}/{site}` is simply not mirrored.
+    #[serde(default)]
+    pub cf_publish_tenant: Option<String>,
+    /// Site name of the single site mirrored to `cf_script_name` (#411). See
+    /// [`cf_publish_tenant`](Self::cf_publish_tenant).
+    #[serde(default)]
+    pub cf_publish_site: Option<String>,
 }
 
 impl AssetBucketConfig {

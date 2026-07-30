@@ -214,6 +214,30 @@ Three CF options for serving FerroGate-hosted static assets/sites.
   (2) upload the file bodies (batched by hash), (3) deploy the Worker script that
   references the completed asset manifest. Requires **Workers Scripts Edit**.
 - Good when assets must be co-served with Worker logic (routing, auth, headers).
+- **The manifest is the whole asset set of the version it deploys.** A path the
+  manifest omits is not carried forward — it is gone from the edge. So a publish
+  is always a WHOLE-BUNDLE operation, never per file.
+- **FerroGate wiring (issue #411).** `[asset_bucket] backend =
+  "workers-static-assets"` selects a static-**site publish target**, not an
+  object-storage backend: `AppState::asset_bucket_client` stays S3-only and
+  asset bytes remain in FerroGate. (Cloudflare exposes no keyed
+  GET/DELETE/LIST for published assets, so standing it behind the
+  `/v1/assets/*` seam would make every read fail and make retention prune,
+  tenant purge and blob GC unable to erase anything.) After a site bundle push
+  commits, `FerroGateway::publish_site_bundle` mirrors the complete bundle to
+  Cloudflare as one asset version; the gateway path
+  `/sites/{tenant}/{site}/{path...}` stays the default serving mode and
+  FerroGate stays the source of truth (scoping decision on #411 / #523).
+  - Config: `cf_account_id`, `cf_api_token`, `cf_script_name`, plus
+    `cf_publish_tenant` + `cf_publish_site`. The last two are **required**: a
+    deploy replaces the Worker's whole asset version, so one script carries
+    exactly one site, and a bundle push for any other `{tenant}/{site}` is not
+    mirrored. `cf_script_name` must name a Worker dedicated to that site — the
+    deploy replaces its script, so pointing it at an existing Worker (the
+    agent-gateway or MCP Workers, say) would overwrite that Worker's code.
+  - A mirror failure never retracts the publish: the bundle is committed and
+    served from the gateway, and the outcome is reported in the push response
+    (`cloudflare_publish`) and in a `site.publish.cloudflare` audit event.
 
 ### Pages
 
