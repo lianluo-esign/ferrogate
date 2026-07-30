@@ -790,6 +790,14 @@ impl FerroGateway {
                     Ok(existing) => existing,
                     Err(error) => return storage_error(session, ctx, error.to_string()).await,
                 };
+                // Whose binding this proof is about to displace, if anyone's.
+                // Captured from the PRE-claim read, because after the claim the
+                // row names the new holder and the displaced tenant is no
+                // longer recoverable from it.
+                let displaced_tenant = existing
+                    .as_ref()
+                    .map(|existing| existing.tenant_id.clone())
+                    .filter(|holder| holder != &tenant_id);
                 if let Some(existing) = existing.as_ref() {
                     if existing.tenant_id != tenant_id {
                         let holder = match state
@@ -869,13 +877,73 @@ impl FerroGateway {
                     }
                     Err(error) => return storage_error(session, ctx, error.to_string()).await,
                 };
-                let acme = self.refresh_acme_after_domain_change(&state, &hostname, true);
+
+                // #488: an ownership signal must never outlive the binding it
+                // backed. The claim above moved the servable row away from the
+                // displaced tenant, but that tenant's own verification row
+                // survived it -- and a `grandfathered` row never expires
+                // (`verification_expires_at_unix` is `None`) and is carried
+                // forward verbatim by `reusable_on_rebind`. So a displaced
+                // squatter only had to wait for the proven owner to unbind and
+                // then re-bind to serve the hostname again with no proof at
+                // all: the land-grab this issue exists to close, restored
+                // through the takeover path. The unbind handler already drops
+                // the proof together with the binding for exactly this reason;
+                // this is the same invariant on the path that moves a binding
+                // between tenants.
+                //
+                // Dropped AFTER the claim, deliberately: until the claim commits
+                // we do not know the binding moved, and deleting another
+                // tenant's proof for a takeover that then failed would destroy
+                // state on a request that changed nothing. A failed drop cannot
+                // fail the request either -- the takeover is already durable --
+                // so it is reported rather than hidden.
+                let takeover_detail = match displaced_tenant.as_deref() {
+                    None => String::new(),
+                    Some(displaced) => {
+                        // Three distinct dispositions, not one boolean: "there
+                        // was nothing to drop" and "the drop failed" are
+                        // different facts for an operator reading this line,
+                        // and only the last one leaves a stale signal behind.
+                        let disposition = match state
+                            .delete_site_domain_verification(displaced, &hostname)
+                            .await
+                        {
+                            Ok(true) => "dropped",
+                            Ok(false) => "absent",
+                            Err(error) => {
+                                tracing::error!(
+                                    hostname = %hostname,
+                                    displaced_tenant = %displaced,
+                                    "took over the site-domain binding after a DNS ownership \
+                                     proof but could not drop the displaced tenant's stale \
+                                     verification row; remove it before that tenant re-binds \
+                                     the hostname, or the re-bind inherits a serving signal it \
+                                     never proved (#488): {error}"
+                                );
+                                "drop_failed"
+                            }
+                        };
+                        format!(", displaced_tenant={displaced}, displaced_proof={disposition}")
+                    }
+                };
+
+                // The order-set decision is derived from the STORED proof here
+                // too, never from a literal at the call site: `acme_order_action`
+                // is the single place the #488 certificate-order policy exists,
+                // and a promotion that did not actually leave a live proof
+                // behind must withhold instead of enrolling.
+                let acme = self.apply_site_domain_acme_action(
+                    &state,
+                    &hostname,
+                    acme_order_action(&verification, now),
+                );
                 audit(
                     "committed",
                     format!(
                         "DNS ownership of {hostname} verified for {tenant_id}/{} via TXT \
                          {record_name} ({backend_name} backend, acme_enabled={}, \
-                         reload_triggered={})",
+                         reload_triggered={}{takeover_detail})",
                         verification.site, acme.enabled, acme.reload_triggered
                     ),
                 );
@@ -985,7 +1053,8 @@ impl FerroGateway {
         }
     }
 
-    /// Applies the #488 certificate-order policy for a bind.
+    /// Applies the #488 certificate-order policy for a bind or a completed
+    /// verification.
     ///
     /// The caller passes the ACTION derived from the stored ownership proof,
     /// not a boolean it computed itself, so "is this hostname serving?" is no
