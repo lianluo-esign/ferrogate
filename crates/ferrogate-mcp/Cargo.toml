@@ -20,6 +20,12 @@ anyhow.workspace = true
 base64.workspace = true
 ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-core = { path = "../ferrogate-core" }
+# The #423 `cf://` Secrets Store seam. Used by `mcp_worker_deploy` to validate
+# that a secret bound into the hosted MCP Worker is named canonically, so the
+# same secret stays resolvable as `cf://<store>/<name>` from the gateway side.
+# ferrogate-secrets depends only on ferrogate-cloudflare, so this edge adds no
+# cycle.
+ferrogate-secrets = { path = "../ferrogate-secrets" }
 http.workspace = true
 rmcp.workspace = true
 rustls.workspace = true

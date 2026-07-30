@@ -31,9 +31,11 @@ consuming CF MCP servers.
   the OAuth 2.1 flow (Cloudflare as the authorization server; grants persisted in
   the `OAUTH_KV` namespace). The interactive authorize/consent surface is the
   provider's `defaultHandler`.
-- **Automation bearer fallback** — an optional static `MCP_BEARER_TOKEN` secret
-  short-circuits OAuth and routes straight to the MCP transport, for CI /
-  machine-to-machine callers.
+- **Automation bearer** — an optional static credential that short-circuits
+  OAuth and routes straight to the MCP transport, for CI / machine-to-machine
+  callers. Sourced from the `MCP_BEARER_TOKEN_STORE` **Cloudflare Secrets Store**
+  binding when one is declared, falling back to the `MCP_BEARER_TOKEN` Worker
+  secret. With neither, OAuth is the only way in.
 
 > Stateless alternative: if you don't need per-session state, the Agents SDK's
 > `createMcpHandler()` (or a plain fetch handler) can replace the `McpAgent` DO —
@@ -47,7 +49,7 @@ consuming CF MCP servers.
 | `agents` | `0.0.109` | Agents SDK `McpAgent`; the DO migration key can move between releases. |
 | `@modelcontextprotocol/sdk` | `1.29.0` | `McpServer` tool registration API (matches the version `agents` bundles, so the `McpAgent.server` types dedupe). |
 | `@cloudflare/workers-oauth-provider` | `0.0.5` | Pre-1.0; the `OAuthProvider` options shape can change. |
-| `zod` | `3.23.8` | Tool input schemas. |
+| `zod` | `3.25.76` | Tool input schemas. |
 | `wrangler` | `4.20.5` | Accepts the `new_sqlite_classes` migration form used here. |
 
 ## One-time setup
@@ -59,13 +61,34 @@ consuming CF MCP servers.
    wrangler kv namespace create OAUTH_KV
    ```
 
-2. **(Optional) seed the automation bearer** for machine-to-machine access:
+2. **(Optional) provision the automation bearer** for machine-to-machine access.
+   Preferred — the Cloudflare Secrets Store, so rotation needs no redeploy and
+   the plaintext never passes through a FerroGate process:
+
+   ```sh
+   wrangler secrets-store store create ferrogate
+   wrangler secrets-store secret create <STORE_ID> --name mcp-bearer-token
+   ```
+
+   then uncomment the `[[secrets_store_secrets]]` block in `wrangler.toml` (or
+   deploy through the Rust pipeline with
+   `McpWorkerSpec::with_bearer_token_from_secrets_store(<STORE_ID>)`, which emits
+   the same binding). The secret name is canonical `[a-z0-9-]+` on purpose: the
+   same secret is then addressable from the Rust gateway as
+   `cf://ferrogate/mcp-bearer-token` — see `docs/cloudflare-secrets-resolution.md`.
+
+   Fallback, where there is no Secrets Store:
 
    ```sh
    wrangler secret put MCP_BEARER_TOKEN
    ```
 
-   No other secret is required for the OAuth flow itself — the provider issues and
+   This `secret_text` binding survives a redeploy through the Rust pipeline
+   because the upload metadata carries `keep_bindings: ["secret_text"]`; without
+   that, a Script-API PUT would replace the whole binding set and silently
+   disable the automation path.
+
+   No secret is required for the OAuth flow itself — the provider issues and
    stores its own tokens in `OAUTH_KV`.
 
 ## Deploy
@@ -96,8 +119,11 @@ npm run teardown    # wrangler delete
   production server MUST render a consent screen and authenticate the end user in
   the `defaultHandler` before calling `completeAuthorization` — the recorded
   `props.userId` is delivered to the agent as `this.props.userId`.
-- **Bearer (automation):** presenting `Authorization: Bearer <MCP_BEARER_TOKEN>`
-  bypasses OAuth and routes directly to `/mcp`.
+- **Bearer (automation):** presenting `Authorization: Bearer <token>` bypasses
+  OAuth and routes directly to `/mcp` (or `/sse`). The expected token is read
+  from `MCP_BEARER_TOKEN_STORE` first, then `MCP_BEARER_TOKEN`. A Secrets Store
+  read that fails is logged and degrades to OAuth-only rather than failing the
+  request.
 
 ## SDK migration caveat
 

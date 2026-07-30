@@ -18,6 +18,18 @@ import OAuthProvider, {
 import { z } from "zod";
 
 /**
+ * The runtime shape of a Cloudflare **Secrets Store** binding: an async accessor
+ * with no name argument — `store_id` + `secret_name` are fixed at deploy time.
+ *
+ * Declared structurally rather than imported so the Worker typechecks against
+ * the pinned `@cloudflare/workers-types` regardless of whether that version
+ * ships a `SecretsStoreSecret` type; the shape is the whole contract.
+ */
+export interface SecretsStoreSecretBinding {
+  get(): Promise<string>;
+}
+
+/**
  * Worker bindings.
  *
  * - `MCP_OBJECT` — the Durable Object namespace for the {@link FerroGateMcp}
@@ -27,15 +39,21 @@ import { z } from "zod";
  * - `OAUTH_KV` — the KV namespace `@cloudflare/workers-oauth-provider` uses to
  *   persist issued grants / tokens / dynamically-registered clients. REQUIRED by
  *   the OAuth provider; create it once and bind it (see README).
- * - `MCP_BEARER_TOKEN` — optional static bearer secret for **automation**: when
- *   set and presented, the request bypasses the interactive OAuth flow and is
- *   routed straight to the MCP transport. Seed via `wrangler secret put`.
+ * - `MCP_BEARER_TOKEN_STORE` — the **preferred** source of the automation bearer:
+ *   a Cloudflare Secrets Store binding declared at deploy time by FerroGate's
+ *   Rust pipeline (`ferrogate_mcp::mcp_worker_deploy`). Rotating the secret in
+ *   the store takes effect with no redeploy.
+ * - `MCP_BEARER_TOKEN` — the same credential seeded out of band
+ *   (`wrangler secret put`), kept as the fallback for deployments with no
+ *   Secrets Store. Optional; when neither binding is present, OAuth is the only
+ *   way in.
  * - `OAUTH_PROVIDER` — injected by {@link OAuthProvider} into the default
  *   handler; exposes `parseAuthRequest` / `completeAuthorization` / `lookupClient`.
  */
 export interface Env {
   MCP_OBJECT: DurableObjectNamespace<FerroGateMcp>;
   OAUTH_KV: KVNamespace;
+  MCP_BEARER_TOKEN_STORE?: SecretsStoreSecretBinding;
   MCP_BEARER_TOKEN?: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
@@ -145,6 +163,28 @@ function matchesBearer(request: Request, expected: string): boolean {
   return diff === 0;
 }
 
+/**
+ * The automation bearer, sourced from the Secrets Store binding when one is
+ * declared and falling back to the plain `secret_text` binding otherwise.
+ *
+ * A Secrets Store read that throws (binding present but the secret was deleted,
+ * or the store is unreachable) returns `undefined` rather than propagating:
+ * losing the automation shortcut degrades to "OAuth only", while a thrown error
+ * here would 500 every request including the OAuth ones. The failure is logged
+ * so it is diagnosable rather than silent.
+ */
+async function resolveAutomationBearer(env: Env): Promise<string | undefined> {
+  if (env.MCP_BEARER_TOKEN_STORE) {
+    try {
+      const fromStore = await env.MCP_BEARER_TOKEN_STORE.get();
+      if (fromStore) return fromStore;
+    } catch (error) {
+      console.error("MCP_BEARER_TOKEN_STORE read failed; falling back", error);
+    }
+  }
+  return env.MCP_BEARER_TOKEN || undefined;
+}
+
 /** The MCP transport handlers (Streamable HTTP at `/mcp`, legacy SSE at `/sse`). */
 const mcpHandler = FerroGateMcp.serve("/mcp");
 const sseHandler = FerroGateMcp.serveSSE("/sse");
@@ -201,9 +241,10 @@ const oauth = new OAuthProvider({
 });
 
 /**
- * Top-level entry. An **automation bearer** (`MCP_BEARER_TOKEN`) short-circuits
- * OAuth and routes straight to the MCP transport — handy for CI / FerroGate's
- * own machine-to-machine calls. Everything else flows through the OAuth provider.
+ * Top-level entry. An **automation bearer** (from the `MCP_BEARER_TOKEN_STORE`
+ * Secrets Store binding, or the `MCP_BEARER_TOKEN` secret) short-circuits OAuth
+ * and routes straight to the MCP transport — handy for CI / FerroGate's own
+ * machine-to-machine calls. Everything else flows through the OAuth provider.
  */
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -211,9 +252,14 @@ export default {
 
     if (url.pathname === "/healthz") return healthz();
 
-    if (env.MCP_BEARER_TOKEN && matchesBearer(request, env.MCP_BEARER_TOKEN)) {
-      if (url.pathname === "/mcp") return mcpHandler.fetch(request, env, ctx);
-      if (url.pathname === "/sse") return sseHandler.fetch(request, env, ctx);
+    // Only pay the Secrets Store read on the two routes a bearer can unlock.
+    if (url.pathname === "/mcp" || url.pathname === "/sse") {
+      const bearer = await resolveAutomationBearer(env);
+      if (bearer && matchesBearer(request, bearer)) {
+        return url.pathname === "/mcp"
+          ? mcpHandler.fetch(request, env, ctx)
+          : sseHandler.fetch(request, env, ctx);
+      }
     }
 
     return oauth.fetch(request, env, ctx);

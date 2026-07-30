@@ -14,7 +14,10 @@ use ferrogate_cloudflare::{
     HttpTransport,
 };
 
-use super::{McpWorkerDeployer, McpWorkerSpec, DEFAULT_MCP_SCRIPT_NAME, MCP_MULTIPART_BOUNDARY};
+use super::{
+    McpSecretsStoreBinding, McpWorkerDeployer, McpWorkerSpec, DEFAULT_MCP_BEARER_SECRET_BINDING,
+    DEFAULT_MCP_BEARER_SECRET_NAME, DEFAULT_MCP_SCRIPT_NAME, MCP_MULTIPART_BOUNDARY,
+};
 
 /// A transport that captures every request and replays a scripted response.
 /// (`CloudflareError` is not `Clone`, so the mock stores an owned `HttpResponse`
@@ -313,4 +316,158 @@ fn wrangler_fallback_command_names_script_and_compat_date() {
     assert!(cmd.contains("wrangler deploy"));
     assert!(cmd.contains("ferrogate-mcp-server"));
     assert!(cmd.contains("2025-06-01"));
+}
+
+#[test]
+fn metadata_keeps_secret_text_bindings_so_a_redeploy_does_not_strip_the_bearer() {
+    // A Script-API PUT replaces the whole binding set, so a `wrangler secret put
+    // MCP_BEARER_TOKEN` value survives only because the upload asks for it.
+    let meta = McpWorkerSpec::new("export default {};").metadata_json();
+    assert_eq!(meta["keep_bindings"][0], "secret_text");
+}
+
+#[test]
+fn a_secrets_store_binding_is_declared_alongside_the_do_and_kv_bindings() {
+    let spec = McpWorkerSpec::new("export default {};")
+        .with_kv_namespace_id("kv-abc123")
+        .with_bearer_token_from_secrets_store("store-9f3");
+    let meta = spec.metadata_json();
+
+    // The DO + KV bindings keep their positions; the secret is appended.
+    assert_eq!(meta["bindings"][0]["type"], "durable_object_namespace");
+    assert_eq!(meta["bindings"][1]["type"], "kv_namespace");
+
+    let secret = &meta["bindings"][2];
+    assert_eq!(secret["type"], "secrets_store_secret");
+    assert_eq!(secret["name"], DEFAULT_MCP_BEARER_SECRET_BINDING);
+    assert_eq!(secret["store_id"], "store-9f3");
+    assert_eq!(secret["secret_name"], DEFAULT_MCP_BEARER_SECRET_NAME);
+    // …and it reaches the wire, not just the metadata value.
+    let body = String::from_utf8(spec.multipart_body()).unwrap();
+    assert!(body.contains("secrets_store_secret"));
+    assert!(body.contains("store-9f3"));
+}
+
+#[test]
+fn the_default_bearer_secret_name_is_resolvable_through_the_cf_seam() {
+    // The whole point of pinning a canonical name: the same Secrets Store secret
+    // the Worker binds must also be addressable as `cf://<store>/<name>` from the
+    // gateway, whose env convention is only injective on canonical names (#423).
+    assert!(ferrogate_secrets::cf_binding_name_is_unambiguous(
+        DEFAULT_MCP_BEARER_SECRET_NAME
+    ));
+}
+
+#[test]
+fn a_secrets_store_binding_without_a_store_id_is_refused_before_the_request_is_built() {
+    let transport = CapturingTransport::new(ok(200, "{}"));
+    let deployer = deployer(transport.clone());
+    let spec = McpWorkerSpec::new("export default {};").with_bearer_token_from_secrets_store("");
+
+    let err = deployer.build_deploy_request(&spec).unwrap_err();
+    assert!(
+        matches!(&err, CloudflareError::Config(message) if message.contains("store_id")),
+        "expected a typed config error naming the missing field, got {err:?}"
+    );
+    assert!(transport.captured.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_non_canonical_secret_name_is_refused_with_the_variable_it_would_collide_on() {
+    let spec = McpWorkerSpec::new("export default {};").with_secrets_store_binding(
+        McpSecretsStoreBinding {
+            binding_name: "MCP_BEARER_TOKEN_STORE".to_string(),
+            store_id: "store-9f3".to_string(),
+            secret_name: "MCP.Bearer_Token".to_string(),
+        },
+    );
+
+    let err = spec.validate().unwrap_err();
+    let CloudflareError::Config(message) = &err else {
+        panic!("expected a config error, got {err:?}");
+    };
+    assert!(
+        message.contains("FERROGATE_CF_SECRET_MCP_BEARER_TOKEN"),
+        "the error must name the ambiguous variable: {message}"
+    );
+}
+
+#[test]
+fn deploy_reports_the_mcp_url_when_the_workers_dev_subdomain_is_known() {
+    let transport = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":{"id":"ferrogate-mcp-server"}}"#,
+    ));
+    let deployer = deployer(transport.clone());
+    let spec = McpWorkerSpec::new("export default {};").with_workers_dev_subdomain("acme");
+
+    let outcome = runtime().block_on(deployer.deploy(&spec)).unwrap();
+    assert_eq!(outcome.script_name, "ferrogate-mcp-server");
+    // Exactly the shape the #408 upstream detector accepts.
+    assert_eq!(
+        outcome.mcp_url.as_deref(),
+        Some("https://ferrogate-mcp-server.acme.workers.dev/mcp")
+    );
+}
+
+#[test]
+fn an_unknown_subdomain_reports_no_url_rather_than_a_guessed_one() {
+    let transport = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":{"id":"ferrogate-mcp-server"}}"#,
+    ));
+    let deployer = deployer(transport.clone());
+    let spec = McpWorkerSpec::new("export default {};");
+
+    let outcome = runtime().block_on(deployer.deploy(&spec)).unwrap();
+    assert_eq!(outcome.mcp_url, None);
+    // A blank subdomain is "unknown", not a host with an empty label.
+    assert_eq!(
+        McpWorkerSpec::new("export default {};")
+            .with_workers_dev_subdomain("   ")
+            .mcp_endpoint_url(),
+        None
+    );
+}
+
+#[test]
+fn workers_dev_subdomain_reads_the_account_endpoint() {
+    let transport = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":{"subdomain":"acme"}}"#,
+    ));
+    let deployer = deployer(transport.clone());
+
+    let subdomain = runtime()
+        .block_on(deployer.workers_dev_subdomain())
+        .unwrap();
+    assert_eq!(subdomain, "acme");
+    assert_eq!(transport.last().method, HttpMethod::Get);
+    assert!(transport
+        .last()
+        .url
+        .ends_with("/accounts/acct-777/workers/subdomain"));
+}
+
+#[test]
+fn status_for_a_spec_carries_the_url_while_status_by_name_stays_silent() {
+    let transport = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":[{"id":"ferrogate-mcp-server"}]}"#,
+    ));
+    let deployer = deployer(transport.clone());
+    let spec = McpWorkerSpec::new("export default {};").with_workers_dev_subdomain("acme");
+
+    let by_spec = runtime().block_on(deployer.status_for(&spec)).unwrap();
+    assert!(by_spec.deployed);
+    assert_eq!(
+        by_spec.mcp_url.as_deref(),
+        Some("https://ferrogate-mcp-server.acme.workers.dev/mcp")
+    );
+
+    let by_name = runtime()
+        .block_on(deployer.status(DEFAULT_MCP_SCRIPT_NAME))
+        .unwrap();
+    assert!(by_name.deployed);
+    assert_eq!(by_name.mcp_url, None);
 }

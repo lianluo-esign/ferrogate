@@ -23,10 +23,31 @@
 //!
 //! - a `metadata` part (JSON): `main_module`, the **Durable Object binding** for
 //!   the `McpAgent` session class, the **`kv_namespace` binding** the OAuth
-//!   provider persists grants in (`OAUTH_KV`), the DO **`migrations`**
-//!   (`new_sqlite_classes` — the Agents SDK stores session state in an embedded
-//!   per-instance SQLite DB), `compatibility_date`, and `compatibility_flags`;
+//!   provider persists grants in (`OAUTH_KV`), any **`secrets_store_secret`
+//!   bindings** (see below), the DO **`migrations`** (`new_sqlite_classes` — the
+//!   Agents SDK stores session state in an embedded per-instance SQLite DB),
+//!   `compatibility_date`, `compatibility_flags`, and `keep_bindings`;
 //! - one module part carrying the Worker's ES-module source.
+//!
+//! ## Secrets: the `cf://` Secrets Store seam (#423)
+//!
+//! Cloudflare Secrets Store values are write-only over REST — the only way one
+//! reaches a consumer is a Worker binding. [`McpWorkerSpec::secrets_store_bindings`]
+//! puts that binding in the deploy metadata, so the Worker's automation bearer
+//! is sourced from the account's Secrets Store instead of being seeded by hand.
+//! Binding names are validated against the canonical
+//! [`ferrogate_secrets::cf_binding_name_is_unambiguous`] shape so the *same*
+//! secret stays addressable as `cf://<store>/<name>` from the Rust side (where
+//! the `FERROGATE_CF_SECRET_*` env convention is lossy for non-canonical names).
+//!
+//! ## `keep_bindings`: why a redeploy does not strip `wrangler secret put`
+//!
+//! A Workers Script-API `PUT` replaces the script's **entire** binding set. A
+//! `secret_text` binding seeded out of band (`wrangler secret put
+//! MCP_BEARER_TOKEN`) is therefore silently removed by the next deploy through
+//! this pipeline — disabling the automation path — unless the upload asks
+//! Cloudflare to preserve it. [`McpWorkerSpec::keep_bindings`] carries that
+//! list, defaulting to `["secret_text"]`.
 //!
 //! [`McpWorkerSpec`] models that upload and produces the metadata JSON, the
 //! multipart body, and the content type **deterministically** (fixed boundary)
@@ -48,13 +69,19 @@
 //! ## Relationship to the #413 agent-gateway deployer (duplication note)
 //!
 //! The multipart script-upload construction here **intentionally duplicates** the
-//! shape of `ferrogate_runtime::cloudflare_gateway_deploy` (#413). We do NOT
-//! depend on `ferrogate-runtime` (that would introduce a dependency cycle:
-//! runtime already depends on this crate's siblings), so the minimal
-//! multipart-upload construction is copied rather than shared. When a third
-//! Cloudflare Worker deployer appears, this belongs in a small shared helper in
-//! `ferrogate-cloudflare` (e.g. a `WorkerScriptUpload` builder) — tracked as a
-//! future extraction.
+//! shape of `ferrogate_runtime::cloudflare_gateway_deploy` (#413).
+//!
+//! **Correction (#409 review, 2026-07-25):** an earlier revision of this note
+//! justified the copy with "a dependency cycle: runtime already depends on this
+//! crate's siblings". **There is no cycle** — `ferrogate-runtime` depends on
+//! `ferrogate-core` / `ferrogate-cloudflare` / `ferrogate-storage`, and the only
+//! crates depending on `ferrogate-mcp` are `ferrogate-gateway` and
+//! `ferrogate-config`. The real reason is narrower and weaker: `ferrogate-mcp`
+//! should not take a dependency on a *sibling deployer* to reach ~60 lines of
+//! multipart framing. With three Worker deployers now on `main` (#409, #411,
+//! #413) the correct destination is the shared `WorkerScriptUpload` builder in
+//! `ferrogate-cloudflare` — the extraction every one of them should move to,
+//! not a fourth copy.
 //!
 //! ## Multipart content type
 //!
@@ -95,6 +122,102 @@ pub const DEFAULT_MCP_DO_BINDING: &str = "MCP_OBJECT";
 /// (`env.OAUTH_KV`).
 pub const DEFAULT_OAUTH_KV_BINDING: &str = "OAUTH_KV";
 
+/// Default Worker binding name for the Secrets-Store-sourced automation bearer
+/// (`env.MCP_BEARER_TOKEN_STORE`, read as `await binding.get()`).
+///
+/// Deliberately **not** `MCP_BEARER_TOKEN`: that name is the `secret_text`
+/// binding a `wrangler secret put` seeds, and the Worker prefers the store
+/// binding while still accepting the plain one (see `workers/mcp-server`).
+pub const DEFAULT_MCP_BEARER_SECRET_BINDING: &str = "MCP_BEARER_TOKEN_STORE";
+
+/// Default Cloudflare Secrets Store secret **name** holding the automation
+/// bearer. Canonical (`^[a-z0-9-]+$`) so the same secret is also addressable as
+/// `cf://<store>/mcp-bearer-token` from the Rust side without the
+/// `FERROGATE_CF_SECRET_*` aliasing hazard (#423).
+pub const DEFAULT_MCP_BEARER_SECRET_NAME: &str = "mcp-bearer-token";
+
+/// Binding types a Workers Script-API `PUT` must be told to preserve rather than
+/// replace. `secret_text` covers a `wrangler secret put`-seeded value, which the
+/// upload body itself can never carry (the plaintext lives only in Cloudflare).
+pub const DEFAULT_KEEP_BINDINGS: &[&str] = &["secret_text"];
+
+/// One Cloudflare **Secrets Store** binding to declare on the deployed Worker.
+///
+/// The runtime read is `await env.<binding_name>.get()` with **no** name
+/// argument: `store_id` + `secret_name` are fixed at deploy time. A Worker
+/// cannot bind a store and look secrets up by name, which is why every secret
+/// the Worker needs is a separate binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSecretsStoreBinding {
+    /// The Worker binding name (`env.<NAME>`).
+    pub binding_name: String,
+    /// The Secrets Store id the secret lives in.
+    pub store_id: String,
+    /// The secret's name within that store.
+    pub secret_name: String,
+}
+
+impl McpSecretsStoreBinding {
+    /// A binding for the automation bearer, using FerroGate's default binding
+    /// and secret names, in the given store.
+    pub fn bearer_token(store_id: impl Into<String>) -> Self {
+        Self {
+            binding_name: DEFAULT_MCP_BEARER_SECRET_BINDING.to_string(),
+            store_id: store_id.into(),
+            secret_name: DEFAULT_MCP_BEARER_SECRET_NAME.to_string(),
+        }
+    }
+
+    /// Reject a binding that cannot be deployed or that would be ambiguous on
+    /// the `cf://` side.
+    ///
+    /// The store id and secret name are required (Cloudflare rejects an empty
+    /// one at deploy with an opaque error; failing here names the field). The
+    /// secret name must additionally be **canonical** — see
+    /// [`ferrogate_secrets::cf_binding_name_is_unambiguous`]: a non-canonical
+    /// name deploys fine, but the identical secret then cannot be resolved
+    /// through the `cf://` env convention from the Rust gateway, so FerroGate
+    /// would have two spellings of "the same secret" that only agree by luck.
+    pub fn validate(&self) -> Result<(), CloudflareError> {
+        if self.binding_name.trim().is_empty() {
+            return Err(CloudflareError::Config(
+                "secrets-store binding name must not be empty".to_string(),
+            ));
+        }
+        if self.store_id.trim().is_empty() {
+            return Err(CloudflareError::Config(format!(
+                "secrets-store binding {:?} has no store_id: create the store once \
+                 (`wrangler secrets-store store create`) and set its id",
+                self.binding_name
+            )));
+        }
+        if !ferrogate_secrets::cf_binding_name_is_unambiguous(&self.secret_name) {
+            return Err(CloudflareError::Config(format!(
+                "secrets-store binding {:?} names secret {:?}, which is not the canonical \
+                 [a-z0-9-]+ shape: the same secret would not be resolvable as \
+                 cf://<store>/{} from the gateway, because the {} variable that name maps \
+                 to is shared with other distinct secrets (see \
+                 docs/cloudflare-secrets-resolution.md)",
+                self.binding_name,
+                self.secret_name,
+                self.secret_name,
+                ferrogate_secrets::cf_binding_env_var(&self.secret_name),
+            )));
+        }
+        Ok(())
+    }
+
+    /// The metadata `bindings[]` entry Cloudflare expects.
+    fn metadata_entry(&self) -> serde_json::Value {
+        json!({
+            "type": "secrets_store_secret",
+            "name": self.binding_name,
+            "store_id": self.store_id,
+            "secret_name": self.secret_name,
+        })
+    }
+}
+
 /// A modeled Workers Script-API upload for the FerroGate-hosted MCP server
 /// Worker.
 ///
@@ -128,6 +251,21 @@ pub struct McpWorkerSpec {
     pub compatibility_date: String,
     /// Worker compatibility flags.
     pub compatibility_flags: Vec<String>,
+    /// Cloudflare Secrets Store bindings to declare on the script (#423 seam).
+    /// Empty by default: the automation bearer is optional, and a binding that
+    /// names a store the account does not have fails the deploy.
+    pub secrets_store_bindings: Vec<McpSecretsStoreBinding>,
+    /// Binding **types** Cloudflare must preserve across this upload rather
+    /// than replace. Defaults to [`DEFAULT_KEEP_BINDINGS`]; see the module docs
+    /// for why dropping it silently disables the automation bearer.
+    pub keep_bindings: Vec<String>,
+    /// The account's `workers.dev` subdomain, when known. Set it to have the
+    /// pipeline report the deployed server's URL
+    /// (`https://<script>.<subdomain>.workers.dev/mcp`) — the exact shape the
+    /// #408 upstream detector accepts, so a deployed server can be registered
+    /// back as an MCP upstream. Resolve it once with
+    /// [`McpWorkerDeployer::workers_dev_subdomain`].
+    pub workers_dev_subdomain: Option<String>,
 }
 
 impl McpWorkerSpec {
@@ -147,6 +285,12 @@ impl McpWorkerSpec {
             migration_tag: "v1".to_string(),
             compatibility_date: "2025-06-01".to_string(),
             compatibility_flags: vec!["nodejs_compat".to_string()],
+            secrets_store_bindings: Vec::new(),
+            keep_bindings: DEFAULT_KEEP_BINDINGS
+                .iter()
+                .map(|kind| (*kind).to_string())
+                .collect(),
+            workers_dev_subdomain: None,
         }
     }
 
@@ -156,29 +300,86 @@ impl McpWorkerSpec {
         self
     }
 
+    /// Builder: declare one Secrets Store binding on the deployed Worker.
+    pub fn with_secrets_store_binding(mut self, binding: McpSecretsStoreBinding) -> Self {
+        self.secrets_store_bindings.push(binding);
+        self
+    }
+
+    /// Builder: source the automation bearer from `store_id` under the default
+    /// binding/secret names ([`McpSecretsStoreBinding::bearer_token`]).
+    pub fn with_bearer_token_from_secrets_store(self, store_id: impl Into<String>) -> Self {
+        self.with_secrets_store_binding(McpSecretsStoreBinding::bearer_token(store_id))
+    }
+
+    /// Builder: record the account's `workers.dev` subdomain so the pipeline can
+    /// report the deployed [`mcp_endpoint_url`](Self::mcp_endpoint_url).
+    pub fn with_workers_dev_subdomain(mut self, subdomain: impl Into<String>) -> Self {
+        self.workers_dev_subdomain = Some(subdomain.into());
+        self
+    }
+
+    /// The deployed MCP endpoint, or `None` when the account's `workers.dev`
+    /// subdomain is not known to this spec.
+    ///
+    /// `None` rather than a guessed host: the subdomain is per-account and not
+    /// derivable from the script name, and a wrong upstream URL registered on a
+    /// tenant is worse than an absent one.
+    pub fn mcp_endpoint_url(&self) -> Option<String> {
+        self.workers_dev_subdomain
+            .as_deref()
+            .map(str::trim)
+            .filter(|subdomain| !subdomain.is_empty())
+            .map(|subdomain| format!("https://{}.{}.workers.dev/mcp", self.script_name, subdomain))
+    }
+
+    /// Reject a spec that cannot produce a usable deploy.
+    ///
+    /// Called by [`McpWorkerDeployer::build_deploy_request`], so an invalid
+    /// binding is a typed error **before** the request is signed and sent
+    /// rather than an opaque Cloudflare 400.
+    pub fn validate(&self) -> Result<(), CloudflareError> {
+        for binding in &self.secrets_store_bindings {
+            binding.validate()?;
+        }
+        Ok(())
+    }
+
     /// The Workers Script-API `metadata` part as JSON.
     ///
     /// Registers the module entrypoint, the `McpAgent` Durable Object namespace
-    /// binding, the `OAUTH_KV` KV-namespace binding, and the
+    /// binding, the `OAUTH_KV` KV-namespace binding, any
+    /// [`secrets_store_bindings`](Self::secrets_store_bindings), the
     /// **`new_sqlite_classes`** migration (NOT `new_classes`: the Agents SDK
-    /// requires the SQLite storage backend for session state).
+    /// requires the SQLite storage backend for session state), and
+    /// [`keep_bindings`](Self::keep_bindings).
     pub fn metadata_json(&self) -> serde_json::Value {
+        let mut bindings = vec![
+            json!({
+                "type": "durable_object_namespace",
+                "name": self.do_binding_name,
+                "class_name": self.do_class_name,
+            }),
+            json!({
+                "type": "kv_namespace",
+                "name": self.kv_binding_name,
+                "namespace_id": self.kv_namespace_id,
+            }),
+        ];
+        bindings.extend(
+            self.secrets_store_bindings
+                .iter()
+                .map(McpSecretsStoreBinding::metadata_entry),
+        );
         json!({
             "main_module": self.module_filename,
             "compatibility_date": self.compatibility_date,
             "compatibility_flags": self.compatibility_flags,
-            "bindings": [
-                {
-                    "type": "durable_object_namespace",
-                    "name": self.do_binding_name,
-                    "class_name": self.do_class_name,
-                },
-                {
-                    "type": "kv_namespace",
-                    "name": self.kv_binding_name,
-                    "namespace_id": self.kv_namespace_id,
-                }
-            ],
+            "bindings": bindings,
+            // Binding types Cloudflare carries over from the live script instead
+            // of replacing. Without this, the PUT's binding array IS the new
+            // binding set and an out-of-band `wrangler secret put` is erased.
+            "keep_bindings": self.keep_bindings,
             "migrations": {
                 "new_tag": self.migration_tag,
                 "new_sqlite_classes": [self.do_class_name],
@@ -232,10 +433,16 @@ impl McpWorkerSpec {
     }
 }
 
-/// Outcome of a successful deploy: the script name Cloudflare acknowledged.
+/// Outcome of a successful deploy: the script name Cloudflare acknowledged, and
+/// the MCP endpoint it is reachable at when the account's `workers.dev`
+/// subdomain is known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpDeployOutcome {
     pub script_name: String,
+    /// `https://<script>.<subdomain>.workers.dev/mcp`, or `None` when the spec
+    /// carries no [`workers_dev_subdomain`](McpWorkerSpec::workers_dev_subdomain).
+    /// This is the value a caller registers as an `McpServerConfig` upstream.
+    pub mcp_url: Option<String>,
 }
 
 /// One entry of the Workers scripts collection (only `id` is consumed).
@@ -246,11 +453,15 @@ pub struct McpScriptSummary {
 }
 
 /// Deploy status for a named MCP server script: whether Cloudflare currently
-/// hosts it.
+/// hosts it, and where it answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpScriptStatus {
     pub script_name: String,
     pub deployed: bool,
+    /// The MCP endpoint, when the caller asked via
+    /// [`McpWorkerDeployer::status_for`] with a spec carrying the account's
+    /// `workers.dev` subdomain. `None` says "not known", never "not reachable".
+    pub mcp_url: Option<String>,
 }
 
 /// Deploys / inspects / tears down the MCP server Worker via the #405 seams.
@@ -316,6 +527,7 @@ impl McpWorkerDeployer {
         &self,
         spec: &McpWorkerSpec,
     ) -> Result<HttpRequest, CloudflareError> {
+        spec.validate()?;
         Ok(HttpRequest {
             method: HttpMethod::Put,
             url: self.script_url(&spec.script_name),
@@ -341,7 +553,24 @@ impl McpWorkerDeployer {
         Ok(McpDeployOutcome {
             // Prefer the id Cloudflare echoes; fall back to the requested name.
             script_name: result.id.unwrap_or_else(|| spec.script_name.clone()),
+            mcp_url: spec.mcp_endpoint_url(),
         })
+    }
+
+    /// The account's `workers.dev` subdomain
+    /// (`GET /accounts/{account_id}/workers/subdomain`).
+    ///
+    /// Resolve it once and feed it to
+    /// [`McpWorkerSpec::with_workers_dev_subdomain`] so deploy/status report the
+    /// server's URL. Kept off the deploy path deliberately: a deploy stays one
+    /// request, and a subdomain lookup failure must not fail an upload that
+    /// otherwise succeeded.
+    pub async fn workers_dev_subdomain(&self) -> Result<String, CloudflareError> {
+        let subdomain: WorkersSubdomain = self
+            .read_client()
+            .get_json("accounts/{account_id}/workers/subdomain", None)
+            .await?;
+        Ok(subdomain.subdomain)
     }
 
     /// List the account's deployed Worker scripts (each `{ id, .. }`), via the
@@ -362,6 +591,20 @@ impl McpWorkerDeployer {
         Ok(McpScriptStatus {
             script_name: script_name.to_string(),
             deployed: scripts.iter().any(|s| s.id == script_name),
+            mcp_url: None,
+        })
+    }
+
+    /// [`status`](Self::status) for a spec, additionally reporting the MCP
+    /// endpoint when the spec knows the account's `workers.dev` subdomain.
+    pub async fn status_for(
+        &self,
+        spec: &McpWorkerSpec,
+    ) -> Result<McpScriptStatus, CloudflareError> {
+        let status = self.status(&spec.script_name).await?;
+        Ok(McpScriptStatus {
+            mcp_url: spec.mcp_endpoint_url(),
+            ..status
         })
     }
 
@@ -389,6 +632,13 @@ impl McpWorkerDeployer {
 struct ScriptResult {
     #[serde(default)]
     id: Option<String>,
+}
+
+/// The `result` shape of `GET /accounts/{account_id}/workers/subdomain`.
+#[derive(Debug, Clone, Deserialize)]
+struct WorkersSubdomain {
+    #[serde(default)]
+    subdomain: String,
 }
 
 #[cfg(test)]

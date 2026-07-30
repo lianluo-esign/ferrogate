@@ -64,15 +64,37 @@ single-tenant/dev deployment, and a production server MUST render a consent scre
 `props.userId` is delivered to the agent as `this.props.userId` (surfaced by the
 `whoami` tool).
 
-**Automation fallback.** An optional static `MCP_BEARER_TOKEN` secret
-(`wrangler secret put MCP_BEARER_TOKEN`) short-circuits OAuth and routes directly
-to the MCP transport — for CI and FerroGate's own machine-to-machine calls.
+**Automation bearer.** An optional static credential short-circuits OAuth and
+routes directly to the MCP transport — for CI and FerroGate's own
+machine-to-machine calls. It is sourced through the **#423 Secrets Store seam**:
+the deploy declares a `secrets_store_secret` binding (`MCP_BEARER_TOKEN_STORE`)
+and the Worker reads it with `await env.MCP_BEARER_TOKEN_STORE.get()`. Rotating
+the value in the store needs no redeploy, and the plaintext never passes through
+a FerroGate process. A plain `wrangler secret put MCP_BEARER_TOKEN` remains the
+fallback for accounts with no Secrets Store.
 
 | Requirement | What | How |
 |-------------|------|-----|
 | KV namespace | `OAUTH_KV` binding | `wrangler kv namespace create OAUTH_KV`, id in `wrangler.toml` |
 | OAuth secret | none (provider self-issues) | — |
-| Automation bearer (optional) | `MCP_BEARER_TOKEN` | `wrangler secret put MCP_BEARER_TOKEN` |
+| Automation bearer (optional, preferred) | `MCP_BEARER_TOKEN_STORE` secrets-store binding | `wrangler secrets-store secret create <STORE_ID> --name mcp-bearer-token`, then `McpWorkerSpec::with_bearer_token_from_secrets_store` (or the `[[secrets_store_secrets]]` block in `wrangler.toml`) |
+| Automation bearer (fallback) | `MCP_BEARER_TOKEN` secret | `wrangler secret put MCP_BEARER_TOKEN` |
+
+The secret's **name** is canonical (`mcp-bearer-token`, matching `^[a-z0-9-]+$`)
+and the deploy pipeline rejects a non-canonical one. That is not cosmetic: the
+`cf://` env convention (`FERROGATE_CF_SECRET_*`) is lossy, so only a canonical
+name lets the *same* Secrets Store secret also be referenced as
+`cf://<store>/<name>` from the Rust gateway. See
+`docs/cloudflare-secrets-resolution.md`.
+
+### `keep_bindings`: a redeploy must not strip the secret
+
+A Workers Script-API `PUT` replaces the script's **entire** binding set, so a
+`secret_text` binding seeded by `wrangler secret put` would be erased by the next
+deploy through the Rust pipeline — silently disabling the automation path. The
+upload metadata therefore carries `keep_bindings: ["secret_text"]`
+(`McpWorkerSpec::keep_bindings`), which tells Cloudflare to carry those bindings
+over from the live script.
 
 ## 3. The deploy flow
 
@@ -80,9 +102,11 @@ Deploying a module Worker is a **`multipart/form-data` PUT** to
 `PUT /accounts/{account_id}/workers/scripts/{script_name}` carrying two parts:
 
 - **`metadata`** (JSON): `main_module`, the **Durable Object binding** for the
-  `McpAgent` class, the **`kv_namespace` binding** (`OAUTH_KV`), the DO
-  **`migrations`** (`new_sqlite_classes` — NOT `new_classes`; the Agents SDK
-  requires the SQLite backend), plus `compatibility_date`/`compatibility_flags`;
+  `McpAgent` class, the **`kv_namespace` binding** (`OAUTH_KV`), any
+  **`secrets_store_secret` bindings**, the DO **`migrations`**
+  (`new_sqlite_classes` — NOT `new_classes`; the Agents SDK requires the SQLite
+  backend), `keep_bindings`, plus
+  `compatibility_date`/`compatibility_flags`;
 - the **module** part carrying the Worker's ES-module source.
 
 Two ways to perform it:
@@ -100,33 +124,58 @@ Two ways to perform it:
   |----|------|-----------|
   | deploy | `deploy(&spec)` | `PUT .../workers/scripts/{name}` (multipart) |
   | list | `list()` | `GET .../workers/scripts` |
-  | status | `status(name)` | derived from `list()` (is the script present?) |
+  | status | `status(name)` / `status_for(&spec)` | derived from `list()` (is the script present?) |
+  | subdomain | `workers_dev_subdomain()` | `GET .../workers/subdomain` |
   | teardown | `teardown(name)` | `DELETE .../workers/scripts/{name}` |
 
-  The read side (`list`/`status`) is served by a `CloudflareClient` built from the
-  same parts, so it inherits the shared retry/backoff + typed-error mapping. The
-  whole pipeline is mock-tested with a scripted transport (no network); the live
-  multipart upload is the deploy agent's to prove (Cloudflare account required),
-  hence the issue stays **In progress**.
+  The read side (`list`/`status`/`subdomain`) is served by a `CloudflareClient`
+  built from the same parts, so it inherits the shared retry/backoff +
+  typed-error mapping. The whole pipeline is mock-tested with a scripted
+  transport (no network); the live multipart upload is the deploy agent's to
+  prove (Cloudflare account required).
 
-### Multipart content-type caveat
+### Reporting the deployed URL
 
-`ferrogate_cloudflare::ReqwestTransport` hard-codes `application/json` for request
-bodies, so the **production** multipart PUT must go through either a
-multipart-aware transport that honors [`McpWorkerSpec::content_type`] or the
-`wrangler deploy` fallback above. The request *construction* in the Rust pipeline
-is faithful and fully tested; only the live send needs the multipart-aware
-transport.
+`McpDeployOutcome::mcp_url` and `McpScriptStatus::mcp_url` carry
+`https://<script>.<subdomain>.workers.dev/mcp` — exactly the shape the #408
+upstream detector accepts, so a deployed server can be registered back as an
+`McpServerConfig` upstream. The account's `workers.dev` subdomain is not
+derivable from the script name, so it is resolved once
+(`McpWorkerDeployer::workers_dev_subdomain`) and recorded on the spec
+(`with_workers_dev_subdomain`). Without it the URL is `None` — a wrong upstream
+URL registered on a tenant is worse than an absent one.
+
+### Multipart content type
+
+`ferrogate_cloudflare::ReqwestTransport` honors `HttpRequest::content_type`
+(#411) and defaults to `application/json` only when it is `None`, and
+`build_deploy_request` sets it to `McpWorkerSpec::content_type()` — so the
+**production** multipart PUT goes out as
+`multipart/form-data; boundary=…` end to end. The `wrangler deploy` fallback
+above remains an equivalent CLI path, not a required one.
+
+> Superseded: this section previously stated that `ReqwestTransport` hard-codes
+> `application/json` and that production therefore *must* use `wrangler`. That
+> stopped being true with `677433e` (#409) on top of #411; the correction is
+> recorded here rather than deleted because operators were told to avoid the Rust
+> deploy path on the strength of it.
 
 ### Duplication with the #413 agent-gateway deployer
 
 The multipart script-upload construction here intentionally **mirrors**
-`ferrogate_runtime::cloudflare_gateway_deploy` (#413, the agent-gateway Worker).
-To avoid a dependency cycle (`ferrogate-runtime` already sits above the MCP
-crate's siblings), the minimal upload construction is **copied** into
-`ferrogate-mcp` rather than shared. When a third Cloudflare Worker deployer
-appears, this belongs in a small shared `WorkerScriptUpload` builder in
-`ferrogate-cloudflare` — a tracked future extraction.
+`ferrogate_runtime::cloudflare_gateway_deploy` (#413, the agent-gateway Worker),
+and is **copied** into `ferrogate-mcp` rather than shared.
+
+> Correction: earlier revisions of this section justified the copy with "a
+> dependency cycle". **There is no cycle** — `ferrogate-runtime` depends on
+> `ferrogate-core` / `ferrogate-cloudflare` / `ferrogate-storage`, and the only
+> crates depending on `ferrogate-mcp` are `ferrogate-gateway` and
+> `ferrogate-config`. The real reason is weaker: `ferrogate-mcp` should not take
+> a dependency on a *sibling deployer* to reach ~60 lines of multipart framing.
+
+With three Worker deployers now on `main` (#409, #411, #413), the correct
+destination is a shared `WorkerScriptUpload` builder in `ferrogate-cloudflare`
+that all three move to — not a fourth copy.
 
 ## 4. Billing + placement
 

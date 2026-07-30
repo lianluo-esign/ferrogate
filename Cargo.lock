@@ -1381,6 +1381,7 @@ dependencies = [
  "base64",
  "ferrogate-cloudflare",
  "ferrogate-core",
+ "ferrogate-secrets",
  "http",
  "rcgen",
  "rmcp",

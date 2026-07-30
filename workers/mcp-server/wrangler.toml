@@ -44,7 +44,40 @@ id = "REPLACE_WITH_OAUTH_KV_NAMESPACE_ID"
 [observability]
 enabled = true
 
-# --- Secrets (NOT stored here) ----------------------------------------------
-# MCP_BEARER_TOKEN is the OPTIONAL static bearer credential for automation that
-# bypasses the interactive OAuth flow. Seed it out-of-band:
-#   wrangler secret put MCP_BEARER_TOKEN
+# --- Secrets (values NEVER stored here) -------------------------------------
+# The automation bearer bypasses the interactive OAuth flow. It is OPTIONAL —
+# without it, OAuth is the only way in. Two sources, checked in this order:
+#
+# 1. PREFERRED — a Cloudflare Secrets Store binding. Rotating the value in the
+#    store takes effect with no redeploy, and the plaintext never passes through
+#    a FerroGate process. Create the store + secret once, then uncomment and
+#    paste the store id:
+#
+#      wrangler secrets-store store create ferrogate
+#      wrangler secrets-store secret create <STORE_ID> --name mcp-bearer-token
+#
+#    Kept commented because it is optional and a store id that does not exist
+#    fails the deploy outright. FerroGate's Rust pipeline emits the equivalent
+#    `secrets_store_secret` binding from
+#    `McpWorkerSpec::with_bearer_token_from_secrets_store`.
+#
+#    The secret NAME is canonical (`[a-z0-9-]+`) on purpose: the same secret is
+#    then also addressable from the Rust gateway as
+#    `cf://ferrogate/mcp-bearer-token` without the `FERROGATE_CF_SECRET_*`
+#    aliasing hazard — see docs/cloudflare-secrets-resolution.md (#423).
+#
+#    NOTE the runtime read is `await env.MCP_BEARER_TOKEN_STORE.get()` with NO
+#    name argument: store id + secret name are fixed at DEPLOY time.
+#
+# [[secrets_store_secrets]]
+# binding = "MCP_BEARER_TOKEN_STORE"
+# store_id = "REPLACE_WITH_SECRETS_STORE_ID"
+# secret_name = "mcp-bearer-token"
+#
+# 2. FALLBACK — a plain Worker secret, for deployments with no Secrets Store:
+#      wrangler secret put MCP_BEARER_TOKEN
+#
+#    A Workers Script-API PUT replaces the whole binding set, so this value
+#    would be erased by a redeploy through the Rust pipeline. It is not: the
+#    upload metadata carries `keep_bindings: ["secret_text"]`
+#    (`McpWorkerSpec::keep_bindings`), which tells Cloudflare to preserve it.
