@@ -414,12 +414,19 @@ impl FerroGateway {
         // honest API contract is to refuse the non-holder before issuing a
         // new proof row.
         let now = now_unix_seconds();
-        let existing = match state.get_site_domain(&hostname).await {
+        let incumbent = match state.get_site_domain(&hostname).await {
             Ok(existing) => existing,
             Err(error) => return storage_error(session, ctx, error.to_string()).await,
         };
-        if let Some(existing) = existing.as_ref() {
-            if existing.tenant_id != tenant_id {
+        // Consume the unfiltered incumbent HERE and let only a same-tenant view
+        // escape. #547: the terminal selector used to receive `existing
+        // .is_some()`, which answered "a row exists" while the 200 it produced
+        // claimed "re-bound within the same tenant" -- a different question. The
+        // refusal below makes the two coincide, but shadowing the raw read keeps
+        // them from drifting apart again: after this point there is no binding
+        // in scope that belongs to another tenant.
+        let same_tenant_existing = match incumbent {
+            Some(existing) if existing.tenant_id != tenant_id => {
                 let message = reject(format!("hostname {hostname} is bound by another tenant"));
                 return write_json_error(
                     session,
@@ -430,7 +437,8 @@ impl FerroGateway {
                 )
                 .await;
             }
-        }
+            unbound_or_own => unbound_or_own,
+        };
 
         // The caller's own proof for this hostname, if any. A live proof (or an
         // unexpired challenge) survives a re-bind -- ownership is of the
@@ -483,9 +491,10 @@ impl FerroGateway {
             hostname: hostname.clone(),
             tenant_id: tenant_id.clone(),
             site: site.clone(),
-            created_at_unix: existing
+            // No tenant filter needed: `same_tenant_existing` is already narrowed
+            // to this tenant's row (or none) by the refusal above.
+            created_at_unix: same_tenant_existing
                 .as_ref()
-                .filter(|existing| existing.tenant_id == tenant_id)
                 .map_or(now, |existing| existing.created_at_unix),
             updated_at_unix: now,
         };
@@ -537,7 +546,7 @@ impl FerroGateway {
                 admin_verification.state, live_ownership_proof, acme.enabled, acme.reload_triggered
             ),
         ));
-        let terminal = site_domain_bind_status(serving, existing.is_some());
+        let terminal = site_domain_bind_status(serving, same_tenant_existing.is_some());
         write_json_response(
             session,
             terminal.status(),
@@ -1167,8 +1176,8 @@ fn admin_site_domain(
 /// * `201 Created` -- a new binding that is serving immediately. Only a live
 ///   `verified` proof enrolls it in ACME; a `grandfathered` migration record is
 ///   serving-only.
-fn site_domain_bind_status(serving: bool, existing: bool) -> BindTerminal {
-    bind_terminal::BindTerminal::select(serving, existing)
+fn site_domain_bind_status(serving: bool, same_tenant_rebind: bool) -> BindTerminal {
+    bind_terminal::BindTerminal::select(serving, same_tenant_rebind)
 }
 
 /// The bind handler's success status, constructible ONLY by
@@ -1223,8 +1232,13 @@ mod bind_terminal {
 
     impl BindTerminal {
         /// The three-way terminal. This is the ONLY constructor.
-        pub(super) fn select(serving: bool, existing: bool) -> BindTerminal {
-            BindTerminal(match (serving, existing) {
+        ///
+        /// `same_tenant_rebind` is the caller's OWN prior binding, never "some
+        /// row exists" (#547) -- a different tenant's row is refused with 409
+        /// before the handler reaches this point, so a `true` here can only mean
+        /// a re-bind the tenant is entitled to.
+        pub(super) fn select(serving: bool, same_tenant_rebind: bool) -> BindTerminal {
+            BindTerminal(match (serving, same_tenant_rebind) {
                 (false, _) => StatusCode::ACCEPTED,
                 (true, true) => StatusCode::OK,
                 (true, false) => StatusCode::CREATED,

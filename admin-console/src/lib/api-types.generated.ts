@@ -18204,7 +18204,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Existing servable binding for the hostname updated (re-bound within the same tenant). Still serving; ACME enrollment still requires a live `verified` ownership proof, not a `grandfathered` migration record. */
+            /** @description Existing servable binding for the hostname updated. The incumbent binding was the calling tenant's own -- a hostname currently bound to a DIFFERENT tenant is refused with 409 and never reaches this terminal, so a 200 always means a re-bind the caller was entitled to. Still serving; ACME enrollment still requires a live `verified` ownership proof, not a `grandfathered` migration record. */
             200: {
                 headers: {
                     "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
@@ -18224,7 +18224,7 @@ export interface operations {
                     "application/json": components["schemas"]["AdminSiteDomainResponse"];
                 };
             };
-            /** @description Binding recorded but NOT serving. Ownership is unproven, so the gateway deliberately keeps the hostname out of the ACME order set (no certificate is ordered) and it will not answer traffic until POST /admin/v1/site-domains/{hostname}/verify succeeds. Clients must branch on this: it is a 2xx that does not mean the domain is live. Read `site_domain.serving` / `verification.state` rather than inferring from the status code. */
+            /** @description Binding recorded but NOT serving. The binding row was persisted for the calling tenant before this response was produced, so the returned `site_domain` is the stored row and not a fabricated echo of the request. Ownership is unproven, so the gateway deliberately keeps the hostname out of the ACME order set (no certificate is ordered) and it will not answer traffic until POST /admin/v1/site-domains/{hostname}/verify succeeds. Clients must branch on this: it is a 2xx that does not mean the domain is live. Read `site_domain.serving` / `verification.state` rather than inferring from the status code. */
             202: {
                 headers: {
                     "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
@@ -18238,7 +18238,16 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
+            /** @description The hostname is currently bound to a different tenant, so the bind is refused. This is the terminal for a non-holder bind even when the incumbent's ownership is unproven: the gateway refuses BEFORE issuing or upserting the caller's proof row, so no challenge is created and no binding is written. It is deliberately not a 2xx -- an earlier contract returned a success status describing a re-bind that never happened (#547). The same 409 is also returned when another tenant wins the binding between this request's preflight read and its write. */
+            409: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             413: components["responses"]["PayloadTooLarge"];
             503: components["responses"]["ServiceUnavailable"];
         };
