@@ -7692,12 +7692,16 @@ mod tests {
         };
         let shared = SharedAppState::with_source_path(active, Some(path.clone()));
 
-        let error = shared
-            .reload_from_source_path()
-            .expect_err(
+        // `{:#}` renders the full anyhow source chain: the reload wraps the
+        // underlying `ensure_auth_posture_is_declared` error (which names the
+        // contradiction) in a "config reload rejected" context, so `.to_string()`
+        // alone would only show the top context and hide the specifics.
+        let error = format!(
+            "{:#}",
+            shared.reload_from_source_path().expect_err(
                 "a file reload that reintroduces the #542 startup contradiction must be rejected",
             )
-            .to_string();
+        );
         assert!(error.contains("[auth] disabled = true"), "{error}");
         assert!(error.contains("credential source"), "{error}");
 
