@@ -734,9 +734,12 @@ tick_interval_secs = {tick_interval_secs}
             &payload,
             200,
             |body| {
+                // `valid && committed` is the whole proof that the reload took
+                // effect. `listener_reload_required` lives on the /validate
+                // response, not on AdminConfigReloadResponse, so asserting it
+                // here compared Null against false and could never pass (#578).
                 assert_eq!(body["valid"], true);
                 assert_eq!(body["committed"], true);
-                assert_eq!(body["listener_reload_required"], false);
                 Ok(())
             },
         )

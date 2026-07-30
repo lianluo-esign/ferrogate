@@ -2445,11 +2445,24 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     let lifecycle_worker_id = RefCell::new(String::new());
     let lifecycle_worker_secret = RefCell::new(String::new());
 
+    // The formal tenant account below activates the #182/#168 entitlement gate
+    // on POST /admin/v1/self-hosted-workers, and the default plan denies
+    // self-hosted worker registration. Seed a plan that grants it and bind the
+    // tenant to it, or the scenario 403s before reaching any #578 scheduler
+    // assertion.
+    case.expect_json(
+        "POST",
+        "/admin/v1/plans",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"lifecycle-plan","name":"Lifecycle plan","slug":"lifecycle-plan","self_hosted_workers_enabled":true}"#,
+        201,
+        |_| Ok(()),
+    )?;
     case.expect_json(
         "POST",
         "/admin/v1/tenant-accounts",
         &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{"id":"org_demo","name":"Lifecycle tenant","slug":"lifecycle-tenant"}"#,
+        r#"{"id":"org_demo","name":"Lifecycle tenant","slug":"lifecycle-tenant","plan_id":"lifecycle-plan"}"#,
         201,
         |_| Ok(()),
     )?;
