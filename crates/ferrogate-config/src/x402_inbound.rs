@@ -40,7 +40,11 @@ use ferrogate_core::TenantContext;
 use serde::{Deserialize, Serialize};
 
 /// Default forward-claim capacity when the operator does not pin one.
-pub const DEFAULT_FORWARD_CLAIM_CAPACITY: usize = 16_384;
+///
+/// Re-exported from the billing crate rather than restated: this module's whole
+/// premise is that config validity cannot drift from runtime enforcement, and a
+/// second literal is exactly such a drift.
+pub use ferrogate_billing::DEFAULT_CLAIM_CAPACITY as DEFAULT_FORWARD_CLAIM_CAPACITY;
 
 /// The operator-authored inbound x402 section.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -35,7 +35,10 @@ const TTL: u64 = 600;
 
 fn endpoint() -> ValidatedInboundX402Endpoint {
     InboundX402Endpoint {
-        resource_url: "https://api.ferrogate.example/paid/report".to_string(),
+        // Must agree with `request()`'s path below: the gate now binds a
+        // settled payment to the priced path, so a fixture where the two
+        // disagree would only ever exercise the refusal.
+        resource_url: "https://api.ferrogate.example/v1/priced/report".to_string(),
         resource_description: Some("Fixed-price report".to_string()),
         resource_mime_type: Some("application/json".to_string()),
         network_caip2: CAIP2_SOLANA_DEVNET.to_string(),
@@ -46,6 +49,7 @@ fn endpoint() -> ValidatedInboundX402Endpoint {
         max_timeout_seconds: 120,
         memo: None,
         challenge_error: Some("payment required".to_string()),
+        allowed_methods: Vec::new(),
     }
     .validate()
     .expect("endpoint validates")
@@ -214,11 +218,82 @@ fn a_duplicated_settlement_header_is_ambiguous_rather_than_first_one_wins() {
     let decision = harness
         .gate
         .evaluate(&request(&headers), &call("req-1"), 1_000);
+    assert_eq!(
+        decision.http_status(),
+        Some(402),
+        "a duplicated settlement header is a payment-side fault, not a 403 \
+         admission failure"
+    );
     assert!(matches!(
         decision,
-        InboundX402Decision::Refused(InboundX402Refusal::Admission(
-            InboundX402AdmissionError::AmbiguousHeader { .. }
-        ))
+        InboundX402Decision::Refused(InboundX402Refusal::AmbiguousSettlementHeader)
+    ));
+}
+
+// -------------------------------------------------------------------------
+// Resource binding
+// -------------------------------------------------------------------------
+
+#[test]
+fn a_settled_proof_does_not_authorize_a_forward_to_another_path() {
+    let harness = harness();
+    let owned = paid_headers("sidecar-1", &paid_header());
+    let headers = borrow(&owned);
+    let mut elsewhere = request(&headers);
+    elsewhere.path = "/v1/admin/secrets";
+
+    let decision = harness.gate.evaluate(&elsewhere, &call("req-1"), 1_000);
+    assert!(!decision.forwards());
+    assert_eq!(
+        decision.http_status(),
+        Some(403),
+        "paying again buys nothing: the price was never quoted for this path"
+    );
+    assert!(matches!(
+        decision,
+        InboundX402Decision::Refused(InboundX402Refusal::ResourceMismatch { .. })
+    ));
+    assert!(
+        harness.revenue.is_empty(),
+        "a refused forward must record no revenue"
+    );
+}
+
+#[test]
+fn a_settled_proof_does_not_authorize_a_method_the_price_did_not_buy() {
+    let harness = harness();
+    let owned = paid_headers("sidecar-1", &paid_header());
+    let headers = borrow(&owned);
+    let mut wrong_method = request(&headers);
+    wrong_method.method = "DELETE";
+
+    let decision = harness.gate.evaluate(&wrong_method, &call("req-1"), 1_000);
+    assert!(!decision.forwards());
+    assert!(matches!(
+        decision,
+        InboundX402Decision::Refused(InboundX402Refusal::ResourceMismatch { .. })
+    ));
+    assert!(harness.revenue.is_empty());
+}
+
+#[test]
+fn an_unpaid_call_to_another_path_is_refused_rather_than_quoted_a_price() {
+    // The 402 challenge quotes ONE resource. Answering an unpaid call on some
+    // other path with this endpoint's challenge would invite a payment that
+    // could never authorize that path.
+    let harness = harness();
+    let owned = vec![
+        (HEADER_SIDECAR_CREDENTIAL, CREDENTIAL.to_string()),
+        (HEADER_SIDECAR_REQUEST_ID, "sidecar-1".to_string()),
+    ];
+    let headers = borrow(&owned);
+    let mut elsewhere = request(&headers);
+    elsewhere.path = "/v1/free/thing";
+
+    let decision = harness.gate.evaluate(&elsewhere, &call("req-1"), 1_000);
+    assert!(matches!(
+        decision,
+        InboundX402Decision::Refused(InboundX402Refusal::ResourceMismatch { .. })
     ));
 }
 
@@ -345,15 +420,26 @@ fn the_same_sidecar_request_retrying_is_idempotent_and_does_not_double_record() 
         .gate
         .evaluate(&request(&headers), &call("req-1"), 1_000)
         .forwards());
+    // A DIFFERENT FerroGate request id: FerroGate mints one per HTTP request, so
+    // a sidecar retry never arrives with the first call's id. Reusing "req-1"
+    // here — as this test used to — makes the assertion pass under an
+    // implementation that keys ownership on the FerroGate id, which is exactly
+    // the bug it is supposed to catch.
     let retry = harness
         .gate
-        .evaluate(&request(&headers), &call("req-1"), 1_030);
+        .evaluate(&request(&headers), &call("req-2"), 1_030);
     assert!(!retry.forwards());
     assert_eq!(retry.http_status(), Some(409));
-    assert!(matches!(
-        retry,
-        InboundX402Decision::AlreadyForwarded { .. }
-    ));
+    match retry {
+        InboundX402Decision::AlreadyForwarded {
+            first_sidecar_request_id,
+            ..
+        } => assert_eq!(
+            first_sidecar_request_id, "sidecar-1",
+            "the claim holder is the first SIDECAR id, not this request's"
+        ),
+        other => panic!("a sidecar retry must be idempotent, got {other:?}"),
+    }
     assert_eq!(harness.revenue.len(), 1, "revenue must be counted once");
 }
 
@@ -433,12 +519,54 @@ fn the_durable_record_reports_the_original_call_as_already_forwarded() {
     assert!(gate
         .evaluate(&request(&headers), &call("req-1"), 1_000)
         .forwards());
-    // Same FerroGate request id: the sidecar's own retry, after the claim expired.
-    let decision = gate.evaluate(&request(&headers), &call("req-1"), 5_000);
-    assert!(matches!(
-        decision,
-        InboundX402Decision::AlreadyForwarded { .. }
-    ));
+    // Same SIDECAR request id, fresh FerroGate request id: the sidecar's own
+    // retry after the claim expired. This is the shape a real retry has, and the
+    // durable record — not the expired claim — is what must recognise it.
+    let decision = gate.evaluate(&request(&headers), &call("req-2"), 5_000);
+    match decision {
+        InboundX402Decision::AlreadyForwarded {
+            first_sidecar_request_id,
+            ..
+        } => assert_eq!(first_sidecar_request_id, "sidecar-1"),
+        other => panic!("the durable record must report an idempotent retry, got {other:?}"),
+    }
+    assert_eq!(revenue.len(), 1);
+}
+
+/// The counterpart to the test above: a different sidecar id on the same proof
+/// is a replay, not a retry. Together they pin that ownership is decided by the
+/// sidecar id — one test alone passes under an implementation that always
+/// answers 409, and the other alone passes under one that always answers 402.
+#[test]
+fn a_different_sidecar_id_on_the_same_proof_is_a_replay_after_the_claim_expired() {
+    let revenue = Arc::new(InMemoryRevenueSink::default());
+    let claims = Arc::new(InMemoryForwardClaimGuard::new(10, 64).expect("valid bounds"));
+    let gate = InboundX402Gate::new(
+        endpoint(),
+        policy(),
+        claims,
+        Arc::clone(&revenue) as Arc<dyn RevenueSink>,
+    );
+    let first = paid_headers("sidecar-1", &paid_header());
+    let first_headers = borrow(&first);
+    assert!(gate
+        .evaluate(&request(&first_headers), &call("req-1"), 1_000)
+        .forwards());
+
+    let stolen = paid_headers("sidecar-2", &paid_header());
+    let stolen_headers = borrow(&stolen);
+    let decision = gate.evaluate(&request(&stolen_headers), &call("req-2"), 5_000);
+    assert_eq!(decision.http_status(), Some(402));
+    match decision {
+        InboundX402Decision::Refused(InboundX402Refusal::ProofReplay {
+            first_sidecar_request_id,
+            ..
+        }) => assert_eq!(
+            first_sidecar_request_id, "sidecar-1",
+            "the refusal must name the sidecar id that legitimately holds the claim"
+        ),
+        other => panic!("a foreign sidecar id must be refused as a replay, got {other:?}"),
+    }
     assert_eq!(revenue.len(), 1);
 }
 

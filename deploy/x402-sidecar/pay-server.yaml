@@ -16,6 +16,9 @@
 #   1. Pin `PAY_SIDECAR_IMAGE` to a digest.
 #   2. Run `pay server --config pay-server.yaml --dry-run` (or the equivalent
 #      for that build) and fix whatever it rejects.
+#   3. Confirm how the `${...}` placeholders below are expanded, and that
+#      `${PAY_REQUEST_ID}` yields a DIFFERENT value on every call. Compose does
+#      not interpolate a mounted file's contents; see the README.
 #
 # NO SECURITY PROPERTY OF THIS DEPLOYMENT DEPENDS ON THIS FILE. The two that
 # matter are enforced elsewhere and are independently checkable:
@@ -67,6 +70,19 @@ facilitator_url: ${PAY_FACILITATOR_URL}
 # credential authenticates the hop; the request id is what makes a sidecar retry
 # distinguishable from a replayed proof, so it MUST be stable across the
 # sidecar's own retries of one logical call and unique across different calls.
+#
+# ⚠️ `${PAY_REQUEST_ID}` is NOT a docker-compose variable and is not supplied by
+# the environment. It is a placeholder for whatever per-request token this `pay`
+# build substitutes, and THAT HAS NOT BEEN VERIFIED — see the README's "Variable
+# expansion" section. Docker Compose does not interpolate the contents of a
+# bind-mounted file, so if `pay server` does not substitute it either, every call
+# forwards the literal string `${PAY_REQUEST_ID}`.
+#
+# That failure is silent and it is the worst one in this file: the sidecar
+# request id is the forward-once ownership key, so a constant value makes every
+# distinct paid call look like a retry of the first — the second payer is
+# answered 409 and served nothing, having paid. Confirm the value differs per
+# call before any non-sandbox use.
 forward_headers:
   x-ferrogate-sidecar-credential: ${PAY_UPSTREAM_CREDENTIAL}
   x-ferrogate-sidecar-request-id: ${PAY_REQUEST_ID}

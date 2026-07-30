@@ -42,6 +42,7 @@ fn endpoint() -> InboundX402Endpoint {
         max_timeout_seconds: 120,
         memo: Some("ferrogate-paid-report".to_string()),
         challenge_error: Some("payment required".to_string()),
+        allowed_methods: Vec::new(),
     }
 }
 
@@ -52,6 +53,7 @@ fn validated() -> ValidatedInboundX402Endpoint {
 fn call_ctx() -> InboundX402CallContext {
     InboundX402CallContext {
         request_id: "req-1".to_string(),
+        sidecar_request_id: "sidecar-1".to_string(),
         trace_id: Some("trace-1".to_string()),
         method: "GET".to_string(),
         tenant: TenantContext {

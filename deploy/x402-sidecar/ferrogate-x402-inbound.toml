@@ -14,6 +14,13 @@
 # only; `ValidatedInboundX402Config::resolve` is the single path from a name to a
 # value. Committing this file leaks nothing.
 
+# Bind the gateway listener to every interface in the container. The built-in
+# default is `127.0.0.1:8080` (loopback), which inside a container is reachable
+# only from that container — the sidecar's `http://ferrogate-paid:8080` hop would
+# be refused and the healthcheck would never pass. A committed test asserts this
+# key is present and non-loopback.
+listen = "0.0.0.0:8080"
+
 [x402_inbound]
 enabled = true
 

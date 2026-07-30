@@ -436,8 +436,38 @@ fn an_empty_sidecar_request_id_is_refused() {
 fn headers_to_strip_covers_the_credential_and_every_reserved_header() {
     let strip = policy().headers_to_strip();
     assert!(strip.contains(&HEADER_SIDECAR_CREDENTIAL));
+    // Every piece of spend-once material must stop at the gate. `PAYMENT-RESPONSE`
+    // is the settlement proof a replay attempt needs, and the sidecar request id
+    // is the forward-once claim owner; leaking either into the handler's request
+    // logs (or into whatever the handler forwards to) hands out replay material.
+    assert!(
+        strip.contains(&HEADER_PAYMENT_RESPONSE),
+        "the settlement proof must not reach the protected handler"
+    );
+    assert!(
+        strip.contains(&HEADER_SIDECAR_REQUEST_ID),
+        "the claim owner must not reach the protected handler"
+    );
     for reserved in RESERVED_ATTRIBUTION_HEADERS {
         assert!(strip.contains(reserved), "{reserved} is not stripped");
+    }
+}
+
+/// Whatever a request legitimately carries past admission must be on the strip
+/// list. Pins the relationship rather than the list's current contents, so a
+/// future header added to the admitted set cannot silently travel downstream.
+#[test]
+fn every_header_admission_consumes_is_stripped_before_the_handler() {
+    let strip = policy().headers_to_strip();
+    for consumed in [
+        HEADER_SIDECAR_CREDENTIAL,
+        HEADER_SIDECAR_REQUEST_ID,
+        HEADER_PAYMENT_RESPONSE,
+    ] {
+        assert!(
+            strip.contains(&consumed),
+            "{consumed} is read by the gate but not stripped"
+        );
     }
 }
 

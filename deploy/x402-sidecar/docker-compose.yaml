@@ -21,9 +21,14 @@
 # comment claimed the opposite (see the "Sidecar compromise" row in
 # docs/x402-inbound-sidecar.md).
 #
-# Verify the boundary rather than trusting this comment:
+# Verify the boundary rather than trusting this comment. The DNS check is the
+# reliable one — it depends only on glibc, not on which fetcher the `pay` image
+# happens to ship:
 #   docker compose exec pay-sidecar sh -c 'getent hosts ferrogate-admin' ; # must fail
-#   docker compose exec pay-sidecar sh -c 'wget -T2 -qO- http://ferrogate-admin:8081/health' ; # must fail
+# If the sidecar image has a fetcher, a connect attempt must also fail. Note that
+# a missing binary also "fails", so treat this as confirmation of the DNS result,
+# not as independent evidence:
+#   docker compose exec pay-sidecar sh -c 'wget -T2 -qO- http://ferrogate-admin:8081/healthz' ; # must fail
 
 name: ferrogate-x402-sidecar
 
@@ -71,9 +76,22 @@ services:
       # FERROGATE_X402_INBOUND_SIDECAR_SECRET_PREVIOUS: ${FERROGATE_X402_INBOUND_SIDECAR_SECRET_PREVIOUS}
       FERROGATE_LOG_FORMAT: json
     networks:
+      # Also on `admin` so the control-plane service can proxy to this gateway.
+      # This does NOT weaken the claim below: the sidecar sits on `edge` +
+      # `paid-upstream` and still shares no network with `ferrogate-admin`, so
+      # it still has no route to the admin listener. Dual-homing the ADMIN
+      # service onto `paid-upstream` would be the unsafe direction, and is what
+      # the header comment warns against.
       - paid-upstream
+      - admin
     healthcheck:
-      test: ["CMD", "/usr/local/bin/ferrogate", "health", "--addr", "127.0.0.1:8080"]
+      # `ferrogate` has no `health` subcommand (see `Commands` in
+      # crates/ferrogate-cli/src/cli.rs) — probe the gateway's own `/healthz`
+      # route instead. `curl` is installed in the runtime image (see the
+      # repo-root Dockerfile); a tokenless `GET /healthz` is the one request the
+      # client-action-time module admits without a token, so this probe does not
+      # need credentials.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -86,7 +104,13 @@ services:
   # because it shares no network with it.
   ferrogate-admin:
     image: ${FERROGATE_IMAGE:-ghcr.io/lianluo-esign/ferrogate:latest}
-    command: ["admin", "--listen", "0.0.0.0:8081"]
+    # `control-api serve` is the real subcommand (`admin-api serve` is its
+    # deprecated alias); there is no `admin` subcommand and no `--listen` flag.
+    # The listen address lives in the `[control_api]` section of the mounted
+    # config.
+    command: ["control-api", "serve", "--config", "/etc/ferrogate/ferrogate-x402-admin.toml"]
+    volumes:
+      - ./ferrogate-x402-admin.toml:/etc/ferrogate/ferrogate-x402-admin.toml:ro
     environment:
       FERROGATE_ADMIN_JWT_SECRET_ENV: FERROGATE_ADMIN_JWT_SECRET
       FERROGATE_ADMIN_JWT_SECRET: ${FERROGATE_ADMIN_JWT_SECRET:?set the admin JWT secret}

@@ -56,6 +56,7 @@ use crate::x402_inbound::{
 };
 use crate::x402_inbound_admission::{
     AdmittedRequest, ForwardedRequest, InboundX402AdmissionError, SidecarAdmissionPolicy,
+    MAX_SIDECAR_REQUEST_ID_BYTES,
 };
 use crate::x402_inbound_forward::{ClaimOutcome, ForwardClaimGuard};
 use crate::BillingError;
@@ -65,12 +66,92 @@ use crate::BillingError;
 /// request that tries.
 ///
 /// [`RESERVED_ATTRIBUTION_HEADERS`]: crate::x402_inbound_admission::RESERVED_ATTRIBUTION_HEADERS
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundCallIdentity {
-    /// FerroGate request id for this HTTP request.
-    pub request_id: String,
-    /// Trace id, when tracing is on.
-    pub trace_id: Option<String>,
+    request_id: String,
+    trace_id: Option<String>,
+}
+
+/// Upper bound on FerroGate's own request/trace ids, matched to
+/// [`MAX_SIDECAR_REQUEST_ID_BYTES`] so neither identity can be the one that
+/// bloats every evidence row.
+///
+/// [`MAX_SIDECAR_REQUEST_ID_BYTES`]: crate::x402_inbound_admission::MAX_SIDECAR_REQUEST_ID_BYTES
+pub const MAX_CALL_IDENTITY_BYTES: usize = MAX_SIDECAR_REQUEST_ID_BYTES;
+
+/// Why an [`InboundCallIdentity`] could not be constructed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InboundCallIdentityError {
+    /// `request_id` is empty. Every revenue record is keyed for audit by it.
+    EmptyRequestId,
+    /// An id exceeds [`MAX_CALL_IDENTITY_BYTES`].
+    IdTooLong {
+        /// Which field.
+        field: &'static str,
+        /// Its length in bytes.
+        len: usize,
+    },
+}
+
+impl std::fmt::Display for InboundCallIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyRequestId => write!(f, "FerroGate request id must not be empty"),
+            Self::IdTooLong { field, len } => write!(
+                f,
+                "{field} is {len} bytes, exceeds the {MAX_CALL_IDENTITY_BYTES}-byte cap"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InboundCallIdentityError {}
+
+impl InboundCallIdentity {
+    /// Build a call identity, enforcing the bounds at the type boundary.
+    ///
+    /// The fields are private and checked here rather than left to the caller:
+    /// both values are copied verbatim onto every revenue record and every
+    /// evidence line, and this is a `pub` API, so "the gateway always mints a
+    /// sane id" is an assumption the type should not have to make.
+    pub fn new(
+        request_id: impl Into<String>,
+        trace_id: Option<String>,
+    ) -> Result<Self, InboundCallIdentityError> {
+        let request_id = request_id.into();
+        if request_id.is_empty() {
+            return Err(InboundCallIdentityError::EmptyRequestId);
+        }
+        if request_id.len() > MAX_CALL_IDENTITY_BYTES {
+            return Err(InboundCallIdentityError::IdTooLong {
+                field: "request_id",
+                len: request_id.len(),
+            });
+        }
+        if let Some(trace_id) = &trace_id {
+            if trace_id.len() > MAX_CALL_IDENTITY_BYTES {
+                return Err(InboundCallIdentityError::IdTooLong {
+                    field: "trace_id",
+                    len: trace_id.len(),
+                });
+            }
+        }
+        Ok(Self {
+            request_id,
+            trace_id,
+        })
+    }
+
+    /// FerroGate's request id for this HTTP request.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    /// The trace id, when tracing is on.
+    pub fn trace_id(&self) -> Option<&str> {
+        self.trace_id.as_deref()
+    }
 }
 
 /// What the private upstream must do with an inbound request.
@@ -120,6 +201,21 @@ pub enum InboundX402Refusal {
     /// The `PAYMENT-RESPONSE` header is present but not parseable as settlement
     /// evidence for this endpoint's network.
     MalformedSettlement { reason: String },
+    /// More than one `PAYMENT-RESPONSE` header arrived, so which proof the
+    /// caller meant is undecidable. Kept distinct from
+    /// [`Self::Admission`]: this is a payment-side fault on an otherwise
+    /// admissible sidecar forward, and folding it into the admission-failure
+    /// class would contaminate the "someone is bypassing the sidecar" signal.
+    AmbiguousSettlementHeader,
+    /// The settled payment was presented against a path or method the fixed
+    /// price does not buy. The proof may be genuine; it just does not authorize
+    /// *this* request.
+    ResourceMismatch {
+        /// Path (or method) the endpoint prices.
+        expected: String,
+        /// What arrived instead.
+        actual: String,
+    },
     /// Settlement evidence did not match the fixed price.
     Settlement(InboundX402SettlementError),
     /// A different request presented an already-claimed payment.
@@ -148,6 +244,11 @@ impl InboundX402Refusal {
         match self {
             Self::Admission(error) => error.http_status(),
             Self::MalformedSettlement { .. } => 402,
+            Self::AmbiguousSettlementHeader => 402,
+            // 403, not 402: paying again buys nothing, because the price was
+            // never quoted for this resource. Handing back a challenge would
+            // invite the caller to pay a second time for the same refusal.
+            Self::ResourceMismatch { .. } => 403,
             Self::Settlement(_) => 402,
             Self::ProofReplay { .. } => 402,
             Self::Unavailable { .. } => 503,
@@ -159,6 +260,8 @@ impl InboundX402Refusal {
         match self {
             Self::Admission(error) => error.code(),
             Self::MalformedSettlement { .. } => "x402_inbound_malformed_settlement",
+            Self::AmbiguousSettlementHeader => "x402_inbound_ambiguous_settlement_header",
+            Self::ResourceMismatch { .. } => "x402_inbound_resource_mismatch",
             Self::Settlement(_) => "x402_inbound_settlement_rejected",
             Self::ProofReplay { .. } => "x402_inbound_proof_replay",
             Self::Unavailable { code, .. } => code.as_str(),
@@ -277,10 +380,28 @@ impl InboundX402Gate {
             }
         };
 
+        // Bind the proof to the priced resource before it is parsed. The 402
+        // challenge quotes ONE resource_url; without this, a settlement bought
+        // for the priced route would authorize a forward to any other path the
+        // sidecar can reach, and "only one fixed-price route is enabled" would
+        // rest on the sidecar's route list rather than on the gate.
+        if request.path != self.endpoint.resource_path() {
+            return InboundX402Decision::Refused(InboundX402Refusal::ResourceMismatch {
+                expected: self.endpoint.resource_path().to_string(),
+                actual: request.path.to_string(),
+            });
+        }
+        if !self.endpoint.allows_method(request.method) {
+            return InboundX402Decision::Refused(InboundX402Refusal::ResourceMismatch {
+                expected: self.endpoint.allowed_methods().join(","),
+                actual: request.method.to_string(),
+            });
+        }
+
         let settlement_header = match request.single(HEADER_PAYMENT_RESPONSE) {
             Ok(value) => value,
-            Err(error) => {
-                return InboundX402Decision::Refused(InboundX402Refusal::Admission(error))
+            Err(_) => {
+                return InboundX402Decision::Refused(InboundX402Refusal::AmbiguousSettlementHeader)
             }
         };
         let Some(settlement_header) = settlement_header else {
@@ -295,8 +416,9 @@ impl InboundX402Gate {
         };
 
         let ctx = InboundX402CallContext {
-            request_id: call.request_id.clone(),
-            trace_id: call.trace_id.clone(),
+            request_id: call.request_id().to_string(),
+            sidecar_request_id: admitted.sidecar_request_id.clone(),
+            trace_id: call.trace_id().map(str::to_string),
             method: admitted.method.clone(),
             tenant: admitted.tenant.clone(),
             occurred_at_unix: Some(now_unix),
@@ -313,15 +435,26 @@ impl InboundX402Gate {
         // id, so a record that exists means this payment was already forwarded.
         match self.revenue.get(&record.id) {
             Ok(Some(existing)) => {
-                return if existing.request_id == record.request_id {
+                // Ownership is the SIDECAR request id, never FerroGate's: a
+                // sidecar timeout-and-retry of the same paid call keeps its
+                // sidecar id but arrives with a freshly minted FerroGate id.
+                // Comparing FerroGate ids here would classify every genuine
+                // retry as a replay and charge the payer twice for a response
+                // it never received.
+                //
+                // A record written before `sidecar_request_id` existed carries
+                // an empty string, which matches no live sidecar id (admission
+                // rejects an empty one), so such a record refuses as a replay
+                // rather than forwarding a second time.
+                return if existing.sidecar_request_id == record.sidecar_request_id {
                     InboundX402Decision::AlreadyForwarded {
                         payment_key: record.id,
-                        first_sidecar_request_id: admitted.sidecar_request_id,
+                        first_sidecar_request_id: existing.sidecar_request_id,
                     }
                 } else {
                     InboundX402Decision::Refused(InboundX402Refusal::ProofReplay {
                         payment_key: record.id,
-                        first_sidecar_request_id: existing.request_id,
+                        first_sidecar_request_id: existing.sidecar_request_id,
                     })
                 };
             }
@@ -362,9 +495,22 @@ impl InboundX402Gate {
         // payment was consumed, otherwise the durable backstop above cannot see
         // it. If the sink refuses, give the claim back so the payer can retry.
         if let Err(error) = self.revenue.record(&record) {
-            let _ = self
+            // Best-effort: the request is refused either way, but a claim that
+            // could not be given back is held until its TTL expires and blocks
+            // the payer's legitimate retry, so it must be observable rather
+            // than silently swallowed.
+            if let Err(release_error) = self
                 .claims
-                .release(&record.id, &admitted.sidecar_request_id);
+                .release(&record.id, &admitted.sidecar_request_id)
+            {
+                tracing::warn!(
+                    payment_key = %record.id,
+                    code = %release_error.code,
+                    message = %release_error.message,
+                    "inbound x402 claim could not be released after a revenue-sink failure; \
+                     it stays held until its TTL expires"
+                );
+            }
             return InboundX402Decision::Refused(unavailable(&error));
         }
 

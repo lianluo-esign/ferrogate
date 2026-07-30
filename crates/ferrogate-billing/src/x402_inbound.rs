@@ -103,7 +103,18 @@ pub struct InboundX402Endpoint {
     /// Optional human-readable reason echoed in the 402 body's `error` field.
     #[serde(default)]
     pub challenge_error: Option<String>,
+    /// HTTP methods the fixed price buys on [`Self::resource_url`]. Empty means
+    /// the default set, [`DEFAULT_ALLOWED_METHODS`].
+    ///
+    /// The price is quoted for one resource, so the gate refuses a settled
+    /// payment presented against a different method — otherwise a payment
+    /// quoted for a read could authorize a write on the same path.
+    #[serde(default)]
+    pub allowed_methods: Vec<String>,
 }
+
+/// Methods a fixed-price endpoint buys when the operator pins none.
+pub const DEFAULT_ALLOWED_METHODS: &[&str] = &["POST"];
 
 /// Structured validation failures for an [`InboundX402Endpoint`]. Each variant
 /// is a distinct rejection class an operator/admin surface can render without
@@ -121,8 +132,11 @@ pub enum InboundX402ConfigError {
     InvalidTimeout { reason: String },
     /// The seller memo exceeds the wire memo byte cap.
     MemoTooLong { len: usize },
-    /// `resource_url` is empty or oversized for the wire contract.
+    /// `resource_url` is empty, oversized, or carries no absolute path the gate
+    /// could bind an arriving request to.
     InvalidResourceUrl { reason: String },
+    /// An entry of `allowed_methods` is not a usable HTTP method token.
+    InvalidAllowedMethod { value: String },
 }
 
 impl std::fmt::Display for InboundX402ConfigError {
@@ -143,6 +157,9 @@ impl std::fmt::Display for InboundX402ConfigError {
                 )
             }
             Self::InvalidResourceUrl { reason } => write!(f, "invalid resource_url: {reason}"),
+            Self::InvalidAllowedMethod { value } => {
+                write!(f, "{value:?} is not a valid HTTP method token")
+            }
         }
     }
 }
@@ -166,6 +183,8 @@ impl InboundX402Endpoint {
                 reason: "must be non-empty and <= 2048 bytes".to_string(),
             });
         }
+        let resource_path = resource_path_of(&self.resource_url)?;
+        let allowed_methods = normalize_allowed_methods(&self.allowed_methods)?;
 
         for (field, value) in [
             ("mint", &self.mint),
@@ -204,8 +223,78 @@ impl InboundX402Endpoint {
         Ok(ValidatedInboundX402Endpoint {
             endpoint: self,
             network,
+            resource_path,
+            allowed_methods,
         })
     }
+}
+
+/// Extract the absolute path `resource_url` prices, with any query or fragment
+/// removed.
+///
+/// Deliberately hand-rolled rather than pulling in a URL parser: the only thing
+/// the gate needs is the path component of an absolute `scheme://authority/path`
+/// URL, and the check below is strict — anything it cannot resolve confidently
+/// is rejected at config validation rather than guessed at request time.
+fn resource_path_of(resource_url: &str) -> Result<String, InboundX402ConfigError> {
+    let invalid = |reason: &str| InboundX402ConfigError::InvalidResourceUrl {
+        reason: reason.to_string(),
+    };
+
+    let (scheme, rest) = resource_url
+        .split_once("://")
+        .ok_or_else(|| invalid("must be an absolute URL of the form scheme://host/path"))?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(invalid("scheme must be http or https"));
+    }
+
+    // Everything up to the first '/' is the authority; the remainder (with its
+    // leading '/') is the path. A URL with no '/' at all prices the site root.
+    let path = match rest.find('/') {
+        Some(index) => &rest[index..],
+        None => {
+            if rest.is_empty() {
+                return Err(invalid("has no host"));
+            }
+            "/"
+        }
+    };
+    // `split` always yields at least one element, so the fallback is unreachable
+    // in practice; it exists so this stays panic-free without an `unwrap`.
+    let path = path.split(['?', '#']).next().unwrap_or("/");
+    if path.is_empty() {
+        return Ok("/".to_string());
+    }
+    Ok(path.to_string())
+}
+
+/// Uppercase and de-duplicate the operator's method list, substituting
+/// [`DEFAULT_ALLOWED_METHODS`] when it is empty.
+fn normalize_allowed_methods(configured: &[String]) -> Result<Vec<String>, InboundX402ConfigError> {
+    if configured.is_empty() {
+        return Ok(DEFAULT_ALLOWED_METHODS
+            .iter()
+            .map(|method| (*method).to_string())
+            .collect());
+    }
+    let mut methods: Vec<String> = Vec::with_capacity(configured.len());
+    for value in configured {
+        // RFC 9110 methods are case-sensitive tokens; every registered method is
+        // uppercase ASCII, so anything else is an operator typo, not a method.
+        if value.is_empty()
+            || value.len() > 32
+            || !value.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+        {
+            return Err(InboundX402ConfigError::InvalidAllowedMethod {
+                value: value.clone(),
+            });
+        }
+        let upper = value.to_ascii_uppercase();
+        if !methods.contains(&upper) {
+            methods.push(upper);
+        }
+    }
+    Ok(methods)
 }
 
 /// An [`InboundX402Endpoint`] that has passed [`InboundX402Endpoint::validate`].
@@ -216,6 +305,12 @@ impl InboundX402Endpoint {
 pub struct ValidatedInboundX402Endpoint {
     endpoint: InboundX402Endpoint,
     network: SolanaNetwork,
+    /// Absolute path component of `endpoint.resource_url`, derived once at
+    /// validation so the request-time comparison is a string equality rather
+    /// than a parse that could fail on the hot path.
+    resource_path: String,
+    /// Uppercased, de-duplicated method set. Never empty.
+    allowed_methods: Vec<String>,
 }
 
 /// The 402 challenge an unpaid call receives: HTTP status plus the base64
@@ -239,6 +334,25 @@ impl ValidatedInboundX402Endpoint {
     /// The recognised Solana network the fixed price settles on.
     pub fn network(&self) -> SolanaNetwork {
         self.network
+    }
+
+    /// The absolute request path the fixed price buys, derived from
+    /// `resource_url` at validation.
+    pub fn resource_path(&self) -> &str {
+        &self.resource_path
+    }
+
+    /// The uppercased HTTP methods the fixed price buys. Never empty.
+    pub fn allowed_methods(&self) -> &[String] {
+        &self.allowed_methods
+    }
+
+    /// Whether an arriving request's method is one the fixed price bought.
+    /// Case-insensitive: the comparison set is uppercase by construction.
+    pub fn allows_method(&self, method: &str) -> bool {
+        self.allowed_methods
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(method))
     }
 
     /// The single fixed price in atomic token units.
@@ -343,6 +457,13 @@ impl RevenueSource {
 pub struct InboundX402CallContext {
     /// FerroGate request id for the paid call.
     pub request_id: String,
+    /// The sidecar's own request id, taken from the admitted request. This — not
+    /// [`Self::request_id`] — is what identifies "the same paid call" across a
+    /// sidecar timeout-and-retry, because FerroGate mints a fresh
+    /// [`Self::request_id`] per HTTP request. Forward-once attribution rests on
+    /// it, so it is recorded on the revenue record rather than left as a
+    /// process-local claim-guard detail.
+    pub sidecar_request_id: String,
     /// Trace id, when present.
     pub trace_id: Option<String>,
     /// HTTP method of the priced call.
@@ -368,6 +489,17 @@ pub struct InboundX402RevenueRecord {
     /// Always [`RevenueSource::X402Inbound`].
     pub revenue_source: RevenueSource,
     pub request_id: String,
+    /// The sidecar request id that claimed this payment. The forward-once
+    /// backstop compares against THIS field, never [`Self::request_id`]: a
+    /// sidecar retry of the same paid call keeps its sidecar id but arrives with
+    /// a fresh FerroGate request id.
+    ///
+    /// `#[serde(default)]` keeps records written before this field existed
+    /// deserializable; such a record carries an empty sidecar id and therefore
+    /// matches no live retry, which fails closed (refused as a replay) rather
+    /// than open.
+    #[serde(default)]
+    pub sidecar_request_id: String,
     #[serde(default)]
     pub trace_id: Option<String>,
     pub method: String,
@@ -500,6 +632,7 @@ pub fn settle_inbound_payment(
         id,
         revenue_source: RevenueSource::X402Inbound,
         request_id: ctx.request_id.clone(),
+        sidecar_request_id: ctx.sidecar_request_id.clone(),
         trace_id: ctx.trace_id.clone(),
         method: ctx.method.clone(),
         tenant: ctx.tenant.clone(),

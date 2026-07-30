@@ -1,0 +1,30 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-30
+# description: Config for the `ferrogate-admin` service of the inbound x402
+# sidecar topology (issue #356) — the FerroGate Control Plane API service
+# (`ferrogate control-api serve`), on a network the sidecar cannot reach.
+#
+# This exact file is loaded and validated by a committed test
+# (`crates/ferrogate-config/src/x402_inbound_test.rs`), so the compose file
+# cannot reference a config the binary would reject.
+#
+# NOTE ON SECRETS: no field here holds a secret value. The admin JWT secret is
+# supplied to the process through the environment (see docker-compose.yaml).
+
+# The control-plane service does not serve the data plane, but the root `listen`
+# key still has to be a value this container can bind. Loopback is deliberate:
+# nothing should reach a gateway listener on this process.
+listen = "127.0.0.1:8080"
+
+[control_api]
+# Bind on every interface so an operator attached to the `admin` Docker network
+# can reach it. The built-in default is `127.0.0.1:8095`, which inside a
+# container is reachable from nothing but the container itself.
+listen = "0.0.0.0:8081"
+
+# The gateway this service reverse-proxies `/admin/v1/*` to. `ferrogate-paid` is
+# joined to the `admin` network for exactly this hop; the sidecar shares no
+# network with THIS service, which is the isolation the topology claims.
+gateway_url = "http://ferrogate-paid:8080"

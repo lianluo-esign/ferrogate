@@ -48,6 +48,7 @@
 use std::fmt;
 
 use ferrogate_core::TenantContext;
+use ferrogate_payments::HEADER_PAYMENT_RESPONSE;
 use subtle::ConstantTimeEq;
 
 /// Header the pay.sh sidecar presents to prove it is the sidecar. Its *value* is
@@ -128,11 +129,32 @@ pub enum SidecarCredentialMatch {
 ///
 /// `Debug` is hand-written and redacted: a derived `Debug` would put the secret
 /// into every `tracing` event that formats an admission policy.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SidecarCredential {
     active: String,
     rotating_out: Option<String>,
 }
+
+/// Hand-written so `==` on a credential — including the derived `==` on every
+/// type that contains one, such as [`SidecarAdmissionPolicy`] — cannot become a
+/// short-circuiting `String` comparison of a secret. The module goes to the
+/// trouble of a constant-time [`SidecarCredential::matches`]; a derived
+/// `PartialEq` would export a timing-leaky path to the same bytes to the next
+/// caller who writes `policy_a == policy_b`.
+impl PartialEq for SidecarCredential {
+    fn eq(&self, other: &Self) -> bool {
+        let active = constant_time_eq(self.active.as_bytes(), other.active.as_bytes());
+        let rotating_out = match (&self.rotating_out, &other.rotating_out) {
+            (Some(left), Some(right)) => constant_time_eq(left.as_bytes(), right.as_bytes()),
+            (None, None) => true,
+            // Whether a rotation is in progress is structural, not secret.
+            _ => false,
+        };
+        active && rotating_out
+    }
+}
+
+impl Eq for SidecarCredential {}
 
 impl fmt::Debug for SidecarCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -331,10 +353,24 @@ impl SidecarAdmissionPolicy {
     /// Header names the gateway must remove from a forwarded request before it
     /// reaches the protected handler. Admission already refuses a request that
     /// carries a reserved attribution header, so this list is the belt to that
-    /// braces: it also covers the credential header, which is legitimately
-    /// present and must not travel further.
+    /// braces: it also covers the headers that are legitimately present on an
+    /// admitted forward and must not travel further.
+    ///
+    /// Every entry is spend-once material. The credential authenticates the
+    /// sidecar; `PAYMENT-RESPONSE` is the settlement proof, which the gate has
+    /// already consumed and which is precisely what a replay attempt needs; the
+    /// sidecar request id is the forward-once claim owner. Letting any of them
+    /// reach the handler puts replayable material into the handler's request
+    /// logs and into anything the handler forwards downstream. A handler that
+    /// needs the sidecar request id for correlation takes it from
+    /// [`AdmittedRequest::sidecar_request_id`], not from a passed-through
+    /// header.
     pub fn headers_to_strip(&self) -> Vec<&'static str> {
-        let mut names = vec![HEADER_SIDECAR_CREDENTIAL];
+        let mut names = vec![
+            HEADER_SIDECAR_CREDENTIAL,
+            HEADER_SIDECAR_REQUEST_ID,
+            HEADER_PAYMENT_RESPONSE,
+        ];
         names.extend_from_slice(RESERVED_ATTRIBUTION_HEADERS);
         names
     }

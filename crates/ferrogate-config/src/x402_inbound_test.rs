@@ -33,6 +33,7 @@ fn endpoint() -> InboundX402Endpoint {
         max_timeout_seconds: 120,
         memo: None,
         challenge_error: None,
+        allowed_methods: Vec::new(),
     }
 }
 
@@ -478,6 +479,87 @@ fn the_shipped_deployment_manifest_loads_validates_and_resolves() {
         resolved.policy.tenant().organization_id.as_deref(),
         Some("tenant-public-paid-api")
     );
+}
+
+/// A container that binds the gateway to loopback is unreachable from the
+/// sidecar, so the whole topology comes up and serves nothing. The built-in
+/// default IS loopback, so an omitted key is the failure — assert the manifest
+/// pins a non-loopback one.
+#[test]
+fn the_shipped_manifest_binds_the_gateway_off_loopback() {
+    let raw = read_deploy_file("ferrogate-x402-inbound.toml");
+    let config =
+        crate::Config::from_toml_str(&raw).expect("the shipped manifest must load as a Config");
+    assert_eq!(
+        config.listen, "0.0.0.0:8080",
+        "the shipped manifest must bind every interface; the default 127.0.0.1 \
+         is reachable from nothing but its own container"
+    );
+}
+
+/// The admin service's config must load, and must bind its control-plane
+/// listener off loopback for the same reason. It must also point at the paid
+/// gateway by its compose service name — the two files are only useful together.
+#[test]
+fn the_shipped_admin_manifest_loads_and_binds_the_control_plane_listener() {
+    let raw = read_deploy_file("ferrogate-x402-admin.toml");
+    let config = crate::Config::from_toml_str(&raw)
+        .expect("the shipped admin manifest must load as a Config");
+    assert_eq!(
+        config.admin_api.listen, "0.0.0.0:8081",
+        "the control-plane listener must bind every interface"
+    );
+    assert_eq!(
+        config.admin_api.gateway_url, "http://ferrogate-paid:8080",
+        "the admin service must proxy to the paid gateway's compose service name"
+    );
+}
+
+/// The compose file must only invoke subcommands the binary actually has. Two
+/// previously-shipped revisions referenced `ferrogate health` and `ferrogate
+/// admin --listen`, neither of which exists — the first left the upstream
+/// permanently unhealthy (so the sidecar's `service_healthy` dependency never
+/// fired), the second crash-looped the admin container.
+///
+/// This is a string check, not a parse of clap's command table: `ferrogate-cli`
+/// depends on this crate, so the dependency cannot run the other way. It pins
+/// the exact regressions that shipped rather than proving general validity.
+#[test]
+fn the_compose_topology_invokes_only_real_subcommands() {
+    let compose = read_deploy_file("docker-compose.yaml");
+
+    for absent in [
+        "\"ferrogate\", \"health\"",
+        "/usr/local/bin/ferrogate\", \"health\"",
+        "\"admin\", \"--listen\"",
+    ] {
+        assert!(
+            !compose.contains(absent),
+            "docker-compose.yaml references {absent:?}, which is not a real \
+             ferrogate subcommand (see `Commands` in ferrogate-cli/src/cli.rs)"
+        );
+    }
+
+    assert!(
+        compose.contains("\"control-api\", \"serve\", \"--config\""),
+        "the admin service must use `control-api serve --config <file>`"
+    );
+    assert!(
+        compose.contains("ferrogate-x402-admin.toml"),
+        "the admin service must mount and load the admin config this crate tests"
+    );
+    assert!(
+        compose.contains("/healthz"),
+        "the upstream healthcheck must probe the gateway's real /healthz route"
+    );
+}
+
+fn read_deploy_file(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy/x402-sidecar")
+        .join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
 /// The shipped manifest and the shipped sidecar spec must quote the same price
