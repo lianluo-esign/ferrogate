@@ -305,6 +305,7 @@ impl Config {
             asset_bucket: crate::config::AssetBucketConfig::default(),
             scheduler: crate::config::SchedulerConfig::default(),
             asset_lifecycle: crate::config::AssetLifecycleConfig::default(),
+            self_hosted_dispatch_sweeper: crate::config::SelfHostedDispatchSweeperConfig::default(),
             x402_sweeper: crate::config::X402SweeperConfig::default(),
             x402_reconciler: crate::config::X402ReconcilerConfig::default(),
             // #351: the Caddyfile bridge has no x402 spend-policy surface; every

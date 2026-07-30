@@ -323,6 +323,8 @@ pub fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool) -> Any
     let _agent_schedule_sweeper = start_agent_schedule_sweeper(&state);
     // #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
     let _asset_lifecycle_sweeper = start_asset_lifecycle_sweeper(&state);
+    // #545: reclaim of dispatch rows a terminal run left behind unacked.
+    let _self_hosted_dispatch_sweeper = start_self_hosted_dispatch_sweeper(&state);
     // #354: TTL sweeper reclaiming overdue pre-submission x402 payment holds.
     let _x402_ttl_sweeper = start_x402_ttl_sweeper(&state);
     // #354: on-chain settlement reconciler driving left-behind submitted/
@@ -634,6 +636,63 @@ fn start_asset_lifecycle_sweeper(state: &SharedAppState) -> AssetLifecycleSweepe
         }
     });
     AssetLifecycleSweeperHandle {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// Background loop that reclaims `self_hosted_run_dispatches` rows whose run is
+/// terminal and whose lease is dead (issue #545).
+struct SelfHostedDispatchSweeperHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for SelfHostedDispatchSweeperHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Always spawns the self-hosted dispatch reclaim loop, unconditionally, exactly
+/// like the billing outbox / scheduler / asset-lifecycle / x402 sweepers (issue
+/// #144): `sweep_self_hosted_dispatches_once` re-reads `state.current()` and
+/// no-ops when `self_hosted_dispatch_sweeper.enabled = false`, so toggling it
+/// via the admin hot config-reload path takes effect on the next tick with no
+/// restart. The tick interval is re-read each iteration so a reload of
+/// `tick_interval_secs` also takes effect live. Reclaim only ever deletes rows
+/// whose run is already terminal and whose lease is dead, and the delete is
+/// idempotent, so this loop is safe to run on every gateway instance
+/// concurrently. Wall-clock time is supplied here (the sweep method takes an
+/// injected `now_unix` so tests can drive lease expiry deterministically without
+/// timing sleeps).
+fn start_self_hosted_dispatch_sweeper(state: &SharedAppState) -> SelfHostedDispatchSweeperHandle {
+    let state = state.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let current = state.current();
+            let tick_secs = current
+                .config
+                .self_hosted_dispatch_sweeper
+                .tick_interval_secs
+                .clamp(1, 86_400);
+            thread::sleep(Duration::from_secs(tick_secs));
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default();
+            state.current().sweep_self_hosted_dispatches_once(now_unix);
+        }
+    });
+    SelfHostedDispatchSweeperHandle {
         stop,
         handle: Some(handle),
     }

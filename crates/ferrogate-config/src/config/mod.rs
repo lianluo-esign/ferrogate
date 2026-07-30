@@ -59,8 +59,8 @@ pub use self::types::{
     PolicyRule, PromptTemplate, PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget,
     PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
     ProviderCloudflareAiGatewayConfig, ProviderCloudflareAiGatewayMode, ReliabilityConfig,
-    RouteRule, SchedulerConfig, ShadowRoute, SkillPackage, SkillPackageCapability,
-    SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
-    StorageMigrationMode, TelemetryConfig, TenancyConfig, TlsAcmeConfig, TlsConfig, Upstream,
-    X402ReconcilerConfig, X402SweeperConfig,
+    RouteRule, SchedulerConfig, SelfHostedDispatchSweeperConfig, ShadowRoute, SkillPackage,
+    SkillPackageCapability, SkillPackageCapabilityKind, SkillPackageCompatibility,
+    SkillPackageResources, StorageConfig, StorageMigrationMode, TelemetryConfig, TenancyConfig,
+    TlsAcmeConfig, TlsConfig, Upstream, X402ReconcilerConfig, X402SweeperConfig,
 };

@@ -117,10 +117,10 @@ pub use config::{
     PromptTemplate, PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget,
     PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
     ProviderCloudflareAiGatewayConfig, ProviderCloudflareAiGatewayMode, ReliabilityConfig,
-    RouteRule, ShadowRoute, SkillPackage, SkillPackageCapability, SkillPackageCapabilityKind,
-    SkillPackageCompatibility, SkillPackageResources, StorageConfig, StorageMigrationMode,
-    TelemetryConfig, TenancyConfig, TlsAcmeConfig, TlsConfig, Upstream, X402ReconcilerConfig,
-    X402SweeperConfig,
+    RouteRule, SelfHostedDispatchSweeperConfig, ShadowRoute, SkillPackage, SkillPackageCapability,
+    SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
+    StorageMigrationMode, TelemetryConfig, TenancyConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    X402ReconcilerConfig, X402SweeperConfig,
 };
 pub use diagnostic::CaddyfileDiagnostic;
 pub use ferrogate_providers::ModelCapability;

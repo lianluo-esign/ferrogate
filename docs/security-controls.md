@@ -211,6 +211,23 @@ expectations scoped in `docs/soc2-audit-scoping.md` — bounded growth of
 operational/audit data, a per-tenant retention policy, and tamper-evident
 audit records of each purge.
 
+`self_hosted_run_dispatches` has its own reclaim
+(`crates/ferrogate-gateway/src/state_self_hosted_dispatch_sweeper.rs`,
+`sweep_self_hosted_dispatches_once`, issue #545), because nothing else prunes
+that table and its four on-demand release points (issue #502) all need some
+actor to touch the run: a worker that leases a job and then vanishes leaves an
+unacked `cancel_run` and a superseded `start_run` behind, and the per-tenant
+open-job cap never trips on them because the run is already terminal. The
+sweeper reclaims a run's rows only once the run is terminal **and** no row of
+that run holds a live lease (`lease_expires_at_unix + lease_grace_secs`) —
+terminal status alone would delete the `start_run` row a live run's
+lease-ownership check (issue #503) reads for its whole life, and lease expiry
+alone would delete a running job's row. Defaults on
+`[self_hosted_dispatch_sweeper]`: `enabled = true` (this reclaim only ever
+deletes rows of an already-terminal run), `tick_interval_secs = 300`,
+`max_runs_per_tick = 200` (a larger backlog drains oldest-first over successive
+ticks), `lease_grace_secs = 300`.
+
 ## Secrets Management
 
 Upstream provider API keys and ACME DNS-provider credentials can be

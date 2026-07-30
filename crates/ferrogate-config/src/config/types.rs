@@ -110,6 +110,10 @@ pub struct Config {
     /// #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
     #[serde(default)]
     pub asset_lifecycle: AssetLifecycleConfig,
+    /// #545: background reclaim for `self_hosted_run_dispatches` rows a
+    /// terminal run left behind because no worker ever acked them.
+    #[serde(default)]
+    pub self_hosted_dispatch_sweeper: SelfHostedDispatchSweeperConfig,
     /// #354: background TTL sweeper that releases the wallet hold of an overdue
     /// pre-submission x402 payment attempt.
     #[serde(default)]
@@ -548,6 +552,79 @@ impl Default for AssetLifecycleConfig {
             default_audit_event_max_age_secs: None,
             default_response_body_max_age_secs: None,
             max_log_deletes_per_tick: default_asset_lifecycle_max_log_deletes(),
+        }
+    }
+}
+
+/// Background reclaim for orphaned self-hosted dispatch rows (issue #545).
+///
+/// #502 made settlement reclaim a run's `self_hosted_run_dispatches` rows, but
+/// every one of its four release points needs some actor to touch the run. A
+/// job a worker leased and then abandoned has none: its `cancel_run` is never
+/// acked and its superseded `start_run` is never deleted, so two rows persist
+/// until some caller happens to retry the cancel. The slot is already free (the
+/// run is terminal), so the per-tenant open-job cap never trips and the rows
+/// accumulate for the life of the deployment.
+///
+/// The sweeper closes that hole on a schedule. Its condition is terminal-status
+/// PLUS lease-expiry, never age alone: #503's lease-ownership proof reads the
+/// `start_run` row for the whole life of a run, so a sweeper keyed only off age
+/// would break lease ownership on a long-running job.
+///
+/// `enabled = true` by default -- unlike the x402/asset sweepers, this one only
+/// ever deletes rows whose run has already reached a terminal state and whose
+/// lease is dead, nothing else prunes this table, and the leak it closes is
+/// reachable by an ordinary tenant. The tick loop is always spawned and
+/// `sweep_self_hosted_dispatches_once` re-reads `state.current()`, so tuning or
+/// disabling it via `/admin/v1/config/reload` needs no restart.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SelfHostedDispatchSweeperConfig {
+    #[serde(default = "default_self_hosted_dispatch_sweeper_enabled")]
+    pub enabled: bool,
+    /// Seconds between reclaim passes. Default 300 -- reclaim is retention
+    /// housekeeping and every candidate has already outlived a worker lease.
+    #[serde(default = "default_self_hosted_dispatch_sweeper_tick_interval_secs")]
+    pub tick_interval_secs: u64,
+    /// Upper bound on RUNS whose rows one tick may reclaim, so a single pass can
+    /// never issue an unbounded number of deletes. Default 200. A backlog larger
+    /// than the bound drains oldest-first over successive ticks.
+    #[serde(default = "default_self_hosted_dispatch_sweeper_max_runs_per_tick")]
+    pub max_runs_per_tick: usize,
+    /// Extra grace (seconds) added to a dispatch's lease expiry before the
+    /// sweeper considers it dead: a row is eligible only once
+    /// `lease_expires_at_unix + grace <= now`. Default 300. This is a real
+    /// defence, not decoration: the expiry is computed from the WORKER-supplied
+    /// `now_unix` of the poll that took the lease
+    /// (`self_hosted_worker.rs::poll_run`), so a worker whose clock runs slow
+    /// persists an expiry already in the gateway's past. The grace bounds how
+    /// much skew can make a still-held lease look dead.
+    #[serde(default = "default_self_hosted_dispatch_sweeper_lease_grace_secs")]
+    pub lease_grace_secs: u64,
+}
+
+fn default_self_hosted_dispatch_sweeper_enabled() -> bool {
+    true
+}
+
+fn default_self_hosted_dispatch_sweeper_tick_interval_secs() -> u64 {
+    300
+}
+
+fn default_self_hosted_dispatch_sweeper_max_runs_per_tick() -> usize {
+    200
+}
+
+fn default_self_hosted_dispatch_sweeper_lease_grace_secs() -> u64 {
+    300
+}
+
+impl Default for SelfHostedDispatchSweeperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_self_hosted_dispatch_sweeper_enabled(),
+            tick_interval_secs: default_self_hosted_dispatch_sweeper_tick_interval_secs(),
+            max_runs_per_tick: default_self_hosted_dispatch_sweeper_max_runs_per_tick(),
+            lease_grace_secs: default_self_hosted_dispatch_sweeper_lease_grace_secs(),
         }
     }
 }
@@ -3197,6 +3274,7 @@ impl Default for Config {
             asset_bucket: AssetBucketConfig::default(),
             scheduler: SchedulerConfig::default(),
             asset_lifecycle: AssetLifecycleConfig::default(),
+            self_hosted_dispatch_sweeper: SelfHostedDispatchSweeperConfig::default(),
             x402_sweeper: X402SweeperConfig::default(),
             x402_reconciler: X402ReconcilerConfig::default(),
             x402_spend_policies: Vec::new(),

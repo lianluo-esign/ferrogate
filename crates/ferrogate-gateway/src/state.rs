@@ -7155,6 +7155,12 @@ mod state_x402_settlement;
 #[path = "state_x402_negotiation.rs"]
 mod state_x402_negotiation;
 
+// #545: periodic reclaim of `self_hosted_run_dispatches` rows a terminal run
+// left behind because no actor ever touched it again -- the one reclaim hole
+// #502's four on-demand release points do not cover.
+#[path = "state_self_hosted_dispatch_sweeper.rs"]
+mod state_self_hosted_dispatch_sweeper;
+
 // #354: background TTL sweeper that drives the settlement loop's `expire_if_due`
 // release edge on a schedule so an overdue pre-submission attempt's wallet hold
 // is reclaimed instead of stranded forever.
