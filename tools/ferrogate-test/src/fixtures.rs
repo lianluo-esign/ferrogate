@@ -268,6 +268,13 @@ endpoint = "http://{agent_addr}/a2a"
 tenant_ids = ["client"]
 capabilities = ["invoke", "read", "stream", "discover"]
 
+# #582/#591: the `tool.echo` extension above is tenant-scoped to `org_demo`, so
+# every chat-completions request from the `client` key gets those tool
+# definitions injected upstream by `prepare_chat_completions`. The typed
+# capability filter therefore makes `tools` a hard requirement on every route
+# this key can reach — a partially-declared route is excluded before dispatch
+# rather than handed tools it never advertised. `blocked-chat` stays without it:
+# it is absent from `client`'s allowed_models and is denied earlier, by scope.
 [[models]]
 name = "fast-chat"
 provider = "openai"
@@ -281,7 +288,7 @@ output_price_per_1m = 2.0
 name = "fallback-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini-failover-primary"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -289,6 +296,7 @@ output_price_per_1m = 2.0
 [[models.fallbacks]]
 provider = "backup-openai"
 provider_model = "gpt-4o-mini-fallback"
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -308,7 +316,7 @@ output_price_per_1m = 2.0
 name = "gpt-5.5-chat"
 provider = "openai"
 provider_model = "gpt-5.5"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 5.0
 output_price_per_1m = 15.0
@@ -317,7 +325,7 @@ output_price_per_1m = 15.0
 name = "anthropic-chat"
 provider = "anthropic"
 provider_model = "claude-3-5-sonnet-latest"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -326,7 +334,7 @@ output_price_per_1m = 2.0
 name = "gemini-chat"
 provider = "gemini"
 provider_model = "gemini-2.5-flash"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -335,7 +343,7 @@ output_price_per_1m = 2.0
 name = "grok-chat"
 provider = "xai"
 provider_model = "grok-4.20-fast"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -344,7 +352,7 @@ output_price_per_1m = 2.0
 name = "openrouter-chat"
 provider = "openrouter"
 provider_model = "openai/gpt-4o-mini"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -353,7 +361,7 @@ output_price_per_1m = 2.0
 name = "azure-openai-chat"
 provider = "azure-openai"
 provider_model = "azure-gpt-4o"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -362,7 +370,7 @@ output_price_per_1m = 2.0
 name = "bedrock-chat"
 provider = "bedrock"
 provider_model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-capabilities = ["chat"]
+capabilities = ["chat", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
@@ -371,7 +379,7 @@ output_price_per_1m = 2.0
 name = "vertex-chat"
 provider = "vertex"
 provider_model = "gemini-2.5-flash"
-capabilities = ["chat", "streaming"]
+capabilities = ["chat", "streaming", "tools"]
 context_window = 8192
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
