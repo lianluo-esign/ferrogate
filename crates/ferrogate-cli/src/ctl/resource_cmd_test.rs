@@ -415,7 +415,18 @@ fn an_offset_a_cursor_endpoint_ignores_is_refused_rather_than_answered() {
     let refusal = cursor_offset_refusal(&cursor_page(), Some(50), "/admin/v1/payment-attempts")
         .expect("an ignored offset must be refused");
     assert!(refusal.contains("cursor-paginated"), "{refusal}");
-    assert!(refusal.contains("page ONE"), "{refusal}");
+    // The refusal describes what the endpoint WOULD have returned, because the
+    // check runs before any renderer and stdout is empty. The earlier wording
+    // ("the rows above are page ONE") narrated output the fix deliberately did
+    // not print (#352 review round 3 §3).
+    assert!(
+        refusal.contains("would have returned page ONE"),
+        "{refusal}"
+    );
+    assert!(
+        !refusal.contains("rows above"),
+        "nothing was printed, so there are no rows above: {refusal}"
+    );
     // The refusal is actionable: it quotes the continuation the server gave.
     assert!(
         refusal.contains("next_cursor=1753500000:att-1"),
@@ -449,6 +460,44 @@ fn an_offset_a_cursor_endpoint_ignores_is_refused_rather_than_answered() {
             "/admin/v1/payment-attempts"
         ),
         None
+    );
+}
+
+/// An envelope that echoes its own `offset` honored the offset, so it is never
+/// refused — even when it also carries a key `PAGE_CURSOR_KEYS` recognizes.
+///
+/// `PAGE_CURSOR_KEYS` is derived from the contract by a rule that admits *any*
+/// boolean in a list envelope. That over-demand was justified as "an extra key
+/// merely refuses a walk, which is the safe direction" — true until this
+/// refusal made an extra key ALSO a hard usage error on the single-page path
+/// (#352 review round 3 §4). A future `truncated`/`stale` flag on an
+/// offset-paginated envelope would then have broken `--offset` on an endpoint
+/// that honors it, exit 2, with no way for the operator to page at all.
+///
+/// The `offset` echo is the discriminator because it is the endpoint's own
+/// evidence that it read the window: none of the three cursor envelopes in the
+/// contract declares an `offset` parameter or echoes one, which is why the
+/// case above still refuses.
+#[test]
+fn an_offset_the_endpoint_echoed_back_is_honored_not_refused() {
+    let hybrid = json!({
+        "object": "list",
+        "data": [{"id": "a"}],
+        "offset": 50,
+        "limit": 1,
+        "total": 9,
+        // The hypothetical flag: a boolean the cursor-key derivation admits.
+        "has_more": true,
+    });
+    assert_eq!(
+        cursor_offset_refusal(&hybrid, Some(50), "/admin/v1/virtual-keys"),
+        None,
+        "the envelope echoed offset 50, so the endpoint read the window"
+    );
+    // The refusal is still on for a real cursor envelope, which echoes no
+    // offset — this is the regression the narrowing must not cause.
+    assert!(
+        cursor_offset_refusal(&cursor_page(), Some(50), "/admin/v1/payment-attempts").is_some()
     );
 }
 

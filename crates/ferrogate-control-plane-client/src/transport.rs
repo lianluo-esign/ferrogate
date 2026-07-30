@@ -614,6 +614,15 @@ pub fn page_cursor_state(body: &serde_json::Value) -> Option<PageCursorState> {
         };
         return Some(PageCursorState::Resume { key, value });
     }
+    // A server that says `has_more: true` has told us more rows exist; a null
+    // token means it did not tell us how to ask for them, which is `Unknown`
+    // and NOT the end of the listing (#352 review round 3 §2). Checked before
+    // the null-token arm below, which would otherwise read the explicit
+    // "not the last page" statement as `Exhausted` and leave the operator with
+    // no notice at all on a page the server called incomplete.
+    if map.get("has_more").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Some(PageCursorState::Unknown);
+    }
     if next_keys().any(|key| map.contains_key(*key)) {
         return Some(PageCursorState::Exhausted);
     }

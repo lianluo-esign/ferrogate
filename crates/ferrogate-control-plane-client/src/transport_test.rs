@@ -625,8 +625,18 @@ fn property_has_type(property: &serde_json::Value, wanted: &str) -> bool {
 /// which can be a cursor. A name-shaped second rule backstops a hypothetical
 /// cursor spelled as a **non**-nullable string, minus the offset vocabulary the
 /// client already classifies elsewhere, so the union can only ever demand MORE
-/// keys than rule 1 — and an extra key here merely *refuses* a walk, which is
-/// the safe direction.
+/// keys than rule 1.
+///
+/// An extra key costs a *refused walk*, which is the safe direction — but only
+/// because the single-page `--offset` refusal is gated on more than this list
+/// (#352 review round 3 §4). `by_shape` admits ANY boolean in ANY list
+/// envelope, so a future `truncated`/`stale` flag on an offset-paginated
+/// envelope lands here; `cursor_offset_refusal` (`ctl/resource_cmd.rs`)
+/// therefore returns `None` when the envelope echoes its own `offset`, so such
+/// a flag cannot turn a working `--offset` into a usage error.
+/// `an_offset_the_endpoint_echoed_back_is_honored_not_refused` pins that, and
+/// it is what keeps this over-demanding union honest rather than merely
+/// convenient.
 ///
 /// The consequence for the next envelope: add `{"data": [...],
 /// "next_page_token": nullable string}` to the contract and this test fails
@@ -806,6 +816,23 @@ fn page_cursor_state_reads_the_continuation_not_the_echo() {
     // Cursor-paginated but silent about continuation.
     assert_eq!(
         page_cursor_state(&serde_json::json!({"data": [{"id": "e1"}], "has_more": true})),
+        Some(PageCursorState::Unknown)
+    );
+    // The documented `Unknown` case in its OTHER spelling (#352 review round 3
+    // §2): the continuation key is PRESENT but null while `has_more` says the
+    // listing is not over. Only the absent-key variant above was pinned, so the
+    // null-token arm classified this as `Exhausted` -- `truncation_notice`
+    // returned `None` and the operator was told nothing on a page the server
+    // explicitly called incomplete. Not reachable from today's handlers (the
+    // one `has_more` envelope sets it only when it also has a token), but
+    // nothing on either side pins that coupling.
+    assert_eq!(
+        page_cursor_state(&serde_json::json!({
+            "data": [{"id": "e1"}],
+            "after_event_id": "e0",
+            "next_after_event_id": serde_json::Value::Null,
+            "has_more": true,
+        })),
         Some(PageCursorState::Unknown)
     );
 }

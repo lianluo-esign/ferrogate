@@ -15176,6 +15176,10 @@ mod payment_attempt_pagination_test;
 mod payment_attempt_amount_domain_test;
 
 #[cfg(test)]
+#[path = "payment_attempt_sql_domain_test.rs"]
+mod payment_attempt_sql_domain_test;
+
+#[cfg(test)]
 #[path = "billing_outbox_replay_test.rs"]
 mod billing_outbox_replay_test;
 

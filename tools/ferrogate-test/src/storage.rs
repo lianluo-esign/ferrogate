@@ -1076,11 +1076,6 @@ fn expect_payment_attempt_schema(schema: &str) -> Result<()> {
         "idx_payment_attempts_hold",
         // Partial index over the in-flight states the reconciler drains.
         "idx_payment_attempts_reconcile",
-        // Migration 59: one on-chain transfer may back at most ONE attempt, so a
-        // single stablecoin payment can never be used as proof to capture two
-        // wallet holds. Partial (NULL not indexed) so unsettled attempts are
-        // unaffected.
-        "idx_payment_attempts_transaction_signature",
     ] {
         let count = postgres_scalar(&format!(
             "SELECT count(*) FROM pg_indexes \
@@ -1093,30 +1088,235 @@ fn expect_payment_attempt_schema(schema: &str) -> Result<()> {
         }
     }
 
+    // Migration 59: one on-chain transfer may back at most ONE attempt, so a
+    // single stablecoin payment can never be used as proof to capture two wallet
+    // holds. Partial (NULL not indexed) so unsettled attempts are unaffected.
+    //
+    // Read as a DEFINITION, not as a name (#352 review round 3 §1): `pg_indexes`
+    // returns count 1 for a plain `CREATE INDEX` under the same name, so a
+    // name-only assertion could not see the loss of either half of what makes
+    // this index load-bearing -- and the invariant stated in this comment lived
+    // entirely in the comment.
+    let signature_index = postgres_scalar(&format!(
+        "SELECT indexdef FROM pg_indexes \
+         WHERE schemaname = '{}' AND indexname = 'idx_payment_attempts_transaction_signature'",
+        sql_literal(schema)
+    ))?;
+    if !signature_index.contains("CREATE UNIQUE INDEX")
+        || !signature_index.contains("(transaction_signature)")
+        || !signature_index.contains("WHERE (transaction_signature IS NOT NULL)")
+    {
+        bail!(
+            "idx_payment_attempts_transaction_signature must be a partial UNIQUE index, \
+             got: {signature_index}"
+        );
+    }
+
     // Migration 59: the money columns have a DOMAIN, enforced by the database
     // and not only by the application. Without these an empty, signed or
     // exponent-shaped `atomic_amount`, or a negative `credits_amount`, is
     // storable into the durable audit record.
-    for constraint in [
-        "payment_attempts_atomic_amount_canonical",
-        "payment_attempts_settled_amount_canonical",
-        "payment_attempts_credits_amount_non_negative",
+    //
+    // The expected fragments are the SHAPE of each guard, for the same reason as
+    // the index above: `conname` alone is satisfied by `CHECK (true)`. The one
+    // definition of the amount domain is `is_canonical_atomic_amount` +
+    // migration 59; that those two agree is proved without a database by
+    // `payment_attempt_sql_domain_test.rs`, and what is proved HERE is that the
+    // live database actually carries it.
+    for (constraint, expected) in [
+        (
+            "payment_attempts_atomic_amount_canonical",
+            vec!["atomic_amount ~ '^[0-9]{1,20}$'"],
+        ),
+        (
+            "payment_attempts_settled_amount_canonical",
+            vec![
+                "settled_atomic_amount IS NULL",
+                "settled_atomic_amount ~ '^[0-9]{1,20}$'",
+            ],
+        ),
+        (
+            "payment_attempts_credits_amount_non_negative",
+            vec!["credits_amount IS NULL", "credits_amount >= 0"],
+        ),
     ] {
-        let count = postgres_scalar(&format!(
-            "SELECT count(*) FROM pg_constraint c \
-             JOIN pg_class t ON t.oid = c.conrelid \
-             JOIN pg_namespace n ON n.oid = t.relnamespace \
-             WHERE n.nspname = '{}' AND t.relname = 'payment_attempts' \
-               AND c.conname = '{}' AND c.contype = 'c'",
+        let definition = postgres_scalar(&format!(
+            "SELECT pg_get_constraintdef(constraint_row.oid) \
+             FROM pg_constraint AS constraint_row \
+             JOIN pg_class AS table_row ON table_row.oid = constraint_row.conrelid \
+             JOIN pg_namespace AS namespace_row ON namespace_row.oid = table_row.relnamespace \
+             WHERE namespace_row.nspname = '{}' AND table_row.relname = 'payment_attempts' \
+               AND constraint_row.conname = '{}' AND constraint_row.contype = 'c'",
             sql_literal(schema),
             sql_literal(constraint)
         ))?;
-        if count.trim() != "1" {
-            bail!("expected schema CHECK constraint {schema}.{constraint}, got count {count}");
+        if definition.trim().is_empty() {
+            bail!("expected schema CHECK constraint {schema}.{constraint}, found none");
+        }
+        for fragment in expected {
+            if !definition.contains(fragment) {
+                bail!("CHECK {schema}.{constraint} must contain {fragment:?}, got: {definition}");
+            }
+        }
+    }
+
+    expect_payment_attempt_guards_refuse_writes(schema)?;
+
+    Ok(())
+}
+
+/// Drives each migration-59 guard with a write it must refuse, and asserts the
+/// SQLSTATE the database answers with (#352 review round 3 §1).
+///
+/// The definition assertions above prove the guards are SPELLED right; these
+/// prove they FIRE, and they are the first live evidence for the 23514 -> typed
+/// `Conflict` mapping the storage layer added for this migration. Without them
+/// the whole SQL half of the money domain is asserted by `information_schema`
+/// text and never by a rejected row.
+///
+/// Everything runs inside one transaction that always ends in `ROLLBACK`, so a
+/// scenario database -- including a live Supabase schema -- is left exactly as
+/// it was found. The probe row is written first and must SUCCEED: a setup that
+/// silently failed would make every refusal below vacuous, so its own SQLSTATE
+/// is asserted to be `NONE`.
+fn expect_payment_attempt_guards_refuse_writes(schema: &str) -> Result<()> {
+    let signature = "probe-signature-352";
+    let setup = format!(
+        "INSERT INTO tenants (id, name, slug) \
+         VALUES ('probe-tenant-352', 'probe', 'probe-tenant-352'); \
+         INSERT INTO payment_attempts (\
+             id, tenant_id, method, resource_url, challenge_hash, x402_version, scheme, \
+             network_caip2, mint, atomic_amount, recipient, policy_revision, decision, \
+             reason_code, state, transaction_signature\
+         ) VALUES (\
+             'probe-attempt-352', 'probe-tenant-352', 'GET', 'https://api.example.com/v1/probe', \
+             '{hash}', 2, 'exact', 'solana:probe', 'probe-mint', '250000', 'probe-recipient', \
+             7, 'allow', 'x402_allowed', 'authorized', '{signature}'\
+         );",
+        hash = "b".repeat(64),
+    );
+
+    for (what, statement, expected_sqlstate) in [
+        (
+            "an empty atomic_amount",
+            format!(
+                "INSERT INTO payment_attempts (\
+                     id, tenant_id, method, resource_url, challenge_hash, x402_version, scheme, \
+                     network_caip2, mint, atomic_amount, recipient, policy_revision, decision, \
+                     reason_code, state\
+                 ) VALUES (\
+                     'probe-attempt-352-empty', 'probe-tenant-352', 'GET', \
+                     'https://api.example.com/v1/probe', '{hash}', 2, 'exact', 'solana:probe', \
+                     'probe-mint', '', 'probe-recipient', 7, 'allow', 'x402_allowed', 'authorized'\
+                 )",
+                hash = "b".repeat(64),
+            ),
+            // check_violation: the atomic_amount domain.
+            "23514",
+        ),
+        (
+            "a signed settled_atomic_amount on the settlement path",
+            "UPDATE payment_attempts SET settled_atomic_amount = '+250000' \
+             WHERE id = 'probe-attempt-352'"
+                .to_string(),
+            // check_violation: the domain applies to UPDATE, which is the only
+            // path that ever writes this column in production.
+            "23514",
+        ),
+        (
+            "a second attempt reusing one transaction_signature",
+            format!(
+                "INSERT INTO payment_attempts (\
+                     id, tenant_id, method, resource_url, challenge_hash, x402_version, scheme, \
+                     network_caip2, mint, atomic_amount, recipient, policy_revision, decision, \
+                     reason_code, state, transaction_signature\
+                 ) VALUES (\
+                     'probe-attempt-352-dup', 'probe-tenant-352', 'GET', \
+                     'https://api.example.com/v1/probe', '{hash}', 2, 'exact', 'solana:probe', \
+                     'probe-mint', '250000', 'probe-recipient', 7, 'allow', 'x402_allowed', \
+                     'authorized', '{signature}'\
+                 )",
+                hash = "b".repeat(64),
+            ),
+            // unique_violation: the double-capture guard, serialized by the
+            // database rather than by the application's mutex.
+            "23505",
+        ),
+    ] {
+        let observed = postgres_probe_sqlstate(schema, &setup, &statement)?;
+        if observed != expected_sqlstate {
+            bail!(
+                "{schema}.payment_attempts accepted {what}: expected SQLSTATE \
+                 {expected_sqlstate}, got {observed}"
+            );
         }
     }
 
     Ok(())
+}
+
+/// Runs `statement` against `schema` after `setup` and returns the SQLSTATE the
+/// database answered with, or `NONE` when the statement succeeded.
+///
+/// The statement runs inside a PL/pgSQL exception block so a refusal is a value
+/// rather than a failed psql invocation, and the whole script ends in
+/// `ROLLBACK` so nothing -- neither the setup rows nor a statement that
+/// unexpectedly succeeded -- survives the probe.
+fn postgres_probe_sqlstate(schema: &str, setup: &str, statement: &str) -> Result<String> {
+    let script = format!(
+        "SET search_path TO {schema}; \
+         BEGIN; \
+         {setup} \
+         CREATE TEMP TABLE probe_result (state TEXT) ON COMMIT DROP; \
+         DO $probe$ \
+         BEGIN \
+             BEGIN \
+                 {statement}; \
+                 INSERT INTO probe_result VALUES ('NONE'); \
+             EXCEPTION WHEN others THEN \
+                 INSERT INTO probe_result VALUES (SQLSTATE); \
+             END; \
+         END \
+         $probe$; \
+         SELECT 'sqlstate-probe:' || state FROM probe_result; \
+         ROLLBACK;",
+        schema = quote_ident(schema),
+    );
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            "-e",
+            "PGPASSWORD=postgres",
+            POSTGRES_CONTAINER,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "ferrogate",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-qAt",
+            "-c",
+            &script,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to run the PostgreSQL constraint probe")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() {
+        bail!(
+            "PostgreSQL constraint probe failed with {}; stdout: {stdout}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let state = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("sqlstate-probe:"))
+        .with_context(|| format!("constraint probe returned no verdict; stdout: {stdout}"))?
+        .trim()
+        .to_string();
+    Ok(state)
 }
 
 fn wait_for_postgres_server() -> Result<()> {

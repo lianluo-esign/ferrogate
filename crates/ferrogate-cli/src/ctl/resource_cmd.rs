@@ -611,8 +611,21 @@ fn mutation_output(
 /// `None` when no offset was asked for, or when the response is not a cursor
 /// page — an offset-paginated endpoint honors offsets, and a non-list document
 /// has no pages at all. Pure.
+///
+/// Also `None` when the envelope echoes its **own** `offset`, whatever else it
+/// carries (#352 review round 3 §4). That echo is the endpoint's only evidence
+/// that it read the window the caller asked for, and it is what keeps this
+/// refusal in the safe direction: `PAGE_CURSOR_KEYS` is derived by a rule that
+/// admits *any* boolean in a list envelope, so a future `truncated`/`stale`
+/// flag on an offset-paginated envelope would otherwise turn a working
+/// `--offset` into a hard usage error. Today's three cursor envelopes declare no
+/// `offset` parameter and echo none, so nothing that is refused now stops being
+/// refused.
 fn cursor_offset_refusal(body: &Value, offset: Option<u64>, path: &str) -> Option<String> {
     let offset = offset.filter(|offset| *offset > 0)?;
+    if page_envelope(body).is_some_and(|envelope| envelope.offset.is_some()) {
+        return None;
+    }
     let state = page_cursor_state(body)?;
     let resume = match &state {
         PageCursorState::Resume { key, value } => format!(
@@ -624,10 +637,14 @@ fn cursor_offset_refusal(body: &Value, offset: Option<u64>, path: &str) -> Optio
              --offset for the first page"
         ),
     };
+    // Deliberately not "the rows above": the check runs before `render_json` /
+    // `render_table`, so stdout is empty and there are no rows above (#352
+    // review round 3 §3). Describing output that was never printed is exactly
+    // the kind of claim this refusal exists to prevent.
     Some(format!(
-        "--offset {offset} was ignored by {path}: it is cursor-paginated, so the rows above are \
-         page ONE, not the page you asked for. Refusing rather than returning the wrong page with \
-         exit 0. {resume}"
+        "--offset {offset} was ignored by {path}: it is cursor-paginated, so this endpoint would \
+         have returned page ONE, not the page you asked for. Refusing before printing anything \
+         rather than returning the wrong page with exit 0. {resume}"
     ))
 }
 
