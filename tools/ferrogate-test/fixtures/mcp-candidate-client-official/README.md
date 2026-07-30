@@ -1,4 +1,4 @@
-# Official MCP candidate client fixture
+# Official MCP client fixture (2026-07-28 final)
 
 This fixture drives two real FerroGate processes through the official Tier-1
 TypeScript client. It is not a FerroGate-authored protocol client or server
@@ -8,14 +8,21 @@ double.
 - npm integrity: recorded in `package-lock.json` and `provenance.json`
 - official SDK tag: `@modelcontextprotocol/client@2.0.0`
 - official SDK commit: `cc4b41617ce3601b1290d67216ea0b194a3cd9ac`
-- protocol artifact: candidate `2026-07-28` at
-  `modelcontextprotocol/modelcontextprotocol@71e306956a4959c9655e5036be215d41986596e6`
+- protocol artifact: final `2026-07-28` at
+  `modelcontextprotocol/modelcontextprotocol` tag `2026-07-28`, commit
+  `5f5440bb26a62e2cf3440b92da5a667efa03b267`, schema `schema/2026-07-28/schema.ts`
 
+The revision is published: the release tag promotes the schema out of
+`schema/draft/` into `schema/2026-07-28/`. Against the pre-release artifact
+FerroGate previously pinned (`71e30695...`, then still `schema/draft/`), the only
+schema change is the `subscriptions/listen` result envelope, which FerroGate does
+not implement — so re-pinning to the release does not move the ingress contract.
 The SDK commit's generated
-`packages/core-internal/src/types/spec.types.2026-07-28.ts` names that exact
-protocol commit as its source. The npm package release does not turn the pinned
-protocol artifact into a final specification; FerroGate continues to describe
-it as a candidate.
+`packages/core-internal/src/types/spec.types.2026-07-28.ts` is the SDK-side
+artifact for the same revision.
+
+The `mcp-candidate-client-official` command name is historical and predates the
+release; the artifact it pins and every claim it prints are final.
 
 `client.mjs` uses official SDK `auto` negotiation to exercise
 `server/discover -> tools/list -> tools/call`, alternating those consecutive

@@ -3,8 +3,8 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 const SDK_PACKAGE = '@modelcontextprotocol/client';
 const SDK_VERSION = '2.0.0';
 const SDK_COMMIT = 'cc4b41617ce3601b1290d67216ea0b194a3cd9ac';
-const SPEC_COMMIT = '71e306956a4959c9655e5036be215d41986596e6';
-const CANDIDATE_VERSION = '2026-07-28';
+const SPEC_COMMIT = '5f5440bb26a62e2cf3440b92da5a667efa03b267';
+const SPEC_VERSION = '2026-07-28';
 
 const endpoint = process.env.FERROGATE_MCP_OFFICIAL_ENDPOINT;
 const secondaryEndpoint = process.env.FERROGATE_MCP_OFFICIAL_SECONDARY_ENDPOINT;
@@ -87,9 +87,9 @@ process.stdout.write(
             version: SDK_VERSION,
             commit: SDK_COMMIT,
             protocolArtifactCommit: SPEC_COMMIT,
-            protocolArtifactStatus: 'candidate'
+            protocolArtifactStatus: 'final'
         },
-        candidateVersion: CANDIDATE_VERSION,
+        specVersion: SPEC_VERSION,
         modern,
         legacy
     })

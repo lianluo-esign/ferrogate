@@ -44,7 +44,7 @@ const ASSET_TOO_LARGE_CODE: i64 = -32004;
 /// `-32002` (the bucket is healthy; the gateway is out of memory budget).
 const GATEWAY_BUFFER_BUDGET_EXHAUSTED_CODE: i64 = -32005;
 
-/// Candidate cacheable results are authorization-dependent and can change on
+/// Cacheable results are authorization-dependent and can change on
 /// config reload or asset mutation. Keep the hint short and private: clients
 /// may avoid immediate polling, while shared intermediaries must never reuse a
 /// tenant/key-specific result across authorization contexts.
@@ -188,7 +188,7 @@ pub(super) async fn handle_request(
                 "mcp.protocol_negotiated",
                 format!("protocol:{}", ferrogate_mcp::MCP_PROTOCOL_VERSION),
                 "success",
-                "served stateless server/discover for the pinned 2026-07-28 candidate",
+                "served stateless server/discover for the released 2026-07-28 revision",
             ));
             result(rpc.id, discover_result())
         }

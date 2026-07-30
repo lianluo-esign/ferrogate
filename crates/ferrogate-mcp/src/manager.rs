@@ -41,7 +41,7 @@ pub struct McpServerStatus {
     /// MCP protocol revision negotiated with this upstream (issue #277).
     /// `None` while disconnected.
     pub protocol_version: Option<String>,
-    /// Candidate per-request metadata mode or initialize-based legacy mode.
+    /// Modern per-request metadata mode or initialize-based legacy mode.
     pub protocol_mode: Option<McpProtocolMode>,
     /// Bounded reason for selecting legacy mode after a modern probe.
     pub protocol_downgrade_reason: Option<McpProtocolDowngradeReason>,

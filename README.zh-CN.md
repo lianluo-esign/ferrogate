@@ -51,8 +51,8 @@ API、集群运维和自动 HTTPS。
   用量从网关送到计费服务，不阻塞请求热路径。
 - **Agent 与工具流量：** 基于 `initialize` 的 MCP host/client 适配器、支持
   2025-11-25 和 2025-06-18 的旧版 `POST /v1/mcp`，以及固定版本 MCP
-  2026-07-28 候选规范的无状态发现和逐请求校验入口；目前不宣称候选规范的
-  出站客户端支持或最终规范一致性。此外还包括显式 `POST /v1/agent-runs`、带 Admin
+  2026-07-28 正式版规范（官方 tag `2026-07-28`）的无状态发现和逐请求校验入口；
+  该入口只覆盖已固定的子集，不宣称全规范一致性。此外还包括显式 `POST /v1/agent-runs`、带 Admin
   CRUD API 的 cron/interval agent 定时调度、对消息体做
   policy/guardrail/billing 的受治理 A2A 入口、受治理的工具执行、插件
   注册、Firecracker 后端的隔离 `agent-worker` 进程 —— 自托管 worker

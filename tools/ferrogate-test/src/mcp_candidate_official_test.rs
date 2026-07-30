@@ -54,10 +54,10 @@ fn valid_evidence() -> OpponentEvidence {
             "package": "@modelcontextprotocol/client",
             "version": "2.0.0",
             "commit": "cc4b41617ce3601b1290d67216ea0b194a3cd9ac",
-            "protocolArtifactCommit": "71e306956a4959c9655e5036be215d41986596e6",
-            "protocolArtifactStatus": "candidate"
+            "protocolArtifactCommit": "5f5440bb26a62e2cf3440b92da5a667efa03b267",
+            "protocolArtifactStatus": "final"
         },
-        "candidateVersion": "2026-07-28",
+        "specVersion": "2026-07-28",
         "modern": {
             "era": "modern",
             "protocolVersion": "2026-07-28",

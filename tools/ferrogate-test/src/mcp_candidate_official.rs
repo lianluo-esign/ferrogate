@@ -2,7 +2,7 @@
 // Developed by the commercial cloud service company represented by https://token4ai.cloud.
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-28
-// description: Official Tier-1 MCP SDK opponent for the pinned 2026-07-28 candidate.
+// description: Official Tier-1 MCP SDK opponent for the released 2026-07-28 revision.
 
 use std::{
     collections::BTreeMap,
@@ -28,8 +28,9 @@ const SDK_REPOSITORY: &str = "modelcontextprotocol/typescript-sdk";
 const SDK_TAG: &str = "@modelcontextprotocol/client@2.0.0";
 const SDK_COMMIT: &str = "cc4b41617ce3601b1290d67216ea0b194a3cd9ac";
 const SDK_TAG_OBJECT: &str = "ba0cd9ba0c5d56d1cf5635adece92349dff5af38";
-const SPEC_COMMIT: &str = "71e306956a4959c9655e5036be215d41986596e6";
-const CANDIDATE_VERSION: &str = "2026-07-28";
+const SPEC_COMMIT: &str = "5f5440bb26a62e2cf3440b92da5a667efa03b267";
+const SPEC_TAG: &str = "2026-07-28";
+const SPEC_VERSION: &str = "2026-07-28";
 
 pub(crate) fn run_mcp_candidate_client_official(args: &LocalArgs) -> Result<()> {
     let root = repository_root()?;
@@ -76,7 +77,7 @@ pub(crate) fn run_mcp_candidate_client_official(args: &LocalArgs) -> Result<()> 
         "mcp-candidate-client-official: opponent={SDK_PACKAGE}@{SDK_VERSION} sdk_commit={SDK_COMMIT}"
     );
     println!(
-        "mcp-candidate-client-official: protocol_artifact=modelcontextprotocol/modelcontextprotocol@{SPEC_COMMIT} status=candidate"
+        "mcp-candidate-client-official: protocol_artifact=modelcontextprotocol/modelcontextprotocol@{SPEC_COMMIT} tag={SPEC_TAG} status=final"
     );
     println!(
         "mcp-candidate-client-official: modern={} legacy={} two-instance discover/list/call + no-session wire contract passed",
@@ -151,8 +152,9 @@ fn verify_provenance(source: &Path) -> Result<()> {
         ("/opponent/tag", SDK_TAG),
         ("/opponent/commit", SDK_COMMIT),
         ("/opponent/tag_object", SDK_TAG_OBJECT),
-        ("/protocol_artifact/status", "candidate"),
-        ("/protocol_artifact/revision", CANDIDATE_VERSION),
+        ("/protocol_artifact/status", "final"),
+        ("/protocol_artifact/tag", SPEC_TAG),
+        ("/protocol_artifact/revision", SPEC_VERSION),
         ("/protocol_artifact/commit", SPEC_COMMIT),
         (
             "/protocol_artifact/sdk_generated_source",
@@ -265,7 +267,7 @@ fn run_official_client(
 #[serde(rename_all = "camelCase")]
 struct OpponentEvidence {
     opponent: OpponentIdentity,
-    candidate_version: String,
+    spec_version: String,
     modern: OpponentLeg,
     legacy: OpponentLeg,
 }
@@ -315,11 +317,11 @@ fn validate_evidence(evidence: &OpponentEvidence) -> Result<()> {
     );
     ensure!(
         evidence.opponent.protocol_artifact_commit == SPEC_COMMIT
-            && evidence.opponent.protocol_artifact_status == "candidate"
-            && evidence.candidate_version == CANDIDATE_VERSION,
-        "opponent no longer reports the pinned candidate artifact"
+            && evidence.opponent.protocol_artifact_status == "final"
+            && evidence.spec_version == SPEC_VERSION,
+        "opponent no longer reports the pinned final 2026-07-28 artifact"
     );
-    validate_leg_result(&evidence.modern, "modern", CANDIDATE_VERSION)?;
+    validate_leg_result(&evidence.modern, "modern", SPEC_VERSION)?;
     validate_leg_result(&evidence.legacy, "legacy", "2025-11-25")?;
     validate_modern_wire(&evidence.modern.wire)?;
     validate_legacy_wire(&evidence.legacy.wire)?;
@@ -403,8 +405,8 @@ fn validate_modern_wire(wire: &[ObservedRequest]) -> Result<()> {
                 .headers
                 .get("mcp-protocol-version")
                 .map(String::as_str)
-                == Some(CANDIDATE_VERSION),
-            "{method} omitted the candidate protocol header"
+                == Some(SPEC_VERSION),
+            "{method} omitted the 2026-07-28 protocol header"
         );
         ensure!(
             request.headers.get("mcp-method").map(String::as_str) == Some(method),
@@ -422,7 +424,7 @@ fn validate_modern_wire(wire: &[ObservedRequest]) -> Result<()> {
             metadata
                 .get("io.modelcontextprotocol/protocolVersion")
                 .and_then(Value::as_str)
-                == Some(CANDIDATE_VERSION),
+                == Some(SPEC_VERSION),
             "{method} omitted per-request protocolVersion"
         );
         ensure!(
@@ -459,7 +461,7 @@ fn validate_modern_wire(wire: &[ObservedRequest]) -> Result<()> {
                 .with_context(|| "tools/list evidence omitted its JSON-RPC result")?;
             ensure!(
                 result.get("ttlMs").and_then(Value::as_u64) == Some(5_000),
-                "tools/list result omitted the bounded candidate ttlMs"
+                "tools/list result omitted the bounded 2026-07-28 ttlMs"
             );
             ensure!(
                 result.get("cacheScope").and_then(Value::as_str) == Some("private"),
@@ -527,8 +529,8 @@ fn validate_legacy_wire(wire: &[ObservedRequest]) -> Result<()> {
                     .headers
                     .get("mcp-protocol-version")
                     .map(String::as_str)
-                    != Some(CANDIDATE_VERSION),
-            "legacy request carried candidate routing headers"
+                    != Some(SPEC_VERSION),
+            "legacy request carried 2026-07-28 routing headers"
         );
         ensure!(
             request
@@ -538,8 +540,8 @@ fn validate_legacy_wire(wire: &[ObservedRequest]) -> Result<()> {
                     |body| body.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
                 )
                 .and_then(Value::as_str)
-                != Some(CANDIDATE_VERSION),
-            "legacy request carried candidate per-request metadata"
+                != Some(SPEC_VERSION),
+            "legacy request carried 2026-07-28 per-request metadata"
         );
     }
     Ok(())

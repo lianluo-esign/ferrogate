@@ -88,12 +88,14 @@ as a defect in its own right.
   backend — a durable, dead-letter-tracked outbox delivers settled usage from
   the gateway to the billing service without blocking the request hot path.
 - **Agent and tool traffic:** dual-era MCP host/client adapters with stateless
-  2026-07-28 candidate discovery and per-request metadata plus strict fallback
+  2026-07-28 `server/discover` and per-request metadata plus strict fallback
   to initialize-based 2025-11-25/2025-06-18 peers. Native `POST /v1/mcp`
-  implements the same pinned candidate ingress contract. External official-SDK
-  interoperability is available as the opt-in locked
-  `ferrogate-test mcp-candidate-client-official` path; a command existing is not
-  a passing result, and final-spec conformance is not claimed. Malformed modern
+  implements the same ingress contract, pinned to the released 2026-07-28
+  revision (`modelcontextprotocol/modelcontextprotocol` tag `2026-07-28`).
+  External official-SDK interoperability is available as the opt-in locked
+  `ferrogate-test mcp-candidate-client-official` path (name is historical); a
+  command existing is not a passing result, and the implemented surface is the
+  ingress subset the harness exercises, not whole-spec conformance. Malformed modern
   request metadata fails as JSON-RPC `-32602`, while missing/mismatched
   Streamable-HTTP routing headers fail as `-32020`. The runtime
   also provides explicit `POST /v1/agent-runs`,
@@ -615,7 +617,7 @@ python3 scripts/check-openapi.py
 git diff --check
 ```
 
-The external MCP candidate opponent is a separate opt-in gate. It installs the
+The external official-SDK MCP opponent is a separate opt-in gate. It installs the
 exact official TypeScript SDK package from its committed npm lockfile, starts
 two real local FerroGate instances, alternates consecutive stateless modern
 requests across them, and independently checks the SDK-generated modern and

@@ -7,16 +7,18 @@
 //! MCP protocol revisions, version negotiation, and Streamable-HTTP routing
 //! headers.
 //!
-//! The modern ingress contract is pinned to official modelcontextprotocol
-//! commit `71e306956a4959c9655e5036be215d41986596e6`, rather than the obsolete
-//! 2026-07-28-RC tag. The final release is not published, so this is a candidate
-//! contract under validation rather than a final-conformance claim.
+//! The modern ingress contract is pinned to the published final 2026-07-28
+//! revision: official modelcontextprotocol tag `2026-07-28`, commit
+//! `5f5440bb26a62e2cf3440b92da5a667efa03b267`, schema `schema/2026-07-28/`.
+//! This is the released revision, not the superseded `2026-07-28-RC` tag and
+//! not the pre-release `schema/draft/` artifact FerroGate validated against
+//! before the release was published.
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-/// Modern MCP candidate revision accepted by FerroGate's stateless ingress.
+/// Modern MCP revision accepted by FerroGate's stateless ingress.
 /// This revision adds the `Mcp-Method` / `Mcp-Name` Streamable-HTTP routing
 /// headers (issues #277/#570); it is never negotiated through `initialize`.
 pub const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -257,7 +259,7 @@ pub(crate) fn http_legacy_downgrade_reason(
     }
 }
 
-/// Encode an outbound mirrored header value using the candidate's sentinel
+/// Encode an outbound mirrored header value using the 2026-07-28 sentinel
 /// rules. Values that are not unambiguous, trimmed, visible ASCII are Base64.
 pub(crate) fn encode_mcp_header_value(value: &str) -> String {
     let ambiguous = value.starts_with("=?base64?") && value.ends_with("?=");

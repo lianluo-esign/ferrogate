@@ -9,10 +9,12 @@
     "commit": "cc4b41617ce3601b1290d67216ea0b194a3cd9ac"
   },
   "protocol_artifact": {
-    "status": "candidate",
+    "status": "final",
     "revision": "2026-07-28",
+    "tag": "2026-07-28",
     "repository": "modelcontextprotocol/modelcontextprotocol",
-    "commit": "71e306956a4959c9655e5036be215d41986596e6",
+    "commit": "5f5440bb26a62e2cf3440b92da5a667efa03b267",
+    "schema_path": "schema/2026-07-28/schema.ts",
     "sdk_generated_source": "packages/core-internal/src/types/spec.types.2026-07-28.ts"
   }
 }

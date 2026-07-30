@@ -151,13 +151,13 @@ through the admin API but the runtime only ever read the tenant scope.
 - **Load boundary:** keep every live scenario bounded and low-volume. Live
   Supabase is not a performance target; do not run load, stress, throughput, or
   high-concurrency benchmarks through these commands.
-- **MCP candidate opponent path:** `ferrogate-test gateway-api` owns the local
+- **MCP official-SDK opponent path:** `ferrogate-test gateway-api` owns the local
   deterministic client-wire contract. The external Tier-1 target tracked by
   #570 is `ferrogate-test mcp-candidate-client-official`. It installs
   `@modelcontextprotocol/client@2.0.0` from a committed npm lockfile, verifies
   npm integrity plus SDK commit `cc4b41617ce3601b1290d67216ea0b194a3cd9ac`
-  and candidate spec commit
-  `71e306956a4959c9655e5036be215d41986596e6`, then drives two real local
+  and released spec tag `2026-07-28`
+  (commit `5f5440bb26a62e2cf3440b92da5a667efa03b267`), then drives two real local
   FerroGate instances in official SDK `auto` mode and one of them in `legacy`
   mode. Modern discover/list/call requests alternate between instances. Rust
   independently checks that instance sequence, the observed headers and

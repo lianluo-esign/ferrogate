@@ -26,20 +26,20 @@ work belongs in [`roadmap.md`](roadmap.md).
 - **MCP gateway support** through `ferrogate-mcp`, including streamable HTTP,
   SSE, stdio, `tools/list`, namespaced tools, deny-by-default execution
   allowlists, health checks, reconnects, and governed tool execution.
-  Streamable HTTP and stdio probe the pinned 2026-07-28 candidate first, use
+  Streamable HTTP and stdio probe the pinned released 2026-07-28 revision first, use
   stateless per-request metadata when supported, and fall back on non-modern
   errors or bounded stdio silence to initialize-based 2025-11-25/2025-06-18
   peers. Modern health checks use `server/discover`; `ping` is legacy-only.
 - **Native MCP JSON-RPC ingress** at `POST /v1/mcp` for legacy `initialize` / `ping`,
   `tools/list`, `tools/call`, and `resources/list`/`resources/read` over the
   hosted-asset registry. It also implements stateless `server/discover` and
-  per-request validation for the MCP 2026-07-28 candidate pinned at official
-  commit `71e306956a4959c9655e5036be215d41986596e6`. Ingress and outbound-client
-  slices have focused in-repo peer coverage, and the opt-in
-  `ferrogate-test mcp-candidate-client-official` path pins the official
-  TypeScript client that was generated from that exact artifact and alternates
-  its stateless modern requests across two gateway instances. Candidate
-  cacheable results carry a short `ttlMs` and authorization-private
+  per-request validation for the released MCP 2026-07-28 revision, pinned at
+  official tag `2026-07-28` (commit `5f5440bb26a62e2cf3440b92da5a667efa03b267`).
+  Ingress and outbound-client slices have focused in-repo peer coverage, and the
+  opt-in `ferrogate-test mcp-candidate-client-official` path (historical name)
+  pins the official TypeScript client generated from that revision and alternates
+  its stateless modern requests across two gateway instances. Cacheable
+  results carry a short `ttlMs` and authorization-private
   `cacheScope`. Candidate
   body-schema failures use `-32602`; Streamable-HTTP header failures use
   `-32020`. Execution evidence and final-spec conformance remain separate from
@@ -142,10 +142,10 @@ Validated end to end:
 - Agentic Lite tools and MCP gateway execution through auth, policy, billing,
   audit, and metrics.
 - Native legacy MCP JSON-RPC ingress at `POST /v1/mcp`, including
-  `resources/list`/`resources/read` over hosted assets. A pinned MCP 2026-07-28
-  candidate ingress and outbound-client slices have focused regression
-  coverage; external official-SDK compatibility and final-spec conformance
-  remain open.
+  `resources/list`/`resources/read` over hosted assets. Ingress and
+  outbound-client slices for the released MCP 2026-07-28 revision have focused
+  regression coverage; external official-SDK compatibility and whole-spec
+  conformance beyond that subset remain open.
 - The hosted-asset closed loop: authenticated publish/pull/delete on
   `/v1/assets/*`, channels/semver/variant resolution, signature and
   malware-scan gates, presigned large-file upload/commit/download against a

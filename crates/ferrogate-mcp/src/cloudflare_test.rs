@@ -75,13 +75,15 @@ fn cloudflare_bearer_header_and_managed_config_are_valid_deny_by_default() {
 
 /// Canned responses for the in-process Cloudflare-managed MCP stub, dispatched
 /// by the outbound `Mcp-Method` routing header (2026-07-28 Streamable HTTP).
+/// The stub is stateless: it answers `server/discover` and never `initialize`,
+/// matching the released 2026-07-28 contract.
 /// The `tools/list` reply emulates a Code Mode server (`search`/`execute`) plus
 /// a mutating `write` tool that must be filtered out by deny-by-default.
 fn cloudflare_stub_response_for(request: &str) -> String {
     let lower = request.to_ascii_lowercase();
-    if lower.contains("mcp-method: initialize") {
+    if lower.contains("mcp-method: server/discover") {
         json_http_response(
-            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28","capabilities":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#,
         )
     } else if lower.contains("mcp-method: tools/list") {
         json_http_response(
@@ -92,7 +94,7 @@ fn cloudflare_stub_response_for(request: &str) -> String {
             ]}}"#,
         )
     } else {
-        // tools/call (and any ping) — a successful, non-error tool result.
+        // tools/call — a successful, non-error tool result.
         json_http_response(
             r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"cf-ok"}],"isError":false}}"#,
         )
@@ -130,8 +132,9 @@ fn spawn_cloudflare_managed_stub(
 
 #[test]
 fn cloudflare_managed_bearer_upstream_connects_lists_allowlisted_and_executes() {
-    // connect() performs initialize + tools/list (2 connections); the allowlisted
-    // execute is a 3rd. Each uses Connection: close, so the stub serves 3.
+    // connect() performs server/discover + tools/list (2 connections); the
+    // allowlisted execute is a 3rd. Each uses Connection: close, so the stub
+    // serves 3.
     let (addr, captured, handle) = spawn_cloudflare_managed_stub(3);
     let mut config = cloudflare_managed_bearer_config(
         "cfmanaged",

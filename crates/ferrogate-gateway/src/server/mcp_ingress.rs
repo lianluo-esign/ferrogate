@@ -2,12 +2,13 @@
 // Developed by the commercial cloud service company represented by https://token4ai.cloud.
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-28
-// description: Dual-era MCP ingress metadata validation for the pinned 2026-07-28 candidate.
+// description: Dual-era MCP ingress metadata validation for the released 2026-07-28 revision.
 
 //! Stateless modern MCP request classification and Streamable-HTTP validation.
 //!
-//! Protocol truth is pinned to official modelcontextprotocol commit
-//! `71e306956a4959c9655e5036be215d41986596e6`. Legacy requests remain
+//! Protocol truth is pinned to the released 2026-07-28 revision: official
+//! modelcontextprotocol tag `2026-07-28`, commit
+//! `5f5440bb26a62e2cf3440b92da5a667efa03b267`. Legacy requests remain
 //! initialize-based; modern requests carry all identity and capability metadata
 //! on the request being validated. Nothing here caches client metadata.
 

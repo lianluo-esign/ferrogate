@@ -137,7 +137,9 @@ fn static_headers_cannot_override_protocol_owned_or_session_headers() {
         "Mcp-Name",
         "Mcp-Session-Id",
     ] {
-        let mut config = test_config("reserved-header");
+        // No '-' in the server name: name validation runs first and would
+        // otherwise mask the reserved-header rejection this test is proving.
+        let mut config = test_config("reservedheader");
         config.auth_type = McpAuthType::SharedHeaders;
         config.headers = vec![McpHeaderConfig {
             name: name.into(),

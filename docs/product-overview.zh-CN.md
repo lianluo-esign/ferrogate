@@ -21,21 +21,21 @@
   启用控制。
 - **MCP gateway**：通过 `ferrogate-mcp` 支持 streamable HTTP、SSE、stdio、
   `tools/list`、命名空间工具、默认拒绝的执行 allowlist、健康检查、重连和受治理
-  的工具执行。Streamable HTTP 和 stdio 会先探测固定的 2026-07-28 候选规范，
+  的工具执行。Streamable HTTP 和 stdio 会先探测固定的 2026-07-28 正式版规范，
   成功后使用无状态逐请求元数据；非现代错误或 stdio 有界静默会回退到基于
   `initialize` 的 2025-11-25/2025-06-18。现代健康检查使用
   `server/discover`，`ping` 仅属于 legacy。
 - **原生 MCP JSON-RPC 入口**：`POST /v1/mcp` 支持 legacy `initialize`/`ping`、
   `tools/list`、`tools/call`，以及基于托管资产注册表的
-  `resources/list`/`resources/read`。入口还实现了基于官方 commit
-  `71e306956a4959c9655e5036be215d41986596e6` 固定的 MCP 2026-07-28 候选规范：
+  `resources/list`/`resources/read`。入口还实现了基于官方 tag `2026-07-28`
+  （commit `5f5440bb26a62e2cf3440b92da5a667efa03b267`）固定的 MCP 2026-07-28 正式版规范：
   无状态 `server/discover` 和逐请求校验。入口和出站客户端切片已有仓库内聚焦
-  对端覆盖；可选命令 `ferrogate-test mcp-candidate-client-official` 固定使用由该
-  候选规范生成的官方 TypeScript client，并让无状态现代请求交替经过两个网关
-  实例。候选 cacheable result 带短 `ttlMs` 和授权私有的 `cacheScope`。
-  候选请求体 schema 错误返回 `-32602`，
-  Streamable-HTTP header 错误返回 `-32020`。命令已实现不等于已执行通过，最终
-  规范一致性也仍需独立验证。
+  对端覆盖；可选命令 `ferrogate-test mcp-candidate-client-official`（名称为历史
+  遗留）固定使用由该规范生成的官方 TypeScript client，并让无状态现代请求交替
+  经过两个网关实例。cacheable result 带短 `ttlMs` 和授权私有的 `cacheScope`。
+  现代请求体 schema 错误返回 `-32602`，
+  Streamable-HTTP header 错误返回 `-32020`。命令已实现不等于已执行通过；已固定
+  子集之外的全规范一致性仍需独立验证。
 - **托管资产闭环**：`/v1/assets/*` 上的版本化 publish/pull/delete 带租户
   配额记账、artifact registry 语义（latest/stable/canary 等 channel、
   semver 解析、平台/架构 variant、yank）、供应链信任门禁（恶意软件扫描、
@@ -114,8 +114,9 @@
 - 非流式 AI 请求的 exact-match 和 semantic（向量相似度）响应缓存。
 - Agentic Lite tools 和 MCP gateway 执行，并经过鉴权、策略、计费、审计和指标链路。
 - `POST /v1/mcp` 原生旧版 MCP JSON-RPC 入口，包括基于托管资产的
-  `resources/list`/`resources/read`。固定版本的 MCP 2026-07-28 候选规范入口切片
-  及出站客户端切片已有聚焦回归覆盖；外部官方 SDK 兼容性和最终规范一致性仍待完成。
+  `resources/list`/`resources/read`。固定版本的 MCP 2026-07-28 正式版规范入口切片
+  及出站客户端切片已有聚焦回归覆盖；外部官方 SDK 兼容性、以及该子集之外的
+  全规范一致性仍待完成。
 - 托管资产闭环：`/v1/assets/*` 上带鉴权的 publish/pull/delete、
   channel/semver/variant 解析、签名与恶意软件扫描门禁、私有 bucket 上的
   presigned 大文件 upload/commit/download（基于 mock S3 兼容端点验证；
