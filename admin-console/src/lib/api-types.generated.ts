@@ -7391,6 +7391,8 @@ export interface components {
             previous_active_revision: number | null;
             rollback: boolean;
             reload: Record<string, never>;
+            /** @description Id of the admin audit-event row this activation/rollback wrote (action guardrail.policy_activate / guardrail.policy_rollback). A mutation receipt follows this id to locate the audit row. Null only when no audit row was recorded. */
+            audit_id?: string | null;
         };
         GuardrailPolicyDryRunRequest: {
             revision?: number | null;

@@ -2807,18 +2807,32 @@ fn receipt_never_carries_the_token_it_authenticated_with() {
     }
 }
 
-/// The audit-id gap the receipt reports is re-derived from the contract, and
-/// the enumeration is produced rather than asserted in the abstract (issue #505
-/// acceptance box 6).
+/// Exactly the audited allowlist of mutating operations returns an audit
+/// identifier; every other mutating operation returns none (issue #552, split
+/// from #505 acceptance box 6).
 ///
-/// The receipt claims every mutating operation returns no audit identifier.
-/// That is a claim about `docs/openapi/admin-api.openapi.json`, so it is
-/// checked against the contract: the day an operation starts declaring one this
-/// fails and forces the absence reason, the E2E's else-branch, and the module
-/// doc to be corrected together. The failure message carries the full
-/// enumeration, so the list exists in the repository rather than in a comment.
+/// This is now a **deliberate contract invariant**, not the old "nothing
+/// returns one". The guardrail-policy activate and rollback operations are the
+/// first mutating operations #552 wired to return the id of the audit row they
+/// write, so a receipt's `audit_id` can follow it to that row (issue #505 E2E
+/// box 5(a)); every other mutating operation still returns no `audit*` property,
+/// so its receipt's `audit_id` stays null with `NO_AUDIT_ID_IN_CONTRACT`.
+///
+/// The claim is re-derived from `docs/openapi/admin-api.openapi.json` on every
+/// run rather than asserted in the abstract: the day another operation starts
+/// declaring an audit id without joining the allowlist this fails and forces the
+/// receipt's absence reason, the E2E's branch, and the module doc to be
+/// corrected together. The failure message carries the full enumeration, so the
+/// list exists in the repository rather than in a comment.
 #[test]
-fn no_mutating_operation_in_the_contract_returns_an_audit_id() {
+fn only_the_audited_allowlist_of_mutating_operations_returns_an_audit_id() {
+    /// The mutating operations #552 deliberately wired to return an audit id.
+    /// Every other mutating operation must return none. Kept sorted.
+    const AUDITED_ALLOWLIST: &[&str] = &[
+        "activateGuardrailPolicyRevision",
+        "rollbackGuardrailPolicyRevision",
+    ];
+
     let spec: serde_json::Value =
         serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
             .expect("the OpenAPI contract parses");
@@ -2871,7 +2885,12 @@ fn no_mutating_operation_in_the_contract_returns_an_audit_id() {
     }
 
     let mut mutating: Vec<String> = Vec::new();
-    let mut declaring: Vec<String> = Vec::new();
+    // Allowlisted mutating operations that DO resolve an `audit*` property in a
+    // 2xx schema, keyed by operation id.
+    let mut allowlisted_declaring: BTreeSet<String> = BTreeSet::new();
+    // Mutating operations that declare an audit id but are NOT allowlisted —
+    // the regression this invariant now guards against.
+    let mut unexpected_declaring: Vec<String> = Vec::new();
     for (path, item) in spec["paths"].as_object().expect("paths") {
         let Some(operations) = item.as_object() else {
             continue;
@@ -2894,7 +2913,11 @@ fn no_mutating_operation_in_the_contract_returns_an_audit_id() {
                 }
                 let schema = &response["content"]["application/json"]["schema"];
                 if declares_audit_property(schema, &components, 0) {
-                    declaring.push(format!("{operation_id} ({status})"));
+                    if AUDITED_ALLOWLIST.contains(&operation_id.as_str()) {
+                        allowlisted_declaring.insert(operation_id.clone());
+                    } else {
+                        unexpected_declaring.push(format!("{operation_id} ({status})"));
+                    }
                 }
             }
         }
@@ -2905,12 +2928,43 @@ fn no_mutating_operation_in_the_contract_returns_an_audit_id() {
         "the structural scan found only {} mutating operations, which means it stopped scanning",
         mutating.len()
     );
+    // Non-vacuity: the allowlist is a real, non-empty set, and it is meaningful
+    // only if each of its operations exists as a mutating operation.
     assert!(
-        declaring.is_empty(),
-        "these mutating operations now return an audit identifier: {declaring:?} — the receipt's \
-         `endpoint_returns_no_audit_id` reason, the E2E's else-branch, and the module doc must be \
-         updated together.\n\nEnumeration of the {} mutating operations that return NO audit \
-         id:\n{}",
+        !AUDITED_ALLOWLIST.is_empty(),
+        "the audited allowlist must name at least one operation, or this test degenerates back \
+         into 'nothing returns an audit id'"
+    );
+    for operation_id in AUDITED_ALLOWLIST {
+        assert!(
+            mutating.iter().any(|found| found == operation_id),
+            "allowlisted audited operation '{operation_id}' is not a mutating operation in the \
+             contract; the allowlist is stale"
+        );
+    }
+    // The invariant's positive half: every allowlisted operation DOES resolve an
+    // `audit*` property in a 2xx schema. Without this the test would pass even if
+    // #552's schema change were reverted.
+    let missing_allowlisted: Vec<&str> = AUDITED_ALLOWLIST
+        .iter()
+        .copied()
+        .filter(|operation_id| !allowlisted_declaring.contains(*operation_id))
+        .collect();
+    assert!(
+        missing_allowlisted.is_empty(),
+        "these audited operations must return an audit identifier but do not: {missing_allowlisted:?} \
+         — #552 wired guardrail-policy activate/rollback to return the id of the audit row they \
+         write; a reverted schema or renamed property reds here"
+    );
+    // The invariant's negative half: no operation OUTSIDE the allowlist returns
+    // an audit id, so every other receipt's `audit_id` stays null with
+    // NO_AUDIT_ID_IN_CONTRACT.
+    assert!(
+        unexpected_declaring.is_empty(),
+        "these NON-allowlisted mutating operations now return an audit identifier: \
+         {unexpected_declaring:?} — either wire the receipt to follow it and add the operation to \
+         AUDITED_ALLOWLIST, or drop the audit property.\n\nEnumeration of the {} mutating \
+         operations:\n{}",
         mutating.len(),
         mutating.join("\n")
     );

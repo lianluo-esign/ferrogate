@@ -28,13 +28,16 @@
 //! deliberate — an absent audit id is itself the finding. A structural scan of
 //! `docs/openapi/admin-api.openapi.json` finds **135** mutating operations
 //! (`POST`/`PUT`/`PATCH`/`DELETE`), of which **117** are covered by this
-//! registry, and **none** declares an audit identifier in any resolved 2xx
-//! response schema; zero declare a `dry_run` echo. That scan is not a
-//! historical note — `no_mutating_operation_in_the_contract_returns_an_audit_id`
+//! registry. Exactly the audited allowlist — the guardrail-policy `activate` and
+//! `rollback` operations #552 wired to return the id of the audit row they write
+//! — declares an `audit_id` in a resolved 2xx response schema; every other
+//! mutating operation declares none, and zero declare a `dry_run` echo. That
+//! scan is not a historical note —
+//! `only_the_audited_allowlist_of_mutating_operations_returns_an_audit_id`
 //! re-derives it from the contract on every run and prints the full
-//! enumeration, so the claim fails the day it stops being true. Issue #505 is
-//! explicit that this slice must *record* that gap, not add the server-side
-//! write path, so the receipt reports it in a machine-greppable way:
+//! enumeration, so the invariant fails the day another operation starts (or
+//! stops) returning one. The receipt harvests the id when the response carries
+//! it and otherwise reports the gap in a machine-greppable way:
 //!
 //! ```sh
 //! ferrogate ctl <group> <verb> … --output json | jq -e '.audit_id.absent_reason.code'
@@ -196,11 +199,11 @@ pub const CLI_ACTION_CLASS: &str = "rest";
 /// Stable reason codes for an absent receipt field. A consumer keys on these,
 /// never on the prose in [`AbsenceReason::detail`].
 pub mod absence_codes {
-    /// The endpoint's 2xx schema declares no audit identifier. Applies to all
-    /// 135 mutating operations in the contract today — the 117 this registry
-    /// covers and the 18 it does not (issue #505, acceptance box 6); the
-    /// enumeration is re-derived by
-    /// `no_mutating_operation_in_the_contract_returns_an_audit_id`.
+    /// The endpoint's 2xx schema declares no audit identifier. Applies to every
+    /// mutating operation in the contract EXCEPT the audited allowlist
+    /// (guardrail-policy `activate`/`rollback`, which #552 wired to return one);
+    /// the enumeration is re-derived by
+    /// `only_the_audited_allowlist_of_mutating_operations_returns_an_audit_id`.
     pub const NO_AUDIT_ID_IN_CONTRACT: &str = "endpoint_returns_no_audit_id";
     /// The endpoint's 2xx schema declares no approval identifier.
     pub const NO_APPROVAL_ID_IN_CONTRACT: &str = "endpoint_returns_no_approval_id";
@@ -1879,9 +1882,9 @@ impl<'a> MutationPlan<'a> {
                 Some(body) => Attested::or_absent(
                     envelope_scalar(body, AUDIT_ID_KEYS),
                     absence_codes::NO_AUDIT_ID_IN_CONTRACT,
-                    "this endpoint returns no audit identifier (none of the 135 mutating \
-                     operations in the contract does); the audit row exists server-side but \
-                     cannot be addressed from this response - see issue #505",
+                    "this endpoint returns no audit identifier (only the audited allowlist - \
+                     guardrail-policy activate/rollback - does); the audit row exists server-side \
+                     but cannot be addressed from this response - see issues #505 and #552",
                 ),
                 None => Attested::absent(missing_code, missing_detail),
             },

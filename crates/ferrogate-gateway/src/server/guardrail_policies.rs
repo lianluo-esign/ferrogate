@@ -501,7 +501,10 @@ impl FerroGateway {
                 } else {
                     "guardrail.policy_activate"
                 };
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                // #552: surface the id of the audit row this activation/rollback
+                // wrote so the mutation receipt can follow it to that row. This
+                // reuses the very event recorded here — no parallel audit write.
+                let audit_id = state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
                     action,
@@ -519,6 +522,7 @@ impl FerroGateway {
                         "previous_active_revision": activation.previous_active_revision,
                         "rollback": rollback,
                         "reload": activation.reload,
+                        "audit_id": audit_id,
                     }),
                     &ctx.request_id,
                 )

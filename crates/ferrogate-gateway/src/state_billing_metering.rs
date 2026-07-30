@@ -563,12 +563,17 @@ impl AppState {
         }
     }
 
-    pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) {
+    /// Record an admin audit event and return the id of the row that was
+    /// stamped for it. The id lets a mutating handler surface `audit_id` in its
+    /// response body (issue #552) so a receipt can follow it to the audit row;
+    /// callers with no such contract ignore the return.
+    pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) -> String {
         // The event (id + occurred_at) is prepared HERE, at call time, so
         // ordering-sensitive sequences (#304's chokepoint success/redacted/
         // withheld rows) are stamped and enqueued in emission order; the
         // single-consumer evidence writer then persists them FIFO (#309).
         let event = self.prepare_admin_audit_event(event);
+        let audit_id = event.id.clone();
         if self.evidence_writes_deferred() {
             self.evidence_writer
                 .enqueue(EvidenceWriteJob::AuditEvent(event));
@@ -577,6 +582,7 @@ impl AppState {
                 self.repositories.append_audit_event(event),
             );
         }
+        audit_id
     }
 
     pub(super) fn prepare_admin_audit_event(

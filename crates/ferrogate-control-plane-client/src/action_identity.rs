@@ -12,9 +12,10 @@
 //!
 //! #505 built the **response** side: [`crate::receipt::MutationReceipt`] renders
 //! actor, target fingerprint, decision and outcome for every mutating verb, and
-//! honestly reports `audit_id: null` because **none of the 135 mutating
-//! operations in the contract returns an audit identifier**. The CLI could not
-//! surface a correlation handle because nothing gave it one.
+//! reports `audit_id: null` for every mutating operation outside the audited
+//! allowlist (guardrail-policy activate/rollback, which #552 wired to return an
+//! audit identifier). For the rest the CLI could not surface a correlation
+//! handle because nothing gave it one.
 //!
 //! This module mints the handle at the client and sends it. That is what makes
 //! the two ends join: a client-generated [`ActionId`] on the request is
