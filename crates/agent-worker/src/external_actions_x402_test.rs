@@ -424,6 +424,97 @@ fn a_payment_required_without_a_challenge_header_fails_closed() {
     assert!(message.contains("nothing was paid"), "{message}");
 }
 
+/// Two `PAYMENT-REQUIRED` headers are two spend demands, and the worker refuses
+/// rather than picking one.
+///
+/// The response below is the case first-wins cannot see: header one names the
+/// authorized loopback resource and would parse cleanly, header two redirects
+/// payment to an attacker. Under first-wins the worker reports the benign
+/// challenge and the gateway decides against evidence that omits the redirect.
+/// Reverting `response_header_value` to `return Some(value.trim())` on the first
+/// match makes this test fail on the `more than one` assertion.
+#[test]
+fn duplicate_payment_challenge_headers_fail_closed_without_picking_one() {
+    let origin = CannedOrigin::spawn_with(|endpoint| {
+        http_response(
+            "HTTP/1.1 402 Payment Required",
+            &[
+                (
+                    "PAYMENT-REQUIRED",
+                    challenge_header(&format!("http://{endpoint}/authorized")),
+                ),
+                (
+                    "payment-required",
+                    challenge_header("https://attacker.example.com/drain"),
+                ),
+            ],
+            "payment required\n",
+        )
+    });
+
+    let error = rest_event_metadata(rest_action(origin.endpoint, 1_000)).unwrap_err();
+    let message = error.to_string();
+
+    assert!(
+        message.contains("more than one PAYMENT-REQUIRED challenge header"),
+        "duplicate challenges must be named as the reason: {message}"
+    );
+    assert!(message.contains("nothing was paid"), "{message}");
+    // Neither demand may be reported as THE challenge: no amount, no payee, no
+    // resource from either header reaches the refusal.
+    assert!(
+        !message.contains(&ATOMIC_AMOUNT.to_string()),
+        "an ambiguous demand must not surface one challenge's amount: {message}"
+    );
+    assert!(
+        !message.contains(RECIPIENT),
+        "an ambiguous demand must not surface one challenge's payee: {message}"
+    );
+    assert!(
+        !message.contains("attacker.example.com"),
+        "an ambiguous demand must not surface one challenge's resource: {message}"
+    );
+
+    assert_eq!(
+        origin.served_requests().len(),
+        1,
+        "an ambiguous 402 must not trigger a replay"
+    );
+}
+
+/// The duplicate guard must count only the header it was asked about, and only
+/// inside the header block — an unrelated repeated header, and the challenge
+/// name appearing in the body, both leave the single real challenge readable.
+#[test]
+fn unrelated_duplicate_headers_do_not_make_a_single_challenge_ambiguous() {
+    let origin = CannedOrigin::spawn_with(|endpoint| {
+        http_response(
+            "HTTP/1.1 402 Payment Required",
+            &[
+                ("set-cookie", "a=1".to_string()),
+                ("set-cookie", "b=2".to_string()),
+                (
+                    "PAYMENT-REQUIRED",
+                    challenge_header(&format!("http://{endpoint}/authorized")),
+                ),
+            ],
+            "PAYMENT-REQUIRED: not-a-header-it-is-the-body\n",
+        )
+    });
+
+    let error = rest_event_metadata(rest_action(origin.endpoint, 1_000)).unwrap_err();
+    let message = error.to_string();
+
+    assert!(
+        message.contains("will not self-authorize"),
+        "one challenge plus unrelated duplicates is still one challenge: {message}"
+    );
+    assert!(
+        message.contains(&ATOMIC_AMOUNT.to_string()),
+        "the single challenge must still be reported in full: {message}"
+    );
+}
+
 /// An unparseable challenge is refused, and the refusal does not echo the
 /// merchant's raw header back — it is attacker-controlled input.
 #[test]

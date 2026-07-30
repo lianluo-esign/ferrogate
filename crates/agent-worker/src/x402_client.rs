@@ -84,10 +84,10 @@
 //! The gateway-minted short-lived `SpendAuthorization` token, the exact-once
 //! paid replay, and the durable attempt/hold integration are NOT deferred out of
 //! convenience — they are **unreachable from this process**. The durable attempt
-//! API is `X402SettlementLoop` (`ferrogate-cli/src/state_x402_settlement.rs`:
+//! API is `X402SettlementLoop` (`ferrogate-gateway/src/state_x402_settlement.rs`:
 //! `open` / `submit` / `finalize` / `cancel` / `expire_if_due`) over
 //! `ferrogate_storage::RuntimeStorageRepositories`, and `agent-worker` depends on
-//! neither `ferrogate-cli` nor `ferrogate-storage` (see this crate's
+//! neither `ferrogate-gateway` nor `ferrogate-storage` (see this crate's
 //! `Cargo.toml`). That is deliberate: the worker sits on the far side of the
 //! gateway-mediated capability boundary, and handing it a durable ledger handle
 //! would breach the very boundary the non-custody rule above exists to protect.

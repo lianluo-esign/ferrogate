@@ -4087,11 +4087,21 @@ fn run_authorized_rest_action(
 /// failure mode — a missing header, an unparseable challenge, a redirected
 /// resource — is a refusal, never a payment.
 fn payment_required_failure(action: &ManagedRestAction, response: &str) -> FrameworkAdapterError {
-    let Some(header) = response_header_value(response, HEADER_PAYMENT_REQUIRED) else {
-        return FrameworkAdapterError::CapabilityDenied(format!(
-            "managed REST action returned status {STATUS_PAYMENT_REQUIRED} without a \
-             {HEADER_PAYMENT_REQUIRED} challenge header; nothing was paid"
-        ));
+    let header = match response_header_value(response, HEADER_PAYMENT_REQUIRED) {
+        HeaderLookup::Single(value) => value,
+        HeaderLookup::Absent => {
+            return FrameworkAdapterError::CapabilityDenied(format!(
+                "managed REST action returned status {STATUS_PAYMENT_REQUIRED} without a \
+                 {HEADER_PAYMENT_REQUIRED} challenge header; nothing was paid"
+            ));
+        }
+        HeaderLookup::Duplicated => {
+            return FrameworkAdapterError::CapabilityDenied(format!(
+                "managed REST action returned status {STATUS_PAYMENT_REQUIRED} with more than one \
+                 {HEADER_PAYMENT_REQUIRED} challenge header; the demand is ambiguous and no \
+                 single challenge can be reported, so nothing was paid"
+            ));
+        }
     };
     let request = AuthorizedRequest::new(action.method.clone(), action.url.clone());
     match detect_payment_required(header, request) {
@@ -4110,22 +4120,44 @@ fn payment_required_failure(action: &ManagedRestAction, response: &str) -> Frame
     }
 }
 
+/// What a single-header lookup found in a raw HTTP response.
+///
+/// `Duplicated` is a case of its own rather than a first-wins pick because the
+/// only caller reads `PAYMENT-REQUIRED`, and two of those headers are two
+/// different spend demands. Silently taking either one reports the gateway
+/// evidence for a challenge — hash, network, amount, recipient — that the
+/// merchant did not unambiguously make, and hides the other. The worker cannot
+/// choose between them without making a spend decision that is not its to make,
+/// so it refuses (#353).
+enum HeaderLookup<'a> {
+    Absent,
+    Single(&'a str),
+    Duplicated,
+}
+
 /// Read a single header value out of a raw HTTP response, case-insensitively.
 /// Stops at the header/body separator so a body line can never be mistaken for
 /// a header.
-fn response_header_value<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+fn response_header_value<'a>(response: &'a str, name: &str) -> HeaderLookup<'a> {
+    let mut found: Option<&'a str> = None;
     for line in response.lines().skip(1) {
         if line.trim_end_matches('\r').is_empty() {
-            return None;
+            break;
         }
         let Some((header, value)) = line.split_once(':') else {
             continue;
         };
         if header.trim().eq_ignore_ascii_case(name) {
-            return Some(value.trim());
+            if found.is_some() {
+                return HeaderLookup::Duplicated;
+            }
+            found = Some(value.trim());
         }
     }
-    None
+    match found {
+        Some(value) => HeaderLookup::Single(value),
+        None => HeaderLookup::Absent,
+    }
 }
 
 fn required_pinned_ip(values: &[String]) -> Result<std::net::IpAddr, FrameworkAdapterError> {
