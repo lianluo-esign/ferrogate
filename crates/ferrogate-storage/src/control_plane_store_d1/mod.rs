@@ -12,6 +12,12 @@
 //! API (`ferrogate_cloudflare::d1`), replacing shared-Postgres row-level
 //! isolation with physical database-per-tenant isolation.
 //!
+//! **When a family lands (or stops erroring), update `docs/cloudflare-d1-backend.md`
+//! in the SAME commit** — specifically its "Implemented vs erroring trait surface"
+//! and "Remaining scope" sections. That doc is the operator-facing map of which
+//! surfaces work on D1, and it silently drifted across issues #454/#455/#456/#460
+//! (corrected in #456) because it is not derived from this list.
+//!
 //! ## Topology and routing
 //!
 //! - One **control database** holds the `tenants` table, the generic
@@ -303,8 +309,17 @@
 //!   (`transition_payment_attempt` CAS). `sweep` is deferred because its
 //!   money-safety guard reads `payment_attempts.hold_id` — coupling wallets to
 //!   the (still-deferred) x402 payment_attempts family into one larger unit.
+//! - Agent cost-burn (#428): `add_agent_burn`, `get_agent_burn`,
+//!   `list_agent_cost_burn`. The durable per-agent burn ledger lands on the
+//!   Postgres control-plane store first; routing its atomic accumulate onto the
+//!   per-tenant proxy binding is a follow-up.
 //! - MCP identity — the last remaining pre-#425 per-entity dispatch surface
 //!   (agent schedules + observed-agent presence landed in issue #460, below).
+//! - Guardrail evidence (`append_guardrail_evaluation`,
+//!   `query_guardrail_evaluations`, `list_guardrail_evaluations`,
+//!   `list_guardrail_check_evaluations`). Enum-dispatched separately from the
+//!   #437 per-entity surfaces (see `guardrail_evidence.rs`), so it is NOT
+//!   covered by the MCP-identity note above.
 //!
 //! RBAC, site domains, and the budget-alert idempotency ledger were
 //! implemented in issue #445; request/audit logs, agent runs/events, and
