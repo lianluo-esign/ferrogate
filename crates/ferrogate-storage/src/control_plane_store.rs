@@ -911,6 +911,14 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         checked_at_or_before_unix: i64,
         limit: usize,
     ) -> Result<Vec<StoredPaymentAttempt>, StorageError>;
+    /// The id of the attempt that already recorded `transaction_signature`, if
+    /// any (#498). At most one row can hold a given signature -- Postgres by the
+    /// migration-59 partial UNIQUE index, Memory by its twin check -- so this is
+    /// a point read, not a list. `Ok(None)` means the signature is unbound.
+    async fn payment_attempt_id_for_transaction_signature(
+        &self,
+        transaction_signature: &str,
+    ) -> Result<Option<String>, StorageError>;
     /// The one CAS seam every typed payment-attempt transition edge routes
     /// through (#399). `op_name` labels the Postgres StorageOperation; the
     /// Memory backend ignores it. `evidence` is the write-once column bundle

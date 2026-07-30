@@ -902,6 +902,39 @@ impl PostgresControlPlaneStore {
         Ok(row.as_ref().map(payment_attempt_from_row))
     }
 
+    /// The attempt id already bound to `transaction_signature`, if any (#498).
+    /// Served by the migration-59 partial UNIQUE index
+    /// (`idx_payment_attempts_transaction_signature`), which is also why `LIMIT
+    /// 1` is a formality rather than an arbitrary pick: at most one row can
+    /// carry a given signature.
+    pub(super) async fn payment_attempt_id_for_transaction_signature(
+        &self,
+        transaction_signature: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let operation =
+            self.payment_attempt_operation("get payment attempt by transaction signature");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
+            .query_opt(
+                "SELECT id FROM payment_attempts WHERE transaction_signature = $1 LIMIT 1",
+                &[&transaction_signature],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(row.map(|row| row.get(0)))
+    }
+
     /// One bounded, keyset-paginated page of a tenant's attempts (issue #352
     /// acceptance box 6). The tenant predicate is applied BEFORE the cursor and
     /// the ordering, so `idx_payment_attempts_tenant_time` serves the whole
@@ -1204,6 +1237,21 @@ impl RuntimeControlPlaneState {
 
     pub fn get_payment_attempt(&self, id: &str) -> Option<StoredPaymentAttempt> {
         self.payment_attempts.get(id)
+    }
+
+    /// Memory twin of the Postgres signature lookup (#498). The uniqueness the
+    /// index guarantees is enforced here by
+    /// [`Self::transition_payment_attempt`], so `find` -- not a collect -- is
+    /// the honest shape: a second binding cannot exist.
+    pub fn payment_attempt_id_for_transaction_signature(
+        &self,
+        transaction_signature: &str,
+    ) -> Option<String> {
+        self.payment_attempts
+            .list()
+            .into_iter()
+            .find(|attempt| attempt.transaction_signature.as_deref() == Some(transaction_signature))
+            .map(|attempt| attempt.id)
     }
 
     /// Memory twin of the Postgres keyset page. Same tenant-first predicate,
@@ -1517,6 +1565,27 @@ impl RuntimeStorageRepositories {
         self.control_plane
             .store()
             .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit)
+            .await
+    }
+
+    /// The attempt already bound to `transaction_signature`, or `None` when the
+    /// signature is unbound (#498).
+    ///
+    /// This exists so the settle edge can refuse to CAPTURE a wallet hold on a
+    /// signature another attempt already claimed. The uniqueness itself is
+    /// enforced at the write (the migration-59 partial UNIQUE index, mirrored in
+    /// the memory backend), but that enforcement lands on the attempt
+    /// transition, which the SETTLE edge runs only AFTER the money has moved --
+    /// so without this read the constraint converts a silent double-capture into
+    /// a captured hold behind a non-terminal attempt, which is still a capture.
+    /// A read here is what keeps the refusal ahead of the money.
+    pub async fn payment_attempt_id_for_transaction_signature(
+        &self,
+        transaction_signature: &str,
+    ) -> Result<Option<String>, StorageError> {
+        self.control_plane
+            .store()
+            .payment_attempt_id_for_transaction_signature(transaction_signature)
             .await
     }
 }

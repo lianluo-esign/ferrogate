@@ -1726,6 +1726,14 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
             .await
     }
 
+    async fn payment_attempt_id_for_transaction_signature(
+        &self,
+        transaction_signature: &str,
+    ) -> Result<Option<String>, StorageError> {
+        self.payment_attempt_id_for_transaction_signature(transaction_signature)
+            .await
+    }
+
     async fn transition_payment_attempt(
         &self,
         op_name: &'static str,

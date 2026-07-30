@@ -2469,6 +2469,15 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("list_reconcilable_payment_attempts"))
     }
 
+    async fn payment_attempt_id_for_transaction_signature(
+        &self,
+        _transaction_signature: &str,
+    ) -> Result<Option<String>, StorageError> {
+        Err(unimplemented_surface(
+            "payment_attempt_id_for_transaction_signature",
+        ))
+    }
+
     async fn transition_payment_attempt(
         &self,
         _op_name: &'static str,

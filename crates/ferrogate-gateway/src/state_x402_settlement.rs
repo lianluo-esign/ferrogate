@@ -575,6 +575,53 @@ impl X402SettlementLoop {
                         attempt.atomic_amount
                     )));
                 }
+                // Second line of defence on the capture (#498): the transaction
+                // signature is MERCHANT-sourced, and since #469 widened the
+                // money test to `settled >= owed` the amount no longer does
+                // incidental duty as a binding between a transfer and an
+                // attempt. So one real on-chain transfer of N can be presented
+                // against any number of attempts owing <= N to the same
+                // recipient and mint.
+                //
+                // Uniqueness IS enforced at the write (the migration-59 partial
+                // UNIQUE index on `transaction_signature`, mirrored in the
+                // memory backend), but that enforcement lands on
+                // `settle_payment_attempt` -- primitive 2 of the SETTLE edge,
+                // which runs only AFTER the hold is captured. Relying on it
+                // alone converts a silent double-capture into a captured hold
+                // behind an attempt that can never reach `settled`: the tenant
+                // is charged for a transfer that paid a different attempt. The
+                // refusal has to happen BEFORE the money moves, which is why
+                // this is a read here rather than a caught constraint violation
+                // there.
+                //
+                // Fail closed exactly like the amount guard above: no capture,
+                // and no release either -- the hold is retained and the attempt
+                // left non-terminal for an operator, because a reused signature
+                // says nothing about whether THIS attempt's payer moved money.
+                //
+                // A storage failure on the lookup is also fail-closed (`?`): an
+                // unknown binding is not a proven-unbound one.
+                //
+                // This closes sequential reuse, which is the whole exposure once
+                // an operator or a compromised merchant can replay a signature.
+                // Two settles racing on the same signature can still both pass
+                // this read; they serialize at primitive 2, where the UNIQUE
+                // index lets exactly one commit -- the pre-check narrows the
+                // window, the constraint remains the last word.
+                if let Some(bound_to) = self
+                    .repositories
+                    .payment_attempt_id_for_transaction_signature(transaction_signature)
+                    .await?
+                {
+                    if bound_to != attempt_id {
+                        return Err(StorageError::Conflict(format!(
+                            "payment attempt {attempt_id} settlement evidence reports \
+                             transaction signature {transaction_signature}, which payment \
+                             attempt {bound_to} already recorded; refusing to capture the hold"
+                        )));
+                    }
+                }
                 self.settle_edge(
                     attempt_id,
                     &hold_id,

@@ -2411,6 +2411,16 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit))
     }
 
+    async fn payment_attempt_id_for_transaction_signature(
+        &self,
+        transaction_signature: &str,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .payment_attempt_id_for_transaction_signature(transaction_signature))
+    }
+
     async fn transition_payment_attempt(
         &self,
         _op_name: &'static str,
