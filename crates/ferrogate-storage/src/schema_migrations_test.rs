@@ -75,6 +75,14 @@ fn sql_code_only(sql: &str) -> String {
                     }
                 }
                 assert_eq!(depth, 0, "a `/* ... */` comment is never closed: {rest}");
+                // Postgres treats a block comment AS whitespace, so it separates
+                // the tokens around it. Dropping it without a separator fused
+                // `INSERT/*c*/INTO` into `INSERTINTO` and this reader stopped
+                // seeing a statement the DATABASE applies -- a cross-check that
+                // goes blind exactly where the const parser stays correct is
+                // worse than none, because the divergence reads as agreement
+                // (#511).
+                code.push(' ');
                 rest = &rest[end..];
             }
             "$" => match dollar_tag(rest) {
@@ -889,6 +897,39 @@ fn comments_between_the_tokens_of_a_ledger_statement_are_skipped() {
     assert_eq!(ledger_rows_by_statement_scan(sql).len(), 2);
 }
 
+/// A block comment ADJACENT to a token still separates it, in all three readers.
+///
+/// The `comments_between_the_tokens_of_a_ledger_statement_are_skipped` fixture
+/// puts whitespace on both sides of every comment, so it passed while the two
+/// cross-check readers were deleting `/* ... */` and closing the gap:
+/// `INSERT/*c*/INTO` became `INSERTINTO`, which matches no anchor. The const
+/// parser was always right here (`skip_ignorable_to` treats a comment as
+/// whitespace between tokens, exactly as Postgres does), so the readers went
+/// quiet on a statement the DATABASE applies -- and a cross-check that silently
+/// stops seeing what it is checking reads as agreement, which is the failure
+/// mode the whole cross-check exists to avoid (#511).
+///
+/// Catches: a stripper that concatenates the tokens around a block comment.
+/// Removing the `code.push(' ')` in `sql_code_only` reds the two reader
+/// assertions below (`ledger_insert_statements` returns 0, not 1) while the
+/// `head_migration` ones stay green -- precisely the divergence that went
+/// unnoticed.
+#[test]
+fn a_block_comment_adjacent_to_a_token_still_separates_it() {
+    let sql = "INSERT/* which statement? */INTO/**/storage_schema_migrations\
+               (version,/* name */name)VALUES(59,'059_a'),(60,'060_b')\
+               ON CONFLICT (version) DO NOTHING;\n";
+    let head = head_migration(sql);
+    assert_eq!(head.version, 60);
+    assert_eq!(head.name, "060_b");
+    assert_eq!(head.rows, 2);
+    assert_eq!(head.statements, 1);
+    // The two independent readers must agree with the const parser, not go
+    // blind: these are the assertions that were red before the fix.
+    assert_eq!(ledger_insert_statements(sql), 1);
+    assert_eq!(ledger_rows_by_statement_scan(sql).len(), 2);
+}
+
 /// The test-side comment stripper drops comments and nothing else.
 ///
 /// Pins `sql_code_only`, which both test-side readers depend on.
@@ -897,11 +938,16 @@ fn comments_between_the_tokens_of_a_ledger_statement_are_skipped() {
 /// and every cross-check above would red) or that eats the contents of a
 /// literal (migration names live in literals). Without this, the shared helper
 /// would be the one unpinned piece of the cross-check.
+///
+/// A block comment is REPLACED by one space rather than deleted, because
+/// Postgres lexes it as whitespace and the tokens it sat between are still two
+/// tokens; see `a_block_comment_adjacent_to_a_token_still_separates_it`. So the
+/// nested comment below contributes the middle space of the three.
 #[test]
 fn the_test_side_comment_stripper_drops_only_comments() {
     assert_eq!(
         sql_code_only("a -- comment\nb /* block /* nested */ */ c 'lit -- /* kept'"),
-        "a \nb  c 'lit -- /* kept'"
+        "a \nb   c 'lit -- /* kept'"
     );
 }
 

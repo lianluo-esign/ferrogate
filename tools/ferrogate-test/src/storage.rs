@@ -1212,6 +1212,67 @@ pub(crate) fn expected_head_migration() -> String {
     )
 }
 
+/// Compare a live ledger's version set against the SQL-derived head, returning
+/// the first violation as an operator-readable sentence, or `None` when the set
+/// is exactly `1..=head`.
+///
+/// `versions` is the comma-separated `version` column read off the live table
+/// (empty string for an empty ledger). The comparison is a SET comparison, and
+/// that is the whole point of the function existing: the check this replaced
+/// asserted `count(DISTINCT version) == head`, which two edits satisfy while
+/// destroying the ledger -- delete migration 45, insert a row at version zero,
+/// and the count is unchanged, `MAX(version)` is unchanged, and the head row
+/// still reads correctly. `version` is `BIGINT PRIMARY KEY` with no positive
+/// domain, so nothing in the schema refuses that row.
+///
+/// Kept free of I/O so the negative paths are exercised by ordinary unit tests
+/// rather than only by a docker-backed scenario nobody runs locally (#511).
+fn ledger_continuity_violation(versions: &str, head: u64) -> Option<String> {
+    let mut applied = std::collections::BTreeSet::new();
+    for field in versions.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+        match field.parse::<i64>() {
+            Ok(version) => {
+                applied.insert(version);
+            }
+            Err(error) => {
+                return Some(format!(
+                    "version {field:?} is not an integer ({error}); the ledger was read as \
+                     {versions:?}"
+                ))
+            }
+        }
+    }
+
+    let head_signed = i64::try_from(head).ok()?;
+    let outside: Vec<String> = applied
+        .iter()
+        .filter(|version| **version < 1 || **version > head_signed)
+        .map(i64::to_string)
+        .collect();
+    if !outside.is_empty() {
+        return Some(format!(
+            "version(s) {} sit outside the expected range 1..={head}; a row below 1 or above the \
+             head is a ledger the embedded sql/001_init_postgres.sql never wrote",
+            outside.join(",")
+        ));
+    }
+
+    let missing: Vec<String> = (1..=head_signed)
+        .filter(|version| !applied.contains(version))
+        .map(|version| version.to_string())
+        .collect();
+    if !missing.is_empty() {
+        return Some(format!(
+            "migration(s) {} are missing from the ledger; expected exactly 1..={head}, got {} \
+             row(s)",
+            missing.join(","),
+            applied.len()
+        ));
+    }
+
+    None
+}
+
 fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
     let expected_tables = [
         "control_plane_resources",
@@ -1464,16 +1525,31 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     // The head alone does not prove the migrations UNDER it landed: the ledger
     // numbers run contiguously from 1 to the head (held by
-    // `ferrogate-storage/src/schema_migrations_test.rs`), so a distinct-version
-    // count below the head means a partially applied schema wearing a correct
-    // head row.
-    let applied_migrations = postgres_scalar(&format!(
-        "SELECT count(DISTINCT version)::text FROM {schema}.storage_schema_migrations",
+    // `ferrogate-storage/src/schema_migrations_test.rs`), so anything other than
+    // exactly `1..=head` means a partially applied schema wearing a correct head
+    // row. The SET is compared, not its SIZE: `version` is `BIGINT PRIMARY KEY`
+    // with no positive-version constraint, so deleting migration 45 and
+    // inserting a substitute row at version zero leaves both `MAX(version)` and the
+    // distinct count untouched -- which is exactly what a count-only check waves
+    // through (#511). The versions are read out and compared in Rust rather than
+    // folded into the SQL so the negative path is reachable without a database;
+    // see `ledger_continuity_violation`.
+    //
+    // No `DISTINCT` in the aggregate: `version` is the PRIMARY KEY so it cannot
+    // repeat, and `string_agg(DISTINCT x, d ORDER BY y)` additionally constrains
+    // `y` to match `x` -- a shape worth avoiding in a query this file cannot
+    // execute locally. `ledger_continuity_violation` folds the versions into a
+    // set anyway, so a repeat would not change its answer.
+    let applied_versions = postgres_scalar(&format!(
+        "SELECT coalesce(string_agg(version::text, ',' ORDER BY version), '') \
+         FROM {schema}.storage_schema_migrations",
         schema = quote_ident(schema),
     ))?;
-    let expected_applied = ferrogate_storage::POSTGRES_SCHEMA_VERSION.to_string();
-    if applied_migrations.trim() != expected_applied {
-        bail!("expected {expected_applied} applied Supabase migrations, got {applied_migrations}");
+    if let Some(violation) = ledger_continuity_violation(
+        applied_versions.trim(),
+        ferrogate_storage::POSTGRES_SCHEMA_VERSION,
+    ) {
+        bail!("unexpected Supabase migration ledger: {violation}");
     }
 
     let asset_size_constraint = postgres_scalar(&format!(

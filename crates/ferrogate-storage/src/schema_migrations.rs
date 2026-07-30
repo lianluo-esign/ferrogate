@@ -13,9 +13,17 @@
 //! one did: the constants stayed at `50:050_bucket_backed_asset_size_constraint`
 //! while the SQL grew to 58, and because the E2E harness pinned a SECOND copy of
 //! the same literal, `ferrogate-test supabase-restart` aborted on the stale pin
-//! before it reached a single durability assertion (issue #511). A scenario that
-//! always fails for an unrelated reason is indistinguishable from a scenario
-//! that does not exist.
+//! (issue #511). A scenario that always fails for an unrelated reason is
+//! indistinguishable from a scenario that does not exist.
+//!
+//! An earlier version of this note said the abort came *before* the scenario
+//! reached a durability assertion. That was wrong, and it is corrected here
+//! rather than quietly dropped: `expect_supabase_schema_migrations` is the LAST
+//! step of `tools/ferrogate-test/src/storage.rs`, after
+//! `run_control_plane_supabase_restart` has already run. The durability leg did
+//! execute -- what the stale pin destroyed was the scenario's ability to ever
+//! REPORT success, which is what made it unusable as a gate and what blocked
+//! #352's Supabase leg from being built on top of it.
 //!
 //! The fix is not a fresher copy, and not a reminder test that a human must
 //! react to: it is to delete the copy. [`head_migration`] parses the migration
@@ -131,9 +139,25 @@
 //!   of resting on the promise above.
 //!
 //! What the parser deliberately does NOT decide is whether the DATABASE is
-//! allowed to be ahead of this file: callers compare a live ledger against this
-//! head for EXACT equality (`crate::validate_postgres_schema`, and the
-//! `supabase-restart` harness). See `schema_migrations_test.rs` for the
+//! allowed to be ahead of this file. That is each caller's choice, and the two
+//! callers make DIFFERENT choices on purpose -- an earlier version of this
+//! sentence claimed both were exact, which was false of the runtime one:
+//!
+//! * `crate::validate_postgres_schema` asks only that the head row EXISTS
+//!   (`SELECT name FROM storage_schema_migrations WHERE version = $1`, compared
+//!   against [`POSTGRES_SCHEMA_NAME`]). A database carrying this head AND
+//!   later migrations passes, deliberately: a process must be able to boot
+//!   against a database a newer peer has already migrated, so a runtime that
+//!   refused anything ahead of its own binary would make every rolling upgrade
+//!   an outage. It is a floor, not an equality.
+//! * The `supabase-restart` harness (`tools/ferrogate-test/src/storage.rs`) is
+//!   EXACT in both directions, and additionally requires the ledger's version
+//!   set to be exactly `1..=head`. It can afford that because it creates the
+//!   database under test from this very file moments earlier, so a head that
+//!   differs either way is a real finding rather than a deployment it has to
+//!   tolerate.
+//!
+//! See `schema_migrations_test.rs` for the
 //! properties that hold this module up -- including fixtures that drive
 //! [`head_migration`] over ledgers this file does not contain, because a parser
 //! only ever pointed at text that parses is untested against the text that does

@@ -280,6 +280,11 @@ fn strip_sql_comments(sql: &str) -> String {
                     }
                 }
                 assert_eq!(depth, 0, "a `/* ... */` comment is never closed");
+                // A block comment IS whitespace to Postgres, so it separates the
+                // tokens around it. Without this separator `INSERT/*c*/INTO`
+                // collapsed to `INSERTINTO` and this reader missed a statement
+                // the database applies (#511).
+                code.push(' ');
                 rest = &rest[end..];
             }
             "$" => match dollar_tag(rest) {
@@ -533,6 +538,106 @@ fn the_harness_reader_refuses_a_ledger_row_inside_a_stored_body() {
            VALUES (60, '060_via_call');\n\
          $b$ LANGUAGE sql;\n\
          CALL p();\n",
+    );
+}
+
+/// A block comment ADJACENT to a token still separates it for this reader too.
+///
+/// `the_harness_ledger_reader_reads_the_ledger_shapes_listed_here` spaces its
+/// comments out, so it stayed green while `strip_sql_comments` was deleting
+/// `/* ... */` and closing the gap -- turning `INSERT/*c*/INTO` into
+/// `INSERTINTO`, which the `"INSERT"` anchor never matches. The harness would
+/// then read a LOWER head than the database actually has and the scenario would
+/// fail pointing at the wrong thing (#511).
+///
+/// Catches: removing the `code.push(' ')` in `strip_sql_comments` -- this test
+/// reds while every whitespace-padded fixture above stays green.
+#[test]
+fn a_block_comment_adjacent_to_a_token_still_separates_it_for_the_harness_reader() {
+    assert_eq!(
+        head_of_ledger(
+            "INSERT/* which statement? */INTO/**/storage_schema_migrations\
+             (version,/* name */name)VALUES(60,'060_adjacent');\n"
+        ),
+        (60, "060_adjacent".to_string()),
+        "a reader that fuses the tokens around a block comment sees no statement here"
+    );
+}
+
+/// The live-ledger continuity check compares the SET, not its SIZE.
+///
+/// The check this replaced asserted `count(DISTINCT version) == head`, and the
+/// review refuted it with two edits that keep every count intact: delete
+/// migration 45, insert `(0, '000_substitute')`. `version` is `BIGINT PRIMARY
+/// KEY` with no positive domain, so the database accepts that row; `MAX(version)`
+/// and the distinct count are both unchanged, so the old check passed on a
+/// ledger missing a migration (#511).
+///
+/// Catches: any return to a count/max-based comparison. Replacing the set logic
+/// in `ledger_continuity_violation` with `applied.len() == head` reds the
+/// punctured case below while leaving the intact case green.
+#[test]
+fn the_ledger_continuity_check_rejects_a_punctured_ledger_of_the_right_size() {
+    let intact = (1..=59)
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(ledger_continuity_violation(&intact, 59), None);
+
+    // The exact refutation from review: drop 45, add 0. Same count, same MAX.
+    let punctured = std::iter::once(0)
+        .chain((1..=59).filter(|v| *v != 45))
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        punctured.split(',').count(),
+        intact.split(',').count(),
+        "the fixture must keep the row count identical, or it proves nothing"
+    );
+    let violation = ledger_continuity_violation(&punctured, 59)
+        .expect("a ledger missing migration 45 must be refused");
+    assert!(
+        violation.contains('0'),
+        "the refusal must name the out-of-range row: {violation}"
+    );
+}
+
+/// Each continuity failure mode is named, not collapsed into one message.
+#[test]
+fn the_ledger_continuity_check_names_what_is_wrong() {
+    // Behind the head: a partially applied schema wearing a correct head row.
+    let short = (1..=58)
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let violation =
+        ledger_continuity_violation(&short, 59).expect("a ledger short of the head is refused");
+    assert!(
+        violation.contains("59"),
+        "the refusal must name the missing migration: {violation}"
+    );
+
+    // Above the head: migrated by some other build than the one under test.
+    let ahead = (1..=60)
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(
+        ledger_continuity_violation(&ahead, 59).is_some(),
+        "a ledger ahead of the embedded SQL is a real finding, not a pass"
+    );
+
+    // An empty ledger is not an empty result.
+    assert!(
+        ledger_continuity_violation("", 59).is_some(),
+        "an empty ledger must be refused, not read as 'nothing wrong'"
+    );
+
+    // A non-numeric field is refused rather than silently skipped.
+    assert!(
+        ledger_continuity_violation("1,two,3", 3).is_some(),
+        "an unparseable version must be refused, not dropped"
     );
 }
 
