@@ -16,6 +16,7 @@ use ferrogate_storage::{StoredAgentRun, StoredSelfHostedRunDispatch};
 
 const NOW: u64 = 1_700_000_000;
 const LEASE_GRACE_SECS: u64 = 300;
+const PENDING_CANCEL_GRACE_SECS: u64 = 3_600;
 
 fn sweeper_config(enabled: bool, max_runs_per_tick: usize) -> Config {
     Config {
@@ -23,7 +24,9 @@ fn sweeper_config(enabled: bool, max_runs_per_tick: usize) -> Config {
             enabled,
             tick_interval_secs: 300,
             max_runs_per_tick,
+            max_scanned_rows: 20_000,
             lease_grace_secs: LEASE_GRACE_SECS,
+            pending_cancel_grace_secs: PENDING_CANCEL_GRACE_SECS,
         },
         ..Config::default()
     }
@@ -45,6 +48,14 @@ fn tenant() -> TenantContext {
 }
 
 fn run_row(run_id: &str, status: &str) -> StoredAgentRun {
+    run_row_completed_at(run_id, status, NOW - PENDING_CANCEL_GRACE_SECS - 1_800)
+}
+
+/// A terminal run settled long enough ago that the pending-cancel grace has
+/// elapsed is the DEFAULT shape here, so tests about lease expiry, bounding and
+/// idempotence stay about those things. The grace itself is driven explicitly by
+/// [`an_undelivered_cancel_for_an_assigned_start_survives_until_the_pending_cancel_grace`].
+fn run_row_completed_at(run_id: &str, status: &str, completed_at_unix: u64) -> StoredAgentRun {
     StoredAgentRun {
         id: run_id.to_string(),
         request_id: "fg-submit".to_string(),
@@ -54,8 +65,8 @@ fn run_row(run_id: &str, status: &str) -> StoredAgentRun {
         provider: "ferrogate.agent-job".to_string(),
         turns_executed: 0,
         output_recorded: false,
-        started_at_unix: Some(NOW - 3_600),
-        completed_at_unix: (status != "running").then_some(NOW - 1_800),
+        started_at_unix: Some(completed_at_unix.saturating_sub(3_600)),
+        completed_at_unix: (status != "running").then_some(completed_at_unix),
     }
 }
 
@@ -100,6 +111,27 @@ fn persist_dispatch(
     )
     .expect("dispatch row persists");
     dispatch_id
+}
+
+/// Mark a persisted dispatch acknowledged, the state a worker's ack leaves
+/// behind. Re-upserted rather than driven through `ack_run` for the same reason
+/// `persist_dispatch` builds the row directly: the handshake's lease clock is
+/// not what these tests are about.
+fn acknowledge_dispatch(state: &AppState, dispatch_id: &str, acknowledged_status: &str) {
+    let mut stored = ferrogate_sync_bridge::block_on_sync_bridge(
+        state.repositories_arc().self_hosted_run_dispatches(),
+    )
+    .into_iter()
+    .find(|record| record.dispatch_id == dispatch_id)
+    .expect("dispatch row exists");
+    stored.acknowledged_status = Some(acknowledged_status.to_string());
+    stored.acknowledged_at_unix = Some(NOW - 60);
+    ferrogate_sync_bridge::block_on_sync_bridge(
+        state
+            .repositories_arc()
+            .upsert_self_hosted_run_dispatch(stored),
+    )
+    .expect("dispatch row updates");
 }
 
 /// Every dispatch id the DURABLE table still holds -- the thing this sweeper has
@@ -335,6 +367,154 @@ fn a_never_leased_dispatch_of_a_terminal_run_is_reclaimed_without_any_lease_at_a
 
     assert_eq!(report.reclaimed_rows, 1);
     assert!(durable_dispatch_ids(&state).is_empty());
+}
+
+#[test]
+fn an_undelivered_cancel_for_an_assigned_start_survives_until_the_pending_cancel_grace() {
+    // The Blocker this rework closes. `cancel_agent_job_in_runtime`'s
+    // NOT-WITHDRAWABLE branch KEEPS the `cancel_run` row on purpose: collecting
+    // it is the only thing that stops a worker already executing the run, and
+    // its delivery is bounded by that worker's next poll. The lease says
+    // nothing here -- it is 30-60s, never renewed, and an acked `start_run` can
+    // never be re-leased, so on any job longer than a minute it is dead by
+    // construction while the work is still running. Reclaiming on lease expiry
+    // alone would make a cancel the caller already saw succeed undeliverable.
+    let state = state_with_sweeper();
+    let cancelled_at = NOW - 120;
+    state.record_agent_run(run_row_completed_at(
+        "job-cancelled",
+        "cancelled",
+        cancelled_at,
+    ));
+    let start = persist_dispatch(
+        &state,
+        "job-cancelled",
+        "start_run",
+        100,
+        // Leased and acked long ago: expiry is far in the past, past the grace.
+        Some(("worker-1", NOW - LEASE_GRACE_SECS - 600)),
+    );
+    let cancel = persist_dispatch(&state, "job-cancelled", "cancel_run", 100, None);
+
+    let inside_grace = state.sweep_self_hosted_dispatches_once(NOW);
+
+    assert_eq!(
+        inside_grace.deferred_pending_cancel_runs, 1,
+        "an undelivered cancel for an assigned start is held, not reclaimed"
+    );
+    assert_eq!(inside_grace.reclaimed_rows, 0);
+    let mut expected = vec![start, cancel];
+    expected.sort();
+    assert_eq!(
+        durable_dispatch_ids(&state),
+        expected,
+        "the cancel the worker still has to collect must survive"
+    );
+
+    // Past the grace the cancel has had its fair chance and the rows go.
+    let past_grace =
+        state.sweep_self_hosted_dispatches_once(cancelled_at + PENDING_CANCEL_GRACE_SECS);
+    assert_eq!(past_grace.deferred_pending_cancel_runs, 0);
+    assert_eq!(past_grace.reclaimed_runs, 1);
+    assert_eq!(past_grace.reclaimed_rows, 2);
+    assert!(durable_dispatch_ids(&state).is_empty());
+}
+
+#[test]
+fn an_acked_cancel_is_not_held_by_the_pending_cancel_grace() {
+    // The grace is scoped to an UNDELIVERED cancel. Once the worker acked it,
+    // the row has done its job and the ordinary terminal-plus-dead-lease gate
+    // applies -- otherwise every acked cancel would leak for an extra hour.
+    let state = state_with_sweeper();
+    state.record_agent_run(run_row_completed_at("job-acked", "cancelled", NOW - 120));
+    persist_dispatch(
+        &state,
+        "job-acked",
+        "start_run",
+        100,
+        Some(("worker-1", NOW - LEASE_GRACE_SECS - 600)),
+    );
+    let cancel_id = persist_dispatch(&state, "job-acked", "cancel_run", 100, None);
+    acknowledge_dispatch(&state, &cancel_id, "cancelled");
+
+    let report = state.sweep_self_hosted_dispatches_once(NOW);
+
+    assert_eq!(report.deferred_pending_cancel_runs, 0);
+    assert_eq!(report.reclaimed_runs, 1);
+    assert!(durable_dispatch_ids(&state).is_empty());
+}
+
+#[test]
+fn a_full_budget_of_never_terminal_candidates_does_not_starve_a_reclaimable_run() {
+    // The Major this rework closes: the per-tick cap used to truncate the
+    // CANDIDATE list before the terminal filter. Dispatches with no run row can
+    // never become terminal, accumulate monotonically, and sort oldest-first --
+    // so once they filled the budget the sweeper stopped reclaiming anything,
+    // permanently, which is the exact leak #545 exists to close.
+    let state = AppState::new(sweeper_config(true, 2));
+    for index in 0..2 {
+        persist_dispatch(
+            &state,
+            &format!("job-no-run-row-{index}"),
+            "start_run",
+            10 + index,
+            None,
+        );
+    }
+    // Newer, and therefore last in the oldest-first order.
+    seed_abandoned_run(&state, "job-abandoned", 100);
+
+    let report = state.sweep_self_hosted_dispatches_once(NOW);
+
+    assert_eq!(
+        report.live_runs, 2,
+        "the two never-terminal candidates are still evaluated and skipped"
+    );
+    assert_eq!(
+        report.reclaimed_runs, 1,
+        "the budget is spent on runs that can actually be reclaimed"
+    );
+    assert_eq!(report.reclaimed_rows, 2);
+    assert_eq!(
+        durable_dispatch_ids(&state),
+        vec![
+            "start_run-job-no-run-row-0".to_string(),
+            "start_run-job-no-run-row-1".to_string(),
+        ],
+        "only the rows nothing may collect are left behind"
+    );
+}
+
+#[test]
+fn one_sweep_reclaims_an_abandoned_run_and_spares_a_live_one() {
+    // Acceptance box 4 read literally: "a sibling asserts a live run survives
+    // THE SAME sweep". One AppState, one call, both shapes present.
+    let state = state_with_sweeper();
+    seed_abandoned_run(&state, "job-abandoned", 100);
+    state.record_agent_run(run_row("job-live", "running"));
+    let live_start = persist_dispatch(
+        &state,
+        "job-live",
+        "start_run",
+        101,
+        Some(("worker-live", NOW - LEASE_GRACE_SECS - 3_600)),
+    );
+
+    let report = state.sweep_self_hosted_dispatches_once(NOW);
+
+    assert_eq!(report.reclaimed_runs, 1);
+    assert_eq!(report.reclaimed_rows, 2);
+    assert_eq!(report.live_runs, 1);
+    assert_eq!(
+        durable_dispatch_ids(&state),
+        vec![live_start],
+        "the same sweep that reclaimed the abandoned run left the live one alone"
+    );
+    assert_eq!(
+        state.self_hosted_dispatch_lease_owner("job-live", SelfHostedRunAction::StartRun),
+        Some("worker-live".to_string()),
+        "#503's lease-ownership proof must survive a sweep that did delete something"
+    );
 }
 
 #[test]

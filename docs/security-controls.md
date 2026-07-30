@@ -222,11 +222,34 @@ sweeper reclaims a run's rows only once the run is terminal **and** no row of
 that run holds a live lease (`lease_expires_at_unix + lease_grace_secs`) —
 terminal status alone would delete the `start_run` row a live run's
 lease-ownership check (issue #503) reads for its whole life, and lease expiry
-alone would delete a running job's row. Defaults on
-`[self_hosted_dispatch_sweeper]`: `enabled = true` (this reclaim only ever
-deletes rows of an already-terminal run), `tick_interval_secs = 300`,
-`max_runs_per_tick = 200` (a larger backlog drains oldest-first over successive
-ticks), `lease_grace_secs = 300`.
+alone would delete a running job's row.
+
+A dead lease is not sufficient for one shape. A `cancel_run` that nobody has
+acked, on a run whose `start_run` was assigned to a worker, is the
+NOT-WITHDRAWABLE cancel: that row is deliberately retained because collecting
+it is the only thing that stops a worker already executing the run, and its
+delivery is bounded by that worker's next poll rather than by the lease (leases
+are 30–60s and are never renewed, so they expire while long jobs are still
+running). Those groups are additionally gated on how long the run has been
+terminal (`pending_cancel_grace_secs`), so a cancel the caller already saw
+succeed cannot be silently deleted before it is delivered.
+
+The reclaim is audited and metered like the asset lifecycle purge: each run's
+reclaim emits a `self_hosted_dispatch.reclaim` admin audit event scoped to the
+dispatch's tenant, and every sweep folds into
+`ferrogate_self_hosted_dispatch_reclaim_{scanned,reclaimed,failed}_total`. A
+sweep that found candidates and reclaimed nothing logs at `warn!`, because
+nothing else prunes this table and a stalled sweeper is otherwise invisible.
+
+Defaults on `[self_hosted_dispatch_sweeper]`: `enabled = true` (this reclaim
+only ever deletes rows of an already-terminal run), `tick_interval_secs = 300`,
+`max_runs_per_tick = 200` — a bound on runs actually RECLAIMED, not on
+candidates examined, so candidates that can never become terminal cannot spend
+the budget and stall the sweeper — `max_scanned_rows = 20000` (the per-tick work
+bound; the durable read has no pushdown filter yet and exceeding this logs at
+`warn!`), `lease_grace_secs = 300`, and `pending_cancel_grace_secs = 3600`. Both
+grace windows are clamped to 86400s, since an unbounded grace is a silent off
+switch rather than a conservative setting.
 
 ## Secrets Management
 

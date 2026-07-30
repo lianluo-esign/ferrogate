@@ -77,6 +77,19 @@ pub struct GatewayMetricsSnapshot {
     /// Lifecycle prune/GC operations that failed (a bucket or registry delete
     /// error), so an operator can alert on a stuck sweeper (issue #263).
     pub asset_lifecycle_failed_total: u64,
+    /// `self_hosted_run_dispatches` rows the #545 reclaim sweeper read this
+    /// deployment's lifetime. The denominator for the two counters below, and
+    /// the signal that the table is growing: nothing else prunes it.
+    pub self_hosted_dispatch_reclaim_scanned_total: u64,
+    /// Dispatch rows the #545 sweeper actually deleted (locally, durably, or
+    /// both). Flat while `scanned` climbs means the sweeper has stopped making
+    /// progress -- alert on that ratio.
+    pub self_hosted_dispatch_reclaim_reclaimed_total: u64,
+    /// Rows a #545 reclaim attempt did not remove anywhere: already gone (a peer
+    /// swept the same run concurrently) or the durable delete errored. Retried
+    /// next tick either way, so a persistently non-zero value means the durable
+    /// delete is failing, not that a peer won a race.
+    pub self_hosted_dispatch_reclaim_failed_total: u64,
     /// #368 presigned staging uploads: intents that were authorized and handed
     /// a size/checksum-bound PUT URL. The denominator every rejection class
     /// below is read against.

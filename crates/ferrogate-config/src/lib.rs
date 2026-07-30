@@ -120,7 +120,7 @@ pub use config::{
     RouteRule, SelfHostedDispatchSweeperConfig, ShadowRoute, SkillPackage, SkillPackageCapability,
     SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
     StorageMigrationMode, TelemetryConfig, TenancyConfig, TlsAcmeConfig, TlsConfig, Upstream,
-    X402ReconcilerConfig, X402SweeperConfig,
+    X402ReconcilerConfig, X402SweeperConfig, MAX_SELF_HOSTED_DISPATCH_SWEEPER_GRACE_SECS,
 };
 pub use diagnostic::CaddyfileDiagnostic;
 pub use ferrogate_providers::ModelCapability;

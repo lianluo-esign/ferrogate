@@ -174,6 +174,9 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         asset_lifecycle_scanned_total: 7,
         asset_lifecycle_pruned_total: 5,
         asset_lifecycle_failed_total: 1,
+        self_hosted_dispatch_reclaim_scanned_total: 9,
+        self_hosted_dispatch_reclaim_reclaimed_total: 6,
+        self_hosted_dispatch_reclaim_failed_total: 2,
         asset_presign_intent_issued_total: 11,
         asset_presign_intent_rejected_total: 2,
         asset_presign_bucket_rejected_total: 3,
@@ -201,6 +204,9 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains("ferrogate_network_access_denied_total 3"));
     assert!(text.contains("ferrogate_network_access_rate_limited_total 4"));
     assert!(text.contains("ferrogate_asset_lifecycle_scanned_total 7"));
+    assert!(text.contains("ferrogate_self_hosted_dispatch_reclaim_scanned_total 9"));
+    assert!(text.contains("ferrogate_self_hosted_dispatch_reclaim_reclaimed_total 6"));
+    assert!(text.contains("ferrogate_self_hosted_dispatch_reclaim_failed_total 2"));
     assert!(text.contains("ferrogate_asset_lifecycle_pruned_total 5"));
     assert!(text.contains("ferrogate_asset_lifecycle_failed_total 1"));
     // #368: the three presign rejection classes must stay separately readable,

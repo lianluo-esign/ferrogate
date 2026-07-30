@@ -1056,6 +1056,9 @@ impl AppState {
             .map(|metrics| metrics.snapshot(self.state_service_name()))
             .unwrap_or_else(|_| GatewayMetricsSnapshot {
                 service_name: self.state_service_name(),
+                self_hosted_dispatch_reclaim_scanned_total: 0,
+                self_hosted_dispatch_reclaim_reclaimed_total: 0,
+                self_hosted_dispatch_reclaim_failed_total: 0,
                 request_log_total: 0,
                 request_error_total: 0,
                 request_status_totals: Vec::new(),

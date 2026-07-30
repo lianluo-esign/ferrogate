@@ -415,6 +415,40 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
         snapshot.asset_lifecycle_failed_total
     ));
 
+    // #545: self-hosted dispatch reclaim sweeper. `scanned` flat-lining while
+    // `reclaimed` stays 0 is the stuck-sweeper signal -- nothing else prunes
+    // `self_hosted_run_dispatches`, so a stalled reclaim is a silent leak.
+    push_help(
+        &mut output,
+        "ferrogate_self_hosted_dispatch_reclaim_scanned_total",
+        "Total self-hosted run dispatch rows read by the reclaim sweeper.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_self_hosted_dispatch_reclaim_scanned_total {}\n",
+        snapshot.self_hosted_dispatch_reclaim_scanned_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_self_hosted_dispatch_reclaim_reclaimed_total",
+        "Total self-hosted run dispatch rows deleted by the reclaim sweeper.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_self_hosted_dispatch_reclaim_reclaimed_total {}\n",
+        snapshot.self_hosted_dispatch_reclaim_reclaimed_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_self_hosted_dispatch_reclaim_failed_total",
+        "Total self-hosted run dispatch rows a reclaim attempt did not remove anywhere.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_self_hosted_dispatch_reclaim_failed_total {}\n",
+        snapshot.self_hosted_dispatch_reclaim_failed_total
+    ));
+
     // #368: presigned staging upload lifecycle. `stage` separates the three
     // rejection classes the acceptance criteria require to be distinguishable;
     // orphan GC stays on `ferrogate_asset_lifecycle_pruned_total` above.

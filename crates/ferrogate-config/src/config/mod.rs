@@ -63,4 +63,5 @@ pub use self::types::{
     SkillPackageCapability, SkillPackageCapabilityKind, SkillPackageCompatibility,
     SkillPackageResources, StorageConfig, StorageMigrationMode, TelemetryConfig, TenancyConfig,
     TlsAcmeConfig, TlsConfig, Upstream, X402ReconcilerConfig, X402SweeperConfig,
+    MAX_SELF_HOSTED_DISPATCH_SWEEPER_GRACE_SECS,
 };

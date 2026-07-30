@@ -585,11 +585,25 @@ pub struct SelfHostedDispatchSweeperConfig {
     /// housekeeping and every candidate has already outlived a worker lease.
     #[serde(default = "default_self_hosted_dispatch_sweeper_tick_interval_secs")]
     pub tick_interval_secs: u64,
-    /// Upper bound on RUNS whose rows one tick may reclaim, so a single pass can
+    /// Upper bound on RUNS one tick may actually RECLAIM, so a single pass can
     /// never issue an unbounded number of deletes. Default 200. A backlog larger
     /// than the bound drains oldest-first over successive ticks.
+    ///
+    /// Deliberately a bound on reclaims and NOT on candidates: candidates that
+    /// can never become terminal (a dispatch with no `agent_runs` row, a run
+    /// whose worker vanished without a cancel) accumulate monotonically and sort
+    /// oldest-first, so capping the candidate list would hand them the whole
+    /// budget and stop the sweeper from ever making progress again.
     #[serde(default = "default_self_hosted_dispatch_sweeper_max_runs_per_tick")]
     pub max_runs_per_tick: usize,
+    /// Upper bound on durable dispatch ROWS one tick will consider. Default
+    /// 20_000. The table read itself has no pushdown filter yet, so this is the
+    /// bound on the per-tick work (grouping, the batched run-status read, and
+    /// the delete loop), not on the bytes the store returns. Exceeding it is
+    /// logged at `warn!` so a recurring full-table load is visible rather than
+    /// silent.
+    #[serde(default = "default_self_hosted_dispatch_sweeper_max_scanned_rows")]
+    pub max_scanned_rows: usize,
     /// Extra grace (seconds) added to a dispatch's lease expiry before the
     /// sweeper considers it dead: a row is eligible only once
     /// `lease_expires_at_unix + grace <= now`. Default 300. This is a real
@@ -598,9 +612,35 @@ pub struct SelfHostedDispatchSweeperConfig {
     /// (`self_hosted_worker.rs::poll_run`), so a worker whose clock runs slow
     /// persists an expiry already in the gateway's past. The grace bounds how
     /// much skew can make a still-held lease look dead.
+    ///
+    /// Clamped to at most `MAX_SELF_HOSTED_DISPATCH_SWEEPER_GRACE_SECS` when the
+    /// sweeper reads it: an unbounded grace makes every lease look permanently
+    /// live and silently disables the reclaim.
     #[serde(default = "default_self_hosted_dispatch_sweeper_lease_grace_secs")]
     pub lease_grace_secs: u64,
+    /// How long a run must have been TERMINAL before the sweeper will reclaim a
+    /// group that still holds an undelivered `cancel_run` for an assigned
+    /// `start_run`. Default 3600.
+    ///
+    /// Lease expiry is not a usable proxy here. A lease is 30-60s and is never
+    /// renewed (`self_hosted_worker.rs::poll_run` writes `lease_expires_at_unix`
+    /// once, and an acked `start_run` can never be re-leased), so on any job
+    /// longer than a minute the lease is dead by construction while the worker
+    /// is still executing. `cancel_agent_job_in_runtime`'s NOT-WITHDRAWABLE
+    /// branch deliberately KEEPS that `cancel_run` row precisely because it is
+    /// the only thing that stops such a worker, and its delivery is bounded only
+    /// by the worker's next poll. Reclaiming it on lease expiry alone would make
+    /// a cancel the caller already saw succeed silently undeliverable.
+    ///
+    /// Clamped the same way as `lease_grace_secs`.
+    #[serde(default = "default_self_hosted_dispatch_sweeper_pending_cancel_grace_secs")]
+    pub pending_cancel_grace_secs: u64,
 }
+
+/// Upper bound applied to both sweeper grace windows. A grace larger than this
+/// is indistinguishable from `enabled = false` for the rows it covers, so the
+/// sweeper clamps and warns rather than silently doing nothing forever.
+pub const MAX_SELF_HOSTED_DISPATCH_SWEEPER_GRACE_SECS: u64 = 86_400;
 
 fn default_self_hosted_dispatch_sweeper_enabled() -> bool {
     true
@@ -614,8 +654,16 @@ fn default_self_hosted_dispatch_sweeper_max_runs_per_tick() -> usize {
     200
 }
 
+fn default_self_hosted_dispatch_sweeper_max_scanned_rows() -> usize {
+    20_000
+}
+
 fn default_self_hosted_dispatch_sweeper_lease_grace_secs() -> u64 {
     300
+}
+
+fn default_self_hosted_dispatch_sweeper_pending_cancel_grace_secs() -> u64 {
+    3_600
 }
 
 impl Default for SelfHostedDispatchSweeperConfig {
@@ -624,7 +672,10 @@ impl Default for SelfHostedDispatchSweeperConfig {
             enabled: default_self_hosted_dispatch_sweeper_enabled(),
             tick_interval_secs: default_self_hosted_dispatch_sweeper_tick_interval_secs(),
             max_runs_per_tick: default_self_hosted_dispatch_sweeper_max_runs_per_tick(),
+            max_scanned_rows: default_self_hosted_dispatch_sweeper_max_scanned_rows(),
             lease_grace_secs: default_self_hosted_dispatch_sweeper_lease_grace_secs(),
+            pending_cancel_grace_secs:
+                default_self_hosted_dispatch_sweeper_pending_cancel_grace_secs(),
         }
     }
 }

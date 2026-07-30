@@ -1894,8 +1894,27 @@ impl AppState {
     /// this node still holds its start dispatch in memory. A run id with no row
     /// is deliberately NOT settled -- absence of evidence never releases a slot.
     pub(crate) fn settled_agent_run_ids(&self, run_ids: &[String]) -> HashSet<String> {
+        self.settled_agent_run_completions(run_ids)
+            .into_keys()
+            .collect()
+    }
+
+    /// [`AppState::settled_agent_run_ids`] plus each settled run's
+    /// `completed_at_unix`, from the SAME single batched read.
+    ///
+    /// The timestamp is what lets a caller reason about how long a run has been
+    /// terminal, which the #545 reclaim sweeper needs and lease expiry cannot
+    /// supply: a lease is 30-60s and never renewed, so it says nothing about
+    /// whether a worker still needs the run's rows. `None` means the run is
+    /// terminal but carries no completion timestamp (rows written before the
+    /// settle paths set it); callers that need elapsed terminal time must treat
+    /// that as "cannot prove", never as zero.
+    pub(crate) fn settled_agent_run_completions(
+        &self,
+        run_ids: &[String],
+    ) -> HashMap<String, Option<u64>> {
         if run_ids.is_empty() {
-            return HashSet::new();
+            return HashMap::new();
         }
         // The cancel/complete paths write the run row through the evidence
         // writer, so an unflushed terminalization must not read back as open.
@@ -1903,7 +1922,7 @@ impl AppState {
         ferrogate_sync_bridge::block_on_sync_bridge(self.repositories.agent_runs_by_ids(run_ids))
             .into_iter()
             .filter(|run| agent_run_status_is_terminal(&run.status))
-            .map(|run| run.id)
+            .map(|run| (run.id, run.completed_at_unix))
             .collect()
     }
 

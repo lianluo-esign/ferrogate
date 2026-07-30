@@ -3249,6 +3249,12 @@ struct GatewayMetricsAccumulator {
     asset_lifecycle_pruned_total: u64,
     /// #263: lifecycle prune/GC delete operations that failed.
     asset_lifecycle_failed_total: u64,
+    /// #545: dispatch rows read by the self-hosted dispatch reclaim sweeper.
+    self_hosted_dispatch_reclaim_scanned_total: u64,
+    /// #545: dispatch rows the reclaim sweeper actually deleted.
+    self_hosted_dispatch_reclaim_reclaimed_total: u64,
+    /// #545: rows a reclaim attempt did not remove anywhere.
+    self_hosted_dispatch_reclaim_failed_total: u64,
     /// #368: presigned staging upload intents issued with a bound PUT URL.
     asset_presign_intent_issued_total: u64,
     /// #368: intents refused by the gateway's own preflight.
@@ -3781,6 +3787,12 @@ impl GatewayMetricsAccumulator {
             asset_lifecycle_scanned_total: self.asset_lifecycle_scanned_total,
             asset_lifecycle_pruned_total: self.asset_lifecycle_pruned_total,
             asset_lifecycle_failed_total: self.asset_lifecycle_failed_total,
+            self_hosted_dispatch_reclaim_scanned_total: self
+                .self_hosted_dispatch_reclaim_scanned_total,
+            self_hosted_dispatch_reclaim_reclaimed_total: self
+                .self_hosted_dispatch_reclaim_reclaimed_total,
+            self_hosted_dispatch_reclaim_failed_total: self
+                .self_hosted_dispatch_reclaim_failed_total,
             asset_presign_intent_issued_total: self.asset_presign_intent_issued_total,
             asset_presign_intent_rejected_total: self.asset_presign_intent_rejected_total,
             asset_presign_bucket_rejected_total: self.asset_presign_bucket_rejected_total,
@@ -3815,6 +3827,26 @@ impl GatewayMetricsAccumulator {
             self.asset_lifecycle_pruned_total.saturating_add(pruned);
         self.asset_lifecycle_failed_total =
             self.asset_lifecycle_failed_total.saturating_add(failed);
+    }
+
+    /// #545: fold one dispatch-reclaim sweep's counts into the cumulative
+    /// metrics. `failed` is the sweep's `unchanged_rows` -- rows a reclaim
+    /// attempt did not remove anywhere.
+    fn record_self_hosted_dispatch_reclaim_sweep(
+        &mut self,
+        scanned: u64,
+        reclaimed: u64,
+        failed: u64,
+    ) {
+        self.self_hosted_dispatch_reclaim_scanned_total = self
+            .self_hosted_dispatch_reclaim_scanned_total
+            .saturating_add(scanned);
+        self.self_hosted_dispatch_reclaim_reclaimed_total = self
+            .self_hosted_dispatch_reclaim_reclaimed_total
+            .saturating_add(reclaimed);
+        self.self_hosted_dispatch_reclaim_failed_total = self
+            .self_hosted_dispatch_reclaim_failed_total
+            .saturating_add(failed);
     }
 }
 
