@@ -11900,7 +11900,18 @@ fn reload_from_admin_payload(
     // resources (the snapshot's `config.api_keys = snapshot.api_keys` replace),
     // so we apply the supplied config directly. Any key the payload re-lists is
     // added by the caller's explicit choice, not silently resurrected.
-    Ok(state.reload_process_local(config_from_admin_payload(payload, state)?))
+    //
+    // #512: "authoritative" cannot extend to DELETING credentials the payload
+    // was never able to name. A config document has no way to declare a key
+    // minted through `POST /admin/v1/api-keys`, so applying the payload
+    // verbatim dropped every runtime-minted key on any inline reload. Undeclared
+    // durable rows are merged back in below -- declared ids still lose to the
+    // payload, so nothing about introducing or overwriting keys changes.
+    let mut candidate = config_from_admin_payload(payload, state)?;
+    state
+        .current()
+        .merge_durable_control_plane_api_keys(&mut candidate)?;
+    Ok(state.reload_process_local(candidate))
 }
 
 fn admin_audit_event_draft(

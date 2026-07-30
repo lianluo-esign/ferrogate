@@ -4985,6 +4985,68 @@ impl AppState {
         Ok(())
     }
 
+    /// Restore the durable control-plane api-keys an inline reload payload does
+    /// not declare, so a reload of an unrelated config section cannot delete a
+    /// credential minted through `POST /admin/v1/api-keys` (#512).
+    ///
+    /// `POST /admin/v1/config/reload` with an inline `config_toml` /
+    /// `config_yaml` / `config_caddyfile` body applies the payload directly --
+    /// deliberately, because only an authoritative payload can INTRODUCE
+    /// api-keys, tenants and policies. But `with_reloaded_config` then writes
+    /// exactly that config back over the durable control plane
+    /// (`sync_control_plane_storage_from_config`), and a config document cannot
+    /// name a credential that was minted at runtime. So every inline reload --
+    /// including one that only appends `[scheduler]` -- silently DELETED every
+    /// admin-API-minted key, and the next request presenting one answered `401
+    /// invalid_api_key`.
+    ///
+    /// That also masks the #514 request-time lifecycle seam this issue's
+    /// harness probes: a suspended tenant's native key must be refused `403
+    /// tenancy_suspended`, and a key that no longer exists never reaches
+    /// `finalize_auth` to be refused by it. The 401 was fail-closed but wrong,
+    /// and it hid a deleted credential behind a code that reads like a typo.
+    ///
+    /// Only ids the payload does NOT list are restored: an id the operator
+    /// re-declares is theirs, so the payload's version still wins and an inline
+    /// reload can introduce or overwrite keys exactly as before. Removing a
+    /// durable key stays the job of `DELETE /admin/v1/api-keys/{id}` -- the same
+    /// rule `reload_from_source_path` already enforces for the file path, where
+    /// letting a reload edit the durable credential set is called out as a
+    /// security-control downgrade.
+    pub(crate) fn merge_durable_control_plane_api_keys(
+        &self,
+        config: &mut Config,
+    ) -> anyhow::Result<()> {
+        let snapshot = self.repositories.control_plane_snapshot()?;
+        let mut durable: Vec<ApiKey> = deserialize_control_plane_documents(snapshot.api_keys)?;
+        let tenant_refs: Vec<crate::responses::AdminTenantRef> =
+            deserialize_control_plane_documents(snapshot.tenants)?;
+        if !tenant_refs.is_empty() {
+            apply_tenant_refs_to_api_keys(&mut durable, tenant_refs);
+        }
+        let declared: HashSet<String> = config
+            .api_keys
+            .iter()
+            .map(|key| key.id.clone())
+            .collect::<HashSet<_>>();
+        let restored: Vec<ApiKey> = durable
+            .into_iter()
+            .filter(|key| !declared.contains(&key.id))
+            .collect();
+        if restored.is_empty() {
+            return Ok(());
+        }
+        // `config.api_keys` now carries rows that are control-plane documents
+        // rather than lines the operator can edit in the payload, so it must
+        // answer to the #540 durable branch: a pre-#515 row is warned about and
+        // still refused at authentication, not turned into a reload refusal that
+        // would wedge the operator out over a credential that already fails
+        // closed.
+        config.api_keys_are_control_plane_documents = true;
+        config.api_keys.extend(restored);
+        Ok(())
+    }
+
     pub(crate) fn next_request_id(&self) -> String {
         let next = self.request_ids.fetch_add(1, Ordering::Relaxed);
         format!("fg-{next:016x}")
