@@ -561,6 +561,33 @@ impl PageEnvelope<'_> {
     pub fn echoes_page_window(&self) -> bool {
         self.total.is_some() || self.limit.is_some() || self.offset.is_some()
     }
+
+    /// Whether the envelope proves the endpoint served the window **this
+    /// caller asked for**: an `offset` echo equal to `requested`, not merely
+    /// the presence of an `offset` field.
+    ///
+    /// Equality is the whole point (#352 review round 4). An endpoint that
+    /// ignores `offset` and constantly reports `"offset": 0` is the most
+    /// natural shape of the very defect this discriminator exists to catch, so
+    /// a presence-only test would admit exactly the envelope it must reject and
+    /// hand the operator page one labelled page N.
+    ///
+    /// The trade-off this accepts, stated because the code must not claim more
+    /// than it does: a server that CLAMPS an over-large offset and echoes the
+    /// clamped value reads as not-honored here. On a money-audit surface that
+    /// is the safe direction -- the caller is told the window it named was not
+    /// the window it got, rather than being shown other rows under that name --
+    /// and no `list*` operation in today's contract clamps. If one ever does,
+    /// pin the clamp case separately rather than loosening this back to
+    /// presence.
+    ///
+    /// One rule, one definition: both the `--offset` refusal and the truncation
+    /// notice classify an envelope through this method, so a single response
+    /// cannot be read as cursor-paginated by one and offset-paginated by the
+    /// other.
+    pub fn honored_offset_window(&self, requested: u64) -> bool {
+        self.offset == Some(requested)
+    }
 }
 
 /// What a cursor-paginated page says about its own continuation.

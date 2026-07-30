@@ -380,6 +380,43 @@ pub fn is_canonical_atomic_amount(value: &str) -> bool {
     !value.is_empty() && value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// The values that actually distinguish the candidate money domains: an empty
+/// string, a sign, an exponent, whitespace, hex, a fraction, and the 20/21-digit
+/// boundary at `u64::MAX`'s width.
+///
+/// It lives beside [`is_canonical_atomic_amount`] because both proofs of the
+/// domain must read the SAME list (#352 review round 4). It was previously two
+/// hand-copied arrays whose comment claimed they were shared: add a
+/// discriminating value to the Rust-side test and the SQL conformance side did
+/// not follow, so the two coverages could diverge with nothing reporting it --
+/// one rule stated twice, which is the defect class this whole issue keeps
+/// bouncing on.
+///
+/// Neither side hardcodes which values are good: both derive the split by
+/// calling [`is_canonical_atomic_amount`], so a new entry is automatically
+/// classified and cannot be silently dropped from one half.
+#[cfg(test)]
+pub(crate) const AMOUNT_CORPUS: [&str; 18] = [
+    "",
+    "0",
+    "1",
+    "250000",
+    "+250000",
+    "+250",
+    "-1",
+    "-5",
+    "1e9",
+    "2.5e5",
+    "25.0",
+    " 250000",
+    " 250",
+    "250 ",
+    "0x10",
+    "18446744073709551615",  // 20 digits: exactly u64::MAX
+    "184467440737095516150", // 21 digits: wider than u64::MAX
+    "00000000000000000000",  // 20 digits, leading zeros: canonical by width
+];
+
 /// Rejects a create whose money columns are outside their domain. Mirrors the
 /// migration-59 `CHECK`s exactly; see [`is_canonical_atomic_amount`].
 fn validate_payment_attempt_amounts(attempt: &StoredPaymentAttempt) -> Result<(), StorageError> {

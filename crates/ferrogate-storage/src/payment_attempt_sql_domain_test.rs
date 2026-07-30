@@ -10,38 +10,11 @@
 // green while Postgres and the memory backend disagreed about what a storable
 // amount is. These tests read the DDL that actually ships and evaluate it.
 
-use super::{is_canonical_atomic_amount, POSTGRES_SCHEMA_SQL};
+use super::{is_canonical_atomic_amount, AMOUNT_CORPUS, POSTGRES_SCHEMA_SQL};
 
 /// The migration whose guards this file holds. Read out of the embedded SQL by
 /// its ledger tuple so the tests cannot drift onto a different migration.
 const MIGRATION_59_LEDGER: &str = "VALUES (59, '059_payment_attempt_amount_domains')";
-
-/// The corpus is deliberately the SAME list
-/// `payment_attempt_amount_domain_test.rs` uses against the Rust mirror, plus
-/// the values the review named. Sharing it is the point: the two sides are
-/// proven equal on the values that actually distinguish the candidate rules --
-/// an empty string, a sign, an exponent, whitespace, hex, and the 20/21-digit
-/// boundary at `u64::MAX`'s width.
-const AMOUNT_CORPUS: [&str; 18] = [
-    "",
-    "0",
-    "1",
-    "250000",
-    "+250000",
-    "+250",
-    "-1",
-    "-5",
-    "1e9",
-    "2.5e5",
-    "25.0",
-    " 250000",
-    " 250",
-    "250 ",
-    "0x10",
-    "18446744073709551615",  // 20 digits: exactly u64::MAX
-    "184467440737095516150", // 21 digits: wider than u64::MAX
-    "00000000000000000000",  // 20 digits, leading zeros: canonical by width
-];
 
 /// The migration-59 `DO` block, verbatim from `sql/001_init_postgres.sql`.
 ///
@@ -66,13 +39,37 @@ fn normalize_whitespace(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The regex literal a named `CHECK` constraint applies, read out of the DDL.
+/// Whether `operand` ends with `column` as a whole SQL identifier rather than
+/// as the tail of a longer one.
 ///
-/// Panics when the constraint is absent or is no longer regex-shaped -- which
-/// is what makes `CHECK (true)` red here: there is no pattern to extract, so
-/// the domain claim cannot be restated by a test that never looked at it.
-fn check_regex(constraint: &str) -> String {
-    let block = migration_59();
+/// This distinction is the entire point of binding the column: `atomic_amount`
+/// is a suffix of `settled_atomic_amount`, so a plain `ends_with` would accept
+/// `CHECK (settled_atomic_amount ~ ...)` as a guard on `atomic_amount` and let
+/// through exactly the mutation the review named -- the regex, the constraint
+/// name and the index statement are all unchanged under it, so nothing else in
+/// the DB-free half can see it either.
+fn operand_names_column(operand: &str, column: &str) -> bool {
+    operand
+        .trim_end()
+        .strip_suffix(column)
+        .is_some_and(|prefix| !prefix.ends_with(|ch: char| ch.is_alphanumeric() || ch == '_'))
+}
+
+/// The regex literal a named `CHECK` constraint applies to `column`, read out
+/// of the DDL.
+///
+/// Panics when the constraint is absent, is no longer regex-shaped, or applies
+/// its regex to a different column. `CHECK (true)` is red because there is no
+/// pattern to extract, so the domain claim cannot be restated by a test that
+/// never looked at it; a guard moved onto another column is red because the
+/// pattern alone says nothing about WHAT it constrains (#352 review round 4).
+fn check_regex(constraint: &str, column: &str) -> String {
+    // Normalized before the search, not after (#352 review round 4 nit): the
+    // `~ '` probe below is whitespace-sensitive, so DDL that ever wrapped the
+    // operator and its literal onto two lines would panic "no longer applies a
+    // regex" about a guard that is perfectly intact -- a false red that reads
+    // like a real finding.
+    let block = normalize_whitespace(migration_59());
     let start = block
         .find(&format!("ADD CONSTRAINT {constraint}"))
         .unwrap_or_else(|| panic!("migration 59 must add CHECK constraint {constraint}"));
@@ -81,9 +78,15 @@ fn check_regex(constraint: &str) -> String {
         .find(';')
         .unwrap_or_else(|| panic!("{constraint} statement must terminate"));
     let statement = &statement[..statement_end];
-    let pattern_start = statement.find("~ '").unwrap_or_else(|| {
+    let tilde = statement.find("~ '").unwrap_or_else(|| {
         panic!("{constraint} no longer applies a regex; its body is: {statement}")
-    }) + "~ '".len();
+    });
+    let operand = &statement[..tilde];
+    assert!(
+        operand_names_column(operand, column),
+        "{constraint} must apply its regex to {column}, but the operand it compares is: {operand}"
+    );
+    let pattern_start = tilde + "~ '".len();
     let pattern = &statement[pattern_start..];
     let pattern_end = pattern
         .find('\'')
@@ -260,7 +263,7 @@ fn pattern_matches(atoms: &[Atom], value: &str) -> bool {
 /// only in a live scenario.
 #[test]
 fn the_atomic_amount_check_and_the_rust_mirror_are_the_same_domain() {
-    let pattern = check_regex("payment_attempts_atomic_amount_canonical");
+    let pattern = check_regex("payment_attempts_atomic_amount_canonical", "atomic_amount");
     let atoms = parse_pattern(&pattern);
 
     let mut accepted = 0;
@@ -294,8 +297,11 @@ fn the_atomic_amount_check_and_the_rust_mirror_are_the_same_domain() {
 /// stays storable).
 #[test]
 fn the_settled_amount_check_is_the_same_domain_and_still_admits_null() {
-    let atomic = check_regex("payment_attempts_atomic_amount_canonical");
-    let settled = check_regex("payment_attempts_settled_amount_canonical");
+    let atomic = check_regex("payment_attempts_atomic_amount_canonical", "atomic_amount");
+    let settled = check_regex(
+        "payment_attempts_settled_amount_canonical",
+        "settled_atomic_amount",
+    );
     assert_eq!(
         atomic, settled,
         "both money columns must state ONE domain; a second, slightly-different \
@@ -368,4 +374,44 @@ fn the_pattern_evaluator_models_the_quantifier_it_reads() {
     let split = parse_pattern("^[0-9]*5$");
     assert!(pattern_matches(&split, "125"));
     assert!(!pattern_matches(&split, "126"));
+}
+
+/// The column binding is itself falsifiable, and it is not a plain `ends_with`.
+///
+/// `check_regex` reads the DDL that ships, so the mutation it must catch --
+/// moving a guard onto another column while keeping the constraint name and the
+/// regex -- cannot be applied from a test. Pinning the predicate directly is
+/// what makes the binding evidence rather than an unexercised assertion.
+///
+/// The suffix case is the load-bearing one: `atomic_amount` is a proper suffix
+/// of `settled_atomic_amount`, so `ends_with` alone would report that the
+/// settled-column guard constrains `atomic_amount` and the mutation would stay
+/// invisible in the DB-free half -- leaving it to the live half, which has
+/// never run.
+#[test]
+fn the_column_binding_rejects_a_suffix_of_a_longer_identifier() {
+    assert!(operand_names_column(
+        "CHECK (atomic_amount ",
+        "atomic_amount"
+    ));
+    assert!(operand_names_column(
+        "CHECK (settled_atomic_amount IS NULL OR settled_atomic_amount ",
+        "settled_atomic_amount"
+    ));
+
+    // The mutation the review named: same constraint name, same regex, wrong
+    // column. A plain `ends_with` returns true here.
+    assert!(!operand_names_column(
+        "CHECK (settled_atomic_amount ",
+        "atomic_amount"
+    ));
+    assert!(!operand_names_column(
+        "CHECK (settlement_response ",
+        "atomic_amount"
+    ));
+    // A column that merely CONTAINS the name is not the column either.
+    assert!(!operand_names_column(
+        "CHECK (atomic_amount_text ",
+        "atomic_amount"
+    ));
 }

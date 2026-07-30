@@ -13,8 +13,8 @@
 
 use crate::schema_routing_test_support::block_on;
 use crate::{
-    RuntimeStorageRepositories, StorageError, StorageProviderKind, StoredPaymentAttempt,
-    StoredWallet, PAYMENT_ATTEMPT_AUTHORIZED,
+    is_canonical_atomic_amount, RuntimeStorageRepositories, StorageError, StorageProviderKind,
+    StoredPaymentAttempt, StoredWallet, AMOUNT_CORPUS, PAYMENT_ATTEMPT_AUTHORIZED,
 };
 
 fn amount_domain_repositories() -> RuntimeStorageRepositories {
@@ -72,22 +72,28 @@ fn attempt(id: &str) -> StoredPaymentAttempt {
     }
 }
 
-/// The exact values the review named, plus the shapes a naive "is it numeric"
-/// check would let through. Delete `validate_payment_attempt_amounts(&attempt)?`
+/// Every value in the shared corpus that the domain refuses must be refused by
+/// the create path too. Delete `validate_payment_attempt_amounts(&attempt)?`
 /// from either create body and this test goes red on the first case.
+///
+/// The bad set is DERIVED from `is_canonical_atomic_amount` rather than
+/// hand-listed (#352 review round 4), so a value added to [`AMOUNT_CORPUS`] for
+/// the SQL conformance proof is automatically exercised here as well. The two
+/// halves of the money domain now read one list and split it by one rule; they
+/// cannot drift apart while both keep passing.
 #[test]
 fn a_non_canonical_atomic_amount_is_refused_at_create() {
-    for bad in [
-        "",                      // empty
-        "-5",                    // signed
-        "1e9",                   // exponent
-        " 250",                  // leading space
-        "250 ",                  // trailing space
-        "0x10",                  // hex
-        "25.0",                  // fractional
-        "+250",                  // explicit sign
-        "184467440737095516150", // 21 digits: wider than u64::MAX
-    ] {
+    let bad_values: Vec<&str> = AMOUNT_CORPUS
+        .into_iter()
+        .filter(|value| !is_canonical_atomic_amount(value))
+        .collect();
+    // Anti-vacuity: an empty (or trivially small) bad set would make the loop
+    // below assert nothing while still reporting success.
+    assert!(
+        bad_values.len() >= 4,
+        "the corpus must carry values the domain refuses, got {bad_values:?}"
+    );
+    for bad in bad_values {
         let repositories = amount_domain_repositories();
         let mut candidate = attempt("att-bad");
         candidate.atomic_amount = bad.into();
@@ -106,9 +112,24 @@ fn a_non_canonical_atomic_amount_is_refused_at_create() {
 
 /// The canonical shapes must still pass, including the full `u64` range that is
 /// the whole reason the column is TEXT.
+///
+/// Derived from the same corpus and the same rule as the refusal test above, so
+/// the two directions cannot be given different lists.
 #[test]
 fn the_canonical_u64_range_is_accepted() {
-    for good in ["0", "1", "250000", "18446744073709551615"] {
+    let good_values: Vec<&str> = AMOUNT_CORPUS
+        .into_iter()
+        .filter(|value| is_canonical_atomic_amount(value))
+        .collect();
+    assert!(
+        good_values.len() >= 4,
+        "the corpus must carry values the domain accepts, got {good_values:?}"
+    );
+    assert!(
+        good_values.contains(&"18446744073709551615"),
+        "the u64::MAX width is the whole reason this column is TEXT: {good_values:?}"
+    );
+    for good in good_values {
         let repositories = amount_domain_repositories();
         let mut candidate = attempt("att-good");
         candidate.atomic_amount = good.into();

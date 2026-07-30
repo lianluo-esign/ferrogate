@@ -1165,8 +1165,9 @@ fn expect_payment_attempt_schema(schema: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drives each migration-59 guard with a write it must refuse, and asserts the
-/// SQLSTATE the database answers with (#352 review round 3 §1).
+/// Drives each migration-59 guard with a write it must refuse, and asserts both
+/// the SQLSTATE and the CONSTRAINT the database names (#352 review round 3 §1,
+/// round 4).
 ///
 /// The definition assertions above prove the guards are SPELLED right; these
 /// prove they FIRE, and they are the first live evidence for the 23514 -> typed
@@ -1174,11 +1175,16 @@ fn expect_payment_attempt_schema(schema: &str) -> Result<()> {
 /// the whole SQL half of the money domain is asserted by `information_schema`
 /// text and never by a rejected row.
 ///
-/// Everything runs inside one transaction that always ends in `ROLLBACK`, so a
-/// scenario database -- including a live Supabase schema -- is left exactly as
-/// it was found. The probe row is written first and must SUCCEED: a setup that
-/// silently failed would make every refusal below vacuous, so its own SQLSTATE
-/// is asserted to be `NONE`.
+/// The expected value pins the constraint name, not only the SQLSTATE. `23514`
+/// is shared by EVERY `CHECK` on `payment_attempts` -- `state IN (...)` among
+/// them -- so a future CHECK that happens to reject a probe row would answer
+/// `23514` even with the guard under test deleted, and the assertion would go
+/// vacuous in exactly the way the round-3 blocker did one level up.
+///
+/// Nothing survives the probe: the writes run inside a transaction that ends in
+/// `ROLLBACK`, and a setup failure aborts the whole `psql -c` before any commit
+/// point, so a scenario database -- including a live Supabase schema -- is left
+/// as it was found either way.
 fn expect_payment_attempt_guards_refuse_writes(schema: &str) -> Result<()> {
     let signature = "probe-signature-352";
     let setup = format!(
@@ -1196,7 +1202,7 @@ fn expect_payment_attempt_guards_refuse_writes(schema: &str) -> Result<()> {
         hash = "b".repeat(64),
     );
 
-    for (what, statement, expected_sqlstate) in [
+    for (what, statement, expected_violation) in [
         (
             "an empty atomic_amount",
             format!(
@@ -1211,17 +1217,18 @@ fn expect_payment_attempt_guards_refuse_writes(schema: &str) -> Result<()> {
                  )",
                 hash = "b".repeat(64),
             ),
-            // check_violation: the atomic_amount domain.
-            "23514",
+            // check_violation, named: the atomic_amount domain and not some
+            // other CHECK on the same table.
+            "23514:payment_attempts_atomic_amount_canonical",
         ),
         (
             "a signed settled_atomic_amount on the settlement path",
             "UPDATE payment_attempts SET settled_atomic_amount = '+250000' \
              WHERE id = 'probe-attempt-352'"
                 .to_string(),
-            // check_violation: the domain applies to UPDATE, which is the only
-            // path that ever writes this column in production.
-            "23514",
+            // check_violation, named: the domain applies to UPDATE, which is
+            // the only path that ever writes this column in production.
+            "23514:payment_attempts_settled_amount_canonical",
         ),
         (
             "a second attempt reusing one transaction_signature",
@@ -1238,16 +1245,17 @@ fn expect_payment_attempt_guards_refuse_writes(schema: &str) -> Result<()> {
                  )",
                 hash = "b".repeat(64),
             ),
-            // unique_violation: the double-capture guard, serialized by the
-            // database rather than by the application's mutex.
-            "23505",
+            // unique_violation, named: the double-capture guard, serialized by
+            // the database rather than by the application's mutex. The name a
+            // unique violation reports is the INDEX's.
+            "23505:idx_payment_attempts_transaction_signature",
         ),
     ] {
-        let observed = postgres_probe_sqlstate(schema, &setup, &statement)?;
-        if observed != expected_sqlstate {
+        let observed = postgres_probe_violation(schema, &setup, &statement)?;
+        if observed != expected_violation {
             bail!(
-                "{schema}.payment_attempts accepted {what}: expected SQLSTATE \
-                 {expected_sqlstate}, got {observed}"
+                "{schema}.payment_attempts did not refuse {what} with the expected guard: \
+                 expected {expected_violation}, got {observed}"
             );
         }
     }
@@ -1255,26 +1263,50 @@ fn expect_payment_attempt_guards_refuse_writes(schema: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs `statement` against `schema` after `setup` and returns the SQLSTATE the
-/// database answered with, or `NONE` when the statement succeeded.
+/// Runs `statement` against `schema` after `setup` and returns
+/// `SQLSTATE:constraint_name` for a refusal, or `NONE` when the statement
+/// succeeded.
 ///
-/// The statement runs inside a PL/pgSQL exception block so a refusal is a value
-/// rather than a failed psql invocation, and the whole script ends in
-/// `ROLLBACK` so nothing -- neither the setup rows nor a statement that
-/// unexpectedly succeeded -- survives the probe.
-fn postgres_probe_sqlstate(schema: &str, setup: &str, statement: &str) -> Result<String> {
+/// The constraint name comes from `GET STACKED DIAGNOSTICS` because the
+/// SQLSTATE alone does not identify a guard: `23514` is every `CHECK` on the
+/// table (#352 review round 4). A refusal that carries no constraint name --
+/// possible for errors raised outside a constraint -- reports `UNKNOWN`, which
+/// fails the caller's comparison rather than passing it.
+///
+/// `statement` runs inside a PL/pgSQL exception block, so a refusal is a value
+/// rather than a failed psql invocation. `setup` deliberately does NOT: it runs
+/// directly under the outer `BEGIN`, so `ON_ERROR_STOP=1` aborts the whole
+/// script and the caller sees a non-zero psql exit. That is the anti-vacuity
+/// mechanism -- a setup that silently failed would make every refusal below
+/// meaningless -- and it is a bail, not an assertion on a captured SQLSTATE.
+///
+/// Nothing the probe writes survives it. On the normal path the trailing
+/// `ROLLBACK` discards the setup rows and any statement that unexpectedly
+/// succeeded; on the setup-failure path that `ROLLBACK` never executes and the
+/// server's own rollback of the aborted session does the same job.
+///
+/// Requires psql >= 15: the verdict `SELECT` is not the last statement in the
+/// `-c` script, and older psql prints only the final result set, which would
+/// surface as "constraint probe returned no verdict" rather than as a real
+/// finding. [`POSTGRES_IMAGE`] pins `postgres:16-alpine`, so this holds today;
+/// the dependency is recorded here so a downgrade is a known cause rather than
+/// a mystery red.
+fn postgres_probe_violation(schema: &str, setup: &str, statement: &str) -> Result<String> {
     let script = format!(
         "SET search_path TO {schema}; \
          BEGIN; \
          {setup} \
          CREATE TEMP TABLE probe_result (state TEXT) ON COMMIT DROP; \
          DO $probe$ \
+         DECLARE violated TEXT; \
          BEGIN \
              BEGIN \
                  {statement}; \
                  INSERT INTO probe_result VALUES ('NONE'); \
              EXCEPTION WHEN others THEN \
-                 INSERT INTO probe_result VALUES (SQLSTATE); \
+                 GET STACKED DIAGNOSTICS violated = CONSTRAINT_NAME; \
+                 INSERT INTO probe_result \
+                     VALUES (SQLSTATE || ':' || coalesce(nullif(violated, ''), 'UNKNOWN')); \
              END; \
          END \
          $probe$; \

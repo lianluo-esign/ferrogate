@@ -478,6 +478,11 @@ fn an_offset_a_cursor_endpoint_ignores_is_refused_rather_than_answered() {
 /// evidence that it read the window: none of the three cursor envelopes in the
 /// contract declares an `offset` parameter or echoes one, which is why the
 /// case above still refuses.
+///
+/// The echo must EQUAL the request, not merely exist (#352 review round 4).
+/// Relax `honored_offset_window` back to `self.offset.is_some()` and the
+/// constant-`"offset": 0` case below goes green — which is the original defect
+/// wearing an envelope field.
 #[test]
 fn an_offset_the_endpoint_echoed_back_is_honored_not_refused() {
     let hybrid = json!({
@@ -499,6 +504,27 @@ fn an_offset_the_endpoint_echoed_back_is_honored_not_refused() {
     assert!(
         cursor_offset_refusal(&cursor_page(), Some(50), "/admin/v1/payment-attempts").is_some()
     );
+
+    // The reverse pin: an endpoint that IGNORES offset and reports a constant
+    // window start is the natural shape of the defect this refusal exists for.
+    // `"offset": 0` is not evidence that the endpoint read `--offset 50`, so it
+    // must not be read as an honored window.
+    let constant_echo = json!({
+        "object": "list",
+        "data": [{"id": "a"}],
+        "offset": 0,
+        "limit": 1,
+        "next_cursor": "1753500000:att-1",
+    });
+    assert!(
+        cursor_offset_refusal(&constant_echo, Some(50), "/admin/v1/payment-attempts").is_some(),
+        "an offset echo that does not match the request is not evidence the window was read"
+    );
+    // ... and the refusal names the offset the operator actually asked for,
+    // not the one the envelope echoed back.
+    let refusal = cursor_offset_refusal(&constant_echo, Some(50), "/admin/v1/payment-attempts")
+        .expect("a mismatched echo must be refused");
+    assert!(refusal.contains("--offset 50"), "{refusal}");
 }
 
 /// A cursor page's completeness comes from its own cursor, not from window
@@ -540,6 +566,50 @@ fn truncation_notice_reads_the_cursor_on_a_cursor_page() {
     let notice = truncation_notice(&short_but_continuing, 0, None)
         .expect("a live cursor means more rows even on a short page");
     assert!(notice.contains("more rows exist"), "{notice}");
+}
+
+/// One envelope, one classification: the hybrid that `cursor_offset_refusal`
+/// treats as offset-paginated must take the window-arithmetic branch here too.
+///
+/// Before #352 review round 4 the two functions disagreed — the refusal saw the
+/// `offset` echo and stood down, while this function saw the `has_more` key and
+/// printed the vague "cursor-paginated endpoint that reported no continuation
+/// either way", discarding the exact row counts the envelope carried. Revert
+/// the `:677` condition to a bare `envelope.cursor` and this goes red.
+#[test]
+fn truncation_notice_classifies_an_honored_offset_window_by_arithmetic() {
+    let hybrid = json!({
+        "object": "list",
+        "data": [{"id": "a"}],
+        "offset": 2,
+        "limit": 1,
+        "total": 9,
+        // The hypothetical flag that makes the cursor-key derivation fire.
+        "has_more": true,
+    });
+    let notice = truncation_notice(&hybrid, 2, Some(1)).expect("2 + 1 < 9, so rows were left");
+    assert!(
+        notice.contains("showing 1 of 9 rows (offset 2)"),
+        "{notice}"
+    );
+    assert!(
+        !notice.contains("cursor-paginated"),
+        "the endpoint echoed the requested window, so it is not cursor-paginated: {notice}"
+    );
+
+    // The same envelope whose echo does NOT match the request stays on the
+    // cursor branch: the arithmetic would be over a window the endpoint never
+    // used, which is the misreading this whole discriminator exists to stop.
+    let mismatched = json!({
+        "object": "list",
+        "data": [{"id": "a"}],
+        "offset": 0,
+        "limit": 1,
+        "total": 9,
+        "has_more": true,
+    });
+    let notice = truncation_notice(&mismatched, 2, Some(1)).expect("has_more: true warns");
+    assert!(notice.contains("cursor-paginated"), "{notice}");
 }
 
 /// A non-list response never produces a pagination notice.

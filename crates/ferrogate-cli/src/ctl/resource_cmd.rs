@@ -612,18 +612,23 @@ fn mutation_output(
 /// page — an offset-paginated endpoint honors offsets, and a non-list document
 /// has no pages at all. Pure.
 ///
-/// Also `None` when the envelope echoes its **own** `offset`, whatever else it
-/// carries (#352 review round 3 §4). That echo is the endpoint's only evidence
-/// that it read the window the caller asked for, and it is what keeps this
-/// refusal in the safe direction: `PAGE_CURSOR_KEYS` is derived by a rule that
-/// admits *any* boolean in a list envelope, so a future `truncated`/`stale`
-/// flag on an offset-paginated envelope would otherwise turn a working
-/// `--offset` into a hard usage error. Today's three cursor envelopes declare no
-/// `offset` parameter and echo none, so nothing that is refused now stops being
-/// refused.
+/// Also `None` when the envelope echoes back the **same** `offset` that was
+/// asked for (#352 review round 3 §4, tightened in round 4). That echo is the
+/// endpoint's only evidence that it read the window the caller asked for, and
+/// it is what keeps this refusal in the safe direction: `PAGE_CURSOR_KEYS` is
+/// derived by a rule that admits *any* boolean in a list envelope, so a future
+/// `truncated`/`stale` flag on an offset-paginated envelope would otherwise turn
+/// a working `--offset` into a hard usage error. Today's three cursor envelopes
+/// declare no `offset` parameter and echo none, so nothing that is refused now
+/// stops being refused.
+///
+/// The comparison is equality, not presence: see
+/// [`PageEnvelope::honored_offset_window`](ferrogate_control_plane_client::transport::PageEnvelope::honored_offset_window)
+/// for why `"offset": 0` against `--offset 50` must keep refusing, and for the
+/// clamping trade-off that choice accepts.
 fn cursor_offset_refusal(body: &Value, offset: Option<u64>, path: &str) -> Option<String> {
     let offset = offset.filter(|offset| *offset > 0)?;
-    if page_envelope(body).is_some_and(|envelope| envelope.offset.is_some()) {
+    if page_envelope(body).is_some_and(|envelope| envelope.honored_offset_window(offset)) {
         return None;
     }
     let state = page_cursor_state(body)?;
@@ -674,7 +679,14 @@ fn truncation_notice(body: &Value, offset: u64, requested_limit: Option<u64>) ->
     // more rows even when it came back short. Pointing such an operator at
     // `--all-pages` — which now refuses cursor endpoints, correctly — would be
     // advice that cannot work.
-    if envelope.cursor {
+    //
+    // `honored_offset_window` is the same discriminator `cursor_offset_refusal`
+    // uses, and it is applied here for that reason (#352 review round 4): a
+    // hybrid envelope that carries a cursor key AND echoes the requested offset
+    // used to be read as offset-paginated by the refusal and cursor-paginated
+    // here, so one response was classified two ways and the operator lost the
+    // precise `showing N of M rows (offset K)` the envelope could support.
+    if envelope.cursor && !envelope.honored_offset_window(offset) {
         return match page_cursor_state(body)? {
             PageCursorState::Resume { key, value } => Some(format!(
                 "note: showing {returned} rows; this endpoint pages by cursor and reported \

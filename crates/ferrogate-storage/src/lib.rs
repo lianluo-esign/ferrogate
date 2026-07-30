@@ -289,6 +289,11 @@ pub use wallet::{
 };
 
 mod payment_attempt;
+/// The shared money-domain corpus, re-exported at the crate root because the
+/// two test modules that must agree on it are declared there (#352 review
+/// round 4).
+#[cfg(test)]
+pub(crate) use payment_attempt::AMOUNT_CORPUS;
 pub use payment_attempt::{
     is_canonical_atomic_amount, payment_attempt_state_is_terminal, PaymentAttemptCreation,
     PaymentAttemptCursor, PaymentAttemptEvidenceArgs, PaymentAttemptLinks, PaymentAttemptPage,
