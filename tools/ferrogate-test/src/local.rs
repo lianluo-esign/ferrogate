@@ -516,80 +516,119 @@ impl LocalHarness {
         std::fs::write(&stdio_mcp_path, blocking_stdio_mcp_script())?;
         let observability =
             spawn_mock_otlp_server().context("start observability provider mock")?;
-        // Allocate the gateway port after every bind(:0) mock in this process.
-        // Otherwise one of those mocks can be handed the just-released gateway
-        // port before the child process binds it (#444).
-        let gateway_addr = free_addr()?;
         let config_path = dir.path().join("ferrogate.toml");
-        let gateway_config = if let Some(template) = config_template {
-            const LISTEN_MARKER: &str = "__FERROGATE_TEST_LISTEN__";
-            if !template.contains(LISTEN_MARKER) {
-                bail!("custom gateway config is missing {LISTEN_MARKER}");
+
+        // Render the gateway config for a given listener. Kept as a closure so a
+        // hijacked gateway port can be rotated (see the start loop below) by
+        // re-rendering with a fresh address rather than baking the port in once.
+        let build_config = |gateway_addr: &str| -> Result<String> {
+            if let Some(template) = config_template {
+                const LISTEN_MARKER: &str = "__FERROGATE_TEST_LISTEN__";
+                if !template.contains(LISTEN_MARKER) {
+                    bail!("custom gateway config is missing {LISTEN_MARKER}");
+                }
+                Ok(template.replace(LISTEN_MARKER, gateway_addr))
+            } else {
+                Ok(local_gateway_config(LocalGatewayConfig {
+                    gateway_addr,
+                    provider_addr: &provider_addr,
+                    mcp_addr: &mcp_addr,
+                    agent_addr: agent_addr.as_deref().unwrap_or("http://127.0.0.1:1/a2a"),
+                    stdio_mcp_path: &stdio_mcp_path,
+                    billing: billing.as_ref(),
+                    observability: Some(&observability),
+                    auth_addr,
+                    billing_service_addr,
+                    primary_provider_secret_ref: provider_secret_binding
+                        .as_ref()
+                        .map(|binding| binding.secret_ref),
+                    scheduler_tick_interval_secs,
+                }))
             }
-            template.replace(LISTEN_MARKER, &gateway_addr)
-        } else {
-            local_gateway_config(LocalGatewayConfig {
-                gateway_addr: &gateway_addr,
-                provider_addr: &provider_addr,
-                mcp_addr: &mcp_addr,
-                agent_addr: agent_addr.as_deref().unwrap_or("http://127.0.0.1:1/a2a"),
-                stdio_mcp_path: &stdio_mcp_path,
-                billing: billing.as_ref(),
-                observability: Some(&observability),
-                auth_addr,
-                billing_service_addr,
-                primary_provider_secret_ref: provider_secret_binding
-                    .as_ref()
-                    .map(|binding| binding.secret_ref),
-                scheduler_tick_interval_secs,
-            })
         };
-        std::fs::write(&config_path, gateway_config)?;
 
-        let mut command = Command::new(ferrogate_bin);
-        command
-            .args(["run", "--config"])
-            .arg(&config_path)
-            .env(
-                "FERROGATE_TEST_AWS_SECRET_ACCESS_KEY",
-                "ferrogate-test-aws-secret",
-            )
-            .env("FERROGATE_TEST_GCP_ACCESS_TOKEN", "ferrogate-test-gcp-token")
-            // Enable the function egress broker (#119) for the org_demo client so
-            // the function-egress scenario can exercise the live gateway pipeline.
-            // The allowlisted base is deliberately unreachable so the test proves
-            // auth + allowlist + token mint + build + egress-attempt without a TLS
-            // upstream.
-            .env("FG_FN_JWT_SECRET", "test-fn-signing-secret")
-            .env("FG_FN_APIKEY", "test-project-anon-key")
-            .env(
-                "FG_FN_ALLOWLIST",
-                r#"[{"tenant":"org_demo","base_url":"https://127.0.0.1:1","function_slugs":["charge-credits"]}]"#,
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(
-                if env::var("FERROGATE_TEST_DEBUG_STDERR").is_ok_and(|value| value == "1") {
-                    Stdio::inherit()
-                } else {
-                    Stdio::null()
-                },
-            );
-        if let Some(binding) = provider_secret_binding {
+        let spawn_gateway = |config_path: &Path| -> Result<Child> {
+            let mut command = Command::new(ferrogate_bin);
             command
-                .env_remove("FERROGATE_PROVIDER_SECRET")
-                .env_remove("CLOUDFLARE_ACCOUNT_ID")
-                .env_remove("CLOUDFLARE_API_TOKEN")
-                .env_remove("CLOUDFLARE_API_BASE_URL")
-                .env(binding.binding_env, binding.binding_value);
-        } else {
-            command.env("FERROGATE_PROVIDER_SECRET", "provider-secret");
-        }
-        let gateway = command
-            .spawn()
-            .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
+                .args(["run", "--config"])
+                .arg(config_path)
+                .env(
+                    "FERROGATE_TEST_AWS_SECRET_ACCESS_KEY",
+                    "ferrogate-test-aws-secret",
+                )
+                .env("FERROGATE_TEST_GCP_ACCESS_TOKEN", "ferrogate-test-gcp-token")
+                // Enable the function egress broker (#119) for the org_demo client so
+                // the function-egress scenario can exercise the live gateway pipeline.
+                // The allowlisted base is deliberately unreachable so the test proves
+                // auth + allowlist + token mint + build + egress-attempt without a TLS
+                // upstream.
+                .env("FG_FN_JWT_SECRET", "test-fn-signing-secret")
+                .env("FG_FN_APIKEY", "test-project-anon-key")
+                .env(
+                    "FG_FN_ALLOWLIST",
+                    r#"[{"tenant":"org_demo","base_url":"https://127.0.0.1:1","function_slugs":["charge-credits"]}]"#,
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(
+                    if env::var("FERROGATE_TEST_DEBUG_STDERR").is_ok_and(|value| value == "1") {
+                        Stdio::inherit()
+                    } else {
+                        Stdio::null()
+                    },
+                );
+            if let Some(binding) = provider_secret_binding {
+                command
+                    .env_remove("FERROGATE_PROVIDER_SECRET")
+                    .env_remove("CLOUDFLARE_ACCOUNT_ID")
+                    .env_remove("CLOUDFLARE_API_TOKEN")
+                    .env_remove("CLOUDFLARE_API_BASE_URL")
+                    .env(binding.binding_env, binding.binding_value);
+            } else {
+                command.env("FERROGATE_PROVIDER_SECRET", "provider-secret");
+            }
+            command
+                .spawn()
+                .with_context(|| format!("failed to start {}", ferrogate_bin.display()))
+        };
 
-        let mut harness = Self {
+        // Start the gateway child and confirm a *FerroGate* is the process that
+        // answers readiness on the configured port.
+        //
+        // `free_addr()` binds `127.0.0.1:0`, records the port, then drops the
+        // listener before the child rebinds it. Allocating the gateway port after
+        // every in-process `bind(:0)` mock keeps this process's own mocks off the
+        // released port, but a mock in *another* parallel harness can still win it
+        // inside that release->rebind window (#444). A squatter that wins the port
+        // holds it for its whole lifetime while Pingora retries its bind forever,
+        // so polling that address can never reach FerroGate. The readiness check
+        // now identifies the responder, and a proven hijack rotates to a fresh
+        // gateway port under a bounded retry instead of silently trusting the
+        // squatter (the original flake) or hanging until the readiness deadline.
+        const MAX_GATEWAY_START_ATTEMPTS: usize = 5;
+        let mut hijacked_addrs: Vec<String> = Vec::new();
+        let (gateway, gateway_addr) = loop {
+            let gateway_addr = free_addr()?;
+            std::fs::write(&config_path, build_config(&gateway_addr)?)?;
+            let mut gateway = spawn_gateway(&config_path)?;
+            match Self::wait_for_gateway(&mut gateway, &gateway_addr)? {
+                GatewayStartOutcome::Ready => break (gateway, gateway_addr),
+                GatewayStartOutcome::PortHijacked => {
+                    let _ = gateway.kill();
+                    let _ = gateway.wait();
+                    hijacked_addrs.push(gateway_addr);
+                    if hijacked_addrs.len() >= MAX_GATEWAY_START_ATTEMPTS {
+                        bail!(
+                            "gateway port hijacked by a non-ferrogate process on every attempt \
+                             ({} tries): {hijacked_addrs:?}",
+                            hijacked_addrs.len(),
+                        );
+                    }
+                }
+            }
+        };
+
+        let harness = Self {
             _dir: dir,
             config_path,
             gateway_addr,
@@ -603,32 +642,41 @@ impl LocalHarness {
             billing,
             observability: Some(observability),
         };
-        harness.wait_for_gateway()?;
         Ok(harness)
     }
 
-    fn wait_for_gateway(&mut self) -> Result<()> {
+    /// Poll `/healthz` until a live FerroGate answers (`Ready`), the configured
+    /// port is proven to be held by a non-FerroGate squatter (`PortHijacked`),
+    /// the child exits, or the 20s deadline passes. The per-probe decision is
+    /// delegated in full to [`classify_gateway_readiness`] so the readiness gate
+    /// cannot silently regress to accepting any HTTP 200 (#444).
+    fn wait_for_gateway(gateway: &mut Child, gateway_addr: &str) -> Result<GatewayStartOutcome> {
         let started = Instant::now();
         let mut last = String::new();
         while started.elapsed() < Duration::from_secs(20) {
-            if let Some(status) = self.gateway.try_wait()? {
-                let stderr = drain_child_stderr(&mut self.gateway); // #264
+            if let Some(status) = gateway.try_wait()? {
+                let stderr = drain_child_stderr(gateway); // #264
                 bail!(
                     "ferrogate process exited before readiness check: {status}{}",
                     format_child_stderr(&stderr)
                 );
             }
-            match http_request_addr(&self.gateway_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if healthz_identifies_ferrogate(&response) => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
+            let probe = http_request_addr(gateway_addr, "GET", "/healthz", &[], "");
+            match classify_gateway_readiness(&probe) {
+                GatewayReadiness::Ready => return Ok(GatewayStartOutcome::Ready),
+                // A squatter holds the port and will not yield it; stop polling now
+                // and let the caller rotate ports rather than burn the deadline.
+                GatewayReadiness::PortHijacked => return Ok(GatewayStartOutcome::PortHijacked),
+                GatewayReadiness::Pending => {
+                    last = match &probe {
+                        Ok(response) => response.raw.clone(),
+                        Err(error) => error.to_string(),
+                    };
+                }
             }
             thread::sleep(Duration::from_millis(100));
         }
-        bail!(
-            "timed out waiting for ferrogate on {}; last response: {last}",
-            self.gateway_addr
-        );
+        bail!("timed out waiting for ferrogate on {gateway_addr}; last response: {last}");
     }
 
     pub(crate) fn expect_json<F>(
@@ -920,6 +968,60 @@ fn healthz_identifies_ferrogate(response: &HttpResponse) -> bool {
         return false;
     };
     body["service"] == "ferrogate" && body["status"] == "ok"
+}
+
+/// Does this response body claim to be the FerroGate gateway at all, regardless
+/// of readiness? Used to tell "our gateway answered but is not ready yet" apart
+/// from "a foreign process holds the port". FerroGate's `/healthz` is a static
+/// 200, so in practice a claiming-but-not-ready body never occurs; this keeps
+/// the classifier from ever misreading our own process as a squatter.
+fn response_claims_ferrogate(response: &HttpResponse) -> bool {
+    serde_json::from_str::<Value>(&response.body)
+        .map(|body| body["service"] == "ferrogate")
+        .unwrap_or(false)
+}
+
+/// The single per-probe readiness decision for a gateway `/healthz` response.
+/// `wait_for_gateway` acts only on this value, so the identity gate cannot
+/// silently regress to status-only acceptance (#444). Covered directly in
+/// `local_test.rs` so a regression to "any HTTP 200 is ready" reddens a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayReadiness {
+    /// A live FerroGate answered `/healthz` with `status:ok`; proceed.
+    Ready,
+    /// No usable HTTP answer yet (connection refused / read timeout), or our own
+    /// gateway answering before it is ready. Pingora has not served a ready
+    /// `/healthz` on this port; keep polling the same address.
+    Pending,
+    /// A non-FerroGate process answered `/healthz` on the configured gateway
+    /// port. FerroGate serves `/healthz` only after Pingora binds, so any parsed
+    /// HTTP answer that does not claim the FerroGate service identity is a
+    /// squatter that won the released ephemeral port (#444). It will not yield
+    /// the port, so polling it can never succeed.
+    PortHijacked,
+}
+
+/// Terminal outcome of one gateway spawn + readiness wait. `Pending` is not a
+/// terminal state: [`LocalHarness::wait_for_gateway`] keeps polling until the
+/// gateway is `Ready`, the port is proven hijacked, the child exits, or the
+/// deadline passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayStartOutcome {
+    Ready,
+    PortHijacked,
+}
+
+fn classify_gateway_readiness(probe: &Result<HttpResponse>) -> GatewayReadiness {
+    let Ok(response) = probe else {
+        return GatewayReadiness::Pending;
+    };
+    if healthz_identifies_ferrogate(response) {
+        return GatewayReadiness::Ready;
+    }
+    if response_claims_ferrogate(response) {
+        return GatewayReadiness::Pending;
+    }
+    GatewayReadiness::PortHijacked
 }
 
 impl Drop for LocalHarness {
