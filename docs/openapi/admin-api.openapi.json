@@ -15386,7 +15386,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "The hostname is currently bound to a different tenant, so the bind is refused. This is the terminal for a non-holder bind even when the incumbent's ownership is unproven: the gateway refuses BEFORE issuing or upserting the caller's proof row, so no challenge is created and no binding is written. It is deliberately not a 2xx -- an earlier contract returned a success status describing a re-bind that never happened (#547). The same 409 is also returned when another tenant wins the binding between this request's preflight read and its write.",
+            "description": "The hostname is currently bound to a different tenant, so the bind is refused. This is the terminal for a non-holder bind even when the incumbent's ownership is unproven. It is deliberately not a 2xx -- an earlier contract returned a success status describing a re-bind that never happened (#547). Two paths reach it: the preflight read finds another tenant's binding, or another tenant wins the binding between this request's preflight read and its guarded claim. Both leave the same footprint -- no binding is written, and no challenge is created for the caller -- because the caller's proof row is written only after the binding claim succeeds. The two paths are not distinguished by error code or message.",
             "content": {
               "application/json": {
                 "schema": {

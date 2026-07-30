@@ -405,29 +405,37 @@ impl FerroGateway {
             Err(error) => return storage_error(session, ctx, error.to_string()).await,
         }
 
-        // A hostname points at exactly one tenant's site. Re-binding within
-        // the same tenant is an update; binding a hostname currently held by
-        // another tenant is a conflict. #547: the old "allow a challenge
-        // against an unproven incumbent" path returned a 2xx with a response
-        // body for a binding row it deliberately did not write. #575 then made
-        // the final write itself reject a different current tenant, so the
-        // honest API contract is to refuse the non-holder before issuing a
-        // new proof row.
+        // The terminal decision and every write it implies live in
+        // `apply_site_domain_bind`, which takes no `Session` so a test can drive
+        // it against an in-memory control plane (#547 Verification). This
+        // handler keeps only what needs the connection: auth, the audit draft,
+        // and serialization.
         let now = now_unix_seconds();
-        let incumbent = match state.get_site_domain(&hostname).await {
-            Ok(existing) => existing,
-            Err(error) => return storage_error(session, ctx, error.to_string()).await,
-        };
-        // Consume the unfiltered incumbent HERE and let only a same-tenant view
-        // escape. #547: the terminal selector used to receive `existing
-        // .is_some()`, which answered "a row exists" while the 200 it produced
-        // claimed "re-bound within the same tenant" -- a different question. The
-        // refusal below makes the two coincide, but shadowing the raw read keeps
-        // them from drifting apart again: after this point there is no binding
-        // in scope that belongs to another tenant.
-        let same_tenant_existing = match incumbent {
-            Some(existing) if existing.tenant_id != tenant_id => {
-                let message = reject(format!("hostname {hostname} is bound by another tenant"));
+        let bound = match apply_site_domain_bind(&state, &tenant_id, &site, &hostname, now).await {
+            // ONE status code, TWO decisions. Under the write ordering in
+            // `apply_site_domain_bind` they also leave the same (empty)
+            // storage footprint, which is what makes the 409's "nothing was
+            // written" promise true on both paths -- and why the two are only
+            // distinguishable by outcome identity, never by observing storage.
+            SiteDomainBindOutcome::NonHolderRefused
+            | SiteDomainBindOutcome::ClaimLostToAnotherTenant => {
+                // Audited against the NORMALIZED hostname, like the commit and
+                // claim-failure arms below -- not through `reject`, whose target
+                // is the raw request field because its other callers run before
+                // validation. A cross-tenant bind attempt is the security event
+                // in this handler; recording it under `APP.Example.com:8443`
+                // while the commits for the same hostname are recorded under
+                // `app.example.com` puts the two on either side of any
+                // hostname-filtered audit query.
+                let message = format!("hostname {hostname} is bound by another tenant");
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "site_domain.bind",
+                    &hostname,
+                    "rejected",
+                    message.clone(),
+                ));
                 return write_json_error(
                     session,
                     StatusCode::CONFLICT,
@@ -437,82 +445,17 @@ impl FerroGateway {
                 )
                 .await;
             }
-            unbound_or_own => unbound_or_own,
-        };
-
-        // The caller's own proof for this hostname, if any. A live proof (or an
-        // unexpired challenge) survives a re-bind -- ownership is of the
-        // HOSTNAME, not of the site it points at -- so an operator who already
-        // published the TXT record is not sent back to DNS.
-        let caller_proof = match state
-            .get_site_domain_verification(&tenant_id, &hostname)
-            .await
-        {
-            Ok(proof) => proof,
-            Err(error) => return storage_error(session, ctx, error.to_string()).await,
-        };
-        let verification = match caller_proof {
-            Some(mut record) if reusable_on_rebind(&record, now) => {
-                record.site = site.clone();
-                record.updated_at_unix = now;
-                record
+            // Read failures answer 503 without an audit event, exactly as they
+            // did before the extraction: nothing was decided, so there is no
+            // decision to record.
+            SiteDomainBindOutcome::ReadFailed(message) => {
+                return storage_error(session, ctx, message).await;
             }
-            _ => {
-                let token = match new_challenge_token() {
-                    Ok(token) => token,
-                    Err(error) => {
-                        let message = reject(error.to_string());
-                        return storage_error(session, ctx, message).await;
-                    }
-                };
-                StoredSiteDomainVerification::pending(&tenant_id, &hostname, &site, token, now)
+            SiteDomainBindOutcome::ProofWriteFailed(message) => {
+                let message = reject(message);
+                return storage_error(session, ctx, message).await;
             }
-        };
-        // Two DIFFERENT questions, deliberately answered by two different
-        // predicates and never by one boolean (#488): `serving` is HTTP
-        // availability, which the `grandfathered` migration exception
-        // satisfies; `acme_action` is certificate-issuance policy, which only a
-        // live DNS proof satisfies.
-        let serving = verification.serves(now);
-        let acme_action = acme_order_action(&verification, now);
-        if let Err(error) = state
-            .upsert_site_domain_verification(verification.clone())
-            .await
-        {
-            let message = reject(error.to_string());
-            return storage_error(session, ctx, message).await;
-        }
-
-        // The servable binding row is written for the hostname the caller
-        // already holds here (unbound, or its own). The storage-level claim is
-        // still required: another tenant can win between the preflight read
-        // above and this write.
-        let domain = StoredSiteDomain {
-            hostname: hostname.clone(),
-            tenant_id: tenant_id.clone(),
-            site: site.clone(),
-            // No tenant filter needed: `same_tenant_existing` is already narrowed
-            // to this tenant's row (or none) by the refusal above.
-            created_at_unix: same_tenant_existing
-                .as_ref()
-                .map_or(now, |existing| existing.created_at_unix),
-            updated_at_unix: now,
-        };
-        let domain = match state.claim_site_domain(domain).await {
-            Ok(claimed) => claimed,
-            Err(StorageError::Conflict(_)) => {
-                let message = reject(format!("hostname {hostname} is bound by another tenant"));
-                return write_json_error(
-                    session,
-                    StatusCode::CONFLICT,
-                    "site_domain_conflict",
-                    message,
-                    &ctx.request_id,
-                )
-                .await;
-            }
-            Err(error) => {
-                let message = error.to_string();
+            SiteDomainBindOutcome::ClaimFailed(message) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
@@ -523,7 +466,15 @@ impl FerroGateway {
                 ));
                 return storage_error(session, ctx, message).await;
             }
+            SiteDomainBindOutcome::Bound(bound) => bound,
         };
+        let BoundSiteDomain {
+            domain,
+            verification,
+            serving,
+            acme_action,
+            same_tenant_rebind,
+        } = *bound;
 
         // #488: an unproven hostname must NOT enter the ACME order set. That is
         // both the certificate-issuance rate-limit pollution the issue calls
@@ -546,7 +497,7 @@ impl FerroGateway {
                 admin_verification.state, live_ownership_proof, acme.enabled, acme.reload_triggered
             ),
         ));
-        let terminal = site_domain_bind_status(serving, same_tenant_existing.is_some());
+        let terminal = site_domain_bind_status(serving, same_tenant_rebind);
         write_json_response(
             session,
             terminal.status(),
@@ -1156,6 +1107,176 @@ fn admin_site_domain(
         created_at_unix: domain.created_at_unix,
         updated_at_unix: domain.updated_at_unix,
     }
+}
+
+/// A bind that reached a success terminal, with everything the handler still
+/// needs to apply ACME, audit, and serialize.
+pub(super) struct BoundSiteDomain {
+    /// The binding row as the store returned it -- never a row assembled by the
+    /// handler and not persisted (#547 Ask 2).
+    domain: StoredSiteDomain,
+    verification: StoredSiteDomainVerification,
+    serving: bool,
+    acme_action: AcmeOrderAction,
+    /// The caller's OWN prior binding for this hostname, never "some row
+    /// exists" (#547). This is the value the 200's "re-bound within the same
+    /// tenant" description is a claim about.
+    same_tenant_rebind: bool,
+}
+
+/// Every terminal of the bind decision, named.
+///
+/// #547 Verification asks for a test that pins the terminal *by identity*, not
+/// by status class, and names the mutation that reds it. That is only possible
+/// if the decision has an identity to observe: `NonHolderRefused` and
+/// `ClaimLostToAnotherTenant` are the same 409 to a client and -- by design,
+/// see [`apply_site_domain_bind`] -- leave the same empty storage footprint, so
+/// no assertion over the response or the store can tell them apart. Deleting
+/// the preflight refusal turns the first into the second, and that is exactly
+/// the mutation the tests in `site_domains_test.rs` catch.
+pub(super) enum SiteDomainBindOutcome {
+    /// The hostname is already bound to a DIFFERENT tenant at preflight.
+    /// Refused before any write.
+    NonHolderRefused,
+    /// The guarded claim rejected the write: another tenant holds the binding.
+    /// Reachable only when a competing bind commits between this request's
+    /// preflight read and its claim.
+    ClaimLostToAnotherTenant,
+    /// A preflight read failed. Nothing was decided and nothing was written.
+    ReadFailed(String),
+    /// The challenge token could not be generated, or the proof row could not
+    /// be written after the binding was claimed.
+    ProofWriteFailed(String),
+    /// The claim failed for a reason other than another tenant holding it.
+    ClaimFailed(String),
+    /// Boxed: the success payload dwarfs the string-only failure variants, and
+    /// this enum is returned by value on every bind.
+    Bound(Box<BoundSiteDomain>),
+}
+
+/// The `Session`-free core of `POST /admin/v1/site-domains`: decide the bind
+/// terminal for an authorized caller and perform the writes it implies.
+///
+/// A hostname points at exactly one tenant's site. Re-binding within the same
+/// tenant is an update; binding a hostname currently held by another tenant is
+/// a conflict. #547: the old "allow a challenge against an unproven incumbent"
+/// path returned a 2xx with a response body for a binding row it deliberately
+/// did not write. #575 then made the final write itself reject a different
+/// current tenant, so the honest API contract is to refuse the non-holder
+/// before issuing a new proof row.
+///
+/// WRITE ORDER IS PART OF THE CONTRACT. The binding is claimed FIRST and the
+/// caller's proof row is written only after that claim succeeds. The reverse
+/// order (which this handler used until #547's third review round) left an
+/// orphan challenge row behind whenever the claim lost a race, while the 409's
+/// own description promised "no challenge is created" -- the same
+/// status-says-one-thing-code-does-another defect #547 was filed for, one layer
+/// down. Nothing between the two writes depends on the claim: `serving` and
+/// `acme_action` are derived from the proof record alone, so the success path
+/// is unchanged.
+///
+/// The residual failure mode of this order is the mirror one: a claimed binding
+/// with no proof row, if the proof write fails. It fails CLOSED -- the
+/// data-plane serve gate refuses a hostname whose proof is missing (#488), the
+/// hostname is not enrolled in ACME because this function returns before the
+/// caller applies `acme_action`, and the caller's own retry re-claims and
+/// completes it. An orphan proof row for a hostname another tenant holds has no
+/// such self-repair.
+async fn apply_site_domain_bind(
+    state: &crate::state::AppState,
+    tenant_id: &str,
+    site: &str,
+    hostname: &str,
+    now: i64,
+) -> SiteDomainBindOutcome {
+    let incumbent = match state.get_site_domain(hostname).await {
+        Ok(existing) => existing,
+        Err(error) => return SiteDomainBindOutcome::ReadFailed(error.to_string()),
+    };
+    // Consume the unfiltered incumbent HERE and let only a same-tenant view
+    // escape. #547: the terminal selector used to receive `existing.is_some()`,
+    // which answered "a row exists" while the 200 it produced claimed "re-bound
+    // within the same tenant" -- a different question. The refusal below makes
+    // the two coincide, but shadowing the raw read keeps them from drifting
+    // apart again: after this point there is no binding in scope that belongs
+    // to another tenant.
+    let same_tenant_existing = match incumbent {
+        Some(existing) if existing.tenant_id != tenant_id => {
+            return SiteDomainBindOutcome::NonHolderRefused;
+        }
+        unbound_or_own => unbound_or_own,
+    };
+
+    // The caller's own proof for this hostname, if any. A live proof (or an
+    // unexpired challenge) survives a re-bind -- ownership is of the HOSTNAME,
+    // not of the site it points at -- so an operator who already published the
+    // TXT record is not sent back to DNS.
+    let caller_proof = match state
+        .get_site_domain_verification(tenant_id, hostname)
+        .await
+    {
+        Ok(proof) => proof,
+        Err(error) => return SiteDomainBindOutcome::ReadFailed(error.to_string()),
+    };
+    let verification = match caller_proof {
+        Some(mut record) if reusable_on_rebind(&record, now) => {
+            record.site = site.to_string();
+            record.updated_at_unix = now;
+            record
+        }
+        _ => {
+            let token = match new_challenge_token() {
+                Ok(token) => token,
+                Err(error) => return SiteDomainBindOutcome::ProofWriteFailed(error.to_string()),
+            };
+            StoredSiteDomainVerification::pending(tenant_id, hostname, site, token, now)
+        }
+    };
+    // Two DIFFERENT questions, deliberately answered by two different
+    // predicates and never by one boolean (#488): `serving` is HTTP
+    // availability, which the `grandfathered` migration exception satisfies;
+    // `acme_action` is certificate-issuance policy, which only a live DNS proof
+    // satisfies. Both are derived from `verification` alone -- which is why the
+    // proof write can be deferred past the claim without changing them.
+    let serving = verification.serves(now);
+    let acme_action = acme_order_action(&verification, now);
+
+    // The servable binding row is written for the hostname the caller already
+    // holds here (unbound, or its own). The storage-level claim is still
+    // required: another tenant can win between the preflight read above and
+    // this write.
+    let claim = StoredSiteDomain {
+        hostname: hostname.to_string(),
+        tenant_id: tenant_id.to_string(),
+        site: site.to_string(),
+        // No tenant filter needed: `same_tenant_existing` is already narrowed to
+        // this tenant's row (or none) by the refusal above.
+        created_at_unix: same_tenant_existing
+            .as_ref()
+            .map_or(now, |existing| existing.created_at_unix),
+        updated_at_unix: now,
+    };
+    let domain = match state.claim_site_domain(claim).await {
+        Ok(claimed) => claimed,
+        Err(StorageError::Conflict(_)) => {
+            return SiteDomainBindOutcome::ClaimLostToAnotherTenant;
+        }
+        Err(error) => return SiteDomainBindOutcome::ClaimFailed(error.to_string()),
+    };
+    if let Err(error) = state
+        .upsert_site_domain_verification(verification.clone())
+        .await
+    {
+        return SiteDomainBindOutcome::ProofWriteFailed(error.to_string());
+    }
+
+    SiteDomainBindOutcome::Bound(Box::new(BoundSiteDomain {
+        domain,
+        verification,
+        serving,
+        acme_action,
+        same_tenant_rebind: same_tenant_existing.is_some(),
+    }))
 }
 
 /// The three-way terminal of `POST /admin/v1/site-domains` (#530).
