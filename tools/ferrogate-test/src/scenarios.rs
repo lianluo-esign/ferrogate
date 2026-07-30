@@ -2723,11 +2723,22 @@ fn assert_lifecycle_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
     )?;
     case.enable_scheduler(1)?;
 
-    for auth in [CLIENT_AUTH, live_auth.as_str(), project_only_auth] {
+    // Labelled, because "expected 403, got 401" from a bare loop does not say
+    // which credential broke the contract, and the three differ in kind: a
+    // config-seeded key, an admin-issued virtual key, and a project-scoped key.
+    for (label, auth) in [
+        ("config-seeded client key", CLIENT_AUTH),
+        ("admin-issued live key", live_auth.as_str()),
+        ("project-scoped key", project_only_auth),
+    ] {
         case.expect_json("GET", "/v1/models", &[auth], "", 403, |body| {
-            assert_eq!(body["error"]["code"], "tenancy_suspended");
+            let code = body["error"]["code"].as_str().unwrap_or_default();
+            if code != "tenancy_suspended" {
+                bail!("{label}: suspended tenant must answer tenancy_suspended, got {code}");
+            }
             Ok(())
-        })?;
+        })
+        .with_context(|| format!("suspended-tenancy denial for the {label}"))?;
     }
     case.expect_json(
         "POST",
