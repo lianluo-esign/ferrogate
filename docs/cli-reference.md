@@ -404,7 +404,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 Subcommands:
 
@@ -522,7 +522,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts get`
@@ -550,7 +550,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts create`
@@ -578,7 +578,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts replace`
@@ -606,7 +606,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts update`
@@ -634,7 +634,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts resolved-defaults`
@@ -662,7 +662,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts assign-plan`
@@ -690,7 +690,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tenants`
@@ -726,7 +726,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl projects`
@@ -767,7 +767,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects get`
@@ -795,7 +795,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects create`
@@ -823,7 +823,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects replace`
@@ -851,7 +851,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects update`
@@ -879,7 +879,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects delete`
@@ -907,7 +907,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl workspaces`
@@ -948,7 +948,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces get`
@@ -976,7 +976,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces create`
@@ -1004,7 +1004,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces replace`
@@ -1032,7 +1032,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces update`
@@ -1060,7 +1060,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces delete`
@@ -1088,7 +1088,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl plans`
@@ -1128,7 +1128,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans get`
@@ -1156,7 +1156,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans create`
@@ -1184,7 +1184,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans replace`
@@ -1212,7 +1212,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans update`
@@ -1240,7 +1240,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl quota-policies`
@@ -1281,7 +1281,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies get`
@@ -1309,7 +1309,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies create`
@@ -1337,7 +1337,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies replace`
@@ -1365,7 +1365,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies update`
@@ -1393,7 +1393,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies delete`
@@ -1421,7 +1421,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl virtual-keys`
@@ -1464,7 +1464,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys get`
@@ -1492,7 +1492,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys create`
@@ -1520,7 +1520,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys revoke`
@@ -1548,7 +1548,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys rotate`
@@ -1576,7 +1576,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys enable`
@@ -1604,7 +1604,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys disable`
@@ -1632,7 +1632,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys revoke-action`
@@ -1660,7 +1660,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl api-keys`
@@ -1701,7 +1701,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys get`
@@ -1729,7 +1729,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys create`
@@ -1757,7 +1757,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys replace`
@@ -1785,7 +1785,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys update`
@@ -1813,7 +1813,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys delete`
@@ -1841,7 +1841,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl roles`
@@ -1880,7 +1880,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl roles get`
@@ -1908,7 +1908,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl roles create`
@@ -1936,7 +1936,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl roles delete`
@@ -1964,7 +1964,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl permissions`
@@ -2003,7 +2003,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl permissions get`
@@ -2031,7 +2031,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl permissions create`
@@ -2059,7 +2059,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl permissions delete`
@@ -2087,7 +2087,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl access-policies`
@@ -2128,7 +2128,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies get`
@@ -2156,7 +2156,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies create`
@@ -2184,7 +2184,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies replace`
@@ -2212,7 +2212,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies update`
@@ -2240,7 +2240,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies delete`
@@ -2268,7 +2268,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tenant-roles`
@@ -2306,7 +2306,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-roles bind`
@@ -2334,7 +2334,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-roles unbind`
@@ -2362,7 +2362,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-workflows`
@@ -2403,7 +2403,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows get`
@@ -2431,7 +2431,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows create`
@@ -2459,7 +2459,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows replace`
@@ -2487,7 +2487,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows update`
@@ -2515,7 +2515,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows delete`
@@ -2543,7 +2543,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-schedules`
@@ -2586,7 +2586,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules get`
@@ -2614,7 +2614,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules create`
@@ -2642,7 +2642,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules replace`
@@ -2670,7 +2670,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules update`
@@ -2698,7 +2698,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules delete`
@@ -2726,7 +2726,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules run-now`
@@ -2754,7 +2754,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules fires`
@@ -2782,7 +2782,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-upstreams`
@@ -2823,7 +2823,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams get`
@@ -2851,7 +2851,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams create`
@@ -2879,7 +2879,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams replace`
@@ -2907,7 +2907,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams update`
@@ -2935,7 +2935,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams delete`
@@ -2963,7 +2963,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-runs`
@@ -3001,7 +3001,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-runs get`
@@ -3029,7 +3029,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-runs start`
@@ -3057,7 +3057,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-jobs`
@@ -3097,7 +3097,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs get`
@@ -3125,7 +3125,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs events`
@@ -3153,7 +3153,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs result`
@@ -3181,7 +3181,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs cancel`
@@ -3209,7 +3209,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl self-hosted-workers`
@@ -3253,7 +3253,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers get`
@@ -3281,7 +3281,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers register`
@@ -3309,7 +3309,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers rotate`
@@ -3337,7 +3337,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers heartbeat`
@@ -3365,7 +3365,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers events`
@@ -3393,7 +3393,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers record-event`
@@ -3421,7 +3421,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers checkpoint`
@@ -3449,7 +3449,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers artifact`
@@ -3477,7 +3477,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl managed-workers`
@@ -3513,7 +3513,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl managed-worker-sessions`
@@ -3549,7 +3549,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl self-hosted-worker-records`
@@ -3585,7 +3585,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl self-hosted-runs`
@@ -3621,7 +3621,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl mcp-servers`
@@ -3662,7 +3662,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers get`
@@ -3690,7 +3690,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers create`
@@ -3718,7 +3718,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers replace`
@@ -3746,7 +3746,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers update`
@@ -3774,7 +3774,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers delete`
@@ -3802,7 +3802,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl mcp-identity`
@@ -3841,7 +3841,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-identity get`
@@ -3869,7 +3869,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-identity revoke`
@@ -3897,7 +3897,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-identity callback`
@@ -3925,7 +3925,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tool-sessions`
@@ -3961,7 +3961,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tools`
@@ -3998,7 +3998,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tools plugin-tools`
@@ -4026,7 +4026,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tool-approvals`
@@ -4066,7 +4066,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals get`
@@ -4094,7 +4094,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals approve`
@@ -4122,7 +4122,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals deny`
@@ -4150,7 +4150,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals expire`
@@ -4178,7 +4178,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl guardrail-policies`
@@ -4223,7 +4223,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies create`
@@ -4251,7 +4251,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies get`
@@ -4279,7 +4279,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies revisions`
@@ -4307,7 +4307,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies create-revision`
@@ -4335,7 +4335,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies get-revision`
@@ -4363,7 +4363,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies archive`
@@ -4391,7 +4391,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies activate`
@@ -4419,7 +4419,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies rollback`
@@ -4447,7 +4447,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies dry-run`
@@ -4475,7 +4475,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl guardrail-evaluations`
@@ -4511,7 +4511,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl investigations`
@@ -4547,7 +4547,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl assets`
@@ -4592,7 +4592,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets list-by-type`
@@ -4620,7 +4620,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets get`
@@ -4648,7 +4648,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets put`
@@ -4676,7 +4676,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets delete`
@@ -4704,7 +4704,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets manifest`
@@ -4732,7 +4732,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets storage-summary`
@@ -4760,7 +4760,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets withheld`
@@ -4788,7 +4788,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets yank`
@@ -4816,7 +4816,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets unyank`
@@ -4844,7 +4844,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl asset-transfer`
@@ -4883,7 +4883,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-transfer commit`
@@ -4911,7 +4911,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-transfer abort`
@@ -4939,7 +4939,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-transfer download-url`
@@ -4967,7 +4967,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl asset-channels`
@@ -5005,7 +5005,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-channels set`
@@ -5033,7 +5033,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-channels delete`
@@ -5061,7 +5061,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl site-domains`
@@ -5101,7 +5101,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains get`
@@ -5129,7 +5129,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains bind`
@@ -5157,7 +5157,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains verify`
@@ -5185,7 +5185,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains unbind`
@@ -5213,7 +5213,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl prompt-templates`
@@ -5255,7 +5255,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates get`
@@ -5283,7 +5283,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates create`
@@ -5311,7 +5311,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates replace`
@@ -5339,7 +5339,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates update`
@@ -5367,7 +5367,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates archive`
@@ -5395,7 +5395,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates render`
@@ -5423,7 +5423,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl skill-packages`
@@ -5464,7 +5464,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages get`
@@ -5492,7 +5492,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages create`
@@ -5520,7 +5520,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages replace`
@@ -5548,7 +5548,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages update`
@@ -5576,7 +5576,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages delete`
@@ -5604,7 +5604,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl plugins`
@@ -5644,7 +5644,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins get`
@@ -5672,7 +5672,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins create`
@@ -5700,7 +5700,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins update`
@@ -5728,7 +5728,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins delete`
@@ -5756,7 +5756,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl catalog`
@@ -5796,7 +5796,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog providers`
@@ -5824,7 +5824,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog provider-models`
@@ -5852,7 +5852,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog extensions`
@@ -5880,7 +5880,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog framework-adapters`
@@ -5908,7 +5908,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl dashboard`
@@ -5946,7 +5946,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl dashboard alias`
@@ -5974,7 +5974,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl dashboard root`
@@ -6002,7 +6002,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl wallets`
@@ -6044,7 +6044,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets get`
@@ -6072,7 +6072,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets create`
@@ -6100,7 +6100,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets update`
@@ -6128,7 +6128,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets adjust`
@@ -6156,7 +6156,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -6185,7 +6185,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -6214,7 +6214,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl payment-methods`
@@ -6252,7 +6252,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl payment-methods create`
@@ -6280,7 +6280,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl payment-methods delete`
@@ -6308,7 +6308,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl billing-events`
@@ -6319,7 +6319,7 @@ Subcommands:
 
 - `list` — List billing events
 - `dead-letters` — List billing outbox dead letters
-- `replay` — Replay a dead-lettered billing outbox record
+- `replay` — Replay a dead-lettered billing outbox record (state-changing; requires confirmation)
 
 ##### `ferrogate ctl billing-events list`
 
@@ -6346,7 +6346,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl billing-events dead-letters`
@@ -6374,12 +6374,12 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl billing-events replay`
 
-Replay a dead-lettered billing outbox record
+Replay a dead-lettered billing outbox record (state-changing; requires confirmation)
 
 Arguments:
 
@@ -6402,7 +6402,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -6443,7 +6443,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage reports`
@@ -6471,7 +6471,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage metering-events`
@@ -6499,7 +6499,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage metering-export-status`
@@ -6527,7 +6527,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage cost-burn`
@@ -6555,7 +6555,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl payment-attempts`
@@ -6592,7 +6592,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl payment-attempts get`
@@ -6620,7 +6620,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl request-logs`
@@ -6657,7 +6657,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl request-logs export`
@@ -6685,7 +6685,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl audit-events`
@@ -6721,7 +6721,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl observed-agent-activity`
@@ -6757,7 +6757,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl system`
@@ -6797,7 +6797,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system status-alias`
@@ -6825,7 +6825,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system ready`
@@ -6853,7 +6853,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system health`
@@ -6881,7 +6881,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system observability`
@@ -6909,7 +6909,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl provider-health`
@@ -6945,7 +6945,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl config`
@@ -6982,7 +6982,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl config reload`
@@ -7010,7 +7010,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -7048,7 +7048,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl drain set`
@@ -7076,7 +7076,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -7118,7 +7118,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs get`
@@ -7146,7 +7146,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs create`
@@ -7174,7 +7174,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs replace`
@@ -7202,7 +7202,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs update`
@@ -7230,7 +7230,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs delete`
@@ -7258,4 +7258,4 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
