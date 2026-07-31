@@ -2,7 +2,7 @@
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "organizeImports": { "enabled": true },
   "files": {
-    "ignore": ["node_modules", "dist", ".wrangler", "target", "crates", "vendor", "docs/legacy"]
+    "ignore": ["node_modules", "dist", ".wrangler", "target", "crates", "workers", "vendor", "docs/legacy"]
   },
   "linter": {
     "enabled": true,
