@@ -74,11 +74,12 @@ use ferrogate_storage::{
     sha256_hex, stored_asset_id, AssetQuotaAdmission, StorageError, StoredAsset,
 };
 
-use super::body::read_request_body;
-use super::local::{
-    admin_audit_event_draft_for_target, admin_audit_event_draft_for_target_with_run_id,
-    declared_agent_run_id, governed_action_tenant_key, require_declared_action_id,
+use super::assets::{
+    asset_action_id_required, asset_invalid_action_id, resolve_asset_action_id,
+    AssetActionIdOutcome,
 };
+use super::body::read_request_body;
+use super::local::admin_audit_event_draft_for_target_with_run_id;
 use super::FerroGateway;
 use crate::auth::AuthContext;
 use crate::{
@@ -409,6 +410,21 @@ impl FerroGateway {
             return Ok(());
         };
 
+        // #522: the upload intent is where the gateway authorizes bytes to enter
+        // the bucket, so its issued/rejected evidence must join the run that
+        // asked for it -- otherwise the commit and the promotion downstream
+        // reference an upload whose origin is unjoinable.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
+
         let intent: PresignUploadIntentRequest = match self.read_control_body(session, ctx).await? {
             Ok(Some(intent)) => intent,
             Ok(None) => return Ok(()),
@@ -476,9 +492,10 @@ impl FerroGateway {
             // GC (`asset.gc.delete`). The matching counter makes the same
             // distinction available to alerting without log scraping.
             state.record_asset_presign_outcome(crate::state::AssetPresignOutcome::IntentRejected);
-            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                 ctx,
                 &auth,
+                agent_run_id.as_deref(),
                 "asset.presign_upload_intent",
                 &id,
                 "rejected_intent",
@@ -518,9 +535,10 @@ impl FerroGateway {
                 state.record_asset_presign_outcome(
                     crate::state::AssetPresignOutcome::IntentRejected,
                 );
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.presign_upload_intent",
                     &id,
                     "rejected_intent",
@@ -592,9 +610,10 @@ impl FerroGateway {
         };
 
         state.record_asset_presign_outcome(crate::state::AssetPresignOutcome::IntentIssued);
-        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+        state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             "asset.presign_upload_intent",
             &id,
             "issued",
@@ -636,6 +655,20 @@ impl FerroGateway {
         else {
             return Ok(());
         };
+
+        // #522: the commit is the governed side effect of the presigned path --
+        // it is what publishes (or refuses) the staged bytes. Every terminal it
+        // records, including the outcome-unknown one, carries the declaring run.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
 
         let commit: PresignCommitRequest = match self.read_control_body(session, ctx).await? {
             Ok(Some(commit)) => commit,
@@ -837,9 +870,10 @@ impl FerroGateway {
                         state.record_asset_presign_outcome(
                             crate::state::AssetPresignOutcome::StagingMissing,
                         );
-                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                             ctx,
                             &auth,
+                            agent_run_id.as_deref(),
                             "asset.push",
                             &id,
                             "staging_missing",
@@ -864,17 +898,20 @@ impl FerroGateway {
                         state.record_asset_presign_outcome(
                             crate::state::AssetPresignOutcome::CommitRejected,
                         );
-                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                            ctx,
-                            &auth,
-                            "asset.push",
-                            &id,
-                            "rejected_commit",
-                            format!(
-                                "asset {id} upload {} failed commit verification ({}): {}",
-                                commit.upload_id, rejection.code, rejection.message
+                        state.record_admin_audit_event(
+                            admin_audit_event_draft_for_target_with_run_id(
+                                ctx,
+                                &auth,
+                                agent_run_id.as_deref(),
+                                "asset.push",
+                                &id,
+                                "rejected_commit",
+                                format!(
+                                    "asset {id} upload {} failed commit verification ({}): {}",
+                                    commit.upload_id, rejection.code, rejection.message
+                                ),
                             ),
-                        ));
+                        );
                         return write_json_error(
                             session,
                             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1004,9 +1041,10 @@ impl FerroGateway {
                 state.record_asset_presign_outcome(
                     crate::state::AssetPresignOutcome::CommitRejected,
                 );
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.push",
                     &id,
                     "rejected_commit",
@@ -1115,9 +1153,10 @@ impl FerroGateway {
                 state.record_asset_presign_outcome(
                     crate::state::AssetPresignOutcome::CommitRejected,
                 );
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.push",
                     &id,
                     "rejected_commit",
@@ -1144,9 +1183,10 @@ impl FerroGateway {
                 // evidence -- scan/signature/approval outcome + verification
                 // manifest -- linked to the asset id, tenant, and request id,
                 // exactly as the inline push event does.
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.push",
                     &id,
                     "committed",
@@ -1239,9 +1279,10 @@ impl FerroGateway {
                             error = %error,
                             "immutable asset create returned an unknown commit outcome; preserving objects"
                         );
-                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                             ctx,
                             &auth,
+                            agent_run_id.as_deref(),
                             "asset.push",
                             &id,
                             "outcome_unknown",
@@ -1335,6 +1376,19 @@ impl FerroGateway {
         else {
             return Ok(());
         };
+
+        // #522: an abort reclaims staged bytes the intent authorized, so its
+        // audit row belongs on the same chain as that intent.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
 
         let abort: PresignAbortRequest = match self.read_control_body(session, ctx).await? {
             Ok(Some(abort)) => abort,
@@ -1465,9 +1519,10 @@ impl FerroGateway {
         for metric in record.metrics {
             state.record_asset_presign_outcome(*metric);
         }
-        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+        state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             "asset.presign_upload_abort",
             &id,
             record.outcome,
@@ -1504,34 +1559,18 @@ impl FerroGateway {
         // #522: the presigned download is a governed asset fetch; thread the
         // caller-declared `x-ferrogate-agent-run-id` onto its audit + egress
         // rows. Absent id -> unjoinable-action metric (surface `asset`) plus the
-        // optional per-tenant enforcement switch (default OFF).
-        let agent_run_id = match declared_agent_run_id(headers) {
-            Ok(agent_run_id) => agent_run_id,
-            Err(message) => {
-                return write_json_error(
-                    session,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_agent_run_id_header",
-                    message,
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
-        if agent_run_id.is_none() {
-            let tenant_key = governed_action_tenant_key(&auth.tenant_context());
-            state.record_unjoinable_action(&tenant_key, "asset");
-            if require_declared_action_id(&tenant_key) {
-                return write_json_error(
-                    session,
-                    StatusCode::BAD_REQUEST,
-                    "agent_run_id_required",
-                    "this tenant requires a declared x-ferrogate-agent-run-id on governed agent traffic",
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        }
+        // optional per-tenant enforcement switch (default OFF). This shares the
+        // asset surface's one resolver rather than restating its three outcomes.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
 
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
         let asset = match state.get_asset(&id).await {

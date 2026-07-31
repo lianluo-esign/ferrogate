@@ -58,10 +58,20 @@ The header is accepted on every governed agent surface:
 | `POST /v1/mcp` (JSON-RPC: `tools/call`, `resources/read`, `resources/list`, …) | MCP tool/resource action |
 | `PUT /v1/assets/{type}/{name}/{version}` | asset push |
 | `GET /v1/assets/{type}/{name}/{version}` and the presigned download endpoint | asset fetch |
+| `DELETE /v1/assets/{type}/{name}/{version}` | asset delete |
+| the asset yank/unyank endpoints | asset version withdrawal |
+| the asset visibility-promotion endpoint | publish / quarantine of scanned bytes |
+| the asset channel move and delete endpoints | channel re-point / removal |
+| the presigned upload intent, commit, and abort endpoints | staged upload lifecycle |
 
 Send the identical value on all of them for one run, and the gateway stitches
-the inference call, its MCP tool calls, and any asset it pulled or published
-into a single joinable chain.
+the inference call, its MCP tool calls, and any asset it pulled, published, or
+withdrew into a single joinable chain.
+
+Each of the asset lifecycle endpoints is its own governed action, so each one
+counts separately: an upload declared on the intent but not on the matching
+commit joins only its intent, and the commit increments the unjoinable metric
+below. Declare the run id on every request in the sequence.
 
 ## Linking a child action to its parent
 
@@ -86,7 +96,10 @@ Query the investigation/evidence view with any of `request_id`, `trace_id`, or
 for that run and **within your tenant only**:
 
 - the request logs for each call,
-- the audit rows for each MCP tool/resource action and each asset push/pull,
+- the audit rows for each MCP tool/resource action and each asset action —
+  push, pull, delete, yank/unyank, visibility promotion, channel move/delete,
+  and the presigned upload intent/commit/abort — including the rejected and
+  outcome-unknown terminals, not only the successful ones,
 - guardrail evaluations and their verdicts,
 - approvals,
 - and, via `x-ferrogate-parent-action-fingerprint`, the parent → child links.

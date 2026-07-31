@@ -32,8 +32,8 @@ use super::asset_inline_publish;
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
 use super::body::read_request_body;
 use super::local::{
-    admin_audit_event_draft_for_target, admin_audit_event_draft_for_target_with_run_id,
-    declared_agent_run_id, governed_action_tenant_key, require_declared_action_id,
+    admin_audit_event_draft_for_target_with_run_id, declared_agent_run_id,
+    governed_action_tenant_key, require_declared_action_id,
 };
 use super::sites::{is_zip_archive, SITE_ASSET_TYPE};
 use super::FerroGateway;
@@ -925,7 +925,16 @@ impl FerroGateway {
         // points that channel at the just-pushed version.
         if let Some(channel) = query_param(query, "channel") {
             if let Err(error) = self
-                .move_channel(&state, ctx, &auth, asset_type, name, &channel, version)
+                .move_channel(
+                    &state,
+                    ctx,
+                    &auth,
+                    agent_run_id.as_deref(),
+                    asset_type,
+                    name,
+                    &channel,
+                    version,
+                )
                 .await
             {
                 return write_channel_move_error(session, ctx, error, asset_type, name, version)
@@ -1168,6 +1177,22 @@ impl FerroGateway {
         let Some(tenant_id) = auth.organization_id.clone() else {
             return tenant_required(session, ctx).await;
         };
+
+        // #522: an asset delete is a governed agent side effect; thread the
+        // caller-declared run id onto both its committed and its rejected audit
+        // rows so the deletion joins the same correlation chain as the LLM/tool
+        // calls that led to it.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
+
         // #402: mirror the pull path -- a #397 site's per-file object lives under
         // `__site_file__:{serving_version}:{path}`, so remap the bare per-file
         // path the console DELETEs by onto that key so unpublish resolves. The
@@ -1215,9 +1240,10 @@ impl FerroGateway {
                         }
                     }
                 }
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.delete",
                     &id,
                     "committed",
@@ -1244,9 +1270,10 @@ impl FerroGateway {
                 .await
             }
             Ok(VariantDeleteOutcome::BlockedByChannel) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.delete",
                     &id,
                     "rejected",
@@ -1303,6 +1330,20 @@ impl FerroGateway {
             return asset_hosting_disabled(session, ctx).await;
         }
 
+        // #522: a yank/unyank changes what every downstream resolve can see, so
+        // it is a governed agent side effect and carries the caller-declared run
+        // id onto both its rejected and its committed audit rows.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
+
         // Yank/unyank the whole logical version atomically (issue #367). A yank
         // is rejected while a channel still references the version, so the
         // lifecycle invariant (no channel points at a yanked version) holds as
@@ -1326,9 +1367,10 @@ impl FerroGateway {
                 .await;
             }
             Ok(VersionYankOutcome::ReferencedByChannel) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     action,
                     target,
                     "rejected",
@@ -1351,9 +1393,10 @@ impl FerroGateway {
             }
             Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
         }
-        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+        state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
             ctx,
             &auth,
+            agent_run_id.as_deref(),
             action,
             target,
             "committed",
@@ -1425,6 +1468,20 @@ impl FerroGateway {
             return asset_hosting_disabled(session, ctx).await;
         }
 
+        // #522: a visibility promotion is what actually publishes (or
+        // quarantines) bytes, so it is the governed side effect an investigation
+        // most needs to join back to the run that requested it.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
+
         let request: AssetVisibilityPromotionRequest =
             match self.read_control_body(session, ctx).await? {
                 Ok(Some(request)) => request,
@@ -1486,9 +1543,10 @@ impl FerroGateway {
             .await
         {
             Ok(AssetVisibilityPromotionOutcome::Promoted { to }) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.visibility.promote",
                     &id,
                     "committed",
@@ -1527,9 +1585,10 @@ impl FerroGateway {
             Ok(AssetVisibilityPromotionOutcome::NotFound) => {
                 // A scan verdict arriving for an absent asset is security-
                 // relevant: record the rejected attempt as durable evidence.
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.visibility.promote",
                     &id,
                     "rejected",
@@ -1548,9 +1607,10 @@ impl FerroGateway {
                 .await
             }
             Ok(AssetVisibilityPromotionOutcome::NotPending { current }) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.visibility.promote",
                     &id,
                     "rejected",
@@ -1646,6 +1706,18 @@ impl FerroGateway {
         if !self.tenant_can_host(&state, &tenant_id).await {
             return asset_hosting_disabled(session, ctx).await;
         }
+        // #522: a channel move re-points what every unversioned resolve returns,
+        // so it is a governed agent side effect and joins the declaring run.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
         let Some(version) = query_param(query, "version") else {
             return write_json_error(
                 session,
@@ -1657,7 +1729,16 @@ impl FerroGateway {
             .await;
         };
         let record = match self
-            .move_channel(&state, ctx, &auth, asset_type, name, channel, &version)
+            .move_channel(
+                &state,
+                ctx,
+                &auth,
+                agent_run_id.as_deref(),
+                asset_type,
+                name,
+                channel,
+                &version,
+            )
             .await
         {
             Ok(record) => record,
@@ -1704,12 +1785,25 @@ impl FerroGateway {
         if !self.tenant_can_host(&state, &tenant_id).await {
             return asset_hosting_disabled(session, ctx).await;
         }
+        // #522: deleting a channel removes a resolve target for every consumer,
+        // so it is a governed agent side effect and joins the declaring run.
+        let agent_run_id =
+            match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
+                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Malformed(message) => {
+                    return asset_invalid_action_id(session, ctx, message).await;
+                }
+                AssetActionIdOutcome::Required => {
+                    return asset_action_id_required(session, ctx).await;
+                }
+            };
         let id = asset_channel_id(&tenant_id, asset_type, name, channel);
         match state.delete_asset_channel(&id).await {
             Ok(true) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     &auth,
+                    agent_run_id.as_deref(),
                     "asset.channel.delete",
                     &id,
                     "committed",
@@ -1829,11 +1923,16 @@ impl FerroGateway {
     /// yank/delete strand the channel). Audit evidence records the prior target,
     /// the requested target, and the outcome for both commit and rejection.
     #[allow(clippy::too_many_arguments)]
+    /// `agent_run_id` is the caller-declared correlation id (#522) resolved by
+    /// the calling handler; both audit rows this emits carry it so a channel
+    /// move joins the run that requested it.
+    #[allow(clippy::too_many_arguments)]
     async fn move_channel(
         &self,
         state: &crate::state::AppState,
         ctx: &super::ProxyContext,
         auth: &crate::auth::AuthContext,
+        agent_run_id: Option<&str>,
         asset_type: &str,
         name: &str,
         channel: &str,
@@ -1857,9 +1956,10 @@ impl FerroGateway {
         {
             ChannelMoveOutcome::Moved { prior_version } => {
                 let prior = prior_version.as_deref().unwrap_or("none");
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     auth,
+                    agent_run_id,
                     "asset.channel.move",
                     &channel_id,
                     "committed",
@@ -1868,9 +1968,10 @@ impl FerroGateway {
                 Ok(record)
             }
             ChannelMoveOutcome::TargetNotResolvable => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(admin_audit_event_draft_for_target_with_run_id(
                     ctx,
                     auth,
+                    agent_run_id,
                     "asset.channel.move",
                     &channel_id,
                     "rejected",
@@ -2375,7 +2476,7 @@ fn now_unix_seconds() -> i64 {
 
 /// #522: outcome of resolving the caller-declared action id
 /// (`x-ferrogate-agent-run-id`) on a governed asset request.
-enum AssetActionIdOutcome {
+pub(super) enum AssetActionIdOutcome {
     /// Proceed with this (possibly absent) declared run id.
     Proceed(Option<String>),
     /// The header was present but malformed — reject with 400
@@ -2391,7 +2492,7 @@ enum AssetActionIdOutcome {
 /// record the low-cardinality unjoinable-action metric (per authenticated
 /// tenant + surface) and consult the optional per-tenant enforcement switch
 /// (default OFF). Never fabricates an id.
-fn resolve_asset_action_id(
+pub(super) fn resolve_asset_action_id(
     headers: &http::HeaderMap,
     state: &crate::state::AppState,
     tenant: &ferrogate_core::TenantContext,
@@ -2414,7 +2515,7 @@ fn resolve_asset_action_id(
 
 /// #522: shared 400 body for a governed asset request that a tenant's
 /// enforcement switch requires to carry a declared action id.
-async fn asset_action_id_required(
+pub(super) async fn asset_action_id_required(
     session: &mut Session,
     ctx: &super::ProxyContext,
 ) -> PingoraResult<()> {
@@ -2430,7 +2531,7 @@ async fn asset_action_id_required(
 
 /// #522: shared 400 body for a malformed `x-ferrogate-agent-run-id` header on
 /// the asset surface.
-async fn asset_invalid_action_id(
+pub(super) async fn asset_invalid_action_id(
     session: &mut Session,
     ctx: &super::ProxyContext,
     message: String,
