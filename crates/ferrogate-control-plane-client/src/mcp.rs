@@ -60,13 +60,15 @@ impl CommandGroup for McpServersGroup {
                     "Register an MCP server",
                     "createAdminMcpServer",
                 ),
-                VerbDescriptor::mutating("replace", "Replace an MCP server", "putAdminMcpServer"),
+                VerbDescriptor::mutating("replace", "Replace an MCP server", "putAdminMcpServer")
+                    .replacing_whole_document(),
                 VerbDescriptor::mutating("update", "Update an MCP server", "patchAdminMcpServer"),
                 VerbDescriptor::mutating(
                     "delete",
                     "Deregister an MCP server",
                     "deleteAdminMcpServer",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }
@@ -96,7 +98,8 @@ impl CommandGroup for McpIdentityGroup {
                     "revoke",
                     "Revoke an MCP identity grant",
                     "revokeMcpIdentity",
-                ),
+                )
+                .without_request_body(),
                 // A GET that MUTATES. `completeMcpIdentityOauth` is a GET only
                 // because it is the OAuth redirect target the authorization
                 // server sends a browser to; completing the flow exchanges the
@@ -109,7 +112,8 @@ impl CommandGroup for McpIdentityGroup {
                     "callback",
                     "Complete an MCP identity OAuth callback",
                     "completeMcpIdentityOauth",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }

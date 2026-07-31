@@ -72,7 +72,8 @@ impl CommandGroup for AgentWorkflowsGroup {
                     "replace",
                     "Replace an agent workflow",
                     "putAdminAgentWorkflow",
-                ),
+                )
+                .replacing_whole_document(),
                 VerbDescriptor::mutating(
                     "update",
                     "Update an agent workflow",
@@ -82,7 +83,8 @@ impl CommandGroup for AgentWorkflowsGroup {
                     "delete",
                     "Delete an agent workflow",
                     "deleteAdminAgentWorkflow",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }
@@ -113,7 +115,8 @@ impl CommandGroup for AgentSchedulesGroup {
                     "replace",
                     "Replace an agent schedule",
                     "putAdminAgentSchedule",
-                ),
+                )
+                .replacing_whole_document(),
                 VerbDescriptor::mutating(
                     "update",
                     "Update an agent schedule",
@@ -123,7 +126,8 @@ impl CommandGroup for AgentSchedulesGroup {
                     "delete",
                     "Delete an agent schedule",
                     "deleteAdminAgentSchedule",
-                ),
+                )
+                .without_request_body(),
                 VerbDescriptor::mutating(
                     "run-now",
                     "Trigger a schedule to run immediately",
@@ -172,7 +176,8 @@ impl CommandGroup for AgentUpstreamsGroup {
                     "replace",
                     "Replace an agent upstream",
                     "putAdminAgentUpstream",
-                ),
+                )
+                .replacing_whole_document(),
                 VerbDescriptor::mutating(
                     "update",
                     "Update an agent upstream",
@@ -182,7 +187,8 @@ impl CommandGroup for AgentUpstreamsGroup {
                     "delete",
                     "Delete an agent upstream",
                     "deleteAdminAgentUpstream",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }

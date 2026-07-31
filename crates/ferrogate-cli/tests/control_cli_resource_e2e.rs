@@ -369,6 +369,375 @@ fn iam_virtual_keys_create_surfaces_one_time_secret() {
     assert_eq!(receipt["response"]["key"], "sk-ONE-TIME-abc", "{out}");
 }
 
+// ----- #361 IAM: the --secret-file sink and the flag-applicability refusals ---
+//
+// Everything below lives in `resource_cmd.rs::execute` — the wiring layer the
+// pure `field_set` / `secret_sink` / `divert_secret_fields` unit tests cannot
+// reach. It is asserted here, against the real binary and a socket that records
+// what actually arrived, because "the refusal happens before anything is sent"
+// is a claim about a socket, not about a function's return value.
+
+/// A `virtual-keys create` mock whose response carries a one-time key.
+fn one_time_key_mock() -> MockServer {
+    spawn_mock(http_response(
+        201,
+        "Created",
+        &[("content-type", "application/json")],
+        r#"{"id":"vk-new","key":"sk-ONE-TIME-abc","label":"ci"}"#,
+    ))
+}
+
+#[test]
+fn secret_file_takes_the_one_time_key_off_stdout_and_writes_it_0600() {
+    let home = tempfile::tempdir().unwrap();
+    let sink = home.path().join("key.json");
+    let mock = one_time_key_mock();
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "create",
+            "--data",
+            r#"{"label":"ci"}"#,
+            "--secret-file",
+            sink.to_str().unwrap(),
+            "--endpoint",
+            &mock.base_url,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(mock.last_request(), "POST /admin/v1/virtual-keys");
+
+    // stdout keeps the receipt but the key's place holds the marker, not the
+    // key: the whole point of the sink is that scrollback and any `tee` of this
+    // run never see the material.
+    let out = stdout(&output);
+    let receipt: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(receipt["object"], "mutation_receipt", "{out}");
+    assert_eq!(
+        receipt["response"]["key"], "<written-to-secret-file>",
+        "{out}"
+    );
+    assert!(
+        !out.contains("sk-ONE-TIME-abc"),
+        "the one-time key must not reach stdout when a sink was named: {out}"
+    );
+    // The rest of the response is untouched — diverting is not redacting.
+    assert_eq!(receipt["response"]["label"], "ci", "{out}");
+
+    let written = std::fs::read_to_string(&sink).expect("the sink file must exist");
+    let document: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
+    assert_eq!(
+        document["key"], "sk-ONE-TIME-abc",
+        "the sink holds the material stdout gave up: {written}"
+    );
+    assert!(
+        stderr(&output).contains(sink.to_str().unwrap()),
+        "the operator is told where the key went: {}",
+        stderr(&output)
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&sink).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a file holding key material must not be group- or world-readable"
+        );
+    }
+}
+
+#[test]
+fn a_one_time_key_printed_to_stdout_warns_that_the_sink_flag_exists() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = one_time_key_mock();
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "create",
+            "--data",
+            r#"{"label":"ci"}"#,
+            "--endpoint",
+            &mock.base_url,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("sk-ONE-TIME-abc"),
+        "without the flag the key still goes to stdout"
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("--secret-file"),
+        "an operator who does not know the flag exists must learn of it at the \
+         moment it mattered: {err}"
+    );
+    assert!(
+        err.contains("key"),
+        "the warning names the field that was exposed: {err}"
+    );
+}
+
+#[test]
+fn a_secret_file_pointing_at_an_existing_path_is_refused_before_anything_is_sent() {
+    let home = tempfile::tempdir().unwrap();
+    let sink = home.path().join("occupied.json");
+    std::fs::write(&sink, "PRE-EXISTING\n").unwrap();
+    let mock = one_time_key_mock();
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "create",
+            "--data",
+            r#"{"label":"ci"}"#,
+            "--secret-file",
+            sink.to_str().unwrap(),
+            "--endpoint",
+            &mock.base_url,
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    assert_eq!(
+        mock.request_count(),
+        0,
+        "reserving the sink BEFORE the request is what makes an unusable sink \
+         cost nothing: {}",
+        mock.last_request()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sink).unwrap(),
+        "PRE-EXISTING\n",
+        "the operator's file must not be truncated"
+    );
+}
+
+/// Every flag whose applicability depends on the resolved verb, refused before
+/// a socket is opened.
+///
+/// The table is the assertion: each row is a flag/verb pair that used to be
+/// accepted and then quietly dropped (or, for `replace`, accepted and quietly
+/// destructive). `request_count() == 0` is the load-bearing half — an error
+/// message printed after the mutation already left would be no fix at all.
+#[test]
+fn flags_that_do_not_apply_to_the_resolved_verb_are_refused_with_nothing_sent() {
+    let cases: &[(&[&str], &str)] = &[
+        // --set on a mutating verb whose builder sends no body: the #361
+        // regression this table exists for.
+        (
+            &["virtual-keys", "revoke", "vk-1", "--set", "reason=leak"],
+            "sends none",
+        ),
+        (
+            &["projects", "delete", "p-1", "--set", "reason=leak"],
+            "sends none",
+        ),
+        // --data on the same shape: same silent drop, same refusal.
+        (
+            &[
+                "projects",
+                "delete",
+                "p-1",
+                "--data",
+                r#"{"reason":"leak"}"#,
+            ],
+            "sends none",
+        ),
+        // --set on a whole-document PUT: accepted here would clear every field
+        // the operator did not name.
+        (
+            &["projects", "replace", "p-1", "--set", "name=renamed"],
+            "replaces the stored one in full",
+        ),
+        // --set on a read verb.
+        (&["projects", "list", "--set", "name=x"], "sends none"),
+        // --secret-file on a read verb, on a family that issues no secrets, and
+        // under --dry-run.
+        (
+            &["projects", "get", "p-1", "--secret-file", "unused.json"],
+            "--secret-file applies to mutating verbs",
+        ),
+        (
+            &[
+                "projects",
+                "create",
+                "--data",
+                "{}",
+                "--secret-file",
+                "unused.json",
+            ],
+            "returns none",
+        ),
+        (
+            &[
+                "virtual-keys",
+                "create",
+                "--data",
+                "{}",
+                "--secret-file",
+                "unused.json",
+                "--dry-run",
+            ],
+            "nothing to write under --dry-run",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let mock = one_time_key_mock();
+        let mut command = base_cmd(home.path());
+        command.current_dir(home.path());
+        command.arg("ctl");
+        command.args(*args);
+        command.args(["--endpoint", &mock.base_url]);
+        let output = command.output().unwrap();
+
+        assert_eq!(
+            code(&output),
+            2,
+            "`ctl {}` must be a usage error, got stdout {} stderr {}",
+            args.join(" "),
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains(expected),
+            "`ctl {}` must say why; wanted {expected:?}, got: {}",
+            args.join(" "),
+            stderr(&output)
+        );
+        assert_eq!(
+            mock.request_count(),
+            0,
+            "`ctl {}` must be refused before anything reaches the wire, but sent {}",
+            args.join(" "),
+            mock.last_request()
+        );
+        assert!(
+            !home.path().join("unused.json").exists(),
+            "`ctl {}` must not leave a reserved sink behind",
+            args.join(" ")
+        );
+    }
+}
+
+#[test]
+fn a_credential_passed_through_set_warns_that_it_is_in_argv() {
+    let home = tempfile::tempdir().unwrap();
+    let mock = spawn_mock(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"id":"mcp-1","name":"prod"}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "mcp-servers",
+            "update",
+            "mcp-1",
+            "--set",
+            "api_key=sk-live-xxxx",
+            "--endpoint",
+            &mock.base_url,
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("--set") && err.contains("api_key") && err.contains("argv"),
+        "rotating a credential through --set is the flag's most likely \
+         credential-bearing use and must warn exactly as --data does: {err}"
+    );
+    assert!(
+        err.contains("--file"),
+        "the warning must name the safe alternative: {err}"
+    );
+}
+
+#[test]
+fn a_set_assembled_document_reaches_the_wire_byte_for_byte_like_data() {
+    let response = http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"id":"mcp-1"}"#,
+    );
+    let home = tempfile::tempdir().unwrap();
+
+    let via_set = {
+        let mock = spawn_mock(response.clone());
+        base_cmd(home.path())
+            .args([
+                "ctl",
+                "mcp-servers",
+                "update",
+                "mcp-1",
+                "--set",
+                "name=prod",
+                "--set-json",
+                "quota.max_bytes=10",
+                "--endpoint",
+                &mock.base_url,
+            ])
+            .output()
+            .unwrap();
+        request_body(&mock.last_raw_request())
+    };
+    let via_data = {
+        let mock = spawn_mock(response.clone());
+        base_cmd(home.path())
+            .args([
+                "ctl",
+                "mcp-servers",
+                "update",
+                "mcp-1",
+                "--data",
+                r#"{"name":"prod","quota":{"max_bytes":10}}"#,
+                "--endpoint",
+                &mock.base_url,
+            ])
+            .output()
+            .unwrap();
+        request_body(&mock.last_raw_request())
+    };
+
+    assert_eq!(
+        via_set, via_data,
+        "nothing downstream — builder, receipt, fingerprint — may learn that a \
+         document was assembled per field rather than supplied whole"
+    );
+    assert!(
+        via_set.contains("\"max_bytes\":10"),
+        "--set-json keeps the value typed rather than stringifying it: {via_set}"
+    );
+}
+
+/// The body of a captured raw request.
+fn request_body(raw: &str) -> String {
+    raw.split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default()
+}
+
 // ----- #362 agent/mcp: create round trip + table list ------------------------
 
 #[test]

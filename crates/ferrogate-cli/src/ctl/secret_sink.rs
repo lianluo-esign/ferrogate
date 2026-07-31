@@ -83,24 +83,49 @@ impl SecretFile {
         &self.path
     }
 
+    /// Build a sink over an already-open handle.
+    ///
+    /// Test-only. `commit`'s failure arm is what makes the stderr fallback in
+    /// `resource_cmd.rs` load-bearing, and it is otherwise unreachable from a
+    /// hermetic test: a handle this process created moments ago with
+    /// `create_new` does not refuse a few hundred bytes on demand, and the
+    /// conditions that would make it (ENOSPC, EDQUOT, EIO) cannot be produced
+    /// without privileges. Handing in a handle that cannot be written to
+    /// reproduces the same `write_all` error the real path returns.
+    #[cfg(test)]
+    pub(crate) fn from_open_handle(path: &Path, file: File) -> SecretFile {
+        SecretFile {
+            path: path.to_path_buf(),
+            file,
+        }
+    }
+
     /// Write the secret document into the reserved file.
     ///
     /// The receipt has already been rendered by the time this runs, so a
     /// failure here says plainly that the marker on stdout points at a file
-    /// that does not hold the key: the operator must rotate rather than go
-    /// looking for it.
+    /// that does not hold the key.
+    ///
+    /// Both failures are [`CliError::transport`], not `usage`: they happen
+    /// AFTER the mutation took effect, and `usage` is exit 2 — "caller-side
+    /// misuse or invalid local configuration", which a script reads as *the
+    /// command was malformed and nothing happened*. That is the opposite of
+    /// what an ENOSPC here means. `reserve` keeps `usage`, where a bad path
+    /// genuinely is caller-side and genuinely did send nothing;
+    /// `resource_cmd.rs`'s stdout-write failure is the same
+    /// already-happened shape and already used `transport`.
     pub(crate) fn commit(mut self, document: &Value) -> CliResult<()> {
         let mut rendered = serde_json::to_vec_pretty(document).map_err(|error| {
-            CliError::usage(format!("failed to render secret material: {error}"))
+            CliError::transport(format!("failed to render secret material: {error}"))
         })?;
         rendered.push(b'\n');
         self.file
             .write_all(&rendered)
             .and_then(|()| self.file.flush())
             .map_err(|error| {
-                CliError::usage(format!(
+                CliError::transport(format!(
                     "failed to write --secret-file {}: {error}. The mutation WAS applied and its \
-                     one-time secret did not reach the file — rotate the credential",
+                     one-time secret did not reach the file",
                     self.path.display()
                 ))
             })
@@ -124,11 +149,52 @@ impl SecretFile {
 }
 
 /// The stderr note confirming where secret material went.
+///
+/// The permission clause is `#[cfg(unix)]` because the `mode(0o600)` that earns
+/// it is: on a non-Unix target that call is compiled out and the file is
+/// created under the platform's default ACL. Claiming 0600 there would tell an
+/// operator the key is protected on exactly the platform where this code did
+/// not protect it.
 pub(crate) fn wrote_notice(path: &Path, taken: &[DivertedSecret]) -> String {
+    let fields = field_list(taken.iter().map(|secret| secret.field.as_str()));
+    let path = path.display();
+    #[cfg(unix)]
+    {
+        format!(
+            "note: one-time secret material ({fields}) was written to {path} with mode 0600 and \
+             kept off stdout"
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        format!(
+            "note: one-time secret material ({fields}) was written to {path} and kept off \
+             stdout; its permissions are this platform's default for a new file — confirm they \
+             restrict it before leaving the key there"
+        )
+    }
+}
+
+/// The stderr message that carries the one-time secret material when the sink
+/// could not be written.
+///
+/// By the time `commit` fails the mutation has been applied, the key has been
+/// issued, and the server will never show it again — but the material is still
+/// in this process, one line above the `return Err(..)`. Dropping it there
+/// forces the operator to rotate a credential that a full disk caused, so the
+/// fallback prints it. stderr is the only safe landing place: it is outside
+/// the #505 render gate and outside the stdout pipe `--output json` feeds, so
+/// the fallback cannot corrupt a piped receipt.
+///
+/// Pure: returns the message rather than printing it, so what it carries is
+/// assertable without capturing process stderr.
+pub(crate) fn commit_failure_fallback(path: &Path, document: &Value) -> String {
     format!(
-        "note: one-time secret material ({}) was written to {} with mode 0600 and kept off stdout",
-        field_list(taken.iter().map(|secret| secret.field.as_str())),
-        path.display()
+        "warning: --secret-file {} could not be written, so the one-time secret material follows \
+         on stderr. Store it now — the mutation WAS applied and the server will not show it \
+         again:\n{}",
+        path.display(),
+        serde_json::to_string_pretty(document).unwrap_or_else(|_| document.to_string())
     )
 }
 

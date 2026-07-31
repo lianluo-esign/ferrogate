@@ -110,7 +110,18 @@ pub fn parse_assignment(raw: &str, json_value: bool) -> CliResult<FieldAssignmen
     })
 }
 
-/// Split a dotted key into its object path, honouring `\.` as a literal dot.
+/// Split a dotted key into its object path, honouring `\.` as a literal dot and
+/// `\\` as a literal backslash.
+///
+/// Those are the only two escapes. A backslash before anything else is kept
+/// verbatim along with the character it preceded (`a\b` is the four-character
+/// field name `a\b`), because field names are server-owned and this layer must
+/// not invent an escape vocabulary it does not implement.
+///
+/// `\\` folding is not decoration: without it the trailing-backslash refusal
+/// below names a spelling that does not exist, and a field whose name really
+/// ends in a backslash is unwritable — `a\` cannot be distinguished from an
+/// unfinished `\.`. Folding closes both.
 fn parse_key_path(key: &str, flag: &str) -> CliResult<Vec<String>> {
     let mut path = Vec::new();
     let mut segment = String::new();
@@ -122,10 +133,7 @@ fn parse_key_path(key: &str, flag: &str) -> CliResult<Vec<String>> {
                 path.push(std::mem::take(&mut segment));
             }
             other => {
-                // A backslash before anything but `.` is kept verbatim rather
-                // than swallowed: field names are server-owned and this layer
-                // must not invent an escape vocabulary it does not implement.
-                if escaped && other != '.' {
+                if escaped && other != '.' && other != '\\' {
                     segment.push('\\');
                 }
                 escaped = false;
@@ -227,20 +235,33 @@ pub fn document_from_flags(set: &[String], set_json: &[String]) -> CliResult<Opt
     build_document(&assignments)
 }
 
-/// The operator-facing warning for a credential-bearing document passed on
-/// argv, or `None` when the document carries nothing that looks like key
+/// The operator-facing warning for a credential-bearing document that reached
+/// `argv`, or `None` when the document carries nothing that looks like key
 /// material.
 ///
-/// `--data` puts the whole request document in `argv`, where it lands in shell
-/// history and is readable by any local `ps` for the life of the process.
-/// `--file`/stdin is the safe alternative but nothing said so. The scan is
-/// keyed on the document the operator actually passed (plus the invoked group's
-/// declared one-time secret fields), so the warning fires on the creates that
-/// really do carry an upstream credential and stays silent otherwise.
+/// `flag` is the flag the operator actually typed — `--data` for the whole
+/// document, `--set`/`--set-json` for the field that carried the credential —
+/// and it changes the message, because the two need different advice.
+/// `--data`'s alternative is to move the same document into a file; `--set`'s
+/// is that a per-field flag has no in-argv-safe form at all, so a credential
+/// field has to go through `--file` even when nothing else about the change
+/// does. Naming the wrong flag here would send an operator looking for a
+/// `--data` they never passed.
+///
+/// Every one of these paths puts its value in `argv`, where it lands in shell
+/// history and is readable by any local `ps` for the life of the process; only
+/// `--file`/stdin keeps it out, and nothing said so. The scan is keyed on the
+/// document the operator actually passed (plus the invoked group's declared
+/// one-time secret fields), so the warning fires on the calls that really do
+/// carry an upstream credential and stays silent otherwise.
 ///
 /// Pure: returns the message instead of printing it, so the decision is
 /// testable without capturing process stderr.
-pub fn argv_credential_warning(document: &Value, secret_fields: &[&str]) -> Option<String> {
+pub fn argv_credential_warning(
+    flag: &str,
+    document: &Value,
+    secret_fields: &[&str],
+) -> Option<String> {
     let mut hits = Vec::new();
     collect_credential_keys(document, secret_fields, &mut hits);
     if hits.is_empty() {
@@ -248,12 +269,21 @@ pub fn argv_credential_warning(document: &Value, secret_fields: &[&str]) -> Opti
     }
     hits.sort();
     hits.dedup();
-    Some(format!(
-        "warning: --data puts this document in argv, where '{}' is visible to shell history and \
-         to any local `ps` while the command runs; pass it with --file <PATH> or --file - \
-         (stdin) instead",
-        hits.join("', '")
-    ))
+    let names = hits.join("', '");
+    Some(if flag == "--data" {
+        format!(
+            "warning: --data puts this document in argv, where '{names}' is visible to shell \
+             history and to any local `ps` while the command runs; pass it with --file <PATH> or \
+             --file - (stdin) instead"
+        )
+    } else {
+        format!(
+            "warning: {flag} puts '{names}' in argv, where it is visible to shell history and to \
+             any local `ps` while the command runs; a per-field flag has no safe form for \
+             credential material — pass the document with --file <PATH> or --file - (stdin) \
+             instead"
+        )
+    })
 }
 
 fn collect_credential_keys(value: &Value, secret_fields: &[&str], hits: &mut Vec<String>) {

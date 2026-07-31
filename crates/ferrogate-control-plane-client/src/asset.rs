@@ -117,8 +117,10 @@ impl CommandGroup for AssetsGroup {
                     "listAssetsByType",
                 ),
                 VerbDescriptor::read("get", "Show one asset version", "getAsset"),
-                VerbDescriptor::mutating("put", "Publish or replace an asset version", "putAsset"),
-                VerbDescriptor::mutating("delete", "Delete an asset version", "deleteAsset"),
+                VerbDescriptor::mutating("put", "Publish or replace an asset version", "putAsset")
+                    .replacing_whole_document(),
+                VerbDescriptor::mutating("delete", "Delete an asset version", "deleteAsset")
+                    .without_request_body(),
                 VerbDescriptor::read(
                     "manifest",
                     "Show an asset's resolved manifest",
@@ -139,7 +141,8 @@ impl CommandGroup for AssetsGroup {
                     "unyank",
                     "Reverse a yank on an asset version",
                     "unyankAssetVersion",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }
@@ -259,8 +262,10 @@ impl CommandGroup for AssetChannelsGroup {
             vec![
                 VerbDescriptor::read("list", "List an asset's channels", "listAssetChannels"),
                 VerbDescriptor::mutating("set", "Point a channel at a version", "putAssetChannel")
+                    .without_request_body()
                     .with_positional_query_segments(1),
-                VerbDescriptor::mutating("delete", "Delete a channel", "deleteAssetChannel"),
+                VerbDescriptor::mutating("delete", "Delete a channel", "deleteAssetChannel")
+                    .without_request_body(),
             ],
         )
     }
@@ -327,7 +332,8 @@ impl CommandGroup for SiteDomainsGroup {
                     "Verify DNS ownership of a bound custom domain",
                     "verifySiteDomain",
                 ),
-                VerbDescriptor::mutating("unbind", "Unbind a custom domain", "unbindSiteDomain"),
+                VerbDescriptor::mutating("unbind", "Unbind a custom domain", "unbindSiteDomain")
+                    .without_request_body(),
             ],
         )
     }

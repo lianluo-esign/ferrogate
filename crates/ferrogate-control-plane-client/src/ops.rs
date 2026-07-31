@@ -224,7 +224,8 @@ impl CommandGroup for GatewayConfigsGroup {
                     "replace",
                     "Replace a gateway config profile",
                     "putAdminGatewayConfig",
-                ),
+                )
+                .replacing_whole_document(),
                 VerbDescriptor::mutating(
                     "update",
                     "Update a gateway config profile",
@@ -234,7 +235,8 @@ impl CommandGroup for GatewayConfigsGroup {
                     "delete",
                     "Delete a gateway config profile",
                     "deleteAdminGatewayConfig",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }

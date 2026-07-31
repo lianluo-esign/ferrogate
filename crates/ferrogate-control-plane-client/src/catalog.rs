@@ -89,7 +89,8 @@ impl CommandGroup for PromptTemplatesGroup {
                     "replace",
                     "Replace a prompt template",
                     "putAdminPromptTemplate",
-                ),
+                )
+                .replacing_whole_document(),
                 VerbDescriptor::mutating(
                     "update",
                     "Patch a prompt template",
@@ -99,7 +100,8 @@ impl CommandGroup for PromptTemplatesGroup {
                     "archive",
                     "Archive a prompt template",
                     "archiveAdminPromptTemplate",
-                ),
+                )
+                .without_request_body(),
                 VerbDescriptor::mutating(
                     "render",
                     "Render a prompt template with inputs",
@@ -144,7 +146,8 @@ impl CommandGroup for SkillPackagesGroup {
                     "replace",
                     "Replace a skill package",
                     "putAdminSkillPackage",
-                ),
+                )
+                .replacing_whole_document(),
                 VerbDescriptor::mutating(
                     "update",
                     "Patch a skill package",
@@ -154,7 +157,8 @@ impl CommandGroup for SkillPackagesGroup {
                     "delete",
                     "Delete a skill package",
                     "deleteAdminSkillPackage",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }
@@ -178,7 +182,8 @@ impl CommandGroup for PluginsGroup {
                 VerbDescriptor::read("get", "Show one plugin", "getAdminPlugin"),
                 VerbDescriptor::mutating("create", "Register a plugin", "createAdminPlugin"),
                 VerbDescriptor::mutating("update", "Patch a plugin", "updateAdminPlugin"),
-                VerbDescriptor::mutating("delete", "Delete a plugin", "deleteAdminPlugin"),
+                VerbDescriptor::mutating("delete", "Delete a plugin", "deleteAdminPlugin")
+                    .without_request_body(),
             ],
         )
     }

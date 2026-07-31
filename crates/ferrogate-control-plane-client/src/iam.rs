@@ -68,7 +68,8 @@ impl CommandGroup for VirtualKeysGroup {
                     "revoke",
                     "Revoke (delete) a virtual key",
                     "revokeVirtualKey",
-                ),
+                )
+                .without_request_body(),
                 VerbDescriptor::mutating(
                     "rotate",
                     "Rotate a virtual key's secret",
@@ -111,9 +112,11 @@ impl CommandGroup for ApiKeysGroup {
                 VerbDescriptor::read("list", "List admin API keys", "listAdminApiKeys"),
                 VerbDescriptor::read("get", "Show an admin API key", "getAdminApiKey"),
                 VerbDescriptor::mutating("create", "Create an admin API key", "createAdminApiKey"),
-                VerbDescriptor::mutating("replace", "Replace an admin API key", "putAdminApiKey"),
+                VerbDescriptor::mutating("replace", "Replace an admin API key", "putAdminApiKey")
+                    .replacing_whole_document(),
                 VerbDescriptor::mutating("update", "Update an admin API key", "patchAdminApiKey"),
-                VerbDescriptor::mutating("delete", "Delete an admin API key", "deleteAdminApiKey"),
+                VerbDescriptor::mutating("delete", "Delete an admin API key", "deleteAdminApiKey")
+                    .without_request_body(),
             ],
         )
     }
@@ -136,7 +139,8 @@ impl CommandGroup for RolesGroup {
                 VerbDescriptor::read("list", "List roles", "listRoles"),
                 VerbDescriptor::read("get", "Show a role", "getRole"),
                 VerbDescriptor::mutating("create", "Create a role", "createRole"),
-                VerbDescriptor::mutating("delete", "Delete a role", "deleteRole"),
+                VerbDescriptor::mutating("delete", "Delete a role", "deleteRole")
+                    .without_request_body(),
             ],
         )
     }
@@ -159,7 +163,8 @@ impl CommandGroup for PermissionsGroup {
                 VerbDescriptor::read("list", "List permissions", "listPermissions"),
                 VerbDescriptor::read("get", "Show a permission", "getPermission"),
                 VerbDescriptor::mutating("create", "Create a permission", "createPermission"),
-                VerbDescriptor::mutating("delete", "Delete a permission", "deletePermission"),
+                VerbDescriptor::mutating("delete", "Delete a permission", "deletePermission")
+                    .without_request_body(),
             ],
         )
     }
@@ -182,9 +187,11 @@ impl CommandGroup for AccessPoliciesGroup {
                 VerbDescriptor::read("list", "List access policies", "listAdminPolicies"),
                 VerbDescriptor::read("get", "Show an access policy", "getAdminPolicy"),
                 VerbDescriptor::mutating("create", "Create an access policy", "createAdminPolicy"),
-                VerbDescriptor::mutating("replace", "Replace an access policy", "putAdminPolicy"),
+                VerbDescriptor::mutating("replace", "Replace an access policy", "putAdminPolicy")
+                    .replacing_whole_document(),
                 VerbDescriptor::mutating("update", "Update an access policy", "patchAdminPolicy"),
-                VerbDescriptor::mutating("delete", "Delete an access policy", "deleteAdminPolicy"),
+                VerbDescriptor::mutating("delete", "Delete an access policy", "deleteAdminPolicy")
+                    .without_request_body(),
             ],
         )
     }
@@ -210,7 +217,8 @@ impl CommandGroup for TenantRolesGroup {
                     "unbind",
                     "Unbind a role from a tenant",
                     "unbindTenantRole",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }

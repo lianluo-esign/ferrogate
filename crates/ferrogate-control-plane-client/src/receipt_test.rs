@@ -2972,3 +2972,75 @@ fn only_the_audited_allowlist_of_mutating_operations_returns_an_audit_id() {
         mutating.join("\n")
     );
 }
+
+/// Every registered verb's DECLARED [`RequestDocument`] agrees with what its
+/// family builder actually puts on the wire.
+///
+/// The declaration exists so a flag that assembles a document per field
+/// (`--set`/`--set-json`) can ask "does this verb carry a document, and does
+/// that document replace the stored one" instead of inferring it from
+/// [`VerbEffect`] — the inference that let `virtual-keys revoke --set
+/// reason=x` build a body, have `build_item_delete` drop it, and exit 0.
+///
+/// A declaration nobody checks is the same class of defect one layer up, so
+/// this derives both halves from the builder: the probe always supplies a body,
+/// so `spec.body.is_none()` means the builder discards it, and `PUT` is what
+/// "replaces the stored document" means over HTTP. Mutating the declaration on
+/// any single verb — or adding a `delete` that forgets
+/// [`VerbDescriptor::without_request_body`] — fails here.
+#[test]
+fn declared_request_document_matches_the_builder() {
+    use crate::command::RequestDocument;
+
+    let registry = full_registry();
+    let expected = registry_verb_count(&registry);
+    let mut checked = 0usize;
+    let mut mismatched: Vec<String> = Vec::new();
+    let mut sent = 0usize;
+    for group in registry.groups() {
+        for verb in &group.verbs {
+            let (spec, _) = probe_spec(&group.name, &verb.name);
+            let observed = match (&spec.body, &spec.method) {
+                (None, _) => RequestDocument::None,
+                (Some(_), &Method::PUT) => RequestDocument::Full,
+                (Some(_), _) => RequestDocument::Partial,
+            };
+            checked += 1;
+            if observed.is_sent() {
+                sent += 1;
+            }
+            if observed != verb.request_document() {
+                mismatched.push(format!(
+                    "'{} {}' declares request_document={} but its builder emits {} with body \
+                     {}; fix the declaration (VerbDescriptor::without_request_body / \
+                     ::replacing_whole_document) or fix the builder",
+                    group.name,
+                    verb.name,
+                    verb.request_document().as_str(),
+                    spec.method,
+                    if spec.body.is_some() {
+                        "present"
+                    } else {
+                        "dropped"
+                    }
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatched.is_empty(),
+        "{} verb(s) disagree with their builder:\n{}",
+        mismatched.len(),
+        mismatched.join("\n")
+    );
+    assert_eq!(
+        checked, expected,
+        "every registered verb must reach the request-document assertion exactly once"
+    );
+    // An anti-vacuity floor: a probe harness that stopped forwarding bodies
+    // would make every verb look like `None` and agree with nothing.
+    assert!(
+        sent > 40,
+        "expected the registry's body-carrying verbs to dominate, saw only {sent}"
+    );
+}

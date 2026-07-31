@@ -142,6 +142,42 @@ pub fn build_request(group: &str, verb: &str, input: &ResourceInput) -> CliResul
     builder(verb, input)
 }
 
+/// Proof that a field list came from [`secret_fields_for`] and is therefore a
+/// group's own **declared** one-time secret fields.
+///
+/// The field is private and this module holds the only constructor, so the
+/// value cannot be assembled from arbitrary names anywhere else — not in
+/// another crate, and not in another module of this one. That is what
+/// [`VerbOutput::divert_response_secrets`] needs: it is the single mutable
+/// access the #505 render gate grants, and its guarantee is only worth
+/// anything if "the names to divert" cannot be chosen freely. Passing a bare
+/// `&[&str]` made the guarantee a call-site convention — a caller who knew a
+/// response's field names could have lifted them out one at a time and
+/// rebuilt the body the gate exists to withhold.
+///
+/// [`VerbOutput::divert_response_secrets`]: crate::receipt::VerbOutput::divert_response_secrets
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredSecretFields(&'static [&'static str]);
+
+impl DeclaredSecretFields {
+    /// The declared field names, for the read-only uses (redaction, warnings)
+    /// that do not need the proof.
+    pub fn fields(self) -> &'static [&'static str] {
+        self.0
+    }
+
+    /// Whether the group declares any one-time secret fields at all.
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// The one-time secret fields a group declares, as a value only this module can
+/// build. See [`DeclaredSecretFields`].
+pub fn declared_secret_fields(group: &str) -> DeclaredSecretFields {
+    DeclaredSecretFields(secret_fields_for(group))
+}
+
 /// The one-time secret fields a group's create/rotate response may carry, which
 /// must never survive into a later read. Groups with no secret material return
 /// an empty slice.

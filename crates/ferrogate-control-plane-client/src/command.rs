@@ -71,6 +71,57 @@ impl VerbEffect {
     }
 }
 
+/// What a verb does with the request document the operator supplies.
+///
+/// [`VerbEffect`] answers *does this change state*; this answers *does the
+/// operator's document reach the server, and does it overwrite what is already
+/// there*. The two questions are independent, and conflating them is how
+/// `ferrogate ctl virtual-keys revoke <id> --set reason=compromised` came to
+/// parse, assemble a body, and have that body dropped by the builder while the
+/// command exited 0 — the `delete` verb is mutating and sends no document at
+/// all. `replace` is the mirror case: mutating, sends a document, and clears
+/// every field the document omits.
+///
+/// It is registry metadata rather than a check against a verb name so a family
+/// that adds a body-less lifecycle action states the fact once, at the
+/// declaration, instead of every flag learning a list of verb names.
+/// `declared_request_document_matches_the_builder` (in `receipt_test.rs`,
+/// beside the equivalent guard on [`VerbEffect`]) rebuilds every registered
+/// verb's request and fails when a declaration and its builder disagree, so
+/// the declaration cannot drift away from what really goes on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestDocument {
+    /// The builder sends no request body (`GET`, `DELETE`, a body-less
+    /// lifecycle action). A document supplied on the command line would be
+    /// assembled and then discarded, so it is refused instead.
+    None,
+    /// The body is a partial document: a field it omits keeps whatever the
+    /// server already holds (`POST` create, `PATCH` update). Assembling it one
+    /// field at a time is safe.
+    Partial,
+    /// The body replaces the stored document wholesale (`PUT`): a field the
+    /// document omits is cleared. Assembling it one field at a time turns
+    /// "change this field" into "delete the others", so per-field flags are
+    /// refused here even though the verb does carry a body.
+    Full,
+}
+
+impl RequestDocument {
+    /// Stable spelling for diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestDocument::None => "none",
+            RequestDocument::Partial => "partial",
+            RequestDocument::Full => "full",
+        }
+    }
+
+    /// Whether the builder forwards an operator-supplied document at all.
+    pub fn is_sent(self) -> bool {
+        !matches!(self, RequestDocument::None)
+    }
+}
+
 /// Whether a mutating verb requires the operator to confirm intent before the
 /// client sends its request.
 ///
@@ -113,6 +164,8 @@ pub struct VerbDescriptor {
     pub effect: VerbEffect,
     /// Whether the CLI must confirm operator intent before sending the request.
     pub confirmation: ConfirmationPolicy,
+    /// What the verb's builder does with an operator-supplied request document.
+    request_document: RequestDocument,
     /// Whether the response is structured CLI data or a byte-faithful export.
     pub response_mode: ResponseMode,
     /// Required query values supplied as positional CLI segments after the
@@ -146,6 +199,7 @@ impl VerbDescriptor {
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Read,
             confirmation: ConfirmationPolicy::None,
+            request_document: RequestDocument::None,
             response_mode: ResponseMode::Structured,
             positional_query_segments: 0,
         }
@@ -165,6 +219,7 @@ impl VerbDescriptor {
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Read,
             confirmation: ConfirmationPolicy::None,
+            request_document: RequestDocument::None,
             response_mode: ResponseMode::Raw {
                 media_type: media_type.into(),
             },
@@ -186,6 +241,7 @@ impl VerbDescriptor {
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::None,
+            request_document: RequestDocument::Partial,
             response_mode: ResponseMode::Structured,
             positional_query_segments: 0,
         }
@@ -204,6 +260,7 @@ impl VerbDescriptor {
             operation_id: Some(operation_id.into()),
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::Required,
+            request_document: RequestDocument::Partial,
             response_mode: ResponseMode::Structured,
             positional_query_segments: 0,
         }
@@ -217,9 +274,33 @@ impl VerbDescriptor {
             operation_id: None,
             effect: VerbEffect::Local,
             confirmation: ConfirmationPolicy::None,
+            request_document: RequestDocument::None,
             response_mode: ResponseMode::Structured,
             positional_query_segments: 0,
         }
+    }
+
+    /// Declare that this verb's builder sends no request body, so an
+    /// operator-supplied document would be discarded rather than delivered.
+    ///
+    /// `delete` and the DELETE-shaped lifecycle verbs (`virtual-keys revoke`)
+    /// are the current members: they are mutating, so effect alone put them on
+    /// the same side of every body-related check as `update`.
+    pub fn without_request_body(mut self) -> VerbDescriptor {
+        self.request_document = RequestDocument::None;
+        self
+    }
+
+    /// Declare that this verb's body **replaces** the stored document, so a
+    /// field the document omits is cleared rather than preserved (`PUT`).
+    pub fn replacing_whole_document(mut self) -> VerbDescriptor {
+        self.request_document = RequestDocument::Full;
+        self
+    }
+
+    /// What this verb's builder does with an operator-supplied document.
+    pub fn request_document(&self) -> RequestDocument {
+        self.request_document
     }
 
     /// Declare required query values that the CLI accepts as positional

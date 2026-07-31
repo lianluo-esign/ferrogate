@@ -107,7 +107,53 @@ fn wrote_notice_names_every_diverted_field_and_the_path() {
     );
     assert!(notice.contains("key, key_id"), "{notice}");
     assert!(notice.contains("/tmp/key.json"), "{notice}");
+    // The 0600 claim is only true where the mode was actually set at creation.
+    #[cfg(unix)]
     assert!(notice.contains("0600"), "{notice}");
+    #[cfg(not(unix))]
+    assert!(
+        !notice.contains("0600"),
+        "a platform that compiles out the mode must not claim it: {notice}"
+    );
+}
+
+#[test]
+fn a_commit_that_cannot_be_written_is_a_transport_failure_not_a_usage_one() {
+    let path = scratch_path("commit-fails");
+    // Reserve normally, then hand `commit` a handle that cannot accept bytes.
+    // Exit class is the whole point: `usage` is exit 2, "caller-side misuse or
+    // invalid local configuration", which a script reads as *the command was
+    // malformed and nothing happened*. Here the mutation already happened.
+    SecretFile::reserve(&path).unwrap();
+    let read_only = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
+    let file = SecretFile::from_open_handle(&path, read_only);
+    let error = file
+        .commit(&json!({"key": "sk-live"}))
+        .expect_err("an unwritable handle must fail the commit");
+    assert_eq!(error.exit_class(), ExitClass::Transport);
+    let message = error.to_string();
+    assert!(
+        message.contains("WAS applied"),
+        "the operator must not read this as 'nothing happened': {message}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_commit_fallback_carries_the_material_the_file_did_not_get() {
+    let fallback = commit_failure_fallback(
+        Path::new("/tmp/key.json"),
+        &json!({"key": "sk-live-abc", "secret": "shh"}),
+    );
+    // The point of the fallback is that the key survives the write failure.
+    // Losing it here would force a rotation that a full disk caused.
+    assert!(fallback.contains("sk-live-abc"), "{fallback}");
+    assert!(fallback.contains("shh"), "{fallback}");
+    assert!(fallback.contains("/tmp/key.json"), "{fallback}");
+    assert!(
+        fallback.contains("WAS applied"),
+        "the operator must know the mutation stands: {fallback}"
+    );
 }
 
 #[test]

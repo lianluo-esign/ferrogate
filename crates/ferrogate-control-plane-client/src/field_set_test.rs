@@ -137,6 +137,34 @@ fn a_scalar_and_a_nested_field_on_one_path_collide_both_ways() {
     );
 }
 
+/// The two escapes the key syntax defines, and the one it does not.
+///
+/// The trailing-backslash refusal tells the operator to "write `\\` for a
+/// literal backslash"; before the fold that spelling produced TWO backslashes,
+/// so the message named a form the parser did not implement and a field name
+/// ending in a backslash had no spelling at all.
+#[test]
+fn a_key_escapes_a_dot_and_a_backslash_and_nothing_else() {
+    // `\.` — a literal dot, one field.
+    let dotted = document(&[r"a\.b=1"], &[]).unwrap().unwrap();
+    assert_eq!(dotted, json!({"a.b": "1"}));
+
+    // `\\` — one literal backslash, as the trailing-backslash message promises.
+    let folded = document(&[r"a\\b=1"], &[]).unwrap().unwrap();
+    assert_eq!(folded, json!({r"a\b": "1"}));
+
+    // `\\` at the end of a segment: the name a bare trailing `\` could not
+    // spell, now reachable, and still a separator after it.
+    let trailing = document(&[r"a\\.b=1"], &[]).unwrap().unwrap();
+    assert_eq!(trailing, json!({r"a\": {"b": "1"}}));
+
+    // A backslash before anything else is kept verbatim along with what it
+    // preceded: this layer does not invent an escape vocabulary for
+    // server-owned field names.
+    let verbatim = document(&[r"a\b=1"], &[]).unwrap().unwrap();
+    assert_eq!(verbatim, json!({r"a\b": "1"}));
+}
+
 #[test]
 fn a_trailing_backslash_is_a_usage_error() {
     let error = document(&["name\\=v"], &[]).unwrap_err();
@@ -147,6 +175,7 @@ fn a_trailing_backslash_is_a_usage_error() {
 #[test]
 fn argv_warning_fires_on_credential_keys_including_nested_and_declared_ones() {
     let warning = argv_credential_warning(
+        "--data",
         &json!({"upstream": {"api_key": "sk-live"}, "name": "prod"}),
         &[],
     )
@@ -156,9 +185,36 @@ fn argv_warning_fires_on_credential_keys_including_nested_and_declared_ones() {
 
     // A group's declared one-time secret field warns even when its name
     // matches none of the generic markers.
-    let declared = argv_credential_warning(&json!({"key": "vk_live"}), &["key"])
+    let declared = argv_credential_warning("--data", &json!({"key": "vk_live"}), &["key"])
         .expect("declared secret field must warn");
     assert!(declared.contains("'key'"), "{declared}");
+}
+
+/// The warning names the flag the operator actually typed.
+///
+/// `--set` is the flag this family added FOR small mutations, which makes
+/// `--set api_key=…` its most likely credential-bearing use — and the advice it
+/// needs is different from `--data`'s, because there is no in-argv-safe form of
+/// a per-field flag. Naming `--data` in a `--set` warning would send an
+/// operator looking for a flag they never passed.
+#[test]
+fn the_argv_warning_names_the_flag_that_put_the_credential_there() {
+    let via_data =
+        argv_credential_warning("--data", &json!({"api_key": "sk-live"}), &[]).expect("warns");
+    assert!(via_data.contains("--data"), "{via_data}");
+    assert!(!via_data.contains("--set"), "{via_data}");
+
+    for flag in ["--set", "--set-json"] {
+        let warning =
+            argv_credential_warning(flag, &json!({"api_key": "sk-live"}), &[]).expect("warns");
+        assert!(warning.contains(flag), "{warning}");
+        assert!(warning.contains("api_key"), "{warning}");
+        assert!(warning.contains("argv"), "{warning}");
+        // Every branch must name the safe alternative, or the warning is just
+        // an alarm with no exit.
+        assert!(warning.contains("--file"), "{warning}");
+        assert!(!warning.contains("--data"), "{warning}");
+    }
 }
 
 #[test]
@@ -167,6 +223,7 @@ fn argv_warning_stays_silent_on_documents_with_no_key_material() {
     // LLM tokens far more often than a credential.
     assert_eq!(
         argv_credential_warning(
+            "--data",
             &json!({"name": "prod", "token_usage": 10, "tokens_per_minute": 5}),
             &[]
         ),
@@ -174,7 +231,7 @@ fn argv_warning_stays_silent_on_documents_with_no_key_material() {
     );
     // A declared secret field present but null carries nothing to leak.
     assert_eq!(
-        argv_credential_warning(&json!({"key": null}), &["key"]),
+        argv_credential_warning("--data", &json!({"key": null}), &["key"]),
         None
     );
 }

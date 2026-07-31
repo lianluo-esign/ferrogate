@@ -40,9 +40,11 @@ use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 use ferrogate_control_plane_client::action_identity::{ClientActionIdentity, FingerprintEnv};
 use ferrogate_control_plane_client::args::GlobalArgs;
 use ferrogate_control_plane_client::auth::{resolve_credential, Credential};
-use ferrogate_control_plane_client::command::Registry;
+use ferrogate_control_plane_client::command::{Registry, RequestDocument};
 use ferrogate_control_plane_client::context::EffectiveContext;
-use ferrogate_control_plane_client::dispatch::{build_request, redact_response, secret_fields_for};
+use ferrogate_control_plane_client::dispatch::{
+    build_request, declared_secret_fields, redact_response, secret_fields_for,
+};
 use ferrogate_control_plane_client::error::{CliError, CliResult};
 use ferrogate_control_plane_client::field_set;
 use ferrogate_control_plane_client::output::{render_output, Table};
@@ -248,6 +250,24 @@ impl ResourceArgs {
     fn has_field_flags(&self) -> bool {
         !self.set.is_empty() || !self.set_json.is_empty()
     }
+
+    /// The document-supplying flag the operator actually typed, for a refusal
+    /// that quotes the command line instead of listing every possibility.
+    /// `None` when none was given. Clap already makes the four mutually
+    /// exclusive, so at most one can be present.
+    fn document_flag(&self) -> Option<&'static str> {
+        if self.data.is_some() {
+            Some("--data")
+        } else if self.file.is_some() {
+            Some("--file")
+        } else if !self.set.is_empty() {
+            Some("--set")
+        } else if !self.set_json.is_empty() {
+            Some("--set-json")
+        } else {
+            None
+        }
+    }
 }
 
 fn read_file_or_stdin(path: &Path) -> CliResult<String> {
@@ -380,7 +400,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     // alternative — accepting and ignoring — is the `ca_bundle_path` /
     // pre-#361 `--sort` anti-pattern this family keeps closing: a flag that
     // parses but does nothing reads as a capability the CLI does not have.
-    let group_secret_fields = secret_fields_for(group_name);
+    let group_secret_fields = declared_secret_fields(group_name);
     if let Some(path) = &resource.secret_file {
         if !descriptor.render_gate().requires_receipt() {
             return Err(CliError::usage(format!(
@@ -405,12 +425,48 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
             ));
         }
     }
-    if resource.has_field_flags() && !descriptor.render_gate().requires_receipt() {
-        return Err(CliError::usage(format!(
-            "--set/--set-json build a request document; '{group_name} {verb_name}' is a {} verb \
-             and sends none",
-            descriptor.effect.as_str()
-        )));
+    // Whether a request document is applicable is a property of what the
+    // verb's BUILDER does with it, not of whether the verb mutates. Deriving it
+    // from the effect put `delete`/`revoke` — mutating verbs whose builders
+    // send no body at all — on the same side of this test as `update`, so
+    // `virtual-keys revoke <id> --set reason=compromised` assembled a document,
+    // had `build_item_delete` drop it, and exited 0 with the reason recorded
+    // nowhere. `replace` is the opposite error: it does carry the document, but
+    // as a whole-object PUT, so a per-field assembly clears every field the
+    // operator did not name. `VerbDescriptor::request_document` states both
+    // facts at the declaration and `declared_request_document_matches_the_
+    // builder` keeps the statement true.
+    match descriptor.request_document() {
+        RequestDocument::Partial => {}
+        RequestDocument::None => {
+            if let Some(flag) = resource.document_flag() {
+                return Err(CliError::usage(format!(
+                    "{flag} supplies a request document, but '{group_name} {verb_name}' sends \
+                     none — the document would be built and then dropped, and the command would \
+                     still exit 0 as if the server had seen it"
+                )));
+            }
+        }
+        RequestDocument::Full => {
+            if resource.has_field_flags() {
+                // Only name `update` when this group really has one: a
+                // suggestion that does not resolve is the same accept-and-
+                // ignore failure moved into the error message.
+                let alternative = match registry.resolve(group_name, "update") {
+                    Ok(_) => format!(
+                        "To change individual fields use '{group_name} update'; to replace the \
+                         whole object"
+                    ),
+                    Err(_) => "To replace the whole object".to_string(),
+                };
+                return Err(CliError::usage(format!(
+                    "--set/--set-json assemble a PARTIAL document, but '{group_name} \
+                     {verb_name}' replaces the stored one in full: every field you do not name \
+                     would be cleared, not preserved. {alternative} pass the complete document \
+                     with --file <PATH>"
+                )));
+            }
+        }
     }
 
     // Confirmation deliberately precedes this conversion: `--file -` may
@@ -418,14 +474,21 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     // because its request body also comes from stdin.
     let input = resource.to_input()?;
 
-    // `--data` puts the whole request document in argv, where it survives in
-    // shell history and is readable by any local `ps` for the life of the
-    // process. `--file`/stdin is the safe alternative, and nothing said so.
-    // Keyed on the document actually passed, so the note fires on the creates
-    // that really do carry a credential and stays quiet otherwise.
-    if resource.data.is_some() {
+    // `--data` and `--set`/`--set-json` all put request-document values in
+    // argv, where they survive in shell history and are readable by any local
+    // `ps` for the life of the process. `--file`/stdin is the safe alternative,
+    // and nothing said so. `--set` is the flag this family added FOR small
+    // mutations, which makes `--set api_key=sk-live-…` its single most likely
+    // credential-bearing use, so gating the warning on `--data` alone left the
+    // newest path to argv the only unwarned one. Keyed on the document actually
+    // passed, so the note fires on the calls that really do carry a credential
+    // and stays quiet otherwise; `--file` is excluded because its document
+    // never reaches argv.
+    if let Some(flag) = resource.document_flag().filter(|flag| *flag != "--file") {
         if let Some(body) = &input.body {
-            if let Some(warning) = field_set::argv_credential_warning(body, group_secret_fields) {
+            if let Some(warning) =
+                field_set::argv_credential_warning(flag, body, group_secret_fields.fields())
+            {
                 eprintln!("{warning}");
             }
         }
@@ -571,7 +634,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         None => Vec::new(),
     };
     if secret_file.is_none() {
-        let exposed = output.response_secret_names(group_secret_fields);
+        let exposed = output.response_secret_names(group_secret_fields.fields());
         if !exposed.is_empty() {
             eprintln!("{}", secret_sink::stdout_exposure_warning(&exposed));
         }
@@ -601,8 +664,22 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
             }
         } else {
             let notice = secret_sink::wrote_notice(file.path(), &diverted);
-            file.commit(&diverted_secret_document(&diverted))?;
-            eprintln!("{notice}");
+            let document = diverted_secret_document(&diverted);
+            let path = file.path().to_path_buf();
+            match file.commit(&document) {
+                Ok(()) => eprintln!("{notice}"),
+                Err(error) => {
+                    // The mutation is already applied and the server will
+                    // never show this key again, but the material is still
+                    // here, in `document`, at the moment the sink failed.
+                    // Returning without printing it would force a rotation
+                    // that a full disk caused — recoverable up to this line
+                    // and unrecoverable after it. Plaintext on stderr beats
+                    // a credential that no longer exists anywhere.
+                    eprintln!("{}", secret_sink::commit_failure_fallback(&path, &document));
+                    return Err(error);
+                }
+            }
         }
     }
 

@@ -59,7 +59,8 @@ impl CommandGroup for TenantAccountsGroup {
                     "replace",
                     "Replace a tenant account",
                     "replaceTenantAccount",
-                ),
+                )
+                .replacing_whole_document(),
                 VerbDescriptor::mutating(
                     "update",
                     "Update a tenant account",
@@ -74,7 +75,8 @@ impl CommandGroup for TenantAccountsGroup {
                     "assign-plan",
                     "Assign a subscription plan to a tenant",
                     "assignTenantPlan",
-                ),
+                )
+                .replacing_whole_document(),
             ],
         )
     }
@@ -169,7 +171,8 @@ impl CommandGroup for PlansGroup {
                 VerbDescriptor::read("list", "List plans", "listPlans"),
                 VerbDescriptor::read("get", "Show a plan", "getPlan"),
                 VerbDescriptor::mutating("create", "Create a plan", "createPlan"),
-                VerbDescriptor::mutating("replace", "Replace a plan", "replacePlan"),
+                VerbDescriptor::mutating("replace", "Replace a plan", "replacePlan")
+                    .replacing_whole_document(),
                 VerbDescriptor::mutating("update", "Update a plan", "updatePlan"),
             ],
         )
@@ -193,9 +196,11 @@ impl CommandGroup for QuotaPoliciesGroup {
                 VerbDescriptor::read("list", "List quota policies", "listQuotaPolicies"),
                 VerbDescriptor::read("get", "Show a quota policy", "getQuotaPolicy"),
                 VerbDescriptor::mutating("create", "Create a quota policy", "createQuotaPolicy"),
-                VerbDescriptor::mutating("replace", "Replace a quota policy", "replaceQuotaPolicy"),
+                VerbDescriptor::mutating("replace", "Replace a quota policy", "replaceQuotaPolicy")
+                    .replacing_whole_document(),
                 VerbDescriptor::mutating("update", "Update a quota policy", "updateQuotaPolicy"),
-                VerbDescriptor::mutating("delete", "Delete a quota policy", "deleteQuotaPolicy"),
+                VerbDescriptor::mutating("delete", "Delete a quota policy", "deleteQuotaPolicy")
+                    .without_request_body(),
             ],
         )
     }
@@ -227,7 +232,8 @@ fn crud_verbs(noun_lower: &str, noun_pascal: &str, list_op: &str) -> Vec<VerbDes
             "replace",
             format!("Replace a {noun_lower}"),
             format!("replace{noun_pascal}"),
-        ),
+        )
+        .replacing_whole_document(),
         VerbDescriptor::mutating(
             "update",
             format!("Update a {noun_lower}"),
@@ -237,7 +243,8 @@ fn crud_verbs(noun_lower: &str, noun_pascal: &str, list_op: &str) -> Vec<VerbDes
             "delete",
             format!("Delete a {noun_lower}"),
             format!("delete{noun_pascal}"),
-        ),
+        )
+        .without_request_body(),
     ]
 }
 

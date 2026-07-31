@@ -176,6 +176,7 @@ use crate::action_identity::{ClientActionIdentity, ServerIssuedTime};
 use crate::auth::AuthSource;
 use crate::command::{VerbDescriptor, VerbEffect};
 use crate::context::EffectiveContext;
+use crate::dispatch::DeclaredSecretFields;
 use crate::error::{CliError, CliResult, ExitClass};
 use crate::resource::{divert_secret_fields, secret_field_names, DivertedSecret};
 use crate::transport::{build_url, ApiResponse, ControlPlaneClient, RequestSpec, Transport};
@@ -1254,23 +1255,33 @@ impl VerbOutput {
     /// document, leaving [`DIVERTED_SECRET_MARKER`] in each field's place, and
     /// return what was taken.
     ///
-    /// This is the ONLY mutable access the gate grants, and it is deliberately
-    /// shaped so it cannot be misused to recover the body: it takes the field
-    /// names to divert rather than a closure, and it returns just the secret
-    /// values — never the response. A mutating verb still cannot render a bare
-    /// body, so the #505 enforcement is unchanged; what becomes possible is
-    /// routing the key material a create/rotate returns to an explicit safe
-    /// sink instead of stdout (issue #361).
+    /// This is the ONLY mutable access the gate grants, and it is shaped so it
+    /// cannot be misused to recover the body: it returns just the secret values
+    /// — never the response — and the names it will divert are not the
+    /// caller's to choose. [`DeclaredSecretFields`] has a private field and one
+    /// constructor, [`declared_secret_fields`], so the only reachable argument
+    /// is the invoked group's own declared list. An arbitrary `&[&str]` would
+    /// have left "diverts only declared secrets" as call-site discipline: a
+    /// caller who knew a response's field names could have named them one at a
+    /// time and reassembled the body #505 withholds. A mutating verb still
+    /// cannot render a bare body; what becomes possible is routing the key
+    /// material a create/rotate returns to an explicit safe sink instead of
+    /// stdout (issue #361).
     ///
     /// Returns an empty vector for a bare (read) output, a dry run, or a
-    /// response carrying none of the named fields.
+    /// response carrying none of the declared fields.
     ///
     /// [`DIVERTED_SECRET_MARKER`]: crate::resource::DIVERTED_SECRET_MARKER
-    pub fn divert_response_secrets(&mut self, secret_fields: &[&str]) -> Vec<DivertedSecret> {
+    /// [`DeclaredSecretFields`]: crate::dispatch::DeclaredSecretFields
+    /// [`declared_secret_fields`]: crate::dispatch::declared_secret_fields
+    pub fn divert_response_secrets(
+        &mut self,
+        secret_fields: DeclaredSecretFields,
+    ) -> Vec<DivertedSecret> {
         match &mut self.0 {
             Payload::Bare(_) => Vec::new(),
             Payload::Receipt(receipt) => match &mut receipt.response {
-                Some(response) => divert_secret_fields(response, secret_fields),
+                Some(response) => divert_secret_fields(response, secret_fields.fields()),
                 None => Vec::new(),
             },
         }

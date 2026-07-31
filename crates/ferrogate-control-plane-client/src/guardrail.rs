@@ -106,7 +106,8 @@ impl CommandGroup for GuardrailPoliciesGroup {
                     "archive",
                     "Archive one immutable policy revision",
                     "archiveGuardrailPolicyRevision",
-                ),
+                )
+                .without_request_body(),
                 VerbDescriptor::mutating(
                     "activate",
                     "Activate a policy revision (make it live)",

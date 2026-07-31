@@ -173,7 +173,8 @@ impl CommandGroup for PaymentMethodsGroup {
                     "delete",
                     "Delete a payment method",
                     "deletePaymentMethod",
-                ),
+                )
+                .without_request_body(),
             ],
         )
     }
