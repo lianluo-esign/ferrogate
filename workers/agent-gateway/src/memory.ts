@@ -47,12 +47,19 @@ const MAX_SEMANTIC_TOP_K = 20;
 /** Upper bound on messages accepted by one `chat/append` call. */
 const MAX_CHAT_APPEND_BATCH = 100;
 
+/**
+ * Upper bound on a chat message's `id`. The id is the table's primary key and
+ * is otherwise caller-chosen and unbounded; a cap keeps a single row's key from
+ * being an unbounded allocation of its own.
+ */
+export const MAX_CHAT_MESSAGE_ID_CHARS = 256;
+
 /** Workers AI embedding model used by the semantic-memory pilot (beta). */
 export const SEMANTIC_EMBEDDING_MODEL = "@cf/baai/bge-m3";
 
 /**
  * Vectorize caps a namespace name at 64 BYTES. A minted instance name
- * (`fg.{tenant}.{session}.{run}`, components up to 64 chars each) reaches 195
+ * (`fg.{tenant}.{session}.{run}`, components up to 64 chars each) reaches 197
  * bytes, so the name cannot be used as the namespace verbatim — see
  * {@link vectorizeNamespace}.
  */
@@ -102,6 +109,13 @@ export interface AgentMemoryHost {
   setState(state: AgentGatewayState): void;
   /** Layer 2: the embedded per-agent SQLite (DO SqlStorage exec). */
   rawSql(query: string, bindings: SqlBinding[]): RawSqlResult;
+  /**
+   * Run `body` as ONE all-or-nothing SQLite transaction: a throw rolls back
+   * every statement it issued. A multi-row write needs this — see
+   * {@link memoryChatHistoryAppend}, whose retention cap is only a guarantee if
+   * a half-written batch cannot survive.
+   */
+  transactionSync<T>(body: () => T): T;
   /** The enforced chat-history retention cap (layer 3). */
   maxPersistedMessages: number;
 }
@@ -243,12 +257,84 @@ function isSqliteFull(message: string): boolean {
 const RESERVED_TABLE_PREFIX = "cf_agents_";
 
 /**
- * Strip SQL comments and single-quoted string literals so an identifier scan
- * sees only code. Both directions matter: `cf/**\/_agents_state` must NOT hide a
- * reserved name behind a comment, and `values ('cf_agents_state')` must NOT be
- * mistaken for one.
+ * The quoted regions SQLite's tokenizer recognises, and how each one ends.
+ *
+ * Inside any of these, the OTHER openers are ordinary characters: `--` in
+ * `"a--b"` starts no comment, `'` in `` `a'b` `` starts no literal. A scanner
+ * that misses that desynchronizes from SQLite's tokenizer, and the region it
+ * wrongly swallows is exactly where a reserved name hides.
+ *
+ * `[…]` has no escape — SQLite ends the identifier at the first `]`. The other
+ * three double their closer to escape it.
  */
-function stripCommentsAndLiterals(sql: string): string {
+const QUOTED_REGIONS: Record<string, { close: string; doubled: boolean; label: string }> = {
+  "'": { close: "'", doubled: true, label: "string literal" },
+  '"': { close: '"', doubled: true, label: "quoted identifier" },
+  "`": { close: "`", doubled: true, label: "backquoted identifier" },
+  "[": { close: "]", doubled: false, label: "bracketed identifier" },
+};
+
+/** A quoted region's body plus the offset just past its closer. */
+interface QuotedRegion {
+  body: string;
+  next: number;
+}
+
+/** Read the quoted region opening at `start`, or `null` when it never closes. */
+function readQuotedRegion(
+  sql: string,
+  start: number,
+  close: string,
+  doubled: boolean,
+): QuotedRegion | null {
+  let body = "";
+  let i = start + 1;
+  while (i < sql.length) {
+    if (sql[i] === close) {
+      if (doubled && sql[i + 1] === close) {
+        body += close;
+        i += 2;
+        continue;
+      }
+      return { body, next: i + 1 };
+    }
+    body += sql[i];
+    i += 1;
+  }
+  return null;
+}
+
+/** Everything the reserved-name scan must read, or the reason it cannot. */
+type ScanSubject = { text: string } | { unterminated: string };
+
+/**
+ * Reduce `sql` to the text a reserved-name scan must read, tokenizing exactly
+ * where SQLite does.
+ *
+ * What survives, and why:
+ *
+ * - **Code** — verbatim; this is where an unquoted table name appears.
+ * - **Every quoted region's body**, space-padded — including single-quoted
+ *   ones. SQLite accepts a single-quoted token as an IDENTIFIER wherever an
+ *   identifier is legal and a string is not, so `insert into
+ *   'cf_agents_schedules' …` really does name the control table. Telling that
+ *   apart from a string that merely mentions the name needs a full parser, so
+ *   the guard reads both and refuses both — a caller that legitimately needs
+ *   the text passes it as a bound parameter, which is never scanned.
+ *   The padding matters: `from"cf_agents_state"` is valid SQLite, and joining
+ *   the body to `from` would put a word character before the name and defeat
+ *   the scan's `\b` anchor.
+ * - **Comments** — dropped. A comment separates tokens rather than splicing
+ *   them, so `cf/*x*\/_agents_state` is two tokens, not a reference; dropping
+ *   splices them into one and the guard refuses. That is a false positive, and
+ *   the safe direction: removal can only create matches, never destroy one.
+ *
+ * A region that never closes is reported instead of swallowed. Unterminated
+ * quoting is a SQLite syntax error anyway, so refusing it costs nothing and
+ * turns the guard's worst failure mode — scan past the end, find nothing,
+ * allow — into a refusal.
+ */
+function scanSubject(sql: string): ScanSubject {
   let out = "";
   let i = 0;
   while (i < sql.length) {
@@ -260,29 +346,22 @@ function stripCommentsAndLiterals(sql: string): string {
     }
     if (two === "/*") {
       const end = sql.indexOf("*/", i + 2);
-      i = end === -1 ? sql.length : end + 2;
+      if (end === -1) return { unterminated: "block comment" };
+      i = end + 2;
       continue;
     }
-    if (sql[i] === "'") {
-      i += 1;
-      while (i < sql.length) {
-        if (sql[i] === "'") {
-          // Doubled quote is an escaped quote, not the end of the literal.
-          if (sql[i + 1] === "'") {
-            i += 2;
-            continue;
-          }
-          i += 1;
-          break;
-        }
-        i += 1;
-      }
+    const region = QUOTED_REGIONS[sql[i]];
+    if (region) {
+      const read = readQuotedRegion(sql, i, region.close, region.doubled);
+      if (!read) return { unterminated: region.label };
+      out += ` ${read.body} `;
+      i = read.next;
       continue;
     }
     out += sql[i];
     i += 1;
   }
-  return out;
+  return { text: out };
 }
 
 /**
@@ -301,21 +380,31 @@ function stripCommentsAndLiterals(sql: string): string {
  *    dispatch that pin closes.
  *
  * The rule is deliberately blunt — a reserved identifier ANYWHERE in the
- * statement is refused, reads included — because "which position is a write"
- * needs a SQL parser, and a partial parser is exactly how this kind of guard
- * fails. Nothing legitimate is lost: layer 1 is served by
+ * statement is refused, reads included, in code AND inside every form of
+ * quoting — because "which position is a write" needs a SQL parser, and a
+ * partial parser is exactly how this kind of guard fails. {@link scanSubject}
+ * therefore reads quoted bodies rather than skipping them, and refuses a
+ * statement it cannot tokenize to the end.
+ *
+ * Nothing legitimate is lost: layer 1 is served by
  * {@link memoryStateGet}/{@link memoryStateSet} and schedules by the #426
- * routes, both of which apply their governance. Identifier quoting
- * (`"x"`, `` `x` ``, `[x]`) is unwrapped before the scan, so a quoted name
- * cannot slip past.
+ * routes, both of which apply their governance; a statement that needs the
+ * literal text `cf_agents_…` as DATA passes it as a bound parameter, which the
+ * scan never sees.
  *
  * Returns a refusal message, or `null` when the statement is acceptable.
  */
 export function reservedTableViolation(sql: string): string | null {
-  const code = stripCommentsAndLiterals(sql)
-    .toLowerCase()
-    .replace(/["`[\]]/g, "");
-  const match = new RegExp(`\\b${RESERVED_TABLE_PREFIX}\\w*`).exec(code);
+  const subject = scanSubject(sql);
+  if ("unterminated" in subject) {
+    return (
+      `statement has an unterminated ${subject.unterminated}; ` +
+      `it cannot be checked against the reserved Agents SDK control tables and is refused`
+    );
+  }
+  const match = new RegExp(`\\b${RESERVED_TABLE_PREFIX}\\w*`).exec(
+    subject.text.toLowerCase(),
+  );
   if (!match) return null;
   return (
     `statement references the reserved Agents SDK control table '${match[0]}'; ` +
@@ -422,8 +511,15 @@ export function isChatMessageInput(value: unknown): value is ChatMessageInput {
  * mechanism that cannot evict.
  *
  * The retention cap is applied in the SAME call, so history cannot exceed
- * `maxPersistedMessages` between an append and some later prune. A row whose id
- * already exists is REPLACEd, keeping the id the caller's idempotency key.
+ * `maxPersistedMessages` between an append and some later prune. That holds on
+ * BOTH paths, which is why the batch is atomic: a per-row loop that failed
+ * halfway would leave the earlier rows persisted and never reach the prune,
+ * parking the table above the cap while reporting failure. The batch is one
+ * `transactionSync`, and the failure path still prunes before returning, so
+ * "history is at or below the cap once this returns" is true either way.
+ *
+ * A row whose id already exists is REPLACEd, keeping the id the caller's
+ * idempotency key.
  */
 export function memoryChatHistoryAppend(
   host: AgentMemoryHost,
@@ -437,14 +533,21 @@ export function memoryChatHistoryAppend(
 }> {
   try {
     ensureChatTable(host);
-    for (const entry of messages) {
-      host.rawSql(
-        `insert or replace into ${CHAT_MESSAGES_TABLE} (id, message) values (?, ?)`,
-        [entry.id, JSON.stringify(entry.message ?? null)],
-      );
-    }
+    host.transactionSync(() => {
+      for (const entry of messages) {
+        host.rawSql(
+          `insert or replace into ${CHAT_MESSAGES_TABLE} (id, message) values (?, ?)`,
+          [entry.id, JSON.stringify(entry.message ?? null)],
+        );
+      }
+    });
   } catch (err) {
     const message = (err as Error).message ?? String(err);
+    // The batch rolled back, but the table can already have been over the cap
+    // before this call (layer 2 can INSERT into it directly), so the
+    // post-condition still needs a prune. Best-effort: a prune that also fails
+    // must not replace the error the caller actually needs to see.
+    memoryChatHistoryPrune(host);
     if (isSqliteFull(message)) {
       return { ok: false, code: "sqlite_full", message };
     }
@@ -679,6 +782,29 @@ export async function handleMemory(request: Request, env: Env, url: URL): Promis
         if (!messages.every(isChatMessageInput)) {
           return json({ error: "each message needs a non-empty id and a message field" }, 400);
         }
+        if (messages.some((m) => m.id.length > MAX_CHAT_MESSAGE_ID_CHARS)) {
+          return json(
+            { error: `message id exceeds the ${MAX_CHAT_MESSAGE_ID_CHARS}-character limit` },
+            400,
+          );
+        }
+        // Same 2 MB pre-check the other two write paths apply, measured in
+        // BYTES on the JSON actually persisted — without it an oversize
+        // message reaches the Durable Object and comes back as a 400
+        // `sql_error`, when the limit it hit is the one `state/set` and
+        // `sql/query` both report as 413.
+        const chatEncoder = new TextEncoder();
+        const oversizeMessage = messages.some(
+          (m) =>
+            chatEncoder.encode(JSON.stringify(m.message ?? null)).length >
+            MAX_SQL_VALUE_BYTES,
+        );
+        if (oversizeMessage) {
+          return json(
+            { error: "message exceeds the 2 MB Durable Object value limit" },
+            413,
+          );
+        }
         return memoryResponse(await agent.memoryChatHistoryAppend(messages));
       }
       case "chat/get":
@@ -726,7 +852,7 @@ const HASHED_NAMESPACE_PREFIX = "fgh_";
  *
  * The namespace IS the only isolation mechanism semantic memory has, and
  * Vectorize caps it at {@link MAX_VECTORIZE_NAMESPACE_BYTES} bytes — but a
- * minted `fg.{tenant}.{session}.{run}` name reaches 195 bytes (a realistic UUID
+ * minted `fg.{tenant}.{session}.{run}` name reaches 197 bytes (a realistic UUID
  * triple is ~110), so passing the name through verbatim makes every real query
  * fail at the platform. Names that fit are used verbatim; longer ones collapse
  * to `fgh_` + 60 hex chars of their SHA-256, which is exactly 64 bytes and stays

@@ -84,7 +84,7 @@ const HASHED_NAMESPACE_PREFIX: &str = "fgh_";
 ///
 /// The namespace is the ONLY isolation mechanism semantic memory has, and
 /// Vectorize caps it at [`VECTORIZE_NAMESPACE_MAX_BYTES`] — but a minted
-/// `fg.{tenant}.{session}.{run}` name reaches 195 bytes (a realistic UUID
+/// `fg.{tenant}.{session}.{run}` name reaches 197 bytes (a realistic UUID
 /// triple is ~110), so the name cannot be the namespace verbatim. Names that
 /// fit are used as-is; longer ones collapse to `fgh_` + 60 hex characters of
 /// their SHA-256, which is exactly 64 bytes.

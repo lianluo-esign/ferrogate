@@ -736,6 +736,15 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
     return { columns: cursor.columnNames, rows };
   }
 
+  /**
+   * All-or-nothing SQLite transaction for the memory verbs: a throw inside
+   * `body` rolls back every statement it issued. `chat/append` writes a batch
+   * and needs the batch to be indivisible — see `memoryChatHistoryAppend`.
+   */
+  transactionSync<T>(body: () => T): T {
+    return this.ctx.storage.transactionSync(body);
+  }
+
   /** Chat-history retention cap for this deployment (layer 3 eviction). */
   get maxPersistedMessages(): number {
     return persistedMessageCap(this.env.MEMORY_MAX_PERSISTED_MESSAGES);
