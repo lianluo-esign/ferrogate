@@ -68,28 +68,38 @@
  * routed handle, so the guards still guard no money.
  * ---------------------------------------------------------------------------
  *
- * PORT-TODO(inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`,
- * §1.2 `list_due_agent_schedules` / `insert_agent_schedule_fire`): the agent
- * SCHEDULER has no module in this package at all — the family is absent, not
- * partial. `crates/ferrogate-storage/src/agent_schedule.rs` (1017 lines) plus
- * `control_plane_store_d1/agent_schedule.rs` (563 lines) carry: cron parsing via
- * `croner` + IANA timezones via `chrono-tz`, interval specs, `next_fire_at`
- * computation, `overlap_policy` (skip|allow), `catchup_policy`
- * (skip_missed|fire_once), `jitter_secs`, the due-query over the partial index
- * `(next_fire_at_unix) WHERE enabled AND next_fire_at_unix IS NOT NULL`, and the
- * AT-MOST-ONCE fire gate (`UNIQUE (schedule_id, scheduled_fire_at_unix)` +
- * `ON CONFLICT DO NOTHING`). Both tables and that UNIQUE exist in
- * `sql/d1-ts/tenant/0001_init_tenant.sql`; no code writes either.
+ * PORT-TODO(inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`)
+ * — SHARPENED. The ENGINE is no longer absent; the TICK TRIGGER still is.
  *
- * What exists instead is CRUD only: `apps/control-plane/src/routes/admin_agent_schedule.ts`
- * stores schedules as generic `control_plane_resources` documents, its `/fires`
- * route lists a collection nothing appends to, and `run-now` merely sets
- * `{ run_now: true }` on the document — no dispatch, no fire row. Why it
- * matters: a schedule an operator creates NEVER FIRES, and if a firing loop is
- * added later without the `ON CONFLICT DO NOTHING` gate, two Workers racing the
- * same cron minute will each dispatch the slot — at-least-once delivery for
- * agent runs that cost money. The natural CF home is a `[triggers] crons`
- * handler plus a Durable Object alarm for sub-minute/jittered fires.
+ * CLOSED in this package: `./agent-schedule.js` ports the whole engine
+ * clean-room — a 5-field cron parser (no `croner`), IANA-timezone wall-clock
+ * arithmetic on `Intl.DateTimeFormat` (no `chrono-tz`) with DST transitions and
+ * spring-forward gaps handled explicitly, interval specs, `next_fire_at`,
+ * `overlap_policy` (skip|allow), `catchup_policy` (skip_missed|fire_once), the
+ * bounded catch-up fast-forward, and the write-time validator. `jitterSecs` is
+ * stored and validated and applied by NOTHING, because Rust's own tick loop
+ * never reads it either — recorded rather than invented.
+ * `./d1/agent-schedule-d1.js` is the durable half: the due scan over the partial
+ * index, the atomic delete-with-fire-cascade (D1 has no `ON DELETE CASCADE`),
+ * and the AT-MOST-ONCE fire gate `INSERT ... ON CONFLICT (schedule_id,
+ * scheduled_fire_at_unix) DO NOTHING RETURNING fire_id`, whose returned row IS
+ * the claim. `test/d1/agent-schedule-d1.test.ts` races two claimers on one slot,
+ * asserts exactly one wins, and mutation-pins the gate.
+ *
+ * STILL OPEN, and NOT CLOSABLE FROM A LIBRARY PACKAGE: nothing TICKS. A
+ * `packages/*` library has no Worker entry module and no `wrangler.toml`, so it
+ * cannot declare `[triggers] crons` or a Durable Object alarm. Until a
+ * deployable calls `listDueSchedules` → `planScheduleTick` → `insertScheduleFire`
+ * → `advanceSchedule` on a schedule, a schedule an operator creates STILL never
+ * fires. What exists on the deployed path today is CRUD only:
+ * `apps/control-plane/src/routes/admin_agent_schedule.ts` stores schedules as
+ * generic `control_plane_resources` documents, its `/fires` route lists a
+ * collection nothing appends to, and `run-now` merely sets `{ run_now: true }`
+ * on the document. The wiring owed is: swap that route onto
+ * `D1AgentScheduleStore` on the tenant handle, and add a `scheduled` handler
+ * (plus a `[triggers] crons` stanza) that drives the four calls above. A Durable
+ * Object alarm is the answer for sub-minute cadences, since cron triggers do not
+ * go below one minute.
  */
 
 export * from "./errors.js";
@@ -109,6 +119,7 @@ export * from "./lifecycle-status.js";
 export * from "./site-domain.js";
 export * from "./references.js";
 export * from "./payment-attempt.js";
+export * from "./agent-schedule.js";
 
 /**
  * The D1 persistence foundation (JOBs 1–4).

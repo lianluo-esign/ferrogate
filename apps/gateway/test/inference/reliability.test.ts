@@ -627,7 +627,20 @@ describe("shadow routes are mirrors, never candidates", () => {
 
       // Without `servableCandidates` the mirror would have served this 200.
       expect(res.status).toBe(503);
-      expect(provider.requests.map((request) => providerOf(request.url))).toEqual(["primary"]);
+      // ...and the CLIENT's bytes are the failed primary's, never the healthy
+      // mirror's. This is the assertion that used to read "the mirror was never
+      // dialled at all", which stopped distinguishing anything once
+      // `shadow.ts` landed and the mirror IS dialled — as a mirror. What the
+      // client is served by is the property that was always meant.
+      expect(await res.text()).not.toContain("chatcmpl-ok");
+
+      // The LADDER walked the primary and stopped: the mirror is not a
+      // fallback. Anything the mirror dispatched is fire-and-forget and
+      // arrives on `ctx.waitUntil`, which is why its dispatch is counted
+      // separately rather than asserted absent.
+      const dialled = provider.requests.map((request) => providerOf(request.url));
+      expect(dialled.filter((name) => name === "primary")).toEqual(["primary"]);
+      expect(dialled.filter((name) => name === "mirror").length).toBeLessThanOrEqual(1);
     } finally {
       provider.restore();
     }

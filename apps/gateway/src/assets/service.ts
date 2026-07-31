@@ -534,6 +534,20 @@ export class AssetService {
   }
 
   /**
+   * Commit the audit rows this request buffered.
+   *
+   * The route module calls it once per request, in a `finally`. It is exposed
+   * on the service rather than on the sink because the sink is private and the
+   * service is what the router holds — and it deliberately does NOT swallow:
+   * an audit sink that fails silently is indistinguishable from one that is not
+   * wired at all, which is precisely the defect this codebase keeps shipping.
+   * `assetRouteModule` decides the request-facing consequence.
+   */
+  async flushAudit(): Promise<void> {
+    await this.#audit.flush?.();
+  }
+
+  /**
    * The one cross-tenant object guard. Every bucket call in this file goes
    * through here, so a `storage_uri` naming another tenant's prefix — a
    * corrupted row, a hand-crafted id — is refused BEFORE the bucket sees it.
@@ -589,7 +603,7 @@ export class AssetService {
     // Best-effort correlation with the screening evidence recorded at push time
     // (#366). `undefined` when that audit row is no longer retained — never a
     // fabricated verdict; the authoritative reason is the row's own visibility.
-    const evidence = this.#audit.screeningEvidence(caller.tenantId);
+    const evidence = await this.#audit.screeningEvidence(caller.tenantId);
     const rows: WithheldAssetSummary[] = withheld
       .filter((asset) =>
         matchesSearch(input.search, [

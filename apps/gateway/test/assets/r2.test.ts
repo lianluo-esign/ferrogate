@@ -22,10 +22,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import {
-  assetDepsFromEnv,
-  sigV4PresignerFromEnv,
-} from "../../src/assets/index.js";
+import { assetDepsFromEnv, sigV4PresignerFromEnv } from "../../src/assets/index.js";
 import { GATEWAY_ROUTE_MODULES } from "../../src/index.js";
 import { ASSET_OPERATION_IDS } from "../../src/routes/index.js";
 

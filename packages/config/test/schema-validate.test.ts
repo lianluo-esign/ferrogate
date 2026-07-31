@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { loadConfigFromObject, migrateControlPlaneAliases } from "../src/loader.js";
 import {
   authRequired,
   configSchema,
@@ -6,16 +7,17 @@ import {
   durableApiKeyStore,
   hasCredentialSource,
 } from "../src/schema/config.js";
-import { limits, DEFAULT_INFERENCE_BODY_MAX_BYTES } from "../src/schema/sections.js";
+import { apiKeySchema } from "../src/schema/entities.js";
+import { DEFAULT_INFERENCE_BODY_MAX_BYTES, limits } from "../src/schema/sections.js";
 import {
   apiKeysThatAuthorizeNothing,
   apiKeysWithoutTenantIdentity,
   ensureApiKeyDeclaresTenantIdentity,
+  tenancyPostureWarnings,
   validateConfig,
+  warnImplicitPlatformOperators,
   warnUndeclaredControlPlaneApiKeys,
 } from "../src/validate.js";
-import { loadConfigFromObject, migrateControlPlaneAliases } from "../src/loader.js";
-import { apiKeySchema } from "../src/schema/entities.js";
 
 describe("Config schema defaults", () => {
   test("an empty document deserializes to the Rust defaults", () => {
@@ -65,8 +67,12 @@ describe("validateConfig — tenant identity (security invariant #7)", () => {
   });
 
   test("accepts a key that declares platform_operator or organization_id", () => {
-    expect(() => validateConfig(configSchema.parse({ api_keys: [key({ platform_operator: true })] }))).not.toThrow();
-    expect(() => validateConfig(configSchema.parse({ api_keys: [key({ organization_id: "org-1" })] }))).not.toThrow();
+    expect(() =>
+      validateConfig(configSchema.parse({ api_keys: [key({ platform_operator: true })] })),
+    ).not.toThrow();
+    expect(() =>
+      validateConfig(configSchema.parse({ api_keys: [key({ organization_id: "org-1" })] })),
+    ).not.toThrow();
   });
 
   test("implicit_platform_operator opt-in permits an undeclared key at load", () => {
@@ -81,9 +87,9 @@ describe("validateConfig — tenant identity (security invariant #7)", () => {
     const config = configSchema.parse({ api_keys: [key({})] });
     expect(() => validateConfig(config, { apiKeysAreControlPlaneDocuments: true })).not.toThrow();
     // The relaxation's compensating control names the ids it let through.
-    expect(warnUndeclaredControlPlaneApiKeys(config, { apiKeysAreControlPlaneDocuments: true })).toEqual([
-      "k",
-    ]);
+    expect(
+      warnUndeclaredControlPlaneApiKeys(config, { apiKeysAreControlPlaneDocuments: true }),
+    ).toEqual(["k"]);
     // ...and reports nothing for a config document (which is refused outright).
     expect(warnUndeclaredControlPlaneApiKeys(config)).toEqual([]);
   });
@@ -97,8 +103,78 @@ describe("validateConfig — tenant identity (security invariant #7)", () => {
 
   test("ensureApiKeyDeclaresTenantIdentity refuses one undeclared key", () => {
     const config = defaultConfig();
-    expect(() => ensureApiKeyDeclaresTenantIdentity(config, key({}))).toThrow(/tenant_identity_required/);
-    expect(() => ensureApiKeyDeclaresTenantIdentity(config, key({ organization_id: "o" }))).not.toThrow();
+    expect(() => ensureApiKeyDeclaresTenantIdentity(config, key({}))).toThrow(
+      /tenant_identity_required/,
+    );
+    expect(() =>
+      ensureApiKeyDeclaresTenantIdentity(config, key({ organization_id: "o" })),
+    ).not.toThrow();
+  });
+});
+
+/**
+ * The warn-only half of invariant #7.
+ *
+ * `validateConfig` returns `void` and a library on Workers has no logger, so
+ * these two postures CANNOT be surfaced by the load-time gate — they are
+ * surfaced by `tenancyPostureWarnings`, which `apps/control-plane`'s
+ * `admin_config_ops` validate response and `apps/cli`'s config gate both render.
+ * Untested, that function is a security warning nobody has ever read: it is the
+ * only thing that tells an operator their legacy opt-in is handing
+ * cross-tenant root to undeclared keys.
+ */
+describe("tenancy posture warnings (warn-only, security invariant #7)", () => {
+  const key = (extra: Record<string, unknown>) =>
+    apiKeySchema.parse({ id: "k", name: "k", key_env: "FERROGATE_KEY", ...extra });
+
+  test("a clean config warns about nothing", () => {
+    const config = configSchema.parse({ api_keys: [key({ organization_id: "org-1" })] });
+    expect(tenancyPostureWarnings(config)).toEqual([]);
+  });
+
+  test("the legacy opt-in NAMES every key it is silently making a platform operator", () => {
+    const config = configSchema.parse({
+      api_keys: [key({}), key({ id: "k2", organization_id: "org-1" })],
+      tenancy: { implicit_platform_operator: true },
+    });
+    const warnings = tenancyPostureWarnings(config);
+    expect(warnings).toHaveLength(1);
+    // The ids matter more than the prose: "some keys" is not actionable.
+    expect(warnings[0]).toContain("implicit_platform_operator = true");
+    expect(warnings[0]).toContain("UNRESTRICTED cross-tenant");
+    expect(warnings[0]).toContain(": k.");
+    expect(warnings[0]).not.toContain("k2");
+  });
+
+  test("a key that authorizes NOTHING is reported with the refusal it will hit", () => {
+    const config = configSchema.parse({ api_keys: [key({ platform_operator: false })] });
+    const warnings = tenancyPostureWarnings(config);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("tenant_identity_required: k.");
+  });
+
+  test("warnImplicitPlatformOperators is silent unless the opt-in is on", () => {
+    // The switch is the whole trigger: an undeclared key WITHOUT the opt-in is
+    // refused outright by `validateConfig`, so warning about it too would be
+    // noise on a config that cannot load.
+    const config = configSchema.parse({ api_keys: [key({})] });
+    expect(warnImplicitPlatformOperators(config)).toEqual([]);
+    expect(
+      warnImplicitPlatformOperators(
+        configSchema.parse({
+          api_keys: [key({})],
+          tenancy: { implicit_platform_operator: true },
+        }),
+      ),
+    ).toEqual(["k"]);
+  });
+
+  test("both postures at once are reported as two separate warnings", () => {
+    const config = configSchema.parse({
+      api_keys: [key({}), key({ id: "k2", platform_operator: false })],
+      tenancy: { implicit_platform_operator: true },
+    });
+    expect(tenancyPostureWarnings(config)).toHaveLength(2);
   });
 });
 
@@ -112,7 +188,9 @@ describe("validateConfig — x402 reconciler money-safety (issue #400)", () => {
 
   test("accepts a hold TTL above the floor and ignores a disabled reconciler", () => {
     expect(() =>
-      validateConfig(configSchema.parse({ x402_reconciler: { enabled: true, hold_ttl_secs: 3600 } })),
+      validateConfig(
+        configSchema.parse({ x402_reconciler: { enabled: true, hold_ttl_secs: 3600 } }),
+      ),
     ).not.toThrow();
     expect(() =>
       validateConfig(configSchema.parse({ x402_reconciler: { enabled: false, hold_ttl_secs: 1 } })),
@@ -181,7 +259,9 @@ describe("control-plane alias migration (issue #359)", () => {
 
 describe("validateConfig — listen address", () => {
   test("rejects an invalid listen address", () => {
-    expect(() => validateConfig(configSchema.parse({ listen: "not-an-addr" }))).toThrow(/listen address/);
+    expect(() => validateConfig(configSchema.parse({ listen: "not-an-addr" }))).toThrow(
+      /listen address/,
+    );
     expect(() => validateConfig(configSchema.parse({ listen: "localhost:8080" }))).not.toThrow();
   });
 });

@@ -475,6 +475,17 @@ ASSET_S3_BUCKET = ""
 ASSET_SCANNER = ""
 ASSET_SCANNER_ENDPOINT = ""
 
+# Telemetry egress (`src/telemetry/`). The TRANSPORT is the
+# `[[services]] TELEMETRY_COLLECTOR` binding declared further down; these two
+# are the knobs that ride with it. `TELEMETRY_TOKEN` is deliberately ABSENT —
+# it is a secret (`wrangler secret put`), and with no token every emit is a
+# no-op, which is what keeps `wrangler dev` and the E2E harness from talking to
+# anything. `TELEMETRY_ENDPOINT` (empty here) is the fallback HTTPS transport
+# for a collector that is not a service binding.
+TELEMETRY_ENDPOINT = ""
+TELEMETRY_SERVICE_NAME = "ferrogate-gateway"
+TELEMETRY_SIGNALS = "metric,trace,log"
+
 # ---------------------------------------------------------------------------
 # R2 — asset object storage
 #
@@ -714,6 +725,62 @@ tag = "v2"
 new_sqlite_classes = ["ProviderCircuitDurableObject"]
 
 # ---------------------------------------------------------------------------
+# SHADOW_BUDGET — the cross-isolate spend cap on shadow (mirror) traffic
+#
+# Read by `src/inference/shadow.ts::shadowBudgetFor`; the class is
+# `ShadowBudgetDurableObject` from `@ferrogate/routing/durable-objects`,
+# re-exported from `src/worker.ts` because workerd resolves `class_name`
+# against the ENTRY module (same startup rule, and the same vitest blind spot,
+# as the two classes above).
+#
+# WHY IT IS NOT OPTIONAL IN PRACTICE. Shadow mirroring spends real provider
+# money on traffic no client ever sees. The per-isolate fallback caps that
+# spend by a bounded factor (one budget per isolate rather than one globally),
+# which is deliberately not "no cap" but is also not the operator's configured
+# number. This is the only cross-isolate counter the platform offers.
+#
+# A SHIPPED MIGRATION IS IMMUTABLE, so this is a NEW tag `v3`, never an edit to
+# `v1`/`v2`. `new_sqlite_classes` for the same reason as the two above.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "SHADOW_BUDGET"
+class_name = "ShadowBudgetDurableObject"
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ShadowBudgetDurableObject"]
+
+# ---------------------------------------------------------------------------
+# TELEMETRY_COLLECTOR — the OTLP egress to `apps/telemetry`
+#
+# Read by `src/telemetry/emit.ts` (`telemetryFromEnv`), which is mounted twice:
+# app-wide in `GATEWAY_MIDDLEWARE` (all 31 operations) and inside
+# `src/inference/route-module.ts` (the six inference operations). The emitter
+# de-duplicates on the inbound `Request` object, so a request that passes
+# through both emits exactly once.
+#
+# A service binding rather than an HTTPS hop: no DNS/TLS handshake, never
+# leaves the colo, and the bearer token never crosses a public network.
+#
+# THE CREDENTIAL IS A SECRET AND IS NOT IN THIS FILE:
+#
+#     bunx wrangler secret put TELEMETRY_TOKEN   # == apps/telemetry COLLECTOR_TOKEN
+#
+# Without it `telemetryFromEnv` returns `NO_TELEMETRY` and every emit is a
+# no-op — the collector answers 401 to an unauthenticated ingest, so emitting
+# anyway would be a guaranteed round trip to a rejection on every request. That
+# is also why `wrangler dev --local` and the E2E harness emit nothing: they
+# have no secret, so nothing is ever sent anywhere.
+#
+# `TELEMETRY_ENDPOINT` in `[vars]` is the alternative transport (a collector on
+# another account, or `wrangler dev` against a locally-running apps/telemetry);
+# it is used only when this binding is absent.
+# ---------------------------------------------------------------------------
+[[services]]
+binding = "TELEMETRY_COLLECTOR"
+service = "ferrogate-telemetry"
+
+# ---------------------------------------------------------------------------
 # Cron — the billing-outbox recovery sweep
 #
 # Handled by `scheduled` on the default export of `src/worker.ts`, which calls
@@ -748,9 +815,13 @@ crons = ["* * * * *"]
 # rule is unchanged: a binding lands in the same commit as its first reader,
 # never before.
 #
-# `[[services]]` stays undeclared for the reason it always has: it names another
-# deployed Worker, and an unimplemented target turns every call into a runtime
-# error instead of a clean 503.
+# `[[services]]` is no longer undeclared: `TELEMETRY_COLLECTOR` above names
+# `apps/telemetry`, which HAS been a deployed Worker with a complete OTLP
+# receiver since wave 4 — the condition the old note deferred on ("it names
+# another deployed Worker, and an unimplemented target turns every call into a
+# runtime error"). The target exists, and `src/telemetry/emit.ts` swallows every
+# transport failure on `ctx.waitUntil`, so even a missing collector cannot reach
+# a client.
 #
 # Each remaining entry is introduced by the slice that first reads it:
 #

@@ -63,6 +63,8 @@ import {
 import type { EstimatedUsage } from "./estimate.js";
 import { inferenceRequestScope, unmeteredTokenGovernor } from "./identity.js";
 import type { TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
+import type { ShadowMirror } from "./shadow.js";
 import {
   adapterErrorMessage,
   callerCanUseModel,
@@ -268,6 +270,17 @@ function validateBody<S extends z.ZodTypeAny>(
  */
 interface PlannedRequest {
   readonly candidates: readonly AttemptCandidate[];
+  /**
+   * The MIRROR selected for this request (`server/shadow.rs::shadow_decision`),
+   * or `undefined` when no shadow is configured, the caller is not sampled, or
+   * the caller has no sticky identity.
+   *
+   * It rides on the plan rather than being recomputed at dispatch because the
+   * mirror is chosen from the FULL candidate list — `servableCandidates` has
+   * already stripped it out of `candidates` by then, which is exactly the
+   * property that keeps a mirror off the ladder.
+   */
+  readonly shadow?: ShadowMirror | undefined;
 }
 
 /** `ModelEndpointKind` for the eligibility gate. */
@@ -375,6 +388,12 @@ function planUpstream(
     return reject(400, "model_not_found", `unknown model ${logicalModel}`);
   }
 
+  // `server/shadow.rs::shadow_decision` (sampling half) — chosen from the FULL
+  // list, because the very next line removes the mirror from it. `undefined`
+  // whenever no shadow is configured, the caller is not in the sampled bucket,
+  // or the caller has no sticky identity to bucket on.
+  const shadow = shadowMirrorFor(resolved, caller, operation, logicalModel, body);
+
   // `AppState::canary_route` — promote the canary for the sticky subset of
   // callers it selects, drop it for everyone else — and then strip the SHADOW
   // route, which is a mirror and must never be servable to a client.
@@ -448,7 +467,7 @@ function planUpstream(
     );
   }
 
-  return { candidates };
+  return { candidates, ...(shadow === null ? {} : { shadow }) };
 }
 
 /**
@@ -459,14 +478,28 @@ function planUpstream(
  * validation and the `limits.dispatchTimeoutMs` deadline, which stay in
  * {@link dispatchUpstream} so that every dispatcher, including one a test
  * injects, is held to them.
+ *
+ * It is also THE ONE PLACE the shadow mirror is fired (`spawn_shadow_mirror`).
+ * All four dispatching handlers funnel through here, so the mirror cannot be
+ * forgotten on one surface the way four separate call sites would eventually
+ * allow — and firing it here rather than in the handlers puts it immediately
+ * BEFORE the primary `await`, i.e. concurrently with the client's own dispatch
+ * and never in front of it.
  */
 async function dispatchCandidates(
+  c: InferenceContext,
   deps: ResolvedInferenceDeps,
   planned: PlannedRequest,
-  signal: AbortSignal | undefined,
 ): Promise<
   { readonly route: PhysicalRoute; readonly response: Response } | InferenceRejection
 > {
+  const signal = clientSignal(c);
+  if (planned.shadow !== undefined) {
+    // Fire-and-forget. `spawnShadowMirror` returns synchronously, hands the
+    // work to `ctx.waitUntil`, and swallows every failure — see `shadow.ts`
+    // for the five mechanisms that keep a mirror off the client's response.
+    spawnShadowMirror(deps, planned.shadow, executionCtxOf(c));
+  }
   const outcome = await dispatchWithFailover({
     candidates: planned.candidates,
     circuit: deps.circuit,
@@ -580,6 +613,24 @@ function inboundSignal(request: Request): AbortSignal | undefined {
 /** The captured inbound signal for this request (see {@link InferenceEnv}). */
 function clientSignal(c: InferenceContext): AbortSignal | undefined {
   return c.get("inferenceClientSignal");
+}
+
+/**
+ * `c.executionCtx`, or `undefined` when the context was built without one.
+ *
+ * Reading it THROWS under `app.request(...)` in a unit test, so this is the
+ * only safe way to reach `waitUntil` from a handler. `route-module.ts` has the
+ * identical guard for the same reason; the two cannot share one because the
+ * outer and inner apps have different `Env` types.
+ */
+function executionCtxOf(
+  c: InferenceContext,
+): { waitUntil(work: Promise<unknown>): void } | undefined {
+  try {
+    return c.executionCtx;
+  } catch {
+    return undefined;
+  }
 }
 
 function isRejection(value: unknown): value is InferenceRejection {
@@ -935,7 +986,7 @@ async function handleOpenAiInference(
   }
   const admission = admissionHandle(admitted);
 
-  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  const dispatched = await dispatchCandidates(c, deps, planned);
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
@@ -1056,7 +1107,7 @@ async function handleMessages(
   }
   const admission = admissionHandle(admitted);
 
-  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  const dispatched = await dispatchCandidates(c, deps, planned);
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
@@ -1160,7 +1211,7 @@ async function handleEmbeddings(
   }
   const admission = admissionHandle(admitted);
 
-  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  const dispatched = await dispatchCandidates(c, deps, planned);
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
@@ -1242,7 +1293,7 @@ async function handleImages(
   }
   const admission = admissionHandle(admitted);
 
-  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  const dispatched = await dispatchCandidates(c, deps, planned);
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }

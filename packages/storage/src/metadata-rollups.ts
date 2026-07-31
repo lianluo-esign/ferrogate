@@ -7,21 +7,24 @@
  * the originating `organizationId` ("" = none/legacy) so a tenant admin sees only
  * their own breakdown; a platform operator sees all.
  *
- * PORT-TODO(inventory-data-billing §1.4.4 `usage_metadata_rollups`): this family
- * has NO durable twin. `sql/d1-ts/tenant/0001_init_tenant.sql` creates the table
- * and `test/d1/schema.test.ts` pins its columns, but no code ever writes a row:
- * `D1UsageLedger.persistUsageAggregate` (`./d1/usage-d1.ts`) batches
- * `tenant_contexts` + `usage_aggregate_rollups` + `usage_monthly_rollups` and
- * stops there, and nothing implements Rust's `list_usage_metadata_rollups`
- * (`crates/ferrogate-storage/src/control_plane_store_d1/usage.rs`). Why it
- * matters: metadata rollups are the ONLY aggregation dimension orthogonal to the
- * tenant/project/workspace/key scope chain — Rust's
- * `state_quota_and_policy.rs::list_usage_metadata_rollups` is how an operator
- * answers "what did feature X / customer Y cost" (#171/#226). Today that question
- * has no answer on this platform and the spend is unattributable after the fact.
- * The close is one more statement per metadata pair inside the SAME
- * `persistUsageAggregate` batch (so attribution cannot land without the spend it
- * explains) plus a D1 read for the admin list.
+ * CLOSED — former marker inventory-data-billing §1.4.4. The durable twin now
+ * exists: `D1UsageLedger.persistUsageAggregate` (`./d1/usage-d1.ts`) appends one
+ * `usage_metadata_rollups` upsert per metadata pair to the SAME atomic batch
+ * that writes `tenant_contexts` + `usage_aggregate_rollups` +
+ * `usage_monthly_rollups`, so the attribution cannot commit without the spend it
+ * explains and the spend cannot commit without its attribution; and
+ * `D1UsageLedger.listUsageMetadataRollups` is the admin read (Rust
+ * `list_usage_metadata_rollups`, `control_plane_store_d1/usage.rs`), ordered
+ * `period_month ASC, metadata_value ASC` like Postgres — the same order this
+ * module's in-memory twin produces — and filtered by
+ * `organization_id` so one tenant cannot read another's breakdown.
+ *
+ * The one-batch property is the load-bearing claim and it is pinned by
+ * mutation in `test/d1/usage-d1.test.ts` > "metadata rollups ride the same
+ * batch": splitting the metadata write into a second `batch()` turns that test
+ * red. The store below stays as the executable in-memory specification the D1
+ * twin is asserted to agree with — same fan-out, same sorted key order, same
+ * `""`-organization rule.
  */
 import { usageMetadataRollupId } from "./ids.js";
 

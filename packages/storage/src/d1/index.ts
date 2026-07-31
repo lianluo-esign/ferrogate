@@ -18,6 +18,10 @@
  * | `quota.ts` rollup DTOs        | `D1UsageLedger`               |
  * | `MemoryReferenceGuardedDeletes` | `D1ReferenceGuardedDeletes` |
  * | `MemoryBudgetAlertStore`      | `D1BudgetAlertStore`          |
+ * | `MemoryAssetStore`            | `D1AssetMetadataStore`        |
+ * | `site-domain.ts` (pure rule)  | `D1SiteDomainVerificationStore` |
+ * | `retention.ts` planners       | `D1RetentionPolicyStore` + `sweepAssetRetention` |
+ * | `agent-schedule.ts` engine    | `D1AgentScheduleStore`        |
  *
  * The in-memory stores are not deprecated by these: they remain the executable
  * specification of the invariant, and the D1 tests assert the SAME observable
@@ -32,3 +36,7 @@ export * from "./billing-d1.js";
 export * from "./references-d1.js";
 export * from "./assets-r2.js";
 export * from "./budget-alerts-d1.js";
+export * from "./assets-d1.js";
+export * from "./site-domain-d1.js";
+export * from "./retention-d1.js";
+export * from "./agent-schedule-d1.js";

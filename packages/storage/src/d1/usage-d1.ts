@@ -1,3 +1,4 @@
+import { StorageError } from "../errors.js";
 /**
  * `D1UsageLedger` — the metering/usage capture leg of the main path.
  *
@@ -59,10 +60,10 @@
  * `test/d1/usage-d1.test.ts` pins the additive (non-idempotent) semantics of
  * this batch so the approximation cannot be mistaken for exactly-once.
  */
-import { periodMonthFromUnix, usageMonthlyRollupId } from "../ids.js";
+import { periodMonthFromUnix, usageMetadataRollupId, usageMonthlyRollupId } from "../ids.js";
+import type { StoredUsageMetadataRollup } from "../metadata-rollups.js";
 import type { QuotaScopeKind, StoredUsageMonthlyRollup } from "../quota.js";
 import { type TenantDatabaseHandle, requireAtomicBatch } from "../tenant-router.js";
-import { StorageError } from "../errors.js";
 import { bindOptional, d1Error } from "./rows.js";
 
 /** The tenant/project/api-key identity a usage aggregate is attributed to. */
@@ -95,6 +96,30 @@ export interface UsageAggregateWrite {
    * double-count a request.
    */
   scopes: readonly { scopeType: QuotaScopeKind; scopeId: string }[];
+  /**
+   * Caller-supplied metadata pairs this call is ALSO attributed to (#171/#226) —
+   * `{"feature": "search", "customer": "acme"}`. Each pair increments one
+   * `usage_metadata_rollups` row INSIDE the same batch as the spend, so
+   * attribution can never land without the spend it explains (and vice versa).
+   *
+   * Omitted / empty is the ordinary case and adds no statements. Iterated in
+   * sorted key order so the fan-out is deterministic, matching
+   * {@link ../metadata-rollups.js MemoryMetadataRollupStore} (Rust `BTreeMap`).
+   */
+  metadata?: ReadonlyMap<string, string>;
+}
+
+/**
+ * Metadata pairs in sorted-key order, so the statement fan-out is deterministic
+ * (Rust iterates a `BTreeMap`). Determinism is not cosmetic here: two isolates
+ * writing the same pairs in different orders would take the SQLite row locks in
+ * different orders, which is how a deadlock is built.
+ */
+function sortedMetadataPairs(
+  metadata: ReadonlyMap<string, string> | undefined,
+): [string, string][] {
+  if (metadata === undefined || metadata.size === 0) return [];
+  return [...metadata.keys()].sort().map((key) => [key, metadata.get(key) as string]);
 }
 
 export class D1UsageLedger {
@@ -119,6 +144,11 @@ export class D1UsageLedger {
     const periodMonth = periodMonthFromUnix(write.occurredAtUnix);
     const aggregateId = `${write.context.id}:${write.logicalModel}:${write.provider}`;
     const errorDelta = write.isError ? 1 : 0;
+    // `""` (not NULL) for an org-less/legacy context: the deterministic rollup
+    // id is `{period}:{org}:{key}:{value}`, and a NULL segment would make two
+    // different rows collide on one id. The column defaults to `''` for the
+    // same reason.
+    const organizationId = write.context.organizationId ?? "";
 
     const statements: D1PreparedStatement[] = [
       // 1. The attribution row. `DO NOTHING` because a context's identity
@@ -201,10 +231,123 @@ export class D1UsageLedger {
       );
     }
 
+    // 4. One metadata rollup row per caller metadata pair (#171/#226). These
+    //    are in the SAME batch as the monthly rollups on purpose: the metadata
+    //    breakdown is a re-slice of the very spend statement 3 recorded, so a
+    //    world where one committed and the other did not is a world where
+    //    "what did feature X cost" disagrees with the invoice.
+    for (const [metadataKey, metadataValue] of sortedMetadataPairs(write.metadata)) {
+      statements.push(
+        this.db
+          .prepare(
+            "INSERT INTO usage_metadata_rollups " +
+              "(id, period_month, organization_id, metadata_key, metadata_value, prompt_tokens, " +
+              " completion_tokens, total_tokens, cost_usd, request_count, error_count, " +
+              " updated_at_unix) " +
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) " +
+              "ON CONFLICT (id) DO UPDATE SET " +
+              "prompt_tokens = usage_metadata_rollups.prompt_tokens + excluded.prompt_tokens, " +
+              "completion_tokens = usage_metadata_rollups.completion_tokens + " +
+              "                    excluded.completion_tokens, " +
+              "total_tokens = usage_metadata_rollups.total_tokens + excluded.total_tokens, " +
+              "cost_usd = usage_metadata_rollups.cost_usd + excluded.cost_usd, " +
+              "request_count = usage_metadata_rollups.request_count + excluded.request_count, " +
+              "error_count = usage_metadata_rollups.error_count + excluded.error_count, " +
+              "updated_at_unix = max(usage_metadata_rollups.updated_at_unix, " +
+              "                      excluded.updated_at_unix)",
+          )
+          .bind(
+            usageMetadataRollupId(periodMonth, organizationId, metadataKey, metadataValue),
+            periodMonth,
+            organizationId,
+            metadataKey,
+            metadataValue,
+            write.promptTokens,
+            write.completionTokens,
+            write.totalTokens,
+            write.costUsd,
+            errorDelta,
+            write.occurredAtUnix,
+          ),
+      );
+    }
+
     try {
       await this.db.batch(statements);
     } catch (error) {
       throw d1Error("persist_usage_aggregate", error);
+    }
+  }
+
+  /**
+   * The metadata breakdown for one metadata key (ports Rust
+   * `list_usage_metadata_rollups`, #171/#226) — "what did each value of
+   * `feature` cost this month".
+   *
+   * `organizationId` is the tenancy filter, and it is NOT optional-as-in-
+   * "everything": passing an org restricts the read to that org's rows, exactly
+   * as Rust's `Some(org)` arm does, so a tenant admin cannot read another
+   * tenant's breakdown out of a shared database. Passing `undefined` is the
+   * platform-operator read across every org in THIS tenant database.
+   *
+   * `""` is a real, distinct organization id — the pre-#226 / platform-scoped
+   * rows — and is queryable as itself, which is why the schema defaults the
+   * column to `''` rather than NULL.
+   *
+   * Ordered `period_month ASC, metadata_value ASC` — the Rust/Postgres order,
+   * and the SAME order `MemoryMetadataRollupStore` produces, so the two backends
+   * cannot be observed to disagree.
+   */
+  async listUsageMetadataRollups(
+    metadataKey: string,
+    organizationId?: string,
+  ): Promise<StoredUsageMetadataRollup[]> {
+    const columns =
+      "id, period_month, organization_id, metadata_key, metadata_value, prompt_tokens, " +
+      "completion_tokens, total_tokens, cost_usd, request_count, error_count, updated_at_unix";
+    try {
+      const statement =
+        organizationId === undefined
+          ? this.db
+              .prepare(
+                `SELECT ${columns} FROM usage_metadata_rollups WHERE metadata_key = ? ORDER BY period_month ASC, metadata_value ASC`,
+              )
+              .bind(metadataKey)
+          : this.db
+              .prepare(
+                `SELECT ${columns} FROM usage_metadata_rollups WHERE metadata_key = ? AND organization_id = ? ORDER BY period_month ASC, metadata_value ASC`,
+              )
+              .bind(metadataKey, organizationId);
+      const rows = await statement.all<{
+        id: string;
+        period_month: string;
+        organization_id: string;
+        metadata_key: string;
+        metadata_value: string;
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+        cost_usd: number;
+        request_count: number;
+        error_count: number;
+        updated_at_unix: number;
+      }>();
+      return rows.results.map((row) => ({
+        id: row.id,
+        periodMonth: row.period_month,
+        organizationId: row.organization_id,
+        metadataKey: row.metadata_key,
+        metadataValue: row.metadata_value,
+        promptTokens: row.prompt_tokens,
+        completionTokens: row.completion_tokens,
+        totalTokens: row.total_tokens,
+        costUsd: row.cost_usd,
+        requestCount: row.request_count,
+        errorCount: row.error_count,
+        updatedAtUnix: row.updated_at_unix,
+      }));
+    } catch (error) {
+      throw d1Error("list_usage_metadata_rollups", error);
     }
   }
 

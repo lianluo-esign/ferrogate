@@ -141,7 +141,8 @@ export function parseHttpScanResponse(body: string): ScanVerdict {
       reason: `scanner reply not JSON: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const record =
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
   const verdict = record.verdict;
   if (verdict === "clean") return { kind: "clean" };
   if (verdict === "infected") {

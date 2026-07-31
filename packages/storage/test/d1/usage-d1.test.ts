@@ -9,6 +9,7 @@ import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   D1UsageLedger,
+  MemoryMetadataRollupStore,
   type TenantDatabaseHandle,
   type UsageAggregateWrite,
   periodMonthFromUnix,
@@ -253,5 +254,200 @@ describe("D1UsageLedger — sumApiKeyCommittedTokens", () => {
     );
     await ledger.persistUsageAggregate(call());
     expect(await ledger.sumApiKeyCommittedTokens("key_1")).toBe(140);
+  });
+});
+
+/**
+ * `usage_metadata_rollups` (#171/#226) — the ONLY aggregation dimension
+ * orthogonal to the tenant/project/workspace/key scope chain, and therefore the
+ * only way to answer "what did feature X / customer Y cost".
+ *
+ * The interesting claim is not that a row appears. It is that the metadata
+ * attribution and the spend it explains are ONE commit: a world where the
+ * monthly rollup landed and the metadata breakdown did not is a world where the
+ * breakdown silently disagrees with the invoice, and nothing surfaces it.
+ */
+describe("D1UsageLedger — metadata rollups", () => {
+  const metadata = new Map([
+    ["feature", "search"],
+    ["customer", "acme"],
+  ]);
+
+  test("one settled call increments ONE row per metadata pair", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call({ metadata }));
+    const rows = await ledger.listUsageMetadataRollups("feature", "org_1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.metadataValue).toBe("search");
+    expect(rows[0]?.totalTokens).toBe(140);
+    expect(rows[0]?.promptTokens).toBe(100);
+    expect(rows[0]?.completionTokens).toBe(40);
+    expect(rows[0]?.costUsd).toBeCloseTo(0.002, 10);
+    expect(rows[0]?.requestCount).toBe(1);
+    expect(rows[0]?.errorCount).toBe(0);
+    expect(rows[0]?.periodMonth).toBe(PERIOD);
+    // The second pair is its own row under its own key.
+    const customers = await ledger.listUsageMetadataRollups("customer", "org_1");
+    expect(customers.map((row) => row.metadataValue)).toEqual(["acme"]);
+  });
+
+  test("accumulates additively across calls, like every other counter", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call({ metadata }));
+    await ledger.persistUsageAggregate(call({ metadata, isError: true }));
+    const [row] = await ledger.listUsageMetadataRollups("feature", "org_1");
+    expect(row?.totalTokens).toBe(280);
+    expect(row?.requestCount).toBe(2);
+    expect(row?.errorCount).toBe(1);
+  });
+
+  test("a call with no metadata writes no metadata rows at all", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call());
+    expect(await ledger.listUsageMetadataRollups("feature")).toEqual([]);
+  });
+
+  test("orders period ASC, value ASC — and AGREES with the in-memory twin", async () => {
+    // The two backends are asserted to be interchangeable specifications of the
+    // same behavior, so an ORDER BY that disagrees with the reference store is a
+    // real divergence, not a cosmetic one. Two periods are needed to see it: a
+    // single-period fixture cannot tell ASC from DESC.
+    const ledger = new D1UsageLedger(handleA);
+    const june = 1_781_395_200; // 2026-06-10
+    await ledger.persistUsageAggregate(
+      call({ metadata: new Map([["feature", "search"]]), occurredAtUnix: june }),
+    );
+    await ledger.persistUsageAggregate(
+      call({ metadata: new Map([["feature", "chat"]]), occurredAtUnix: NOW }),
+    );
+    await ledger.persistUsageAggregate(
+      call({ metadata: new Map([["feature", "aaa"]]), occurredAtUnix: NOW }),
+    );
+    const durable = await ledger.listUsageMetadataRollups("feature", "org_1");
+    expect(durable.map((r) => `${r.periodMonth}/${r.metadataValue}`)).toEqual([
+      "2026-06/search",
+      "2026-07/aaa",
+      "2026-07/chat",
+    ]);
+
+    const memory = new MemoryMetadataRollupStore();
+    const delta = {
+      promptTokens: 100,
+      completionTokens: 40,
+      totalTokens: 140,
+      costUsd: 0.002,
+      isError: false,
+    };
+    memory.incrementUsageMetadataRollups(
+      "org_1",
+      new Map([["feature", "search"]]),
+      periodMonthFromUnix(june),
+      delta,
+      june,
+    );
+    for (const value of ["chat", "aaa"]) {
+      memory.incrementUsageMetadataRollups(
+        "org_1",
+        new Map([["feature", value]]),
+        PERIOD,
+        delta,
+        NOW,
+      );
+    }
+    expect(
+      memory
+        .listUsageMetadataRollups("feature", "org_1")
+        .map((r) => `${r.periodMonth}/${r.metadataValue}`),
+    ).toEqual(durable.map((r) => `${r.periodMonth}/${r.metadataValue}`));
+  });
+
+  test("different values of one key are different rows", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call({ metadata: new Map([["feature", "search"]]) }));
+    await ledger.persistUsageAggregate(call({ metadata: new Map([["feature", "chat"]]) }));
+    const rows = await ledger.listUsageMetadataRollups("feature", "org_1");
+    // ORDER BY period_month DESC, metadata_value ASC.
+    expect(rows.map((row) => row.metadataValue)).toEqual(["chat", "search"]);
+  });
+
+  test("the organization filter is a tenancy boundary, not a convenience", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call({ metadata: new Map([["feature", "search"]]) }));
+    await ledger.persistUsageAggregate(
+      call({
+        context: { id: "ctx_other", organizationId: "org_2", apiKeyId: "key_9" },
+        metadata: new Map([["feature", "secret-project"]]),
+      }),
+    );
+    // org_1 must not be able to see org_2's breakdown...
+    expect(
+      (await ledger.listUsageMetadataRollups("feature", "org_1")).map((r) => r.metadataValue),
+    ).toEqual(["search"]);
+    // ...while the unfiltered platform-operator read sees both.
+    expect((await ledger.listUsageMetadataRollups("feature")).map((r) => r.metadataValue)).toEqual([
+      "search",
+      "secret-project",
+    ]);
+  });
+
+  test('an org-less context is the distinct "" organization, not a NULL that collides', async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(
+      call({
+        context: { id: "ctx_legacy" },
+        metadata: new Map([["feature", "search"]]),
+        totalTokens: 7,
+      }),
+    );
+    await ledger.persistUsageAggregate(call({ metadata: new Map([["feature", "search"]]) }));
+    const legacy = await ledger.listUsageMetadataRollups("feature", "");
+    const scoped = await ledger.listUsageMetadataRollups("feature", "org_1");
+    expect(legacy).toHaveLength(1);
+    expect(scoped).toHaveLength(1);
+    // Two DIFFERENT rows for the same key/value: the org is part of the id.
+    expect(legacy[0]?.totalTokens).toBe(7);
+    expect(scoped[0]?.totalTokens).toBe(140);
+  });
+
+  test("metadata rollups ride the SAME batch as the spend (statement count)", async () => {
+    // The mutation this test exists to catch is moving the metadata upsert into
+    // a second `batch()`. One `batch()` carrying context + aggregate + 2 scopes
+    // + 2 metadata pairs = 6 statements; a split writes 4 then 2.
+    const batchSizes: number[] = [];
+    const spy = new Proxy(handleA.db, {
+      get(target, property, receiver) {
+        if (property === "batch") {
+          return (statements: D1PreparedStatement[]) => {
+            batchSizes.push(statements.length);
+            return target.batch(statements);
+          };
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    const spied: TenantDatabaseHandle = { ...handleA, db: spy as D1Database };
+    await new D1UsageLedger(spied).persistUsageAggregate(call({ metadata }));
+    expect(batchSizes).toEqual([6]);
+  });
+
+  test("a rejected spend rolls the metadata attribution back with it", async () => {
+    // The independent half of the same claim, and the one that states the
+    // CONSEQUENCE: an invalid `scope_type` violates the CHECK on
+    // `usage_monthly_rollups`, so the batch is rejected. A metadata write in a
+    // separate batch survives that rejection and leaves attribution for spend
+    // that was never recorded.
+    await expect(
+      new D1UsageLedger(handleA).persistUsageAggregate(
+        call({
+          metadata: new Map([["feature", "doomed"]]),
+          scopes: [{ scopeType: "not_a_scope" as never, scopeId: "x" }],
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(
+      (await new D1UsageLedger(handleA).listUsageMetadataRollups("feature")).map(
+        (row) => row.metadataValue,
+      ),
+    ).not.toContain("doomed");
   });
 });

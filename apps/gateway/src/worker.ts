@@ -85,3 +85,19 @@ export { RateLimiterDurableObject } from "./ratelimit/index.js";
  * never from a caller, so no request input can choose a DO id.
  */
 export { ProviderCircuitDurableObject } from "./inference/index.js";
+
+/**
+ * The `SHADOW_BUDGET` Durable Object class — the cross-isolate spend cap on
+ * shadow (mirror) traffic (`@ferrogate/routing/durable-objects`, reached from
+ * `src/inference/shadow.ts::shadowBudgetFor`).
+ *
+ * Same startup rule as the two classes above: workerd resolves the
+ * `[[durable_objects.bindings]]` `class_name` against THIS module, so without
+ * this line `wrangler dev` fails with "Durable Object class
+ * ShadowBudgetDurableObject not found" while the vitest suite stays green.
+ *
+ * Unbound, `shadowBudgetFor` degrades to a PER-ISOLATE ledger, which caps
+ * shadow spend by a bounded factor rather than absolutely — deliberately not
+ * "no cap". Bound, it is the only cross-isolate cap the platform offers.
+ */
+export { ShadowBudgetDurableObject } from "@ferrogate/routing/durable-objects";

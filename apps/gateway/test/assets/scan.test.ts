@@ -17,7 +17,11 @@
  * tests go red.
  */
 import { afterEach, describe, expect, test } from "vitest";
-import { assetDepsFromEnv, assetRouteModule, buildAssetService } from "../../src/assets/handlers.js";
+import {
+  assetDepsFromEnv,
+  assetRouteModule,
+  buildAssetService,
+} from "../../src/assets/handlers.js";
 import {
   type AssetScreener,
   BuiltinEicarScreener,
@@ -26,9 +30,9 @@ import {
 } from "../../src/assets/ports.js";
 import {
   type AssetContentScanner,
-  type ScanVerdict,
   DeferringScreener,
   HttpContentScanner,
+  type ScanVerdict,
   ScannerBackedScreener,
   assetScreenerFromEnv,
   contentScannerFromEnv,
@@ -37,7 +41,7 @@ import {
   unavailablePolicyFromEnv,
 } from "../../src/assets/scan.js";
 import { createGatewayApp } from "../../src/routes/index.js";
-import { CTX, callerFor, bytes, harness } from "./helpers.js";
+import { CTX, bytes, callerFor, harness } from "./helpers.js";
 
 const SCANNER_URL = "https://scanner.test/scan";
 
@@ -288,9 +292,7 @@ describe("ScannerBackedScreener through the real putAsset path", () => {
   });
 
   test("clean ⇒ visible and pullable", async () => {
-    const { service } = serviceWith(
-      new ScannerBackedScreener(new FixedScanner({ kind: "clean" })),
-    );
+    const { service } = serviceWith(new ScannerBackedScreener(new FixedScanner({ kind: "clean" })));
     const pushed = await push(service, "harmless");
     expect(pushed.ok === true && pushed.body.asset.visibility).toBe("visible");
     const read = await pull(service);
@@ -366,7 +368,9 @@ describe("assetScreenerFromEnv / contentScannerFromEnv", () => {
   test('ASSET_SCANNER="http" with NO endpoint ⇒ null — never a scanner pointed at nothing', () => {
     expect(contentScannerFromEnv({ ASSET_SCANNER: "http" })).toBeNull();
     expect(assetScreenerFromEnv({ ASSET_SCANNER: "http" })).toBeNull();
-    expect(assetScreenerFromEnv({ ASSET_SCANNER: "http", ASSET_SCANNER_ENDPOINT: "  " })).toBeNull();
+    expect(
+      assetScreenerFromEnv({ ASSET_SCANNER: "http", ASSET_SCANNER_ENDPOINT: "  " }),
+    ).toBeNull();
   });
 
   test("an unknown backend name keeps the builtin", () => {
@@ -477,6 +481,8 @@ describe("assetDepsFromEnv wires the configured screener into the deployed app",
     );
     expect(response.status).toBe(422);
     const body = (await response.json()) as { error: { code: string; message: string } };
-    expect(body.error.message).toBe("scanner unavailable (fail-closed): scanner returned status 504");
+    expect(body.error.message).toBe(
+      "scanner unavailable (fail-closed): scanner returned status 504",
+    );
   });
 });

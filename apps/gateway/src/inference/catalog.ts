@@ -38,6 +38,11 @@
  * rule `parseJsonVar` follows for the auth tables in `src/adapters.ts`.
  */
 import { z } from "zod";
+import {
+  type ProviderSecretResolution,
+  providerSecretRefusal,
+  resolveProviderSecret,
+} from "../keys/index.js";
 import { canonicalProviderKind, defaultAuthScheme } from "./adapters.js";
 import type { OpenRouterRoute } from "./adapters.js";
 import { InMemoryModelResolver, emptyModelResolver } from "./defaults.js";
@@ -80,7 +85,12 @@ export const providerRecordSchema = z
     kind: z.string().trim().min(1),
     /** `ProviderConfig.base_url`; adapters append their endpoint path. */
     base_url: z.string().trim().url(),
-    /** Name of the Worker SECRET binding holding the credential. */
+    /**
+     * Where the provider's credential comes from: a Worker SECRET binding NAME
+     * (`OPENAI_API_KEY`, the legacy form), or a secret REFERENCE resolved
+     * through `@ferrogate/secrets` — `env://NAME` or `cf://<store>/<name>`.
+     * Never the value. See `src/keys/provider-secrets.ts`.
+     */
     api_key_var: z.string().trim().min(1).optional(),
     /** Credential scheme override; defaults to the family's Rust hard-coding. */
     auth_scheme: z.enum(["bearer", "x-api-key"]).optional(),
@@ -261,13 +271,22 @@ function parseTable<T extends z.ZodTypeAny>(
   return { ok: true, rows: result.data as z.infer<T>[] };
 }
 
-/** Read a Worker SECRET binding by name; `undefined` unless it is a non-empty string. */
+/**
+ * Resolve a credential the provider table NAMED, through `@ferrogate/secrets`.
+ *
+ * `reference` is the operator's own text: a bare Worker binding name (the
+ * legacy form, unchanged), or an `env://` / `cf://` / `vault://` secret
+ * reference. See `src/keys/provider-secrets.ts` for the resolution table, the
+ * fail-closed rule, and the two PORT-TODO limits that remain.
+ *
+ * Fails CLOSED — an unresolvable reference refuses the WHOLE catalog at every
+ * call site below, so a provider can never dispatch with an empty credential.
+ */
 function boundSecret(
   secrets: Readonly<Record<string, unknown>>,
-  name: string,
-): string | undefined {
-  const value = secrets[name];
-  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+  reference: string,
+): ProviderSecretResolution {
+  return resolveProviderSecret(secrets, reference);
 }
 
 /** The composite credentials a `bedrock` / `vertex` provider dispatches with. */
@@ -328,28 +347,39 @@ function providerCredentials(
       };
     }
     const secretAccessKey = boundSecret(secrets, provider.aws_secret_access_key_var);
-    if (secretAccessKey === undefined) {
+    if (!secretAccessKey.ok) {
       return {
         ok: false,
-        reason: `provider ${provider.name} names aws_secret_access_key_var ${provider.aws_secret_access_key_var}, which is not bound`,
+        reason: providerSecretRefusal(
+          provider.name,
+          "aws_secret_access_key_var",
+          provider.aws_secret_access_key_var,
+          secretAccessKey,
+        ),
       };
     }
     let sessionToken: string | undefined;
     if (provider.aws_session_token_var !== undefined) {
-      sessionToken = boundSecret(secrets, provider.aws_session_token_var);
-      if (sessionToken === undefined) {
+      const resolved = boundSecret(secrets, provider.aws_session_token_var);
+      if (!resolved.ok) {
         return {
           ok: false,
-          reason: `provider ${provider.name} names aws_session_token_var ${provider.aws_session_token_var}, which is not bound`,
+          reason: providerSecretRefusal(
+            provider.name,
+            "aws_session_token_var",
+            provider.aws_session_token_var,
+            resolved,
+          ),
         };
       }
+      sessionToken = resolved.value;
     }
     return {
       ok: true,
       credentials: {
         aws: {
           accessKeyId: provider.aws_access_key_id,
-          secretAccessKey,
+          secretAccessKey: secretAccessKey.value,
           ...(sessionToken === undefined ? {} : { sessionToken }),
           region: provider.region,
         },
@@ -377,17 +407,22 @@ function providerCredentials(
       };
     }
     const accessToken = boundSecret(secrets, provider.gcp_access_token_var);
-    if (accessToken === undefined) {
+    if (!accessToken.ok) {
       return {
         ok: false,
-        reason: `provider ${provider.name} names gcp_access_token_var ${provider.gcp_access_token_var}, which is not bound`,
+        reason: providerSecretRefusal(
+          provider.name,
+          "gcp_access_token_var",
+          provider.gcp_access_token_var,
+          accessToken,
+        ),
       };
     }
     return {
       ok: true,
       credentials: {
         gcp: {
-          accessToken,
+          accessToken: accessToken.value,
           projectId: provider.gcp_project_id,
           location: provider.region,
         },
@@ -406,13 +441,15 @@ function providerCredentials(
  * Join the two tables into the flattened {@link PhysicalRoute}s the dispatch
  * seam carries, resolving each provider's credential out of `secrets`.
  *
- * `secrets` is the Worker `env`; a provider's `api_key_var` is looked up there
- * so the credential value never appears in either table. A provider that names
- * a binding that is absent (or not a non-empty string) is a MISCONFIGURATION,
- * not an anonymous provider: it refuses the whole catalog, because silently
- * dispatching an unauthenticated request to a paid upstream is the failure mode
- * this check exists to prevent. The same rule covers the composite
- * `bedrock`/`vertex` credentials — see {@link providerCredentials}.
+ * `secrets` is the Worker `env`; a provider's `api_key_var` is resolved against
+ * it through `@ferrogate/secrets` ({@link boundSecret}), so the credential value
+ * never appears in either table and an operator may write either a bare binding
+ * name or an `env://` / `cf://` reference. A provider whose credential does not
+ * resolve is a MISCONFIGURATION, not an anonymous provider: it refuses the whole
+ * catalog, because silently dispatching an unauthenticated request to a paid
+ * upstream is the failure mode this check exists to prevent. The same rule
+ * covers the composite `bedrock`/`vertex` credentials — see
+ * {@link providerCredentials}.
  */
 export function buildModelCatalog(
   providers: readonly ProviderRecord[],
@@ -488,14 +525,19 @@ export function buildModelCatalog(
 
       let apiKey: string | undefined;
       if (provider.api_key_var !== undefined) {
-        const value = secrets[provider.api_key_var];
-        if (typeof value !== "string" || value.trim() === "") {
+        const resolved = boundSecret(secrets, provider.api_key_var);
+        if (!resolved.ok) {
           return {
             ok: false,
-            reason: `provider ${provider.name} names api_key_var ${provider.api_key_var}, which is not bound`,
+            reason: providerSecretRefusal(
+              provider.name,
+              "api_key_var",
+              provider.api_key_var,
+              resolved,
+            ),
           };
         }
-        apiKey = value;
+        apiKey = resolved.value;
       }
 
       const credentials = credentialsByName.get(provider.name) ?? {};

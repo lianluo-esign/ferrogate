@@ -16,12 +16,12 @@ import {
   selectVariant,
 } from "../../src/assets/registry.js";
 import {
+  type SemverRange,
+  type SemverVersion,
   compareVersions,
   parseRange,
   parseVersion,
   rangeMatches,
-  type SemverRange,
-  type SemverVersion,
 } from "../../src/assets/semver.js";
 
 function row(version: string, over: Partial<StoredAsset> = {}): StoredAsset {

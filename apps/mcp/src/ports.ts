@@ -651,7 +651,7 @@ export class InMemoryAssets implements AssetReaderPort {
 
   // eslint-disable-next-line @typescript-eslint/require-await
   async list(tenantId: string): Promise<readonly StoredAsset[]> {
-    const prefix = `${tenantId} `;
+    const prefix = `${tenantId}\u0000`;
     return [...this.#assets.entries()]
       .filter(([key]) => key.startsWith(prefix))
       .map(([, entry]) => entry.asset);
@@ -676,7 +676,7 @@ export class InMemoryAssets implements AssetReaderPort {
 }
 
 function assetKey(tenantId: string, assetType: string, name: string, version: string): string {
-  return `${tenantId} ${assetType} ${name} ${version}`;
+  return `${tenantId}\u0000${assetType}\u0000${name}\u0000${version}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,7 +1203,7 @@ export class InMemoryCredentialStore implements McpCredentialStorePort {
 }
 
 function actorKey(actor: McpIdentityActor, serverName: string): string {
-  return `${actor.tenantId} ${actor.workspaceId} ${actor.userId} ${serverName}`;
+  return `${actor.tenantId}\u0000${actor.workspaceId}\u0000${actor.userId}\u0000${serverName}`;
 }
 
 /** Derives the stable credential id. Port of `state_mcp_identity::credential_id`. */

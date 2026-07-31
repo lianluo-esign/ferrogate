@@ -42,15 +42,18 @@
  * channel, and every subsequent pull on that channel resolves to a version whose
  * bytes are gone — a 404 on a name the operator believes is published.
  *
- * PORT-TODO(inventory-data-billing §1.4.6 `asset_channels` write path) — the
- * guard exists; the thing it guards does not yet WRITE. Nothing in this package
- * or in `apps/gateway` inserts an `asset_channels` row (see the marker on
- * `ChannelMoveOutcome` in `./assets.ts`), so today the guard can only ever
- * observe zero pointers and always permits the delete. That is the correct
- * behaviour for the current data — a table with no rows references nothing —
- * but it means the REFUSAL arm is exercised by tests that seed the table
- * directly rather than by a production write path. It lands with the
- * `D1AssetMetadataStore`.
+ * CLOSED — former marker inventory-data-billing §1.4.6 `asset_channels` write
+ * path — the thing this guard guards now WRITES.
+ * {@link ./d1/assets-d1.js D1AssetMetadataStore} inserts `asset_channels` rows
+ * via `upsertAssetChannel` and the guarded `moveAssetChannelIfResolvable`, so
+ * the REFUSAL arm is no longer reachable only from a hand-seeded table: the
+ * end-to-end test in `test/d1/assets-d1.test.ts` publishes a version, MOVES a
+ * channel onto it through the production write path, and then asserts
+ * `deleteAssetVariantIfUnreferenced` refuses and NAMES that channel.
+ *
+ * The two guards are deliberately complementary and both directions are pinned:
+ * this one refuses to delete a variant a channel names, and
+ * `setAssetVersionYank` refuses to yank a version a channel names.
  */
 
 /** Reference counts observed for a project id in one database. */

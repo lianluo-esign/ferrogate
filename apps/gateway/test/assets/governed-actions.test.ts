@@ -54,11 +54,7 @@ function gateway(requireVar?: string) {
     ASSET_ENTITLEMENTS: ENTITLEMENTS,
   };
   if (requireVar !== undefined) env["FG_REQUIRE_AGENT_RUN_ID"] = requireVar;
-  return (
-    token: string,
-    version: string,
-    runId?: string,
-  ): Promise<Response> => {
+  return (token: string, version: string, runId?: string): Promise<Response> => {
     const headers = new Headers({
       authorization: `Bearer ${token}`,
       "content-type": "application/octet-stream",
@@ -114,7 +110,10 @@ describe("tenantRequiresDeclaredActionId — Rust `tenant_requires_declared_acti
 });
 
 describe("governedActionTenantKey — Rust `governed_action_tenant_key`", () => {
-  const auth = (tenancy: Partial<AuthContext["tenancy"]>, subject: string | null = null): AuthContext => ({
+  const auth = (
+    tenancy: Partial<AuthContext["tenancy"]>,
+    subject: string | null = null,
+  ): AuthContext => ({
     subject,
     tenancy: {
       tenantId: tenancy.tenantId ?? null,

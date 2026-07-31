@@ -44,6 +44,8 @@ import type { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
+import { assetAuditSinkFromEnv, assetMetadataStoreFromEnv } from "./d1.js";
+import { D1AssetEntitlements } from "./entitlements.js";
 import {
   type AssetAuthFailure,
   type AssetCaller,
@@ -55,9 +57,7 @@ import {
   UnavailablePresigner,
   isAuthFailure,
 } from "./ports.js";
-import { D1AssetEntitlements } from "./entitlements.js";
 import { type AssetScannerBindings, assetScreenerFromEnv } from "./scan.js";
-import { SigV4Presigner } from "./sigv4.js";
 import {
   assetChannelParamsSchema,
   assetNameParamsSchema,
@@ -80,6 +80,7 @@ import {
   AssetService,
   type AssetServiceDeps,
 } from "./service.js";
+import { SigV4Presigner } from "./sigv4.js";
 
 // ---------------------------------------------------------------------------
 // Caller resolution
@@ -532,16 +533,31 @@ export function sigV4PresignerFromEnv(env: AssetObjectBindings): SigV4Presigner 
  *    `null` for that case rather than re-supplying the default, so the
  *    fallback stays in exactly one place.
  *
- * `metadata` is deliberately NOT resolved here: the asset registry is still the
- * in-isolate `InMemoryAssetMetadataStore`. See the marker on that class.
+ *  - `DB` bound (the TENANT D1) ⇒ {@link D1AssetMetadataStore}: the asset
+ *    REGISTRY — `stored_assets` + `asset_channels` — is durable. Absent ⇒ the
+ *    in-isolate `InMemoryAssetMetadataStore`, whose rows die with the isolate.
+ *    This is the half `docs/rewrite/parity-audit-storage.md` §4.8 found
+ *    missing, and it is the more dangerous half of the two: the BYTES were
+ *    already durable in R2, so without it a published asset's object outlives
+ *    the row that finds it (an unresolvable `latest`), and a YANK — the kill
+ *    switch for a bad artifact — does not survive a deploy. `test/assets/
+ *    wiring.test.ts` fails if this line is removed.
+ *
+ * `DB` is the TENANT database because `stored_assets`/`asset_channels` are in
+ * `sql/d1-ts/tenant/`; a store pointed at `CONTROL_DB` would fail loudly with
+ * `no such table`, which is the migration split working as designed.
  */
 export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetServiceDeps> {
   const bindings = env as AssetObjectBindings;
   const objects = isAssetObjectStore(bindings.ASSETS) ? bindings.ASSETS : undefined;
   const presigner = sigV4PresignerFromEnv(bindings);
   const screener = assetScreenerFromEnv(env as AssetScannerBindings);
+  const metadata = assetMetadataStoreFromEnv(env);
+  const audit = assetAuditSinkFromEnv(env);
   return {
     ...(objects !== undefined ? { objects } : {}),
+    ...(metadata !== null ? { metadata } : {}),
+    ...(audit !== null ? { audit } : {}),
     ...(presigner !== null ? { presigner } : {}),
     ...(screener !== null ? { screener } : {}),
     ...(objects !== undefined && presigner !== null ? { limits: { presignEnabled: true } } : {}),
@@ -638,11 +654,34 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
   return {
     operationIds: [...ORDERED_ASSET_OPERATION_IDS],
     register(router: GatewayRouter): void {
+      /**
+       * Every asset operation goes through here, and the `finally` is why:
+       * the durable audit sink BUFFERS during the handler (its `record` is
+       * synchronous at 24 call sites in `service.ts`) and commits exactly once
+       * per request. A `finally` rather than a trailing statement because the
+       * audit row an operator most wants is the one on the REFUSED request —
+       * `403 no_asset_hosting`, `409 asset_version_immutable`,
+       * `413 payload_too_large` — and every one of those leaves this function
+       * by `throw`.
+       *
+       * The flush is AWAITED, not `waitUntil`-ed: `c.executionCtx` throws when
+       * the app is driven by `app.request(...)`, and an audit trail that exists
+       * only under one of the two call styles is exactly the kind of seam this
+       * codebase has shipped unmounted before. Asset operations already pay an
+       * R2 round trip, so one D1 `batch()` is not the cost that matters here.
+       */
       const on = (
         operationId: string,
         handler: (c: Context<AssetEnv>) => Promise<Response>,
       ): void => {
-        router.register(operationId, (c) => handler(c as unknown as Context<AssetEnv>));
+        router.register(operationId, async (c) => {
+          const context = c as unknown as Context<AssetEnv>;
+          try {
+            return await handler(context);
+          } finally {
+            await serviceFor(context).flushAudit();
+          }
+        });
       };
 
       // --- reserved literals ------------------------------------------------
@@ -662,7 +701,12 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const body = await controlBody(c, presignUploadIntentRequestSchema);
         return render(
-          await serviceFor(c).createUploadIntent(await caller(c), refOf(params), body, requestContext(c)),
+          await serviceFor(c).createUploadIntent(
+            await caller(c),
+            refOf(params),
+            body,
+            requestContext(c),
+          ),
         );
       });
 
@@ -684,7 +728,9 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
 
       on("getAssetDownloadUrl", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
-        return render(await serviceFor(c).downloadUrl(await caller(c), refOf(params), requestContext(c)));
+        return render(
+          await serviceFor(c).downloadUrl(await caller(c), refOf(params), requestContext(c)),
+        );
       });
 
       // --- reserved third/fourth segments -----------------------------------
@@ -735,14 +781,24 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
       on("yankAssetVersion", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         return render(
-          await serviceFor(c).setVersionYank(await caller(c), refOf(params), true, requestContext(c)),
+          await serviceFor(c).setVersionYank(
+            await caller(c),
+            refOf(params),
+            true,
+            requestContext(c),
+          ),
         );
       });
 
       on("unyankAssetVersion", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         return render(
-          await serviceFor(c).setVersionYank(await caller(c), refOf(params), false, requestContext(c)),
+          await serviceFor(c).setVersionYank(
+            await caller(c),
+            refOf(params),
+            false,
+            requestContext(c),
+          ),
         );
       });
 

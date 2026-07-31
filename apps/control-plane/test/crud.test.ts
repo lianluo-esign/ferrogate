@@ -78,16 +78,25 @@ describe("derived CRUD: /admin/v1/agent-schedules", () => {
   });
 
   it("refuses a duplicate id with 409", async () => {
-    await SELF.fetch(`${BASE}/admin/v1/agent-schedules`, jsonRequest(KEY, "POST", { id: "dup" }));
+    // Every body in this group now carries a firing spec, because
+    // `routes/admin_agent_schedule.ts` validates one (a schedule that cannot
+    // compute a next fire is a schedule that never fires, so it is refused at
+    // write time). The ASSERTIONS below are unchanged — only the fixtures grew
+    // the field the collection has always been about.
+    const body = { id: "dup", cron_expr: "0 3 * * *" };
+    await SELF.fetch(`${BASE}/admin/v1/agent-schedules`, jsonRequest(KEY, "POST", body));
     const again = await SELF.fetch(
       `${BASE}/admin/v1/agent-schedules`,
-      jsonRequest(KEY, "POST", { id: "dup" }),
+      jsonRequest(KEY, "POST", body),
     );
     expect(again.status).toBe(409);
   });
 
   it("serves the bespoke sub-list and action routes", async () => {
-    await SELF.fetch(`${BASE}/admin/v1/agent-schedules`, jsonRequest(KEY, "POST", { id: "s2" }));
+    await SELF.fetch(
+      `${BASE}/admin/v1/agent-schedules`,
+      jsonRequest(KEY, "POST", { id: "s2", cron_expr: "0 3 * * *" }),
+    );
 
     const fires = await SELF.fetch(`${BASE}/admin/v1/agent-schedules/s2/fires`, {
       headers: bearer(KEY),
@@ -95,14 +104,32 @@ describe("derived CRUD: /admin/v1/agent-schedules", () => {
     expect(fires.status).toBe(200);
     expect(await fires.json()).toEqual({ object: "list", data: [] });
 
+    /**
+     * This block used to assert `{ agent_schedule: { run_now: true } }` — it
+     * pinned the DEFECT `docs/rewrite/parity-audit-storage.md` §4.2 found:
+     * `run-now` merged a flag onto the document and dispatched nothing, and the
+     * assertion made that look like working software. It is replaced, not
+     * dropped, by the parity shape from Rust
+     * `handle_admin_agent_schedule_run_now`: **202** with
+     * `{ object: "agent_schedule_fire", fire }` — plus the thing the old
+     * assertion could not see, that a fire row now exists.
+     */
     const runNow = await SELF.fetch(`${BASE}/admin/v1/agent-schedules/s2/run-now`, {
       method: "POST",
       headers: bearer(KEY),
     });
-    expect(runNow.status).toBe(200);
-    expect((await runNow.json()) as { agent_schedule: { run_now: boolean } }).toMatchObject({
-      agent_schedule: { run_now: true },
+    expect(runNow.status).toBe(202);
+    expect(await runNow.json()).toMatchObject({
+      object: "agent_schedule_fire",
+      fire: { schedule_id: "s2", outcome: "dispatched" },
     });
+
+    const afterFire = await SELF.fetch(`${BASE}/admin/v1/agent-schedules/s2/fires`, {
+      headers: bearer(KEY),
+    });
+    const history = (await afterFire.json()) as { data: { schedule_id: string }[] };
+    expect(history.data).toHaveLength(1);
+    expect(history.data[0]?.schedule_id).toBe("s2");
   });
 
   it("404s a sub-route whose parent does not exist", async () => {

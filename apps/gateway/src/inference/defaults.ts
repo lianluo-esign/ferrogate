@@ -26,6 +26,7 @@ import {
   reliabilityFromVar,
 } from "./reliability.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
+import { shadowBudgetFor } from "./shadow.js";
 import type {
   Caller,
   InferenceBindings,
@@ -366,5 +367,13 @@ export function resolveDeps(
     caller: deps.caller ?? defaultCallerResolver,
     reliability,
     circuit,
+    // Same env-resolved shape as `circuit`: the `SHADOW_BUDGET` Durable Object
+    // when it is bound, the per-isolate ledger otherwise. Resolved here rather
+    // than at the mirror's dispatch site so the choice is made once per env,
+    // not once per mirrored request.
+    shadowBudget:
+      typeof deps.shadowBudget === "function"
+        ? deps.shadowBudget(env)
+        : (deps.shadowBudget ?? shadowBudgetFor(env)),
   };
 }

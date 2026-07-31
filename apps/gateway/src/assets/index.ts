@@ -41,6 +41,7 @@ export type {
   AssetRouteModuleOptions,
 } from "./handlers.js";
 
+export * from "./d1.js";
 export * from "./entitlements.js";
 export * from "./service.js";
 export * from "./ports.js";

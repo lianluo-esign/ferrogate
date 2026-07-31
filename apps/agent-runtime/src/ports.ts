@@ -910,6 +910,36 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
  * Returns `undefined` when `FG_DEV_IN_MEMORY_PORTS` is unset and no real
  * adapters are bound — the Worker then fails CLOSED (503) on every
  * authenticated surface rather than defaulting to a permissive stub.
+ *
+ * PORT-TODO(inventory-edge-control §8) — EVERY PORT IS IN-MEMORY IN THE
+ * COMMITTED DEPLOYMENT. Not a platform limit. Not closed. See
+ * `docs/rewrite/parity-audit-dead-packages.md` §7.1.
+ *
+ * Two facts, together:
+ *
+ *  1. This function has EXACTLY ONE branch. There is no real-adapter path
+ *     anywhere in this app — not unbound, UNWRITTEN. `apiKeys`,
+ *     `workerIdentities`, `governance` and `upstreams` have no durable
+ *     implementation to fall back to. (`guardrails` is the real
+ *     `@ferrogate/guardrails` detector, `config`/`clock` are genuinely real,
+ *     and the `AGENT_RUN_STATE` / `WORKER_PLANE` Durable Objects ARE bound —
+ *     so the run lifecycle is durable while identity and governance are not.)
+ *  2. `wrangler.toml:64` COMMITS `FG_DEV_IN_MEMORY_PORTS = "1"`, three lines
+ *     under a comment reading "DEV / TEST ONLY … Production MUST NOT set this."
+ *     The committed deployment configuration contradicts its own docstring:
+ *     deploy this file and every port is the dev bundle.
+ *
+ * Consequence: everything a self-hosted worker authenticates against is a JSON
+ * `[vars]` entry, and no agent-run identity survives isolate eviction. The only
+ * test that touches the flag (`test/contract.test.ts:514`) asserts the
+ * FAIL-CLOSED direction (unset ⇒ 503); nothing asserts a real adapter is ever
+ * reachable, because none exists — so this whole seam is invisible to the suite.
+ *
+ * Closing it needs the bindings listed in the `TODO(bindings)` block of
+ * `wrangler.toml` (D1 for `agent_runs`/`self_hosted_worker_records`, R2 for
+ * artifacts, the Secrets-Store worker registry) plus adapters over them, and
+ * then removal of the var from the committed `[vars]` — a COMPOSITION-ROOT edit
+ * this file may not make.
  */
 export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undefined {
   if (env.FG_DEV_IN_MEMORY_PORTS !== "1") return undefined;

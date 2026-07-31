@@ -94,8 +94,14 @@ export async function resetTenantData(db: D1Database): Promise<void> {
     db.prepare("DELETE FROM observed_agent_presence"),
     db.prepare("DELETE FROM agent_cost_burn"),
     db.prepare("DELETE FROM usage_monthly_rollups"),
+    db.prepare("DELETE FROM usage_metadata_rollups"),
     db.prepare("DELETE FROM usage_aggregate_rollups"),
     db.prepare("DELETE FROM tenant_contexts"),
+    db.prepare("DELETE FROM asset_channels"),
+    db.prepare("DELETE FROM stored_assets"),
+    db.prepare("DELETE FROM retention_policies"),
+    db.prepare("DELETE FROM agent_schedule_fires"),
+    db.prepare("DELETE FROM agent_schedules"),
   ]);
 }
 

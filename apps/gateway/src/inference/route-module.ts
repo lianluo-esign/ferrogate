@@ -42,6 +42,7 @@ import {
   INFERENCE_OPERATION_IDS,
   type RouteModule,
 } from "../routes/index.js";
+import { emitRequestTelemetry } from "../telemetry/index.js";
 import { createInferenceRouter } from "./handlers.js";
 import type { InferenceEnv } from "./handlers.js";
 import {
@@ -108,13 +109,78 @@ export function inferenceRouteModule(deps: InferenceDeps = {}): RouteModule {
     operationIds: [...INFERENCE_OPERATION_IDS],
     register(router: GatewayRouter): void {
       for (const operationId of INFERENCE_OPERATION_IDS) {
-        router.register(operationId, (c) => {
+        router.register(operationId, async (c) => {
           publishRequestScope(c);
-          return inner.fetch(c.req.raw, c.env, executionCtxOf(c));
+          const startedAtMs = Date.now();
+          // `await` costs nothing here: Hono resolves as soon as the RESPONSE
+          // OBJECT exists, and a streaming branch hands back the provider's
+          // `Response` with its `ReadableStream` untouched — the body is still
+          // relayed lazily, so first-token latency is unchanged.
+          const response = await inner.fetch(c.req.raw, c.env, executionCtxOf(c));
+          emitInferenceTelemetry(c, operationId, startedAtMs, response);
+          return response;
         });
       }
     },
   };
+}
+
+/**
+ * THE TELEMETRY MOUNT — `@ferrogate/observability` reaching a destination.
+ *
+ * `apps/telemetry` has been a complete OTLP receiver since wave 4 and the
+ * gateway sent it nothing: the only `@ferrogate/observability` import anywhere
+ * in `apps/gateway/src` was an `import type` in `cache/metrics.ts`, which is
+ * ERASED at build time, so not one byte of the package reached the deployed
+ * bundle. This call is what changes that for the six inference operations, and
+ * `test/telemetry/mount.test.ts` drives it through `SELF.fetch` so removing the
+ * line turns that suite RED.
+ *
+ * Everything about NOT hurting the request lives behind
+ * `emitRequestTelemetry`: it returns synchronously, defers the build and the
+ * send to `ctx.waitUntil`, swallows every failure, and is a no-op when no
+ * collector is configured (which is the committed default, so this mount
+ * changes no deployed behavior until the `[[services]]` binding lands — see
+ * `src/telemetry/index.ts`).
+ *
+ * ## The ids are the CLIENT'S ids, not the outer context's
+ *
+ * The inner inference router mints its own `fg-<16 hex>` request id and that is
+ * what the client is told in `x-request-id` — the OUTER `c.get("requestId")` is
+ * a different value (a UUID) that the caller never sees on this surface. A span
+ * stamped with the outer id would be unjoinable to the id in a customer's
+ * incident report, which is the single thing a request span is for. So the
+ * response's own `x-request-id` wins, with the outer id as the fallback for a
+ * response that carries none.
+ *
+ * The trace id is the reverse: a valid inbound `traceparent` was adopted by
+ * `middleware/trace.ts` and only the OUTER context knows it, so when one
+ * arrived it wins and the span joins the caller's existing trace. With no
+ * traceparent the trace id falls back to the client-visible request id, so the
+ * span still lands under an id the caller holds.
+ */
+function emitInferenceTelemetry(
+  c: Context<GatewayEnv>,
+  operationId: string,
+  startedAtMs: number,
+  response: Response,
+): void {
+  const auth = c.get("auth");
+  const requestId = response.headers.get("x-request-id") ?? c.get("requestId");
+  emitRequestTelemetry(c.env, executionCtxOf(c), c.req.raw, {
+    requestId,
+    traceId: c.get("traceparent") ? (c.get("traceId") ?? requestId) : requestId,
+    method: c.req.method,
+    path: c.get("canonicalPath") ?? new URL(c.req.url).pathname,
+    route: operationId,
+    statusCode: response.status,
+    startedAtMs,
+    endedAtMs: Date.now(),
+    // The AUTHENTICATED tenant, never a client-declared header. Absent for a
+    // platform-operator credential, which the collector indexes under its own
+    // `unknown` sentinel rather than under a fabricated tenant.
+    ...(auth?.tenancy.tenantId ? { tenantId: auth.tenancy.tenantId } : {}),
+  });
 }
 
 /**

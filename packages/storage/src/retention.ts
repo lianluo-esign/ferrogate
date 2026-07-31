@@ -7,21 +7,33 @@
  * channel-pinned version or one inside the grace window; GC never deletes a blob a
  * row references, one whose age is unknown, or one inside the grace window.
  *
- * PORT-TODO(inventory-data-billing §1.4.6 `retention_policies` + §1.2
- * `set_retention_limits` / `delete_request_logs` / `delete_audit_events`): the
- * PLANNERS below are ported and tested; the STORAGE and the EXECUTOR are not.
- * Nothing reads or writes the `retention_policies` table (it exists in
- * `sql/d1-ts/tenant/0001_init_tenant.sql` and is asserted only by
- * `test/d1/schema.test.ts`), and no caller feeds {@link planVersionRetention},
- * {@link planLogRetention} or {@link planBlobGc} — `R2AssetBlobStore.deleteOrphans`
- * is the one reclaim primitive that exists and it too has no caller. Why it
- * matters: `request_logs`, `audit_events`, `agent_run_events` and R2 asset blobs
- * are append-only on this platform and NOTHING prunes them, so storage grows
- * without bound and the #263/#284 retention contract an operator configures has
- * no effect. The close is a `[triggers] crons` sweeper on the composition root
- * that reads the policies, runs these planners, and applies the deletes — the
- * gateway already has a `scheduled` handler (`apps/gateway/src/worker.ts`) for
- * the billing outbox to hang it off.
+ * PORT-TODO(inventory-data-billing §1.4.6 `retention_policies`) — SHARPENED, and
+ * now only ONE leg wide: the CRON TRIGGER.
+ *
+ * CLOSED in this package: the STORAGE and the EXECUTOR both exist in
+ * {@link ./d1/retention-d1.js} — `D1RetentionPolicyStore` reads/writes the
+ * `retention_policies` table (Rust `set_retention_limits`), `sweepAssetRetention`
+ * feeds {@link planVersionRetention} from real rows and applies the plan
+ * ROW-BEFORE-OBJECT, and `sweepOrphanBlobs` feeds {@link planBlobGc} from the
+ * live `storage_uri` set. `test/d1/retention-d1.test.ts` pins the delete order
+ * and the channel-pin protection.
+ *
+ * STILL OPEN, and NOT CLOSABLE FROM A LIBRARY PACKAGE: nothing CALLS the sweeper
+ * on a schedule. A `packages/*` library has no Worker entry module, no
+ * `wrangler.toml`, and therefore no `[triggers] crons` — the schedule can only
+ * be declared on a deployable. `apps/gateway/src/worker.ts` already exposes a
+ * `scheduled` handler for the billing outbox and is where this hangs off; the
+ * exact seam is `sweepAssetRetention(assets, blobs, line, retentionPolicyOf(p),
+ * nowUnix)` per policy returned by `listRetentionPolicies`. Until that edit
+ * lands, `request_logs`, `audit_events`, `agent_run_events` and R2 asset blobs
+ * still grow without bound in a deployed environment, because a sweeper nobody
+ * invokes prunes nothing.
+ *
+ * Also still open and deliberately so: {@link planLogRetention} has no D1
+ * executor here. `request_logs` / `audit_events` are CONTROL-database tables and
+ * this module's executor is tenant-scoped; deleting from the control database on
+ * a tenant's rule is a cross-scope decision that belongs to the control plane,
+ * not to a per-tenant sweep.
  */
 import type { StoredAsset, StoredAssetChannel } from "./assets.js";
 

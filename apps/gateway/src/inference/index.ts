@@ -38,6 +38,13 @@ export type {
 } from "./identity.js";
 export * from "./catalog.js";
 export * from "./candidates.js";
+export {
+  runShadowMirror,
+  shadowBudgetFor,
+  shadowMirrorFor,
+  spawnShadowMirror,
+} from "./shadow.js";
+export type { ShadowMirror } from "./shadow.js";
 export * from "./reliability.js";
 export {
   DurableObjectProviderCircuit,

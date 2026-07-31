@@ -44,6 +44,7 @@
 // Type-only, and therefore erased at build time: `reliability.ts` imports
 // `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
 // here would be a real cycle.
+import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 
 export type ProviderAuthScheme = "bearer" | "x-api-key";
@@ -671,6 +672,14 @@ export interface InferenceDeps {
    * not configured a threshold + cooldown.
    */
   readonly circuit?: ProviderCircuit | ((env: InferenceBindings) => ProviderCircuit);
+  /**
+   * `AppState::shadow_budget_try_consume`'s ledger. Absent ⇒ built per Worker
+   * `env` by `shadow.ts::shadowBudgetFor`: the `SHADOW_BUDGET` Durable Object
+   * when it is bound, the per-isolate `ShadowBudgetLedger` otherwise.
+   */
+  readonly shadowBudget?:
+    | AsyncShadowBudgetLedger
+    | ((env: InferenceBindings) => AsyncShadowBudgetLedger);
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -686,4 +695,5 @@ export interface ResolvedInferenceDeps {
   readonly caller: (request: Request) => Caller;
   readonly reliability: ReliabilitySettings;
   readonly circuit: ProviderCircuit;
+  readonly shadowBudget: AsyncShadowBudgetLedger;
 }

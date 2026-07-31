@@ -31,6 +31,7 @@ import {
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
+import { requestTelemetry } from "./telemetry/index.js";
 import { tenantDatabase } from "./tenancy/index.js";
 
 /**
@@ -102,8 +103,8 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * ingress order (`docs/legacy/inventory-request-path.md` §"Cross-crate
  * architecture", steps 5/11 + `auth::finalize_auth` → `server/chat.rs`):
  *
- *   contractAuth → meteringDrain → rateLimit → guardrails → tenantDatabase
- *                → responseCache → validate → dispatch
+ *   contractAuth → meteringDrain → requestTelemetry → rateLimit → guardrails
+ *                → tenantDatabase → responseCache → validate → dispatch
  *
  * (`responseCache` is mounted by `createGatewayApp` itself, immediately after
  * this array and immediately before the routes — see `CreateGatewayAppOptions`.)
@@ -175,6 +176,28 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
 export const GATEWAY_MIDDLEWARE = [
   // Durable metering, on `ctx.waitUntil`, after the response is flushed.
   meteringDrain(usage),
+  // OTLP egress to `apps/telemetry`, on `ctx.waitUntil` — the analogue of
+  // Pingora's `logging` hook: it wraps `await next()` and does its work on the
+  // way OUT, with the final `Response` in hand.
+  //
+  // SECOND, not first. Being outermost would have been the natural reading of
+  // "last hook to run", but `meteringDrain` owns index 0 and
+  // `test/metering/wiring.test.ts` pins it there — money is the reason, and it
+  // outranks observability: the drain has to wrap every middleware that can
+  // short-circuit (`rateLimit`'s 429, `guardrails`' 403) or the usage captured
+  // for such a request would never be billed. Nothing is lost by sitting one
+  // layer in: `meteringDrain` returns the same `Response` object it received,
+  // so the status this emitter records is the client's.
+  //
+  // `src/inference/route-module.ts` ALSO emits, so the six inference
+  // operations pass through two emitters; `emitRequestTelemetry` de-duplicates
+  // on the inbound `Request` object, so they still produce exactly one span
+  // and one metric point. Mounting here is what widens the coverage from those
+  // six to all 31 gateway operations.
+  //
+  // Inert until `TELEMETRY_TOKEN` is set (a secret, never a committed var):
+  // `telemetryFromEnv` returns `NO_TELEMETRY` and every emit is a no-op.
+  requestTelemetry(),
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
   rateLimit(),

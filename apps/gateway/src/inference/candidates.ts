@@ -12,7 +12,11 @@
  * | {@link eligibleCandidates}       | `ModelRoutingDecision::consider` + `::rejection`      |
  * | {@link orderCandidates}          | `state_routing.rs:517-540` priority → weight ordering |
  * | {@link applyCanary}              | `AppState::canary_route` (`state_rollout.rs:47`)      |
- * | {@link shadowCandidate}          | `server/shadow.rs:69,78`                              |
+ * | {@link servableCandidates}       | `server/shadow.rs` — a mirror is not a candidate      |
+ *
+ * The mirror DISPATCH itself (`server/shadow.rs:69,78`, `spawn_shadow_mirror`)
+ * is `./shadow.ts`: it had to leave this module because the budget cap became
+ * an `async` Durable Object call and everything here is a pure decision.
  *
  * ## `@ferrogate/routing` IS THE ROLLOUT IMPLEMENTATION
  *
@@ -23,7 +27,7 @@
  * `apps/*`, so a configured canary diverted 0% of traffic. Re-implementing the
  * bucketing here would have kept it that way while looking wired.
  */
-import { ShadowBudgetLedger, canarySelected, shadowSampled } from "@ferrogate/routing";
+import { canarySelected } from "@ferrogate/routing";
 import type { Caller, ModelCapability, PhysicalRoute } from "./ports.js";
 
 // ---------------------------------------------------------------------------
@@ -423,47 +427,20 @@ export function applyCanary(
 }
 
 /**
- * Process-lifetime shadow budget.
+ * The MIRROR half of the rollout lives in `./shadow.ts`.
  *
- * PORT-TODO(rollout.ts `ShadowBudgetLedger`): this is the per-ISOLATE ledger,
- * so a cap of `N` becomes `N` per live isolate. `@ferrogate/routing/durable-objects`
- * ships `ShadowBudgetDurableObject` for the cross-isolate cap; it needs a DO
- * binding this slice may not add (see the WIRING block in `./circuit-do.ts` for
- * the identical three-edit shape). Over-mirroring costs money on a provider
- * bill, so the cap being loose is a real cost, not a cosmetic one — but it is
- * bounded per isolate and shadow is off unless an operator configures it.
- */
-const SHADOW_BUDGET = new ShadowBudgetLedger();
-
-/**
- * `server/shadow.rs:69,78` — pick the mirror route for this request, if any.
+ * `shadowSampled` + the budget ledger are called from
+ * `shadow.ts::shadowMirrorFor` / `runShadowMirror`, which `handlers.ts` reaches
+ * through `dispatchCandidates` — i.e. on the deployed request path, once per
+ * dispatched inference request. They are NOT here because the budget charge had
+ * to become `async` (it is a Durable Object hop, see
+ * `shadow.ts::shadowBudgetFor`) and this module is deliberately pure and
+ * synchronous: every function in it is a decision, not an effect.
  *
- * Two gates in Rust's order: `shadow_sampled(sticky_key, percent)` first (cheap,
- * deterministic, per-caller), then `shadow_budget_try_consume(logical_model,
- * max_requests)` — which CHARGES, so it must run second or a sampled-out
- * request would still burn budget.
+ * What stays here is the half that IS a decision — {@link servableCandidates},
+ * below, which is what makes "a mirror is never served to a client" structural
+ * rather than a promise.
  */
-export function shadowCandidate(
-  candidates: readonly PhysicalRoute[],
-  caller: Caller,
-  logicalModel: string,
-): PhysicalRoute | null {
-  const shadow = candidates.find((route) => route.shadowPercent !== undefined);
-  if (shadow === undefined) {
-    return null;
-  }
-  const stickyKey = stickyKeyFor(caller);
-  if (stickyKey === null) {
-    return null;
-  }
-  if (!shadowSampled(stickyKey, shadow.shadowPercent ?? 0)) {
-    return null;
-  }
-  if (!SHADOW_BUDGET.tryConsume(logicalModel, shadow.shadowMaxRequests ?? 0)) {
-    return null;
-  }
-  return shadow;
-}
 
 /**
  * A shadow route is a MIRROR, never a candidate the client can be served from.

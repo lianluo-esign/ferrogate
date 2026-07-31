@@ -19,12 +19,10 @@
  * (the Rust pre-flight is pingora's `load_certs_and_key_files`), no `:80`
  * HTTP-01 challenge listener a Worker can own, and no ACME storage directory.
  */
-import { parseEndpoint, endpointTargetsR2, parseR2Endpoint, R2_REGION } from "./asset-endpoint.js";
-import { x402ConfirmationWindowSecs, x402HoldTtlFloorSecs } from "./x402-hold.js";
+import { R2_REGION, endpointTargetsR2, parseEndpoint, parseR2Endpoint } from "./asset-endpoint.js";
+import type { ApiKey, Config } from "./schema/index.js";
 import { buildsS3Client } from "./schema/sections.js";
 import { buildSnapshotCrypto } from "./signed-snapshot.js";
-import type { ApiKey, Config } from "./schema/index.js";
-import { isValidSocketAddr } from "./validate/helpers.js";
 import {
   addMcpPolicyTargets,
   validateAgentUpstreams,
@@ -37,6 +35,15 @@ import {
   validateRoutes,
   validateUpstreams,
 } from "./validate/entities.js";
+import { isValidSocketAddr } from "./validate/helpers.js";
+import { validatePlugins } from "./validate/plugins.js";
+import {
+  validateAgentWorkflows,
+  validateGuardrails,
+  validatePromptTemplates,
+  validateSkillPackages,
+  workflowToolNames,
+} from "./validate/policies.js";
 import {
   validateAdminApi,
   validateAgentRuntime,
@@ -55,14 +62,7 @@ import {
   validateTelemetry,
   validateX402SpendPolicies,
 } from "./validate/sections.js";
-import { validatePlugins } from "./validate/plugins.js";
-import {
-  validateAgentWorkflows,
-  validateGuardrails,
-  validatePromptTemplates,
-  validateSkillPackages,
-  workflowToolNames,
-} from "./validate/policies.js";
+import { x402ConfirmationWindowSecs, x402HoldTtlFloorSecs } from "./x402-hold.js";
 
 // Re-exported so `@ferrogate/config` keeps ONE validation surface (the Rust
 // `Config::validate` + its `pub` helpers), whichever module implements it.
@@ -117,31 +117,20 @@ export function tenancyPostureWarnings(config: Config): string[] {
   const implicit = warnImplicitPlatformOperators(config);
   if (implicit.length > 0) {
     warnings.push(
-      `[tenancy] implicit_platform_operator = true grants UNRESTRICTED cross-tenant ` +
-        `(platform-operator) access to every API key that declares neither organization_id nor ` +
-        `platform_operator: ${implicit.join(", ")}. Declare each key and then remove the switch.`,
+      `[tenancy] implicit_platform_operator = true grants UNRESTRICTED cross-tenant (platform-operator) access to every API key that declares neither organization_id nor platform_operator: ${implicit.join(", ")}. Declare each key and then remove the switch.`,
     );
   }
   const authorizesNothing = apiKeysThatAuthorizeNothing(config);
   if (authorizesNothing.length > 0) {
     warnings.push(
-      `these API keys declare platform_operator = false and name no organization_id, so they ` +
-        `have no tenant identity to authorize against: every request presenting one is refused ` +
-        `with tenant_identity_required: ${authorizesNothing.join(", ")}.`,
+      `these API keys declare platform_operator = false and name no organization_id, so they have no tenant identity to authorize against: every request presenting one is refused with tenant_identity_required: ${authorizesNothing.join(", ")}.`,
     );
   }
   return warnings;
 }
 
 function undeclaredTenantIdentityRefusal(undeclared: string[]): string {
-  return (
-    `refusing to start: these API keys declare neither organization_id nor platform_operator, ` +
-    `so they have no tenant identity to authorize against and would be refused at authentication ` +
-    `(tenant_identity_required): ${undeclared.join(", ")}. Say what each one is: ` +
-    `platform_operator = true (administers every tenant) or organization_id = "<tenants.id>" ` +
-    `(belongs to one tenant). In TOML/YAML only you may keep the pre-#515 behaviour with ` +
-    `[tenancy] implicit_platform_operator = true while you annotate them.`
-  );
+  return `refusing to start: these API keys declare neither organization_id nor platform_operator, so they have no tenant identity to authorize against and would be refused at authentication (tenant_identity_required): ${undeclared.join(", ")}. Say what each one is: platform_operator = true (administers every tenant) or organization_id = "<tenants.id>" (belongs to one tenant). In TOML/YAML only you may keep the pre-#515 behaviour with [tenancy] implicit_platform_operator = true while you annotate them.`;
 }
 
 /**
@@ -150,7 +139,10 @@ function undeclaredTenantIdentityRefusal(undeclared: string[]): string {
  * keys are reported, not refused (stopping there would lock the operator out of
  * the API that repairs them). Throws on refusal.
  */
-export function ensureEveryKeyDeclaresTenantIdentity(config: Config, options: ValidateOptions = {}): void {
+export function ensureEveryKeyDeclaresTenantIdentity(
+  config: Config,
+  options: ValidateOptions = {},
+): void {
   if (config.tenancy.implicit_platform_operator) return;
   const undeclared = apiKeysWithoutTenantIdentity(config);
   if (undeclared.length === 0) return;
@@ -196,14 +188,7 @@ export function validateX402Reconciler(config: Config): void {
   if (BigInt(reconciler.hold_ttl_secs) < floor) {
     const window = x402ConfirmationWindowSecs(reconciler);
     throw new Error(
-      `field x402_reconciler.hold_ttl_secs: the wallet hold TTL (${reconciler.hold_ttl_secs}s) ` +
-        `must strictly outlive the settlement confirmation window (confirmation_deadline_secs ` +
-        `${reconciler.confirmation_deadline_secs}s + reconcile_check_delay_secs ` +
-        `${reconciler.reconcile_check_delay_secs}s + one reconciler tick of slack ` +
-        `tick_interval_secs ${reconciler.tick_interval_secs}s = ${window}s); otherwise a payment ` +
-        `confirmed on-chain can no longer capture the wallet hold (it has already auto-released ` +
-        `past its TTL), delivering the stablecoin without ever charging the wallet -- raise ` +
-        `hold_ttl_secs above ${window}s or shrink the confirmation window`,
+      `field x402_reconciler.hold_ttl_secs: the wallet hold TTL (${reconciler.hold_ttl_secs}s) must strictly outlive the settlement confirmation window (confirmation_deadline_secs ${reconciler.confirmation_deadline_secs}s + reconcile_check_delay_secs ${reconciler.reconcile_check_delay_secs}s + one reconciler tick of slack tick_interval_secs ${reconciler.tick_interval_secs}s = ${window}s); otherwise a payment confirmed on-chain can no longer capture the wallet hold (it has already auto-released past its TTL), delivering the stablecoin without ever charging the wallet -- raise hold_ttl_secs above ${window}s or shrink the confirmation window`,
     );
   }
 }
@@ -217,7 +202,8 @@ export function validateAssetBucket(config: Config): void {
   if (emptyString(bucket.endpoint)) throw new Error("field asset_bucket.endpoint: cannot be empty");
   if (emptyString(bucket.bucket)) throw new Error("field asset_bucket.bucket: cannot be empty");
   if (emptyString(bucket.region)) throw new Error("field asset_bucket.region: cannot be empty");
-  if (emptyString(bucket.access_key_id)) throw new Error("field asset_bucket.access_key_id: cannot be empty");
+  if (emptyString(bucket.access_key_id))
+    throw new Error("field asset_bucket.access_key_id: cannot be empty");
   if (emptyString(bucket.secret_access_key_env))
     throw new Error("field asset_bucket.secret_access_key_env: cannot be empty");
   if (!buildsS3Client(bucket)) return;
@@ -256,20 +242,12 @@ export function validateAssetBucketR2(config: Config): void {
       /* keep raw endpoint */
     }
     throw new Error(
-      `field asset_bucket.endpoint: ${display} looks like a Cloudflare R2 endpoint but is not of ` +
-        `the form https://<account_id>.r2.cloudflarestorage.com (optionally with an .eu./.fedramp. ` +
-        `jurisdiction label); the account id must be a single DNS label and the endpoint must use ` +
-        `https:// and carry no userinfo, port, path, query, or fragment. The runtime would send ` +
-        `\`host: ${signedHost}\`, which R2 rejects for this endpoint shape`,
+      `field asset_bucket.endpoint: ${display} looks like a Cloudflare R2 endpoint but is not of the form https://<account_id>.r2.cloudflarestorage.com (optionally with an .eu./.fedramp. jurisdiction label); the account id must be a single DNS label and the endpoint must use https:// and carry no userinfo, port, path, query, or fragment. The runtime would send \`host: ${signedHost}\`, which R2 rejects for this endpoint shape`,
     );
   }
   if (bucket.region !== R2_REGION) {
     throw new Error(
-      `field asset_bucket.region: FerroGate requires region "${R2_REGION}" for Cloudflare R2 ` +
-        `endpoints (got ${JSON.stringify(bucket.region)}); R2 ignores geographic regions and ` +
-        `documents a blank region and "us-east-1" as aliases for "${R2_REGION}", but the signer ` +
-        `folds this string straight into the credential scope, so FerroGate pins the canonical ` +
-        `value`,
+      `field asset_bucket.region: FerroGate requires region "${R2_REGION}" for Cloudflare R2 endpoints (got ${JSON.stringify(bucket.region)}); R2 ignores geographic regions and documents a blank region and "us-east-1" as aliases for "${R2_REGION}", but the signer folds this string straight into the credential scope, so FerroGate pins the canonical value`,
     );
   }
 }
@@ -280,7 +258,9 @@ export function validateAssetBucketBackend(config: Config): void {
   if (!bucket.enabled || bucket.backend !== "workers-static-assets") return;
   const requireCf = (v: string | null, name: string) => {
     if (v === null || v.trim().length === 0) {
-      throw new Error(`field asset_bucket.${name}: required when asset_bucket.backend = "workers-static-assets"`);
+      throw new Error(
+        `field asset_bucket.${name}: required when asset_bucket.backend = "workers-static-assets"`,
+      );
     }
   };
   requireCf(bucket.cf_account_id, "cf_account_id");
@@ -294,7 +274,8 @@ export function validateAssetBucketBackend(config: Config): void {
 export function validateCloudflare(config: Config): void {
   const cf = config.cloudflare;
   if (cf === null) return;
-  if (cf.account_id.trim().length === 0) throw new Error("field cloudflare.account_id: cannot be empty");
+  if (cf.account_id.trim().length === 0)
+    throw new Error("field cloudflare.account_id: cannot be empty");
   if (cf.api_token.trim().length === 0)
     throw new Error("field cloudflare.api_token: cannot be empty (an env:// reference or token)");
   for (const [tenant, ref] of Object.entries(cf.tenant_tokens)) {
@@ -332,9 +313,7 @@ export function validateCloudflareMcpServers(config: Config): void {
     }
     if (server.auth_type === "none") {
       throw new Error(
-        `field mcp_servers[${index}].auth_type: Cloudflare managed MCP server ${server.name} ` +
-          `requires authentication (shared_headers with a Cloudflare API bearer token, ` +
-          `per_user_oauth, or original_bearer); Cloudflare rejects unauthenticated requests`,
+        `field mcp_servers[${index}].auth_type: Cloudflare managed MCP server ${server.name} requires authentication (shared_headers with a Cloudflare API bearer token, per_user_oauth, or original_bearer); Cloudflare rejects unauthenticated requests`,
       );
     }
   }
@@ -401,7 +380,13 @@ export function validateConfig(config: Config, options: ValidateOptions = {}): v
   addMcpPolicyTargets(config, modelNames, providerNames);
   const apiKeyIds = validateApiKeys(config, modelNames, providerNames);
   ensureEveryKeyDeclaresTenantIdentity(config, options);
-  warnImplicitPlatformOperators(config);
+  // Rust warns here via `tracing::warn!`. A library on Workers has no logger and
+  // this function returns `void`, so a call whose `string[]` is discarded would
+  // be INERT — it would look wired and warn nobody. The warning is surfaced
+  // instead by {@link tenancyPostureWarnings}, which the two consumers that can
+  // actually show it to an operator do call: `apps/control-plane`'s
+  // `admin_config_ops` validate response and `apps/cli`'s config gate. Pinned by
+  // `schema-validate.test.ts` > "tenancy posture warnings".
   validatePolicies(config, apiKeyIds, modelNames, providerNames);
   validateGatewayConfigs(config, apiKeyIds);
   validatePlugins(config);

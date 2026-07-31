@@ -95,3 +95,16 @@ migrations_dir = "../../sql/d1-ts/control"
 #   [[secrets_store]]       admin JWT + provider creds (deploy-time binding)
 #   [[analytics_engine_datasets]] audit/evidence sink
 #   route groups: /admin/v1/* (canonical), /control/v1/* (alias), /v1/admin/* (auth service)
+
+# ---------------------------------------------------------------------------
+# The agent-schedule TICK (`src/schedule/scheduled.ts`, dispatched from the
+# `scheduled` handler on `src/worker.ts`'s default export).
+#
+# `* * * * *` is the finest granularity Cron Triggers offer, which is also the
+# finest granularity a 5-field cron expression can ask for, so nothing is lost:
+# a sub-minute schedule would need a Durable Object alarm instead. Without this
+# stanza `runScheduleTick` is reachable only through `run-now`, i.e. schedules
+# never fire on their own.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["* * * * *"]

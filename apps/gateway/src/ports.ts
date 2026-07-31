@@ -357,6 +357,44 @@ export interface GatewayBindings {
   readonly GATEWAY_TENANT_DB_ACCOUNT_ID?: string;
   /** D1 REST API token — `"rest"` mode only. A SECRET, never a committed var. */
   readonly GATEWAY_TENANT_DB_API_TOKEN?: string;
+
+  // -------------------------------------------------------------------------
+  // Wave-10 bindings. Same rule: each is declared in `wrangler.toml` and read
+  // by the module named below.
+  // -------------------------------------------------------------------------
+
+  /**
+   * `ShadowBudgetDurableObject` namespace — the CROSS-ISOLATE spend cap on
+   * shadow (mirror) traffic, read by `src/inference/shadow.ts`
+   * (`shadowBudgetFor`). Unbound, the ledger degrades to a per-isolate `Map`,
+   * which over-spends the operator's configured cap by a bounded factor
+   * (one budget per isolate); it is deliberately never "no cap".
+   *
+   * The class is re-exported from `src/worker.ts`: workerd resolves a binding's
+   * `class_name` against the ENTRY module.
+   */
+  readonly SHADOW_BUDGET?: DurableObjectNamespace;
+
+  /**
+   * `[[services]] TELEMETRY_COLLECTOR` → the `ferrogate-telemetry` Worker's
+   * OTLP receiver. Read by `src/telemetry/emit.ts`. The PREFERRED transport:
+   * no DNS/TLS handshake, never leaves the colo, so the bearer token never
+   * crosses a public network.
+   */
+  readonly TELEMETRY_COLLECTOR?: { fetch(request: Request): Promise<Response> };
+  /** Absolute collector base URL — the fallback transport when no service binding exists. */
+  readonly TELEMETRY_ENDPOINT?: string;
+  /**
+   * The collector's `COLLECTOR_TOKEN`. A SECRET (`wrangler secret put`), never
+   * a committed var. WITHOUT IT NOTHING IS EMITTED — the collector answers 401
+   * to an unauthenticated ingest, so emitting would be a guaranteed round trip
+   * to a rejection on every request.
+   */
+  readonly TELEMETRY_TOKEN?: string;
+  /** `resource.service.name` on every record. Defaults to `"ferrogate-gateway"`. */
+  readonly TELEMETRY_SERVICE_NAME?: string;
+  /** Comma-separated subset of `metric,trace,log`. Absent ⇒ all three. */
+  readonly TELEMETRY_SIGNALS?: string;
   //
   // The per-tenant D1 handles themselves are deliberately NOT declared here:
   // each is bound under the name recorded in `tenant_databases.binding_name`,

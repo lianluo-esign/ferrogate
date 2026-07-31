@@ -1,5 +1,14 @@
 /**
- * `apps/gateway/src/keys` — D1-backed API-key resolution.
+ * `apps/gateway/src/keys` — credential resolution, in both directions.
+ *
+ *  - INBOUND: D1-backed API-key resolution for a caller's key (everything below
+ *    this header).
+ *  - OUTBOUND: `./provider-secrets.ts` resolves the credential FerroGate
+ *    presents to a provider — `api_key_var` and the Bedrock/Vertex halves —
+ *    through `@ferrogate/secrets`, so `env://NAME` and `cf://<store>/<name>`
+ *    work wherever a bare binding name did. It is MOUNTED in
+ *    `src/inference/catalog.ts::boundSecret`; `test/keys/provider-secrets.test.ts`
+ *    is the unmount gate.
  *
  * The public seam of this slice. Everything the composition root needs is
  * re-exported here; nothing outside this directory imports a deeper path.
@@ -92,6 +101,11 @@ export {
   type KeyHashAlgorithm,
   type VirtualApiKeyMaterial,
 } from "./hash.js";
+export {
+  providerSecretRefusal,
+  resolveProviderSecret,
+  type ProviderSecretResolution,
+} from "./provider-secrets.js";
 export {
   apiKeyCacheTtlSeconds,
   D1ApiKeyResolver,

@@ -721,15 +721,62 @@ export interface AssetAuditEvent {
 }
 
 export interface AssetAuditSink {
+  /**
+   * SYNCHRONOUS by design — 24 call sites in `./service.ts` record on both the
+   * success and the refusal path, several inside `return fail(...)`
+   * expressions, and an `await` at each would let a durable-store hiccup change
+   * the ANSWER the caller gets. A durable sink therefore buffers here and
+   * commits in {@link flush}.
+   */
   record(event: AssetAuditEvent): void;
   /**
    * Screening evidence recorded at push/commit time, keyed by asset id — the
    * best-effort correlation the withheld listing surfaces (Rust issue #379).
+   *
+   * May be a promise: a durable sink has to read it back, and `#379`'s whole
+   * point is that the evidence outlives the isolate that produced it.
    */
-  screeningEvidence(tenantId: string): Map<string, string>;
+  screeningEvidence(tenantId: string): Map<string, string> | Promise<Map<string, string>>;
+  /**
+   * Commit whatever {@link record} buffered. Called ONCE per request by the
+   * route module's `on()` wrapper — in a `finally`, so a refused request's
+   * audit row is written too, which is the row an operator most wants.
+   *
+   * Optional: the in-memory sink has nothing to commit.
+   */
+  flush?(): Promise<void>;
 }
 
-/** Bounded in-memory audit sink; the production sink is Analytics Engine / D1. */
+/**
+ * Bounded in-memory audit sink — the LOCAL-DEV default only.
+ *
+ * The production sink is {@link D1AssetAuditSink} (`./d1.ts`), which
+ * `assetDepsFromEnv` supplies whenever `CONTROL_DB` is bound. Keep this one for
+ * `wrangler dev` with no bindings and for tests that assert on `events`
+ * directly; it is a RING BUFFER whose contents die with the isolate, so
+ * `screeningEvidence` here answers for a push only when the very same isolate
+ * served it.
+ *
+ * PORT-TODO(inventory-data-billing §1.4.6, issues #263/#284 — RETENTION, and a
+ * CROSS-APP boundary, not a platform limit): `audit_events` is append-only and
+ * NOTHING prunes it. `packages/storage/src/retention.ts` ports
+ * `planLogRetention` — pure, tested, and with no executor and no
+ * `retention_policies` reader. The executor belongs on a Cron trigger, and the
+ * only `scheduled` handler in this Worker is `gatewayScheduled` in
+ * `src/index.ts`, which this directory may not edit: the integrate step owns
+ * every composition root. The exact line it needs, next to the existing
+ * `await usage.sweep({ env, ctx })`:
+ *
+ * ```ts
+ * await sweepRetention({ env, ctx });   // when a retention slice lands
+ * ```
+ *
+ * Until then the mitigation is real but partial, and named so it is not
+ * mistaken for the fix: {@link D1AssetAuditSink.screeningEvidence} reads a
+ * `LIMIT`-bounded newest-first window (`AUDIT_EVIDENCE_SCAN_LIMIT`), so the
+ * withheld listing does not degrade as the table grows — but the TABLE still
+ * grows without bound.
+ */
 export class InMemoryAssetAuditSink implements AssetAuditSink {
   readonly events: AssetAuditEvent[] = [];
   private readonly limit: number;

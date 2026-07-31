@@ -82,6 +82,35 @@ const SELF_HOSTED_WORKER_REGISTRY = [
   },
 ];
 
+/**
+ * The auxiliary Worker `[[services]] binding = "TELEMETRY_COLLECTOR"` names.
+ *
+ * NOT optional plumbing, and not a stand-in for a test double. `wrangler.toml`
+ * declares the service binding to `ferrogate-telemetry` (`apps/telemetry`), and
+ * miniflare resolves a service binding against the set of workers it was given:
+ * with the target undefined the RUNTIME REFUSES TO START —
+ *
+ *   Worker "core:user:vitest-pool-workers-runner-"'s binding
+ *   "TELEMETRY_COLLECTOR" refers to a service "core:user:ferrogate-telemetry",
+ *   but no such service is defined.
+ *
+ * — and every test file in this project errors before it is imported. (Real
+ * `wrangler dev` is more forgiving: it boots and reports the binding as
+ * `[not connected]`.)
+ *
+ * It answers 204 and records nothing on purpose. The gateway emits ONLY when
+ * `TELEMETRY_TOKEN` is set, and this config sets no token, so nothing here is
+ * ever reached in the default suite — `test/telemetry/mount.test.ts` installs
+ * its own RECORDING collector plus a token on `env` and asserts against that.
+ * Making this one recording as well would create a second, ambient sink whose
+ * contents no test reads.
+ */
+const TELEMETRY_COLLECTOR_STUB = {
+  name: "ferrogate-telemetry",
+  modules: true,
+  script: "export default { fetch: () => new Response(null, { status: 204 }) };",
+} as const;
+
 export default defineConfig({
   plugins: [
     cloudflareTest({
@@ -105,6 +134,7 @@ export default defineConfig({
           GATEWAY_MODELS: "[]",
           TEST_D1_SCHEMA: migrations,
         },
+        workers: [TELEMETRY_COLLECTOR_STUB],
       },
     }),
   ],
