@@ -13,9 +13,12 @@
 // is not refused as a signature mismatch", with the unbound `presign_query`
 // form as the control that proves the credentials and endpoint are sound.
 //
-// Everything is env-gated and SKIPS cleanly with an explicit message when the
-// credentials are absent -- there is no live Supabase Storage S3 credential in
-// the dev sandbox by default. Objects are tiny (< 64 bytes) and any object the
+// Everything is env-gated on the #495 live-probe convention: the probe SKIPS
+// cleanly with an explicit message when the opt-in switch is absent -- there is
+// no live Supabase Storage S3 credential in the dev sandbox by default -- but
+// an opted-in, HALF-configured environment is a hard error rather than a second
+// opt-out, so a typo'd credential cannot report a green proof that never ran.
+// Objects are tiny (< 64 bytes) and any object the
 // probe manages to create is deleted and its absence re-verified. No load,
 // stress or throughput traffic is generated: at most four small requests.
 
@@ -40,15 +43,61 @@ struct LiveSupabaseS3 {
     credentials: AwsCredentials,
 }
 
+/// The opt-in switch. Its absence -- and ONLY its absence -- is what makes
+/// this probe skip; see [`live_env`].
+const OPT_IN_VAR: &str = "FERROGATE_SUPABASE_S3_ENDPOINT";
+
+/// Everything that must also be set once the operator has opted in. `REGION`
+/// is not here because it has a documented default, and `SESSION_TOKEN` is
+/// genuinely optional (it belongs only to the anon-key credential form).
+const REQUIRED_ONCE_OPTED_IN: [&str; 3] = [
+    "FERROGATE_SUPABASE_S3_BUCKET",
+    "FERROGATE_SUPABASE_S3_ACCESS_KEY_ID",
+    "FERROGATE_SUPABASE_S3_SECRET_ACCESS_KEY",
+];
+
+/// Resolve the live environment, following the #495 live-probe convention:
+///
+/// * **no opt-in switch** -> `None`, and the caller skips and exits 0. There is
+///   no Supabase Storage S3 credential in the dev sandbox by default, so this
+///   is the ordinary outcome and must not read as a failure.
+/// * **opted in but half-configured** -> panic naming *every* missing variable.
+///   This is an operator mistake, not a second opt-out.
+///
+/// The second arm is the point. Resolving every variable with `?` -- which is
+/// what this did -- turned a typo'd or forgotten credential into a clean SKIP,
+/// so the gate that set four of the five variables correctly saw the probe
+/// report `ok` and could not tell it apart from a run that actually proved
+/// #368 acceptance box 3 against Supabase. A green live probe that never ran is
+/// the exact failure this repo keeps filing (#495/#499/#509/#511).
 fn live_env() -> Option<LiveSupabaseS3> {
     let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let endpoint = var(OPT_IN_VAR)?;
+
+    let missing: Vec<&str> = REQUIRED_ONCE_OPTED_IN
+        .into_iter()
+        .filter(|name| var(name).is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{OPT_IN_VAR} is set, so the #368 live Supabase parity proof was requested, but it is \
+         half-configured: {} {} unset or empty. Set every one of them, or unset {OPT_IN_VAR} to \
+         opt back out and skip this probe. Skipping here instead would report a green live proof \
+         that never ran.",
+        missing.join(", "),
+        if missing.len() == 1 { "is" } else { "are" },
+    );
+
     Some(LiveSupabaseS3 {
-        endpoint: var("FERROGATE_SUPABASE_S3_ENDPOINT")?,
-        bucket: var("FERROGATE_SUPABASE_S3_BUCKET")?,
+        endpoint,
+        bucket: var("FERROGATE_SUPABASE_S3_BUCKET")
+            .expect("checked present by the half-configured guard above"),
         region: var("FERROGATE_SUPABASE_S3_REGION").unwrap_or_else(|| "us-east-1".to_string()),
         credentials: AwsCredentials {
-            access_key_id: var("FERROGATE_SUPABASE_S3_ACCESS_KEY_ID")?,
-            secret_access_key: var("FERROGATE_SUPABASE_S3_SECRET_ACCESS_KEY")?,
+            access_key_id: var("FERROGATE_SUPABASE_S3_ACCESS_KEY_ID")
+                .expect("checked present by the half-configured guard above"),
+            secret_access_key: var("FERROGATE_SUPABASE_S3_SECRET_ACCESS_KEY")
+                .expect("checked present by the half-configured guard above"),
             session_token: var("FERROGATE_SUPABASE_S3_SESSION_TOKEN"),
         },
     })
@@ -84,11 +133,12 @@ fn error_code(body: &str) -> String {
 async fn supabase_storage_s3_accepts_the_bound_presigned_put_this_gateway_issues() {
     let Some(env) = live_env() else {
         eprintln!(
-            "skipping supabase_storage_s3_accepts_the_bound_presigned_put_this_gateway_issues: \
-             set FERROGATE_SUPABASE_S3_ENDPOINT, FERROGATE_SUPABASE_S3_BUCKET, \
-             FERROGATE_SUPABASE_S3_REGION, FERROGATE_SUPABASE_S3_ACCESS_KEY_ID and \
-             FERROGATE_SUPABASE_S3_SECRET_ACCESS_KEY (plus an optional \
-             FERROGATE_SUPABASE_S3_SESSION_TOKEN) to run the #368 live Supabase parity proof"
+            "supabase_storage_s3_accepts_the_bound_presigned_put_this_gateway_issues: SKIP -- \
+             #368 acceptance box 3 is NOT proven by this run. Set {OPT_IN_VAR} (the opt-in \
+             switch) together with {}, and optionally FERROGATE_SUPABASE_S3_REGION (defaults to \
+             us-east-1) and FERROGATE_SUPABASE_S3_SESSION_TOKEN, to run the live Supabase parity \
+             proof. Setting the switch without the rest fails loudly rather than skipping.",
+            REQUIRED_ONCE_OPTED_IN.join(", "),
         );
         return;
     };
