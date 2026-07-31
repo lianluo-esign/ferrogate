@@ -209,7 +209,11 @@ statements/batch cap).
 The Worker's `env.DB` binding is fixed at deploy time to the FerroGate **control
 database** — the atomic family wired in this slice (billing metering + report
 outbox) is account-global control-plane data that routes to the control database,
-exactly like the #447/#449 REST families.
+exactly like the #447/#449 REST families. Issue #455 later added the optional
+`database` selector on both request bodies, so the same deployed Worker also
+serves one binding per tenant database (absent selector = `env.DB`); see the
+per-tenant binding section below. Every binding is still declared at deploy time
+— there is no runtime select-by-database-id.
 
 ### The Rust client (`ferrogate_cloudflare::d1_proxy`)
 
@@ -368,6 +372,17 @@ The retry is **internal**, so the `WorkflowBudgetDebit` contract is UNCHANGED �
 `Applied`/`Exceeded`, with **no new `Conflict` variant**. That keeps caller code identical
 across backends and avoids the #415 non-exhaustive-match hazard. The no-lost-debit and
 fail-closed-`Exceeded` invariants are preserved, not traded away.
+
+The retry budget is bounded, so exhaustion needs a defined outcome: after the ceiling
+(`WORKFLOW_BUDGET_CAS_MAX_ATTEMPTS` = 16, `workflow_budget.rs`) both `debit` and `topup` return
+`StorageError::Runtime` naming the method and the attempt count. That is the third
+result of the concurrency contract and it is deliberately an ERROR, not a fabricated
+`Applied`/`Exceeded`: each attempt re-reads committed state, so exhaustion means sustained
+contention on one budget row, and the caller must not be told a debit landed (or was
+refused) when neither is known. No counter has moved when this returns — every attempt
+that failed its guard wrote nothing — so the caller may safely retry. Postgres, holding
+`SELECT ... FOR UPDATE`, has no equivalent path; this is the one observable divergence the
+internal retry buys.
 
 ### Divergence: mutating an unprovisioned tenant is `NotFound` (issue #456)
 
@@ -584,7 +599,22 @@ surfaces. Nothing fails silently; tests pin the contract.
 
 The proxy Worker serves both the control database and the per-tenant bindings
 through the `database` selector (#455), so nothing below is deferred for want of
-a binding; each entry carries its own reason. That set is now exactly:
+a binding; each entry carries its own reason. **Given a configured proxy Worker**
+that set is now exactly the list below.
+
+That precondition is load-bearing, not a formality: every proxy-backed family
+takes its client through `proxy_client(method)`
+(`control_plane_store_d1/provisioning.rs`), which returns the SAME typed
+`unimplemented-backend-surface` error — naming the calling method — when the
+store was built without proxy options. So on a deployment with no proxy Worker
+configured, the erroring surface is strictly LARGER than this list: it also
+covers every atomic/per-tenant family (wallets, workflow budgets, assets and
+channels, retention, agent schedules, observed presence, usage rollups, the
+guardrail binding CAS, and the billing-event + outbox enqueue). That widening is
+deliberately NOT in the block below, and `check-d1-surface-map.py` cannot see it:
+the gate matches string-literal `unimplemented_surface("…")` call sites, and
+`proxy_client` passes a `method` variable. The list below is therefore the
+static, always-erroring set — the floor, not the ceiling.
 
 <!-- SOURCE OF TRUTH: the `unimplemented_surface("…")` call sites under
      crates/ferrogate-storage/src/control_plane_store_d1/, plus the

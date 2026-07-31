@@ -245,8 +245,12 @@
 //!   row-for-row identical across backends. An UNPROVISIONED tenant is `NotFound`
 //!   on the writes (`open`), the database-per-tenant divergence. `CAST(? AS
 //!   INTEGER)` guards every bound numeric param in the debit fit-arithmetic (the
-//!   #455 lesson). Fail closed (typed unimplemented-surface) on `debit`/`topup`
-//!   with no proxy; see `workflow_budget.rs`.
+//!   #455 lesson). Exhausting the bounded retry ceiling
+//!   (`WORKFLOW_BUDGET_CAS_MAX_ATTEMPTS`) is the contract's third result:
+//!   `StorageError::Runtime` naming the method and attempt count, never a
+//!   fabricated `Applied`/`Exceeded` — no counter moved (each missed guard wrote
+//!   nothing), so the caller may retry. Fail closed (typed unimplemented-surface)
+//!   on `debit`/`topup` with no proxy; see `workflow_budget.rs`.
 //! - Agent schedules + fire history (#460/#246, TENANT databases, proxy Worker):
 //!   the time-based schedule DEFINITIONS + the idempotent fire-history ledger.
 //!   `upsert_agent_schedule`/`list_agent_schedules` route by tenant (`upsert` is a
@@ -307,6 +311,16 @@
 //! Each entry below carries its own reason. (The wallet reserve/settle/release
 //! trio + wallet CRUD landed in #455, and the remaining wallet ops in #456 —
 //! both above; only the sweep is still deferred.)
+//!
+//! The list is the set that errors on a store built WITH proxy options; it is a
+//! floor, not a ceiling. `D1ControlPlaneStore::proxy_client` returns the same
+//! typed error, naming its caller, whenever the store has no proxy configured,
+//! so a proxy-less deployment additionally errors on every proxy-backed family
+//! (wallets, workflow budgets, assets/channels/retention, agent schedules,
+//! observed presence, usage rollups, the guardrail binding CAS, and the billing
+//! event + outbox enqueue). `scripts/check-d1-surface-map.py` cannot see that
+//! widening — it matches string-literal call sites and `proxy_client` passes a
+//! `method` variable — which is why it is stated here instead of listed below.
 //!
 //! <!-- BEGIN D1-ERRORING-SURFACE -->
 //! - x402 payments (issue #459, deferred org-wide, so this is scope not

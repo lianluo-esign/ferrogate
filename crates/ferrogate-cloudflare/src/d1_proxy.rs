@@ -33,10 +33,15 @@
 //!
 //! REST stays the transport for the non-atomic/admin surface (provisioning,
 //! schema migration, CRUD, config documents). This proxy client is used ONLY for
-//! the atomic hot path. The Worker's `env.DB` binding is fixed at deploy time to
-//! the FerroGate CONTROL database, which is where the wired atomic family
-//! (billing metering + report outbox) lives; per-tenant atomic families are an
-//! enumerated follow-up needing per-database bindings.
+//! the atomic hot path. The Worker holds ONE binding per database it serves,
+//! fixed at deploy time: `env.DB` for the FerroGate CONTROL database plus one
+//! per-tenant binding each. Which one a request runs on is chosen by the
+//! optional `database` selector on the request body (issue #455) — absent =
+//! `env.DB`, present = that named binding — so control-database families
+//! (billing metering + report outbox) and per-tenant families (wallets,
+//! workflow budgets, assets, schedules, usage rollups) share one deployed
+//! Worker. There is no runtime select-by-database-id: the binding must exist in
+//! the Worker's config.
 //!
 //! ## Parameter typing
 //!
