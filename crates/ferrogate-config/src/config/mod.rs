@@ -60,7 +60,7 @@ pub use self::types::{
     PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
     ProviderCloudflareAiGatewayConfig, ProviderCloudflareAiGatewayMode, ReliabilityConfig,
     RouteRule, SchedulerConfig, ShadowRoute, SkillPackage, SkillPackageCapability,
-    SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
-    StorageMigrationMode, TelemetryConfig, TenancyConfig, TlsAcmeConfig, TlsConfig, Upstream,
-    X402ReconcilerConfig, X402SweeperConfig,
+    SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StaticSitePublishBackend,
+    StaticSitePublishConfig, StorageConfig, StorageMigrationMode, TelemetryConfig, TenancyConfig,
+    TlsAcmeConfig, TlsConfig, Upstream, X402ReconcilerConfig, X402SweeperConfig,
 };

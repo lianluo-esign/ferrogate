@@ -68,6 +68,9 @@ mod route_groups;
 mod shadow;
 mod site_domain_verification;
 mod site_domains;
+/// #411: background reconciler that drives the Cloudflare static-site mirror
+/// toward the desired state derived from the site's own authoritative state.
+pub(crate) mod site_publish;
 mod sites;
 mod usage_reports;
 mod virtual_keys;
@@ -323,6 +326,7 @@ pub fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool) -> Any
     let _agent_schedule_sweeper = start_agent_schedule_sweeper(&state);
     // #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
     let _asset_lifecycle_sweeper = start_asset_lifecycle_sweeper(&state);
+    let _site_publish_reconciler = start_site_publish_reconciler(&state);
     // #354: TTL sweeper reclaiming overdue pre-submission x402 payment holds.
     let _x402_ttl_sweeper = start_x402_ttl_sweeper(&state);
     // #354: on-chain settlement reconciler driving left-behind submitted/
@@ -634,6 +638,58 @@ fn start_asset_lifecycle_sweeper(state: &SharedAppState) -> AssetLifecycleSweepe
         }
     });
     AssetLifecycleSweeperHandle {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// Background loop that reconciles the Cloudflare static-site mirror (#411).
+struct SitePublishReconcilerHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for SitePublishReconcilerHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Always spawns the static-site mirror reconcile loop, exactly like the asset
+/// lifecycle sweeper above: `reconcile_static_site_publish_once` re-reads
+/// `state.current()` and no-ops when `static_site_publish.enabled = false`, so
+/// enabling it through the admin hot config-reload path starts reconciling on
+/// the next tick with no restart, and disabling it stops driving the edge
+/// without leaving a half-applied publish behind.
+///
+/// Safe on every gateway instance concurrently: both operations are idempotent
+/// against the same desired state (Cloudflare dedups asset bytes it already
+/// holds, and an already-absent script is the retraction's desired end state).
+fn start_site_publish_reconciler(state: &SharedAppState) -> SitePublishReconcilerHandle {
+    let state = state.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let tick_secs = state
+                .current()
+                .config
+                .static_site_publish
+                .tick_interval_secs();
+            thread::sleep(Duration::from_secs(tick_secs));
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let gateway = FerroGateway {
+                state: state.clone(),
+            };
+            block_on_sync_bridge(gateway.reconcile_static_site_publish_once());
+        }
+    });
+    SitePublishReconcilerHandle {
         stop,
         handle: Some(handle),
     }

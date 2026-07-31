@@ -105,6 +105,11 @@ pub struct Config {
     pub network_access: NetworkAccessConfig,
     #[serde(default)]
     pub asset_bucket: AssetBucketConfig,
+    /// #411: Cloudflare static-site publish mirror. Independent of
+    /// `[asset_bucket]` — a deployment may offload asset bytes to S3/R2 and
+    /// mirror a site to Cloudflare's edge at the same time.
+    #[serde(default)]
+    pub static_site_publish: StaticSitePublishConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
     /// #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
@@ -765,17 +770,23 @@ impl Default for X402ReconcilerConfig {
 /// Storage exposes an S3-compatible endpoint using the same SigV4 auth
 /// scheme AWS S3 does, so this also works against a real AWS S3 bucket or
 /// any other S3-compatible service (MinIO, etc.), not only Supabase.
-/// Which object-storage backend `[asset_bucket]` drives (issue #411). The
-/// default `s3` covers every S3-compatible service (AWS S3, Supabase Storage,
-/// MinIO, Cloudflare R2) through the one SigV4 client.
+/// Which object-storage backend `[asset_bucket]` drives (issue #411). This is
+/// the config-side discriminant of the [`AssetObjectStore`] seam: it selects
+/// which implementation stands behind `/v1/assets/*` put/get/delete/list/
+/// presign. The default `s3` covers every S3-compatible service (AWS S3,
+/// Supabase Storage, MinIO, Cloudflare R2) through the one SigV4 client.
 ///
-/// `workers-static-assets` does NOT select an object store. Cloudflare Workers
-/// Static Assets is a whole-site *publish* target — a deploy replaces the
-/// Worker's entire asset version, and there is no keyed GET/DELETE/LIST — so it
-/// cannot stand behind the `/v1/assets/*` read, erase and GC seam. Selecting it
-/// keeps every asset's bytes in FerroGate (the same shape as an unconfigured
-/// `[asset_bucket]`) and additionally configures the static-site publish target
-/// described by the `cf_*` fields below.
+/// Cloudflare Workers Static Assets is deliberately NOT a value here. It is a
+/// whole-site *publish* target, not an object store — a deploy replaces the
+/// Worker's entire asset version and there is no keyed GET/DELETE/LIST, so it
+/// cannot satisfy the read/erase/GC half of the seam. Modelling it as a backend
+/// value also made the two structurally exclusive: a deployment could offload
+/// asset bytes to R2 *or* mirror a site to Cloudflare's edge, never both, for
+/// no reason other than the discriminant they shared. The publish target is its
+/// own independent `[static_site_publish]` section
+/// ([`StaticSitePublishConfig`]).
+///
+/// [`AssetObjectStore`]: https://docs.rs/ferrogate-gateway
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssetBucketBackend {
@@ -783,10 +794,6 @@ pub enum AssetBucketBackend {
     /// historical and default behavior — unchanged by #411.
     #[default]
     S3,
-    /// No object store; a Cloudflare Workers Static Assets *site publish*
-    /// target instead (#411). Asset bytes stay inline in FerroGate, which
-    /// remains the source of truth for the gateway serve path.
-    WorkersStaticAssets,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -873,52 +880,133 @@ pub struct AssetBucketConfig {
     /// `0` sheds immediately with no queueing.
     #[serde(default)]
     pub buffer_admission_wait_ms: Option<u64>,
-    /// Cloudflare account id for the `workers-static-assets` backend (#411).
-    /// Ignored by the default S3 backend.
-    #[serde(default)]
-    pub cf_account_id: Option<String>,
-    /// Cloudflare API token *reference* for the `workers-static-assets`
-    /// backend (#411) — an `env://VAR` reference or an inline token, resolved
-    /// via [`ferrogate_cloudflare::EnvTokenResolver`]. Ignored by the S3
-    /// backend.
-    #[serde(default)]
-    pub cf_api_token: Option<String>,
-    /// The Worker script name the published site attaches to for the
-    /// `workers-static-assets` backend (#411). Ignored by the S3 backend.
-    ///
-    /// A publish REPLACES this Worker's script and asset version, so it must
-    /// name a Worker dedicated to this one site — never an existing Worker
-    /// carrying bindings or logic (the agent-gateway or MCP Workers, say).
-    #[serde(default)]
-    pub cf_script_name: Option<String>,
-    /// Tenant id of the single site mirrored to `cf_script_name` (#411).
-    ///
-    /// A Cloudflare deploy replaces the Worker's whole asset version, so one
-    /// Worker script can carry exactly one site. Naming the tenant and site the
-    /// script belongs to is what keeps a second tenant's publish from
-    /// overwriting the first tenant's bytes on a shared script; a bundle push
-    /// for any other `{tenant}/{site}` is simply not mirrored.
-    #[serde(default)]
-    pub cf_publish_tenant: Option<String>,
-    /// Site name of the single site mirrored to `cf_script_name` (#411). See
-    /// [`cf_publish_tenant`](Self::cf_publish_tenant).
-    #[serde(default)]
-    pub cf_publish_site: Option<String>,
 }
 
 impl AssetBucketConfig {
     /// Whether the runtime will actually construct the S3/R2 SigV4 client for
     /// this section (issue #485).
     ///
-    /// `AppState::asset_bucket_client` returns `None` for a disabled section
-    /// and for the Cloudflare-native backend, so the S3-only load-time guards
-    /// (`validate_asset_bucket`'s credential-presence rules and the R2 host /
-    /// region rules) must key off exactly the same condition -- otherwise a
-    /// section carrying leftover S3 fields hard-fails config load for a client
-    /// that is never built. Both the runtime accessor and the validators call
-    /// this so the condition cannot drift.
+    /// `AppState::asset_bucket_client` returns `None` for a disabled section,
+    /// so the S3-only load-time guards (`validate_asset_bucket`'s
+    /// credential-presence rules and the R2 host / region rules) must key off
+    /// exactly the same condition -- otherwise a section carrying leftover S3
+    /// fields hard-fails config load for a client that is never built. Both the
+    /// runtime accessor and the validators call this so the condition cannot
+    /// drift.
     pub fn builds_s3_client(&self) -> bool {
         self.enabled && matches!(self.backend, AssetBucketBackend::S3)
+    }
+}
+
+/// Which static-site publish backend `[static_site_publish]` drives (#411).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StaticSitePublishBackend {
+    /// Cloudflare Workers Static Assets direct upload: a 3-step
+    /// assets-upload-session -> `/workers/assets/upload` -> Worker script `PUT`
+    /// that publishes one whole site bundle as one asset version.
+    #[default]
+    WorkersStaticAssets,
+}
+
+/// Mirrors one FerroGate static site onto a Cloudflare edge target (issue
+/// #411). Independent of `[asset_bucket]`: a deployment may offload asset bytes
+/// to S3/R2 *and* mirror a site to Cloudflare, or do either alone.
+///
+/// FerroGate remains the source of truth (scoping decision on #523). The mirror
+/// is DECLARATIVE and reconciled in the background, not a side effect of the
+/// publish request:
+///
+/// - Desired edge state is derived every tick from the site's own authoritative
+///   state -- the `serving` channel's active bundle and that bundle's `public`
+///   flag. A rollback, a yank, a version delete, a tenant purge, or flipping a
+///   site private therefore propagates to the edge on the next tick with no
+///   per-operation hook, because nothing is event-driven.
+/// - A private site (`public = false`, the default) is never mirrored, and one
+///   that becomes private is RETRACTED from the edge.
+/// - A failed publish is retried on the next tick and its divergence is
+///   durable and queryable, rather than existing only in one response body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StaticSitePublishConfig {
+    /// `false` (default) disables the reconciler entirely; nothing is published
+    /// and nothing is retracted.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub backend: StaticSitePublishBackend,
+    /// Cloudflare account id. Required when `enabled`.
+    #[serde(default)]
+    pub cf_account_id: Option<String>,
+    /// Cloudflare API token *reference* — an `env://VAR` reference or an inline
+    /// token, resolved via [`ferrogate_cloudflare::EnvTokenResolver`].
+    /// Required when `enabled`.
+    #[serde(default)]
+    pub cf_api_token: Option<String>,
+    /// The Worker script the published site attaches to. Required when
+    /// `enabled`.
+    ///
+    /// A publish REPLACES this Worker's script and asset version, and a
+    /// retraction DELETES it, so it must name a Worker dedicated to this one
+    /// site — never an existing Worker carrying bindings or logic (the
+    /// agent-gateway or MCP Workers, say).
+    pub cf_script_name: Option<String>,
+    /// Tenant id of the single site mirrored to `cf_script_name`. Required when
+    /// `enabled`.
+    ///
+    /// A Cloudflare deploy replaces the Worker's whole asset version, so one
+    /// Worker script carries exactly one site. Naming the owning
+    /// `{tenant}/{site}` is what keeps a second tenant's publish from erasing
+    /// the first tenant's bytes on a shared script.
+    #[serde(default)]
+    pub tenant: Option<String>,
+    /// Site name of the single site mirrored to `cf_script_name`. Required when
+    /// `enabled`. See [`tenant`](Self::tenant).
+    #[serde(default)]
+    pub site: Option<String>,
+    /// Seconds between reconcile passes. Clamped to `1..=86_400`; unset
+    /// defaults to 60.
+    #[serde(default)]
+    pub tick_interval_secs: Option<u64>,
+    /// Total wall-clock budget (seconds) for ONE publish or retraction against
+    /// Cloudflare, covering all three upload steps together (#411 review: the
+    /// inline mirror had no total timeout and could hang ~165s on the request
+    /// path). Clamped to `1..=3_600`; unset defaults to 120.
+    #[serde(default)]
+    pub publish_timeout_secs: Option<u64>,
+}
+
+impl Default for StaticSitePublishConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: StaticSitePublishBackend::default(),
+            cf_account_id: None,
+            cf_api_token: None,
+            cf_script_name: None,
+            tenant: None,
+            site: None,
+            tick_interval_secs: None,
+            publish_timeout_secs: None,
+        }
+    }
+}
+
+impl StaticSitePublishConfig {
+    /// Reconcile interval, clamped to a sane band.
+    pub fn tick_interval_secs(&self) -> u64 {
+        self.tick_interval_secs.unwrap_or(60).clamp(1, 86_400)
+    }
+
+    /// Total budget for one Cloudflare publish/retraction, clamped.
+    pub fn publish_timeout_secs(&self) -> u64 {
+        self.publish_timeout_secs.unwrap_or(120).clamp(1, 3_600)
+    }
+
+    /// Whether this section names the site `{tenant_id}/{site}`.
+    pub fn publishes(&self, tenant_id: &str, site: &str) -> bool {
+        self.enabled
+            && self.tenant.as_deref() == Some(tenant_id)
+            && self.site.as_deref() == Some(site)
     }
 }
 
@@ -3219,6 +3307,7 @@ impl Default for Config {
             routes: Vec::new(),
             network_access: NetworkAccessConfig::default(),
             asset_bucket: AssetBucketConfig::default(),
+            static_site_publish: StaticSitePublishConfig::default(),
             scheduler: SchedulerConfig::default(),
             asset_lifecycle: AssetLifecycleConfig::default(),
             x402_sweeper: X402SweeperConfig::default(),

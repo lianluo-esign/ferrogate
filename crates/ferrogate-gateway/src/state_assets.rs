@@ -570,14 +570,15 @@ impl AppState {
     /// missing, the same opt-in, fail-closed-only-when-misconfigured shape as
     /// before.
     ///
-    /// Only the S3/R2 SigV4 client can stand here. The `workers-static-assets`
-    /// section configures a static-site *publish* target
-    /// ([`Self::static_site_publish_target`]), not an object store: Cloudflare
+    /// Only an S3-shaped client can stand here, which is why Cloudflare Workers
+    /// Static Assets is not an `[asset_bucket] backend` value: Cloudflare
     /// exposes no keyed GET/DELETE/LIST for published assets, so every read
     /// (`load_asset_content`), every erasure (retention prune, tenant purge)
     /// and blob GC would fail against it while the write path had already
-    /// discarded the inline copy. Asset bytes therefore stay in FerroGate under
-    /// that backend, exactly as they do with `[asset_bucket]` unset.
+    /// discarded the inline copy. The Cloudflare static-site mirror is its own
+    /// independent `[static_site_publish]` section
+    /// ([`Self::static_site_publish_target`]), so a deployment can offload
+    /// bytes to R2 AND mirror a site to the edge instead of choosing one.
     pub(crate) fn asset_bucket_client(
         &self,
     ) -> Option<Box<dyn crate::server::asset_bucket::AssetObjectStore>> {
@@ -611,34 +612,31 @@ impl AppState {
                     ),
                 ))
             }
-            ferrogate_config::AssetBucketBackend::WorkersStaticAssets => None,
         }
     }
 
     /// Resolves the Cloudflare static-site publish target (issue #411), or
-    /// `None` when `[asset_bucket]` does not select `workers-static-assets` or
-    /// any required piece is missing.
+    /// `None` when `[static_site_publish]` is disabled or any required piece is
+    /// missing.
     ///
     /// The target carries the one `{tenant}/{site}` the configured Worker
-    /// script belongs to. A publish replaces that Worker's entire asset
-    /// version, so a site bundle is mirrored only when the target says it owns
-    /// it — that pairing, checked at load time by
-    /// `validate_asset_bucket_backend`, is what keeps one tenant's publish from
+    /// script belongs to. A publish replaces that Worker's entire asset version
+    /// and a retraction deletes the script, so a site is mirrored only when the
+    /// target says it owns it — that pairing, required at load time by
+    /// `validate_static_site_publish`, is what keeps one tenant's publish from
     /// erasing another's files on a shared script.
     pub(crate) fn static_site_publish_target(
         &self,
     ) -> Option<crate::server::asset_bucket::StaticSitePublishTarget> {
-        let bucket = &self.config.asset_bucket;
-        if !bucket.enabled
-            || bucket.backend != ferrogate_config::AssetBucketBackend::WorkersStaticAssets
-        {
+        let publish = &self.config.static_site_publish;
+        if !publish.enabled {
             return None;
         }
-        let account_id = bucket.cf_account_id.clone()?;
-        let api_token = bucket.cf_api_token.clone()?;
-        let script_name = bucket.cf_script_name.clone()?;
-        let publish_tenant = bucket.cf_publish_tenant.clone()?;
-        let publish_site = bucket.cf_publish_site.clone()?;
+        let account_id = publish.cf_account_id.clone()?;
+        let api_token = publish.cf_api_token.clone()?;
+        let script_name = publish.cf_script_name.clone()?;
+        let publish_tenant = publish.tenant.clone()?;
+        let publish_site = publish.site.clone()?;
         let cf_config = ferrogate_cloudflare::CloudflareConfig::new(account_id, api_token);
         let resolver =
             std::sync::Arc::new(ferrogate_cloudflare::EnvTokenResolver::from_process_env());
@@ -650,6 +648,7 @@ impl AppState {
             ),
             publish_tenant,
             publish_site,
+            std::time::Duration::from_secs(publish.publish_timeout_secs()),
         ))
     }
 }

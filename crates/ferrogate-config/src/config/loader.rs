@@ -303,6 +303,7 @@ impl Config {
                 .collect(),
             network_access: crate::config::NetworkAccessConfig::default(),
             asset_bucket: crate::config::AssetBucketConfig::default(),
+            static_site_publish: crate::config::StaticSitePublishConfig::default(),
             scheduler: crate::config::SchedulerConfig::default(),
             asset_lifecycle: crate::config::AssetLifecycleConfig::default(),
             x402_sweeper: crate::config::X402SweeperConfig::default(),

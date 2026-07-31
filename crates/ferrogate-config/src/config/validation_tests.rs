@@ -627,47 +627,26 @@ fn disabled_asset_bucket_with_an_r2_endpoint_skips_the_r2_rules() {
     config.validate().unwrap();
 }
 
-/// Same, for the Cloudflare-native backend: it never constructs the SigV4
-/// client either (issue #485 item 4).
+/// #411: a Cloudflare deploy replaces the Worker's whole asset version and a
+/// retraction deletes the script, so the one script `[static_site_publish]`
+/// names carries exactly one site. Every field that binding needs is required
+/// at load time -- otherwise the first two sites to publish would silently
+/// overwrite each other on the edge.
 #[test]
-fn workers_static_assets_backend_with_an_r2_endpoint_skips_the_r2_rules() {
-    let mut asset_bucket = enabled_r2_asset_bucket();
-    asset_bucket.backend = crate::config::AssetBucketBackend::WorkersStaticAssets;
-    asset_bucket.region = Some("us-east-1".into());
-    asset_bucket.cf_account_id = Some("cf-account".into());
-    asset_bucket.cf_api_token = Some("env://FERROGATE_CF_TOKEN".into());
-    asset_bucket.cf_script_name = Some("ferrogate-assets".into());
-    asset_bucket.cf_publish_tenant = Some("acme".into());
-    asset_bucket.cf_publish_site = Some("docs".into());
-    let config = Config {
-        asset_bucket,
-        ..Config::default()
+fn static_site_publish_requires_the_site_its_script_publishes() {
+    let complete = || crate::config::StaticSitePublishConfig {
+        enabled: true,
+        backend: crate::config::StaticSitePublishBackend::WorkersStaticAssets,
+        cf_account_id: Some("cf-account".into()),
+        cf_api_token: Some("env://FERROGATE_CF_TOKEN".into()),
+        cf_script_name: Some("ferrogate-site".into()),
+        tenant: Some("acme".into()),
+        site: Some("docs".into()),
+        ..Default::default()
     };
-    config.validate().unwrap();
-}
-
-/// #411: a Cloudflare deploy replaces the Worker's whole asset version, so the
-/// one script a `workers-static-assets` section names carries exactly one site.
-/// That binding is required at load time -- otherwise the first two sites to
-/// publish would silently overwrite each other on the edge.
-#[test]
-fn workers_static_assets_backend_requires_the_site_its_script_publishes() {
-    let complete = || {
-        let mut asset_bucket = crate::config::AssetBucketConfig {
-            enabled: true,
-            backend: crate::config::AssetBucketBackend::WorkersStaticAssets,
-            ..Default::default()
-        };
-        asset_bucket.cf_account_id = Some("cf-account".into());
-        asset_bucket.cf_api_token = Some("env://FERROGATE_CF_TOKEN".into());
-        asset_bucket.cf_script_name = Some("ferrogate-site".into());
-        asset_bucket.cf_publish_tenant = Some("acme".into());
-        asset_bucket.cf_publish_site = Some("docs".into());
-        asset_bucket
-    };
-    let validate = |asset_bucket| {
+    let validate = |static_site_publish| {
         Config {
-            asset_bucket,
+            static_site_publish,
             ..Config::default()
         }
         .validate()
@@ -675,23 +654,58 @@ fn workers_static_assets_backend_requires_the_site_its_script_publishes() {
     validate(complete()).unwrap();
 
     for (field, blanked) in [
-        ("cf_publish_tenant", {
-            let mut bucket = complete();
-            bucket.cf_publish_tenant = None;
-            bucket
+        ("tenant", {
+            let mut publish = complete();
+            publish.tenant = None;
+            publish
         }),
-        ("cf_publish_site", {
-            let mut bucket = complete();
-            bucket.cf_publish_site = Some("   ".into());
-            bucket
+        ("site", {
+            let mut publish = complete();
+            publish.site = Some("   ".into());
+            publish
+        }),
+        ("cf_script_name", {
+            let mut publish = complete();
+            publish.cf_script_name = None;
+            publish
         }),
     ] {
         let error = validate(blanked).unwrap_err().to_string();
         assert!(
-            error.contains(&format!("asset_bucket.{field}")),
+            error.contains(&format!("static_site_publish.{field}")),
             "{field}: unexpected error {error}"
         );
     }
+}
+
+/// #411: the mirror is independent of `[asset_bucket]`. A deployment may
+/// offload asset bytes to R2 AND mirror a site to Cloudflare's edge; modelling
+/// the mirror as an `[asset_bucket] backend` value made those two structurally
+/// exclusive for no reason other than the discriminant they shared.
+#[test]
+fn static_site_publish_coexists_with_an_r2_asset_bucket() {
+    let config = Config {
+        asset_bucket: enabled_r2_asset_bucket(),
+        static_site_publish: crate::config::StaticSitePublishConfig {
+            enabled: true,
+            cf_account_id: Some("cf-account".into()),
+            cf_api_token: Some("env://FERROGATE_CF_TOKEN".into()),
+            cf_script_name: Some("ferrogate-site".into()),
+            tenant: Some("acme".into()),
+            site: Some("docs".into()),
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+/// A disabled section requires nothing, so an unconfigured deployment is
+/// unaffected.
+#[test]
+fn static_site_publish_disabled_by_default_requires_nothing() {
+    assert!(!Config::default().static_site_publish.enabled);
+    Config::default().validate().unwrap();
 }
 
 /// The load-time guard and the runtime signer agree, end to end: every endpoint

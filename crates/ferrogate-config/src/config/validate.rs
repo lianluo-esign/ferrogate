@@ -136,7 +136,7 @@ impl Config {
         self.validate_asset_bucket_r2()?;
         self.validate_cloudflare_ai_gateway_providers()?;
         self.validate_cloudflare_mcp_servers()?;
-        self.validate_asset_bucket_backend()?;
+        self.validate_static_site_publish()?;
         Ok(())
     }
 
@@ -470,9 +470,7 @@ impl Config {
         // The S3 credential pieces below are required only when the runtime
         // will actually build the S3-compatible client (issue #411/#485) --
         // `builds_s3_client()` is the same predicate
-        // `AppState::asset_bucket_client` gates its S3 arm on. A CF-native
-        // backend uses the `cf_*` fields and is validated by
-        // `validate_asset_bucket_backend`.
+        // `AppState::asset_bucket_client` gates its S3 arm on.
         if !bucket.builds_s3_client() {
             return Ok(());
         }
@@ -496,77 +494,35 @@ impl Config {
         Ok(())
     }
 
-    /// Validates the Cloudflare-native `[asset_bucket]` backend (issue #411). A
-    /// no-op unless `enabled = true` and `backend = "workers-static-assets"`;
-    /// when selected, the three `cf_*` fields the CF publish client needs are
-    /// required at config-load time (mirroring the S3 backend's credential
-    /// presence checks) rather than failing silently at first publish.
-    fn validate_asset_bucket_backend(&self) -> AnyResult<()> {
-        let bucket = &self.asset_bucket;
-        if !bucket.enabled
-            || bucket.backend != crate::config::AssetBucketBackend::WorkersStaticAssets
-        {
+    /// Validates `[static_site_publish]` (issue #411). A no-op unless
+    /// `enabled = true`; when enabled, every field the Cloudflare publish
+    /// client and the one-script-one-site binding need is required at
+    /// config-load time rather than failing silently on the first reconcile
+    /// tick, where nothing is waiting on the answer.
+    fn validate_static_site_publish(&self) -> AnyResult<()> {
+        let publish = &self.static_site_publish;
+        if !publish.enabled {
             return Ok(());
         }
-        if bucket
-            .cf_account_id
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-        {
-            bail!(
-                "field asset_bucket.cf_account_id: required when asset_bucket.backend = \"workers-static-assets\""
-            );
-        }
-        if bucket
-            .cf_api_token
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-        {
-            bail!(
-                "field asset_bucket.cf_api_token: required when asset_bucket.backend = \"workers-static-assets\""
-            );
-        }
-        if bucket
-            .cf_script_name
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-        {
-            bail!(
-                "field asset_bucket.cf_script_name: required when asset_bucket.backend = \"workers-static-assets\""
-            );
-        }
-        // A Cloudflare deploy replaces the Worker's whole asset version, so the
-        // one script this section names can carry exactly one site. Requiring
-        // the owning `{tenant}/{site}` at load time is what makes that
-        // one-script-one-site binding checkable before a second tenant's
-        // publish could overwrite the first's bytes.
-        if bucket
-            .cf_publish_tenant
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-        {
-            bail!(
-                "field asset_bucket.cf_publish_tenant: required when asset_bucket.backend = \"workers-static-assets\" (a Worker script publishes exactly one site)"
-            );
-        }
-        if bucket
-            .cf_publish_site
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-        {
-            bail!(
-                "field asset_bucket.cf_publish_site: required when asset_bucket.backend = \"workers-static-assets\" (a Worker script publishes exactly one site)"
-            );
+        // A Cloudflare deploy replaces the Worker's whole asset version and a
+        // retraction deletes the script, so the one script this section names
+        // can carry exactly one site. Requiring the owning `{tenant}/{site}` at
+        // load time is what makes that binding checkable before a second
+        // tenant's publish could overwrite the first's bytes.
+        for (field, value) in [
+            ("cf_account_id", publish.cf_account_id.as_deref()),
+            ("cf_api_token", publish.cf_api_token.as_deref()),
+            ("cf_script_name", publish.cf_script_name.as_deref()),
+            ("tenant", publish.tenant.as_deref()),
+            ("site", publish.site.as_deref()),
+        ] {
+            if value.unwrap_or("").trim().is_empty() {
+                bail!(
+                    "field static_site_publish.{field}: required when \
+                     static_site_publish.enabled = true (one Worker script publishes exactly one \
+                     site)"
+                );
+            }
         }
         Ok(())
     }

@@ -32,7 +32,6 @@ use ferrogate_storage::{
     StoredAsset, StoredAssetChannel,
 };
 
-use super::asset_bucket::{PublishedSite, SitePublishFile};
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
@@ -46,6 +45,21 @@ use crate::{
 /// is stored under, so publishing a bundle reuses the same `stored_assets`
 /// table and tenant quota accounting as any other asset.
 pub(super) const SITE_ASSET_TYPE: &str = "static_site";
+
+/// Asset type of the Cloudflare mirror's durable state row (#411).
+///
+/// Deliberately a SEPARATE asset type rather than another reserved version
+/// under `static_site`: the mirror state is FerroGate's bookkeeping about a
+/// third party, not a file the site serves, and keeping it out of
+/// `static_site` keeps it out of the bundle's file listings, its retention
+/// grouping, and the per-file resolution the serve path does. It is readable
+/// through the ordinary `/v1/assets/{type}/{name}/{version}` pull path, which
+/// is what makes a diverged mirror queryable rather than reconstructable only
+/// from audit lines.
+pub(super) const SITE_MIRROR_ASSET_TYPE: &str = "static_site_mirror";
+
+/// Reserved `version` of the single, mutable mirror-state row per site (#411).
+pub(super) const SITE_MIRROR_STATE_VERSION: &str = "cloudflare";
 
 /// Reserved `version` for the per-site "latest" manifest row (#258). Kept as a
 /// mutable existence/latest marker after #397: it is rewritten to the newest
@@ -146,7 +160,7 @@ fn site_file_version(bundle_version: &str, path: &str) -> String {
 ///   manifest came from the `__site_manifest__` marker and file rows are keyed
 ///   by the bare `{path}`, exactly as the pre-#397 serve path read them.
 #[derive(Debug, Clone)]
-enum SiteFileKeying {
+pub(super) enum SiteFileKeying {
     Bundle(String),
     Legacy,
 }
@@ -158,60 +172,6 @@ pub(super) struct SiteBundlePublish {
     pub(super) spa_fallback: bool,
     pub(super) cache_control: Option<String>,
     pub(super) project_id: Option<String>,
-}
-
-/// What the Cloudflare static-site mirror did for one bundle publish (#411).
-/// A mirror never changes the publish's own verdict — the bundle is committed
-/// and served from the gateway either way — so a failure is carried here to be
-/// reported rather than turned into an error.
-enum CloudflareSitePublish {
-    /// No `workers-static-assets` publish target is configured.
-    NotConfigured,
-    /// A target is configured, but for a different site.
-    NotThisSite,
-    /// The whole bundle is live as a new Cloudflare asset version.
-    Published(PublishedSite),
-    /// The mirror failed. FerroGate still serves the committed bundle; the
-    /// Cloudflare edge keeps whatever version it had.
-    Failed(String),
-}
-
-impl CloudflareSitePublish {
-    /// `(outcome, detail)` for the admin audit trail, or `None` when no mirror
-    /// was configured for this site and there is nothing to record.
-    fn audit_entry(&self) -> Option<(&'static str, String)> {
-        match self {
-            Self::NotConfigured | Self::NotThisSite => None,
-            Self::Published(published) => Some((
-                "published",
-                format!(
-                    "mirrored {} files to Cloudflare Worker {}",
-                    published.file_count, published.script_name
-                ),
-            )),
-            Self::Failed(error) => Some((
-                "failed",
-                format!("Cloudflare mirror failed (bundle is committed and served): {error}"),
-            )),
-        }
-    }
-
-    /// The `cloudflare_publish` field of the publish response, or `None` when
-    /// no mirror was configured for this site.
-    fn response_field(&self) -> Option<serde_json::Value> {
-        match self {
-            Self::NotConfigured | Self::NotThisSite => None,
-            Self::Published(published) => Some(serde_json::json!({
-                "status": "published",
-                "script_name": published.script_name,
-                "file_count": published.file_count,
-            })),
-            Self::Failed(error) => Some(serde_json::json!({
-                "status": "failed",
-                "error": error,
-            })),
-        }
-    }
 }
 
 /// Definitive, non-error outcome of [`FerroGateway::commit_site_bundle`] (#397).
@@ -232,9 +192,9 @@ pub(super) enum SiteBundleCommit {
 
 /// A site's active bundle as resolved for serving: the manifest to resolve a
 /// request path against, and the keying used to load the matched file object.
-struct ResolvedSiteBundle {
-    manifest: SiteManifest,
-    keying: SiteFileKeying,
+pub(super) struct ResolvedSiteBundle {
+    pub(super) manifest: SiteManifest,
+    pub(super) keying: SiteFileKeying,
 }
 
 impl ResolvedSiteBundle {
@@ -258,10 +218,10 @@ impl ResolvedSiteBundle {
 /// [`FerroGateway::resolve_servable_site_file`] (issue #528), so the lookup +
 /// withholding decision can be exercised without a live `Session` and the
 /// handler stays the only place that turns it into a response.
-struct SiteFileRefusal {
+pub(super) struct SiteFileRefusal {
     status: StatusCode,
     code: &'static str,
-    message: String,
+    pub(super) message: String,
 }
 
 /// `true` when `data` starts with the ZIP local-file-header magic (`PK\x03\x04`).
@@ -706,25 +666,15 @@ impl FerroGateway {
             ),
         ));
 
-        // The bundle is committed and the gateway is already serving it. The
-        // Cloudflare mirror is an additional, opt-in destination for exactly one
-        // configured site, so its outcome is reported -- in the audit trail and
-        // in the response -- and never allowed to retract a publish that landed.
-        let cloudflare = self
-            .mirror_bundle_to_cloudflare(tenant_id, site, &prepared)
-            .await;
-        if let Some((outcome, detail)) = cloudflare.audit_entry() {
-            state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                ctx,
-                auth,
-                "site.publish.cloudflare",
-                &manifest_id,
-                outcome,
-                detail,
-            ));
-        }
-
-        let mut body = serde_json::json!({
+        // The Cloudflare mirror (#411) is deliberately NOT driven from here.
+        // Desired edge state is derived from the site's own authoritative state
+        // by the background reconciler in `site_publish.rs`, so a rollback, a
+        // yank, a version delete, a tenant purge and a flip to private each
+        // propagate to the edge on their own -- none of which has a hook on
+        // this handler. Driving it inline also put an unbounded third-party
+        // round trip on the publish request and added a response field the
+        // closed `StaticSitePublishResponse` schema rejects.
+        let body = serde_json::json!({
             "object": "static_site",
             "tenant": tenant_id,
             "site": site,
@@ -739,43 +689,7 @@ impl FerroGateway {
                 .map(|entry| entry.path.clone())
                 .collect::<Vec<_>>(),
         });
-        if let Some(report) = cloudflare.response_field() {
-            body["cloudflare_publish"] = report;
-        }
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-    }
-
-    /// Mirrors a just-committed bundle to the configured Cloudflare
-    /// static-site publish target (issue #411).
-    ///
-    /// Publishes the WHOLE bundle in one Cloudflare asset version, because a
-    /// deploy replaces the version wholesale. Only the single `{tenant}/{site}`
-    /// the target names is mirrored — another site pushing to the same Worker
-    /// script would delete this one's files from the edge.
-    async fn mirror_bundle_to_cloudflare(
-        &self,
-        tenant_id: &str,
-        site: &str,
-        prepared: &[(String, String, Vec<u8>)],
-    ) -> CloudflareSitePublish {
-        let Some(target) = self.state.current().static_site_publish_target() else {
-            return CloudflareSitePublish::NotConfigured;
-        };
-        if !target.publishes(tenant_id, site) {
-            return CloudflareSitePublish::NotThisSite;
-        }
-        let files: Vec<SitePublishFile<'_>> = prepared
-            .iter()
-            .map(|(path, content_type, content)| SitePublishFile {
-                path,
-                content_type,
-                body: content,
-            })
-            .collect();
-        match target.publish_site(&files).await {
-            Ok(published) => CloudflareSitePublish::Published(published),
-            Err(error) => CloudflareSitePublish::Failed(error.to_string()),
-        }
     }
 
     /// Session-free core of a static-site publish (#397): the immutability guard,
@@ -919,7 +833,7 @@ impl FerroGateway {
     /// path reads. Backward-compat: a site with no `serving` channel (published
     /// before #397) falls back to the mutable `__site_manifest__` marker and the
     /// legacy bare-`{path}` file keying, so already-served sites keep serving.
-    async fn resolve_active_site_bundle(
+    pub(super) async fn resolve_active_site_bundle(
         &self,
         tenant_id: &str,
         site: &str,
@@ -985,7 +899,7 @@ impl FerroGateway {
     /// Extracted from the handler so the test helper resolves files through the
     /// SAME code rather than a mirror of it: a mirrored lookup would keep
     /// passing with the gate deleted.
-    async fn resolve_servable_site_file(
+    pub(super) async fn resolve_servable_site_file(
         &self,
         resolved: &ResolvedSiteBundle,
         tenant: &str,

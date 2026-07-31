@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -1361,6 +1361,11 @@ impl WorkersStaticAssetsStore {
         }
     }
 
+    /// The Worker script this store publishes to.
+    pub(crate) fn script_name(&self) -> &str {
+        &self.script_name
+    }
+
     /// Step 1 of the Workers Static Assets direct upload: negotiate an upload
     /// session for `manifest`. Issues
     /// `POST /accounts/{account_id}/workers/scripts/{script}/assets-upload-session`
@@ -1513,6 +1518,40 @@ impl WorkersStaticAssetsStore {
         })
     }
 
+    /// Retract the published site from Cloudflare's edge (issue #411): delete
+    /// the Worker script the bundle is served by.
+    ///
+    /// This is the de-publish half the mirror needs to be operable. A site that
+    /// is rolled back to nothing, yanked, deleted, turned private, or whose
+    /// tenant is purged must stop being anonymously readable on the edge, and
+    /// there is no "publish an empty asset version" -- an empty manifest is
+    /// rejected by [`Self::publish_site`] and by Cloudflare. Deleting the
+    /// script removes both the assets and the route that served them.
+    ///
+    /// Idempotent: Cloudflare answers `404` for a script that is already gone,
+    /// which is the desired end state, so it counts as success. That is what
+    /// lets the reconciler re-run a retraction every tick without flapping.
+    pub(crate) async fn retract_site(&self) -> anyhow::Result<()> {
+        let path = format!(
+            "accounts/{{account_id}}/workers/scripts/{}",
+            self.script_name
+        );
+        match self
+            .client
+            .request_json::<serde_json::Value>(HttpMethod::Delete, &path, None, None)
+            .await
+        {
+            Ok(_) => Ok(()),
+            // Already absent == retracted. Matching on the rendered error keeps
+            // this from depending on the shared client's error enum shape; the
+            // client renders the HTTP status into the message.
+            Err(error) if is_not_found_error(&error.to_string()) => Ok(()),
+            Err(error) => Err(anyhow::anyhow!(
+                "workers-static-assets script delete failed: {error}"
+            )),
+        }
+    }
+
     /// Step 3: deploy the Worker script referencing the completion token. A
     /// `success: true` envelope is the point at which the publish is durable.
     async fn deploy_static_worker(&self, completion_token: &str) -> anyhow::Result<()> {
@@ -1560,30 +1599,88 @@ pub(crate) struct StaticSitePublishTarget {
     store: WorkersStaticAssetsStore,
     tenant_id: String,
     site: String,
+    /// Total wall-clock budget for ONE publish or retraction, covering all
+    /// three Cloudflare steps together. Without it the flow's worst case is the
+    /// sum of every step's own retrying timeout (~165s measured on the inline
+    /// path #411 review flagged); the reconciler needs a bound it can state.
+    budget: Duration,
 }
 
 impl StaticSitePublishTarget {
-    pub(crate) fn new(store: WorkersStaticAssetsStore, tenant_id: String, site: String) -> Self {
+    pub(crate) fn new(
+        store: WorkersStaticAssetsStore,
+        tenant_id: String,
+        site: String,
+        budget: Duration,
+    ) -> Self {
         Self {
             store,
             tenant_id,
             site,
+            budget,
         }
     }
 
-    /// Whether this target is the Cloudflare mirror of `{tenant_id}/{site}`.
-    pub(crate) fn publishes(&self, tenant_id: &str, site: &str) -> bool {
-        self.tenant_id == tenant_id && self.site == site
+    /// The tenant of the one site this target mirrors. The target is the single
+    /// source of the pairing -- a caller must never re-derive it from config,
+    /// or the script could be driven toward a site it does not belong to.
+    pub(crate) fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    /// The one site this target mirrors. See [`tenant_id`](Self::tenant_id).
+    pub(crate) fn site(&self) -> &str {
+        &self.site
+    }
+
+    /// The Worker script this target publishes to.
+    pub(crate) fn script_name(&self) -> &str {
+        self.store.script_name()
     }
 
     /// Publish `files` — the site's complete bundle — as one Cloudflare asset
-    /// version. See [`WorkersStaticAssetsStore::publish_site`].
+    /// version, within the configured total budget. See
+    /// [`WorkersStaticAssetsStore::publish_site`].
     pub(crate) async fn publish_site(
         &self,
         files: &[SitePublishFile<'_>],
     ) -> anyhow::Result<PublishedSite> {
-        self.store.publish_site(files).await
+        self.within_budget("publish", self.store.publish_site(files))
+            .await
     }
+
+    /// Retract the site from the edge within the configured total budget. See
+    /// [`WorkersStaticAssetsStore::retract_site`].
+    pub(crate) async fn retract_site(&self) -> anyhow::Result<()> {
+        self.within_budget("retraction", self.store.retract_site())
+            .await
+    }
+
+    /// Runs `operation` under the target's total budget. A timeout is reported
+    /// as an error naming the budget, and — critically — leaves the mirror
+    /// state "unknown", not "done": the caller records a failure and the next
+    /// reconcile pass re-derives desired state and retries.
+    async fn within_budget<T>(
+        &self,
+        operation: &str,
+        future: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        match tokio::time::timeout(self.budget, future).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "workers-static-assets {operation} exceeded its {}s total budget; the Cloudflare \
+                 edge state is unknown and will be reconciled on the next pass",
+                self.budget.as_secs()
+            )),
+        }
+    }
+}
+
+/// Whether a rendered shared-client error describes a `404`. Used to make a
+/// retraction idempotent: a script that is already absent IS the desired end
+/// state, so re-running the retraction must not report failure forever.
+fn is_not_found_error(rendered: &str) -> bool {
+    rendered.contains("404")
 }
 
 /// Extracts `<Contents>` entries from a `ListObjectsV2` XML body as
