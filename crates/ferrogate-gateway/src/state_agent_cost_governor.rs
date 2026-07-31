@@ -48,7 +48,7 @@
 use super::*;
 
 use ferrogate_runtime::{
-    AgentBurnLedger, AgentCostGovernor, AgentDispatchGuard, AgentInstanceIdentity,
+    AgentBurnLedger, AgentBurnScope, AgentCostGovernor, AgentDispatchGuard, AgentInstanceIdentity,
     CfRuntimeCostModel, CloudflareControlSurface, CloudflareControlSurfaceError,
     CloudflareRunExecOutcome, CloudflareRunExecRequest, CloudflareRunHandle,
     CloudflareRunStartRequest, CloudflareRunStatus, CostGovernorError, StorageAgentBurnLedger,
@@ -238,6 +238,21 @@ impl AppState {
     /// governor, no ledger read, and no behavior change for unbudgeted tenants.
     /// `Err` means a budget IS configured but is unusable, which callers must
     /// treat as fail-closed.
+    ///
+    /// ## The ledger read is TENANT-scoped, and that is the whole point
+    ///
+    /// The governor's ledger is built with [`AgentBurnScope::Tenant`], so the
+    /// ceiling is evaluated against the SUM of every per-agent burn row the
+    /// tenant accumulated in the period. Agent spend is settled by whichever
+    /// request paid for it, so one logical agent's burn lands under several
+    /// `agent_key`s -- the interactive run's api key, the job runner's key, and
+    /// [`UNATTRIBUTED_AGENT_KEY`] for a scheduled fire that carries no api-key
+    /// identity at all. Reading a single `agent_key` row made the gate read 0.0
+    /// on every deployment that uses api keys (the ceiling existed but bound
+    /// against a row nobody increments); the tenant sum is also exactly what the
+    /// ceiling resolved from the tenant/project/workspace/key quota chain
+    /// describes. Writes stay per-agent, so `GET /admin/v1/agent-cost-burn`
+    /// still attributes spend agent by agent.
     pub(crate) async fn agent_cost_governor<C: CloudflareControlSurface>(
         &self,
         tenant: &ferrogate_core::TenantContext,
@@ -247,7 +262,8 @@ impl AppState {
             return Ok(None);
         };
         let ledger =
-            StorageAgentBurnLedger::new(self.repositories.clone(), self.current_period_month());
+            StorageAgentBurnLedger::new(self.repositories.clone(), self.current_period_month())
+                .with_scope(AgentBurnScope::Tenant);
         Ok(Some(AgentCostGovernor::new(
             CfRuntimeCostModel::new(),
             policy,
@@ -258,13 +274,14 @@ impl AppState {
 
     /// Consult the cost governor before admitting a new agent run.
     ///
-    /// `agent_key` is the STABLE per-agent identity the durable burn ledger
-    /// accumulates against (the api key / virtual key the agent runs under --
-    /// the same identity `#357`/`#464` treat as "the agent" when surfacing
-    /// unattributed activity), deliberately NOT the ephemeral `run_id`: a
-    /// per-agent budget must fold every run of the agent inside the billing
-    /// period into one total, and keying on the run id would hand each run its
-    /// own untethered budget.
+    /// `agent_key` is the STABLE per-agent identity (the api key / virtual key
+    /// the agent runs under -- the same identity `#357`/`#464` treat as "the
+    /// agent" when surfacing unattributed activity), deliberately NOT the
+    /// ephemeral `run_id`. It names the run in the refusal log and in the
+    /// governor's audit attribution; the ceiling itself is evaluated against the
+    /// TENANT's total burn for the period (see [`Self::agent_cost_governor`]),
+    /// so a run started under a key that has itself never settled any spend is
+    /// still refused once the tenant's agents have burnt through the budget.
     ///
     /// Returns [`AgentRunAdmission::Unbudgeted`] without touching the ledger when
     /// the tenant has no configured budget.
@@ -333,13 +350,24 @@ impl AppState {
     ///
     /// The Cloudflare-runtime dimensions (DO requests, GB-seconds, SQLite rows)
     /// need a live CF Analytics feed and credentials, and stay behind the
-    /// [`ferrogate_runtime::AgentRuntimeUsageSource`] seam. **Model / tool / MCP
-    /// egress spend needs none of that**: the gateway already prices and settles
-    /// it per request, and the settled `BillingEvent` already carries the
-    /// `agent_run_id` correlation and the tenant's `api_key_id`. Those two are
-    /// exactly the `(tenant_id, agent_key)` pair the ledger accumulates against
-    /// and [`Self::admit_agent_run`] reads back, so folding the settled cost in
-    /// at metering time closes the loop with no new telemetry source.
+    /// [`ferrogate_runtime::AgentRuntimeUsageSource`] seam. **Priced egress the
+    /// gateway settles itself needs none of that**: the settled `BillingEvent`
+    /// already carries the `agent_run_id` correlation and the tenant's
+    /// `api_key_id`, which are the `(tenant_id, agent_key)` pair the ledger
+    /// accumulates against, so folding the settled cost in at metering time
+    /// closes the loop with no new telemetry source.
+    /// [`Self::admit_agent_run`] reads the tenant SUM of those rows rather than
+    /// any single one, because the key that settles an agent's spend is often
+    /// not the key that starts its next run (a job runner, or a keyless
+    /// scheduled fire).
+    ///
+    /// Only **priced** spend can appear here: an unpriced unit settles with
+    /// `cost_usd = None` and contributes nothing. Today that means model token
+    /// spend and (when `asset_egress_price_per_gb` is configured) agent asset
+    /// egress are folded in, while MCP tool calls, A2A exchanges, and managed
+    /// external actions are metered and audited but priced at nothing, so they
+    /// add no burn. The ledger is a lower bound on real agent cost, never an
+    /// over-count.
     ///
     /// ## Unconditional, by design
     ///
@@ -400,6 +428,34 @@ impl AppState {
                 None
             }
         }
+    }
+
+    /// Fold ONE settled billing event's priced cost into the durable per-agent
+    /// burn ledger, when that event is agent activity.
+    ///
+    /// The single seam every settlement path calls, so "which spend counts as
+    /// agent burn" has one answer instead of one per call site: the event must
+    /// carry an `agent_run_id` (it is agent activity) AND a `cost_usd` (the unit
+    /// is priced). An unpriced unit contributes nothing because it cost nothing
+    /// that FerroGate can name -- that is a pricing-configuration fact, not a
+    /// dropped charge.
+    ///
+    /// A non-agent request costs one `Option` check and never touches the
+    /// ledger, which matters because this runs on every metered request.
+    pub(crate) async fn fold_settled_agent_burn(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        agent_run_id: Option<&str>,
+        cost_usd: Option<f64>,
+    ) {
+        let Some((agent_key, run_id)) = Self::agent_burn_attribution(tenant, agent_run_id) else {
+            return;
+        };
+        let Some(cost_usd) = cost_usd else {
+            return;
+        };
+        self.record_agent_burn(tenant, agent_key, run_id, cost_usd)
+            .await;
     }
 
     /// The `(agent_key, run_id)` a settled billing event attributes agent burn

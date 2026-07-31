@@ -1081,17 +1081,57 @@ impl AgentBurnLedger for InMemoryAgentBurnLedger {
 pub struct StorageAgentBurnLedger {
     repos: Arc<RuntimeStorageRepositories>,
     period: String,
+    scope: AgentBurnScope,
+}
+
+/// Which accumulated total a [`StorageAgentBurnLedger`] READ answers with.
+///
+/// Writes are unaffected: [`AgentBurnLedger::add`] always folds the amount into
+/// the identity's own `(tenant_id, agent_key, period)` row, so the per-agent
+/// rows `GET /admin/v1/agent-cost-burn` reports stay individually legible under
+/// either scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentBurnScope {
+    /// Read only the identity's own `agent_key` row.
+    #[default]
+    Agent,
+    /// Read the SUM of every agent row the identity's tenant accumulated in the
+    /// period.
+    ///
+    /// This is the scope a **budget gate** must use. FerroGate's agent spend is
+    /// settled by whichever request actually paid for it, so one logical agent's
+    /// burn lands under several `agent_key`s: the interactive run's api key, the
+    /// job runner's key, and the `unattributed` key for a scheduled fire that
+    /// carries no api-key identity at all. A gate reading a single `agent_key`
+    /// row therefore reads 0.0 on any deployment that uses api keys — the
+    /// ceiling exists but binds against a row nobody increments. The ceiling
+    /// itself is resolved from the tenant/project/workspace/key quota chain, so
+    /// the tenant total is also the number the configured value describes.
+    Tenant,
 }
 
 impl StorageAgentBurnLedger {
     /// Build a durable ledger over `repos`, attributing all burn to `period` (a
     /// `YYYY-MM` billing window). `period` is injected — not read from a clock —
-    /// so enforcement is deterministic and unit-testable.
+    /// so enforcement is deterministic and unit-testable. Reads default to
+    /// [`AgentBurnScope::Agent`]; see [`Self::with_scope`].
     pub fn new(repos: Arc<RuntimeStorageRepositories>, period: impl Into<String>) -> Self {
         Self {
             repos,
             period: period.into(),
+            scope: AgentBurnScope::Agent,
         }
+    }
+
+    /// Choose which total reads answer with (writes are unchanged).
+    pub fn with_scope(mut self, scope: AgentBurnScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// The read scope this ledger answers `get` with.
+    pub fn scope(&self) -> AgentBurnScope {
+        self.scope
     }
 
     /// The billing period this ledger attributes burn to.
@@ -1111,16 +1151,26 @@ impl StorageAgentBurnLedger {
 impl AgentBurnLedger for StorageAgentBurnLedger {
     async fn get(&self, identity: &AgentInstanceIdentity) -> Result<f64, AgentBurnLedgerError> {
         let (tenant_id, agent_key) = Self::attribution(identity);
-        match self
-            .repos
-            .get_agent_burn(tenant_id, agent_key, &self.period)
-            .await
-        {
-            // Unseen (no durable row yet) == zero burn.
-            Ok(None) => Ok(0.0),
-            Ok(Some(total)) => Ok(total),
-            // Fail closed: a store read failure is an error, NOT zero burn.
-            Err(e) => Err(AgentBurnLedgerError::Storage(e.to_string())),
+        match self.scope {
+            AgentBurnScope::Agent => match self
+                .repos
+                .get_agent_burn(tenant_id, agent_key, &self.period)
+                .await
+            {
+                // Unseen (no durable row yet) == zero burn.
+                Ok(None) => Ok(0.0),
+                Ok(Some(total)) => Ok(total),
+                // Fail closed: a store read failure is an error, NOT zero burn.
+                Err(e) => Err(AgentBurnLedgerError::Storage(e.to_string())),
+            },
+            // Every agent row this tenant accumulated in the period, summed:
+            // the gate must see spend settled under a DIFFERENT api key than
+            // the one starting this run, or it binds against nothing.
+            AgentBurnScope::Tenant => self
+                .repos
+                .tenant_agent_burn_total(tenant_id, &self.period)
+                .await
+                .map_err(|e| AgentBurnLedgerError::Storage(e.to_string())),
         }
     }
 

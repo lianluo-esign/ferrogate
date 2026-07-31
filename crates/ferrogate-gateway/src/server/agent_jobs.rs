@@ -646,6 +646,11 @@ impl FerroGateway {
         //
         // An unbudgeted tenant resolves to `Unbudgeted`: no governor, no ledger
         // read, no audit event, and the pre-#428 path continues unchanged.
+        //
+        // The submitting key below is the run's identity label only. The verdict
+        // comes from the tenant's TOTAL agent burn for the period, which is what
+        // makes this gate bind even though the spend of the job it starts is
+        // settled later, under the runner's own key rather than the submitter's.
         let admission = state
             .admit_agent_run(
                 &tenant,

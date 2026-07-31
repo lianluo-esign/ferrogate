@@ -126,6 +126,10 @@ pub(super) async fn record_asset_egress(
             &ctx.request_id,
             ctx.trace_id.as_deref(),
             &tenant,
+            // #428/#522: the run correlation the caller already resolved, so an
+            // agent's priced download joins its run and reaches the agent burn
+            // ledger instead of being dropped here.
+            agent_run_id,
             asset_type,
             name,
             version,

@@ -297,6 +297,38 @@ impl RuntimeStorageRepositories {
             .await
     }
 
+    /// Total durable agent burn for `tenant_id` in `period`: the sum of EVERY
+    /// per-agent row the tenant accumulated in the window.
+    ///
+    /// This is the read the #428 budget gate binds on. The write side keys each
+    /// row on whichever api-key identity settled the spend (the run's key, the
+    /// job runner's key, or [`unattributed`] for a cron that carries no key), so
+    /// a gate that read ONE `agent_key` row would miss every other writer and
+    /// read 0.0 on any deployment that uses api keys. Summing the tenant's rows
+    /// makes the ceiling bind on the same money the ledger recorded, whoever
+    /// wrote it, while the per-agent rows stay individually legible on
+    /// `GET /admin/v1/agent-cost-burn`.
+    ///
+    /// Built on [`Self::list_agent_cost_burn`] rather than a new backend SUM so
+    /// the aggregate cannot drift from the rows the admin surface reports, and
+    /// so an unimplemented backend keeps failing loudly (the caller fails closed)
+    /// instead of silently returning a fabricated zero. Non-finite row values
+    /// are skipped: a single poisoned row must not turn the tenant total into
+    /// `NaN`, which compares false against every threshold and would silently
+    /// disable the ceiling.
+    pub async fn tenant_agent_burn_total(
+        &self,
+        tenant_id: &str,
+        period: &str,
+    ) -> Result<f64, StorageError> {
+        let rows = self.list_agent_cost_burn(Some(tenant_id), period).await?;
+        Ok(rows
+            .iter()
+            .map(|row| row.accumulated_usd)
+            .filter(|usd| usd.is_finite())
+            .sum())
+    }
+
     /// List the durable per-agent burn rows for `period`, biggest accumulated
     /// total first, optionally scoped to one tenant (#428 slice B-surface).
     /// `tenant_scope = Some(tenant_id)` restricts to that tenant so a

@@ -227,22 +227,21 @@ impl AppState {
         // #428 burn writer: this settled request is agent activity iff it
         // carries an `agent_run_id`, and its `cost_usd` has just been priced
         // against the model registry. Fold it into the durable per-agent burn
-        // ledger so the per-agent ceiling `AppState::admit_agent_run` reads at
-        // the NEXT dispatch is backed by real spend rather than a permanent
-        // zero. Attribution is `(organization_id, api_key_id)` -- the same pair
-        // admission keys on, so the write and the read join by construction.
+        // ledger so the ceiling `AppState::admit_agent_run` reads at the NEXT
+        // dispatch is backed by real spend rather than a permanent zero. The row
+        // is keyed `(organization_id, api_key_id)`; admission sums the tenant's
+        // rows, so spend settled under one key still bounds a run started under
+        // another.
         //
         // Recorded whether or not the tenant has a configured ceiling: the
         // visibility half of #428 (`GET /admin/v1/agent-cost-burn`) is how an
         // operator sizes a budget before setting one.
-        if let Some((agent_key, run_id)) =
-            AppState::agent_burn_attribution(&draft.request.tenant, event.agent_run_id.as_deref())
-        {
-            if let Some(cost_usd) = cost_usd {
-                self.record_agent_burn(&draft.request.tenant, agent_key, run_id, cost_usd)
-                    .await;
-            }
-        }
+        self.fold_settled_agent_burn(
+            &draft.request.tenant,
+            event.agent_run_id.as_deref(),
+            cost_usd,
+        )
+        .await;
         // Runs after the rollup update this settled request just committed
         // (both `append_billing_event` paths increment
         // `usage_monthly_rollups` synchronously), so spend read here
@@ -689,12 +688,19 @@ impl AppState {
     /// unpriced (`asset_egress_price_per_gb = None`) the event is still metered
     /// and audited but carries no cost and never debits the wallet -- exactly
     /// how an unpriced model is metered but not charged.
+    ///
+    /// `agent_run_id` is the #522-threaded run correlation of a download an
+    /// agent performed (`None` for an ordinary operator/client download). It was
+    /// previously accepted by the caller and then dropped at this boundary, so
+    /// agent egress spend joined no run and could not reach the #428 burn
+    /// ledger; it now rides the settled event like every other correlation id.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_asset_egress_event(
         &self,
         request_id: &str,
         trace_id: Option<&str>,
         tenant: &ferrogate_core::TenantContext,
+        agent_run_id: Option<&str>,
         asset_type: &str,
         name: &str,
         version: &str,
@@ -713,7 +719,7 @@ impl AppState {
             request_id: request_id.to_string(),
             trace_id: trace_id.map(str::to_string),
             provider_attempt: ProviderAttempt::for_request(request_id, 0),
-            agent_run_id: None,
+            agent_run_id: agent_run_id.map(str::to_string),
             workflow_id: None,
             workflow_version: None,
             workflow_node_id: None,
@@ -792,6 +798,12 @@ impl AppState {
         if let Some(exporter) = &self.metering_exporter {
             exporter.export_event(event.clone());
         }
+        // #428: priced egress an AGENT caused is agent burn like its model
+        // spend, so it folds into the same durable ledger the run-admission
+        // ceiling reads. Unpriced egress (`cost_usd = None`) adds nothing, and a
+        // download with no run correlation is not agent activity at all.
+        self.fold_settled_agent_burn(tenant, agent_run_id, cost_usd)
+            .await;
         // Egress spend counts toward the tenant's monthly budget/alert tiers
         // just like token spend.
         self.dispatch_budget_threshold_alerts(tenant).await;

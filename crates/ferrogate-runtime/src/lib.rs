@@ -54,7 +54,7 @@ pub use capability_boundary::{
 };
 pub use cloudflare_agent_cost::{
     evaluate as evaluate_agent_budget, should_dispatch, AgentBudgetPolicy, AgentBurnLedger,
-    AgentBurnLedgerError, AgentCostAttribution, AgentCostGovernor, AgentCostReceipt,
+    AgentBurnLedgerError, AgentBurnScope, AgentCostAttribution, AgentCostGovernor, AgentCostReceipt,
     AgentDispatchGuard, AgentRuntimeUsageSample, AgentRuntimeUsageSource, BudgetDecision,
     CfRuntimeCostModel, CfRuntimePricing, ContainerUsageSample, CostBreakdown, CostGovernorError,
     CostWindow, InMemoryAgentBurnLedger, KillMode, ScriptedUsageSource, StorageAgentBurnLedger,

@@ -165,10 +165,14 @@ impl AppState {
         // its own cadence once the period rolls over or the ceiling is raised --
         // rather than silently skipping or backing up a catch-up queue.
         //
-        // The schedule carries no api-key identity, so burn attributes to
-        // `UNATTRIBUTED_AGENT_KEY` -- the same row every other unattributed run
-        // of this tenant folds into, which is what makes the cap bind across
-        // surfaces instead of handing schedules their own untethered budget.
+        // The schedule carries no api-key identity, so it names itself with
+        // `UNATTRIBUTED_AGENT_KEY` in the refusal log and audit attribution.
+        // That label does NOT decide the verdict: `admit_agent_run` evaluates
+        // the ceiling against the tenant's TOTAL agent burn for the period (the
+        // sum of every per-agent row), so a cron is bounded by the spend its
+        // tenant's api-keyed agents settled, not only by burn recorded under
+        // this one keyless label -- which was zero on every deployment that uses
+        // api keys.
         let tenant = ferrogate_core::TenantContext {
             organization_id: Some(schedule.tenant_id.clone()),
             workspace_id: Some(schedule.workspace_id.clone()),
