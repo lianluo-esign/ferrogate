@@ -28,6 +28,10 @@ const addressSegment = z
   .string()
   .min(1)
   .max(512)
+  // Matching control characters IS the point: this segment becomes an object
+  // key and a response header value, so a raw CR/LF or NUL must be refused
+  // rather than smuggled into either.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: see above
   .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
     message: "must not contain control characters",
   });
@@ -36,8 +40,7 @@ const addressSegment = z
 export const RESERVED_ASSET_TYPE_SEGMENTS = ["storage", "withheld", "presign"] as const;
 
 export const assetTypeSchema = addressSegment.refine(
-  (value) =>
-    !(RESERVED_ASSET_TYPE_SEGMENTS as readonly string[]).includes(value),
+  (value) => !(RESERVED_ASSET_TYPE_SEGMENTS as readonly string[]).includes(value),
   { message: "reserved asset_type segment" },
 );
 
@@ -98,13 +101,9 @@ export const withheldQuerySchema = z.object({
 // Control bodies
 // ---------------------------------------------------------------------------
 
-const sha256Hex = z
-  .string()
-  .regex(/^[0-9a-fA-F]{64}$/, "must be a 64-character hex sha256");
+const sha256Hex = z.string().regex(/^[0-9a-fA-F]{64}$/, "must be a 64-character hex sha256");
 
-const uploadId = z
-  .string()
-  .regex(/^upl_[0-9a-f]{32}$/, "must be a gateway-issued upload id");
+const uploadId = z.string().regex(/^upl_[0-9a-f]{32}$/, "must be a gateway-issued upload id");
 
 const positiveSize = z.number().int().positive();
 
@@ -115,9 +114,7 @@ export const presignUploadIntentRequestSchema = z
     sha256: sha256Hex,
   })
   .strict();
-export type PresignUploadIntentRequest = z.infer<
-  typeof presignUploadIntentRequestSchema
->;
+export type PresignUploadIntentRequest = z.infer<typeof presignUploadIntentRequestSchema>;
 
 /** `POST /v1/assets/presign/commit/…` — Rust `PresignCommitRequest`. */
 export const presignCommitRequestSchema = z
@@ -159,9 +156,7 @@ export const assetVisibilityPromotionRequestSchema = z.object({
   evidence: z.string().default(""),
   scanner: z.string().optional(),
 });
-export type AssetVisibilityPromotionRequest = z.infer<
-  typeof assetVisibilityPromotionRequestSchema
->;
+export type AssetVisibilityPromotionRequest = z.infer<typeof assetVisibilityPromotionRequestSchema>;
 
 // ---------------------------------------------------------------------------
 // Response DTOs

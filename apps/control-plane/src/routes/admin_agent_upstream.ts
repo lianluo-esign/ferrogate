@@ -6,7 +6,7 @@
  * Rust: `crates/ferrogate-gateway/src/server/local.rs` (agent-upstream family).
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 /**
  * PORT-TODO(inventory-request-path §agent upstreams): tighten to the Rust

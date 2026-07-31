@@ -27,11 +27,11 @@
  * change; only this file is swapped in the composition root.
  */
 import {
-  StoreConflictError,
   type CallerScope,
   type ControlPlaneStore,
   type ListPage,
   type ListQuery,
+  StoreConflictError,
   type StoreRecord,
 } from "../ports.js";
 
@@ -152,7 +152,12 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     if (existing === null) return null;
     // `id` and `tenant_id` are structural, never patchable.
     const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = patch;
-    const stored: StoreRecord = { ...existing, ...fields, id, tenant_id: existing.tenant_id ?? null };
+    const stored: StoreRecord = {
+      ...existing,
+      ...fields,
+      id,
+      tenant_id: existing.tenant_id ?? null,
+    };
     this.#bucket(collection).set(id, stored);
     return stored;
   }

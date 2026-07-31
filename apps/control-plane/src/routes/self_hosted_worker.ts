@@ -32,6 +32,9 @@
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import {
+  type CollectionSpec,
+  type GroupModule,
+  type Handler,
   actionHandler,
   adminRecordSchema,
   crudGroup,
@@ -41,9 +44,6 @@ import {
   readOnlyCollection,
   scopeOf,
   subListHandler,
-  type CollectionSpec,
-  type GroupModule,
-  type Handler,
 } from "./resource.js";
 
 const WORKERS = "self-hosted-workers";
@@ -113,7 +113,10 @@ function appendChild(collection: string, object: string, schema: z.ZodTypeAny): 
 
 export const selfHostedWorkerRoutes: GroupModule = crudGroup(
   "self_hosted_worker",
-  [SELF_HOSTED_WORKER_SPEC, readOnlyCollection("self-hosted-worker-records", "self_hosted_worker_record")],
+  [
+    SELF_HOSTED_WORKER_SPEC,
+    readOnlyCollection("self-hosted-worker-records", "self_hosted_worker_record"),
+  ],
   {
     recordAdminSelfHostedWorkerHeartbeat: actionHandler({
       spec: SELF_HOSTED_WORKER_SPEC,

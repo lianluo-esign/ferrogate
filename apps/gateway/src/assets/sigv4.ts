@@ -90,8 +90,7 @@ function canonicalUri(path: string): string {
 /** `(amzDate, dateStamp)` — Rust `format_timestamps`. */
 export function formatTimestamps(unixSeconds: number): [string, string] {
   const date = new Date(unixSeconds * 1000);
-  const pad = (value: number, width = 2): string =>
-    String(value).padStart(width, "0");
+  const pad = (value: number, width = 2): string => String(value).padStart(width, "0");
   const dateStamp = `${pad(date.getUTCFullYear(), 4)}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`;
   const amzDate = `${dateStamp}T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`;
   return [amzDate, dateStamp];
@@ -103,10 +102,7 @@ async function deriveSigningKey(
   region: string,
   service: string,
 ): Promise<Uint8Array> {
-  const kDate = await hmacSha256(
-    new TextEncoder().encode(`AWS4${secretAccessKey}`),
-    dateStamp,
-  );
+  const kDate = await hmacSha256(new TextEncoder().encode(`AWS4${secretAccessKey}`), dateStamp);
   const kRegion = await hmacSha256(kDate, region);
   const kService = await hmacSha256(kRegion, service);
   return hmacSha256(kService, "aws4_request");
@@ -128,10 +124,7 @@ interface PresignInput {
  */
 async function presignQuery(
   request: PresignInput,
-  credentials: Pick<
-    R2S3Endpoint,
-    "accessKeyId" | "secretAccessKey" | "sessionToken"
-  >,
+  credentials: Pick<R2S3Endpoint, "accessKeyId" | "secretAccessKey" | "sessionToken">,
   signedHeaders: readonly (readonly [string, string])[],
   payloadHash: string,
 ): Promise<string> {
@@ -139,9 +132,7 @@ async function presignQuery(
   const credentialScope = `${dateStamp}/${request.region}/${SERVICE}/aws4_request`;
   const credential = `${credentials.accessKeyId}/${credentialScope}`;
   const signedHeaderNames = signedHeaders.map(([name]) => name).join(";");
-  const canonicalHeaders = signedHeaders
-    .map(([name, value]) => `${name}:${value}\n`)
-    .join("");
+  const canonicalHeaders = signedHeaders.map(([name, value]) => `${name}:${value}\n`).join("");
 
   // Canonical query params are sorted by encoded key; the `X-Amz-*` names below
   // are already alphabetical, and the optional security token slots between
@@ -157,10 +148,7 @@ async function presignQuery(
   }
   params.push(["X-Amz-SignedHeaders", signedHeaderNames]);
   const canonicalQuery = params
-    .map(
-      ([name, value]) =>
-        `${percentEncodeQuery(name)}=${percentEncodeQuery(value)}`,
-    )
+    .map(([name, value]) => `${percentEncodeQuery(name)}=${percentEncodeQuery(value)}`)
     .join("&");
 
   const canonicalRequest = `${request.method}\n${canonicalUri(request.path)}\n${canonicalQuery}\n${canonicalHeaders}\n${signedHeaderNames}\n${payloadHash}`;
@@ -240,11 +228,7 @@ export class SigV4Presigner implements AssetPresigner {
     };
   }
 
-  async presignGet(
-    key: string,
-    expiresSeconds: number,
-    nowUnix: number,
-  ): Promise<string> {
+  async presignGet(key: string, expiresSeconds: number, nowUnix: number): Promise<string> {
     const { host, path, origin } = this.parts(key);
     const query = await presignQuery(
       {

@@ -26,16 +26,16 @@
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
+import { type CallerScope, StoreConflictError } from "../ports.js";
 import { adminDeleted, listResponse, parseListQuery } from "../responses.js";
-import { StoreConflictError, type CallerScope } from "../ports.js";
 import {
+  type GroupModule,
   adminRecordSchema,
   crudGroup,
   json,
   pathParam,
   readJson,
   scopeOf,
-  type GroupModule,
 } from "./resource.js";
 
 export const permissionSchema = adminRecordSchema.extend({
@@ -138,11 +138,7 @@ export const rbacRoutes: GroupModule = crudGroup(
 
       const id = bindingId(tenantId, roleId);
       if (!(await deps.store.remove(TENANT_ROLES_COLLECTION, scope, id))) {
-        throw new HttpError(
-          404,
-          "not_found",
-          `role ${roleId} is not bound to tenant ${tenantId}`,
-        );
+        throw new HttpError(404, "not_found", `role ${roleId} is not bound to tenant ${tenantId}`);
       }
       return json(c, 200, adminDeleted("tenant_role", id));
     },

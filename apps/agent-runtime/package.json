@@ -8,5 +8,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "dependencies": { "hono": "^4.6.0", "zod": "^3.25.76", "@ferrogate/core": "workspace:*", "@ferrogate/schemas": "workspace:*", "agents": "^0.0.109", "@cloudflare/sandbox": "^0.12.4" }
+  "dependencies": {
+    "hono": "^4.6.0",
+    "zod": "^3.25.76",
+    "@ferrogate/core": "workspace:*",
+    "@ferrogate/schemas": "workspace:*",
+    "agents": "^0.0.109",
+    "@cloudflare/sandbox": "^0.12.4"
+  }
 }

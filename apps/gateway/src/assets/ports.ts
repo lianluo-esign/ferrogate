@@ -63,10 +63,7 @@ export interface AssetObjectStore {
 
 /** Offline {@link AssetObjectStore} used by tests and local dev. */
 export class InMemoryAssetObjectStore implements AssetObjectStore {
-  readonly objects = new Map<
-    string,
-    { bytes: Uint8Array; contentType: string | undefined }
-  >();
+  readonly objects = new Map<string, { bytes: Uint8Array; contentType: string | undefined }>();
 
   async put(
     key: string,
@@ -84,10 +81,7 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
       bytes = new Uint8Array(value.slice(0));
     } else {
       bytes = new Uint8Array(
-        value.buffer.slice(
-          value.byteOffset,
-          value.byteOffset + value.byteLength,
-        ),
+        value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
       );
     }
     this.objects.set(key, {
@@ -106,10 +100,7 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
       size: bytes.byteLength,
       httpMetadata: { contentType: object.contentType },
       arrayBuffer: async () =>
-        bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
-        ) as ArrayBuffer,
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
     };
   }
 
@@ -222,10 +213,7 @@ export interface AssetMetadataStore {
   getAsset(id: string): Promise<StoredAsset | null>;
   listAssets(tenantId: string, assetType?: string): Promise<StoredAsset[]>;
   /** Non-`visible` rows only — Rust `list_withheld_assets` (issue #379). */
-  listWithheldAssets(
-    tenantId: string,
-    assetType?: string,
-  ): Promise<StoredAsset[]>;
+  listWithheldAssets(tenantId: string, assetType?: string): Promise<StoredAsset[]>;
   tenantAssetStorageBytesUsed(tenantId: string): Promise<number>;
   /** Atomic create-if-absent folded with the tenant quota guard (issue #371). */
   createAssetWithinQuota(
@@ -287,10 +275,7 @@ export class InMemoryAssetMetadataStore implements AssetMetadataStore {
     return asset ? { ...asset } : null;
   }
 
-  async listAssets(
-    tenantId: string,
-    assetType?: string,
-  ): Promise<StoredAsset[]> {
+  async listAssets(tenantId: string, assetType?: string): Promise<StoredAsset[]> {
     return [...this.assets.values()]
       .filter(
         (asset) =>
@@ -300,15 +285,17 @@ export class InMemoryAssetMetadataStore implements AssetMetadataStore {
       .map((asset) => ({ ...asset }));
   }
 
-  async listWithheldAssets(
-    tenantId: string,
-    assetType?: string,
-  ): Promise<StoredAsset[]> {
+  async listWithheldAssets(tenantId: string, assetType?: string): Promise<StoredAsset[]> {
     const assets = await this.listAssets(tenantId, assetType);
     return assets.filter((asset) => !isDownloadable(asset.visibility));
   }
 
-  async tenantAssetStorageBytesUsed(tenantId: string): Promise<number> {
+  /**
+   * Synchronous byte count. Kept separate from the `async` accessor because
+   * {@link createAssetWithinQuota} MUST NOT `await` between its read and its
+   * write — see the note there.
+   */
+  #bytesUsed(tenantId: string): number {
     let used = 0;
     for (const asset of this.assets.values()) {
       if (asset.tenant_id === tenantId) used += asset.size_bytes;
@@ -316,12 +303,28 @@ export class InMemoryAssetMetadataStore implements AssetMetadataStore {
     return used;
   }
 
+  async tenantAssetStorageBytesUsed(tenantId: string): Promise<number> {
+    return this.#bytesUsed(tenantId);
+  }
+
+  /**
+   * Create-if-absent folded with the quota guard.
+   *
+   * Every statement below runs in ONE synchronous turn: there is deliberately
+   * no `await` between the `has` check, the quota arithmetic, and the `set`.
+   * An `await` there — even on a method of this same class — yields the isolate
+   * and lets a concurrent push observe the same absent id and the same
+   * remaining capacity, so both would be admitted and jointly overshoot. That
+   * is precisely the read-then-write gap Rust issues #369/#371 closed with a
+   * single conditional statement, and the reason this method exists at all
+   * rather than being a `getAsset` + `put` pair on the caller's side.
+   */
   async createAssetWithinQuota(
     asset: StoredAsset,
     quotaBytes: number | undefined,
   ): Promise<AssetQuotaAdmission> {
     if (this.assets.has(asset.id)) return { kind: "already_exists" };
-    const used = await this.tenantAssetStorageBytesUsed(asset.tenant_id);
+    const used = this.#bytesUsed(asset.tenant_id);
     if (quotaBytes !== undefined && used + asset.size_bytes > quotaBytes) {
       return {
         kind: "over_quota",
@@ -375,10 +378,7 @@ export class InMemoryAssetMetadataStore implements AssetMetadataStore {
     if (!this.assets.has(id)) return { kind: "not_found" };
     const rows = this.versionRows(tenantId, assetType, name, version);
     const remaining = rows.filter((row) => row.id !== id && !row.yanked);
-    if (
-      remaining.length === 0 &&
-      this.channelReferences(tenantId, assetType, name, version)
-    ) {
+    if (remaining.length === 0 && this.channelReferences(tenantId, assetType, name, version)) {
       return { kind: "blocked_by_channel" };
     }
     this.assets.delete(id);
@@ -512,11 +512,7 @@ export interface AssetPresigner {
     sizeBytes: number,
     contentSha256Hex: string,
   ): Promise<PresignedUpload>;
-  presignGet(
-    key: string,
-    expiresSeconds: number,
-    nowUnix: number,
-  ): Promise<string>;
+  presignGet(key: string, expiresSeconds: number, nowUnix: number): Promise<string>;
 }
 
 /** Signals "no bucket configured" — the service maps it to a 503. */
@@ -580,9 +576,7 @@ export interface AssetScreeningRequest {
  * detectors drop in behind this same interface.
  */
 export interface AssetScreener {
-  screen(
-    request: AssetScreeningRequest,
-  ): Promise<AssetScreeningVerdict | AssetScreeningRejection>;
+  screen(request: AssetScreeningRequest): Promise<AssetScreeningVerdict | AssetScreeningRejection>;
 }
 
 export function isScreeningRejection(
@@ -592,8 +586,7 @@ export function isScreeningRejection(
 }
 
 /** The EICAR anti-malware test string the Rust offline scanner matched on. */
-const EICAR_SIGNATURE =
-  "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+const EICAR_SIGNATURE = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 
 /**
  * The offline default scanner, faithful to the Rust default posture: no
@@ -601,9 +594,7 @@ const EICAR_SIGNATURE =
  * is `quarantined` (withheld from every read surface), never a clean publish.
  */
 export class BuiltinEicarScreener implements AssetScreener {
-  async screen(
-    request: AssetScreeningRequest,
-  ): Promise<AssetScreeningVerdict> {
+  async screen(request: AssetScreeningRequest): Promise<AssetScreeningVerdict> {
     // `fatal: false` so arbitrary binary decodes lossily into replacement
     // characters instead of throwing — the EICAR signature is ASCII, so a
     // lossy decode still finds it wherever it appears in a mixed-content file.
@@ -667,9 +658,7 @@ export interface AssetAuthenticator {
   ): Promise<AssetCaller | AssetAuthFailure>;
 }
 
-export function isAuthFailure(
-  value: AssetCaller | AssetAuthFailure,
-): value is AssetAuthFailure {
+export function isAuthFailure(value: AssetCaller | AssetAuthFailure): value is AssetAuthFailure {
   return "status" in value && "code" in value;
 }
 
@@ -729,19 +718,11 @@ export class InMemoryAssetAuditSink implements AssetAuditSink {
         message: event.message,
       });
     }
-    return new Map(
-      [...latest.entries()].map(([target, entry]) => [target, entry.message]),
-    );
+    return new Map([...latest.entries()].map(([target, entry]) => [target, entry.message]));
   }
 }
 
 /** Convenience: the durable id of the row a `{ref}` addresses. */
 export function assetRowId(ref: AssetObjectRef): string {
-  return storedAssetVariantId(
-    ref.tenantId,
-    ref.assetType,
-    ref.name,
-    ref.version,
-    ref.variant,
-  );
+  return storedAssetVariantId(ref.tenantId, ref.assetType, ref.name, ref.version, ref.variant);
 }

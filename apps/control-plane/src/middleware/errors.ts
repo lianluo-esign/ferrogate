@@ -13,7 +13,7 @@
  *
  * plus the `x-request-id` / `x-trace-id` headers Rust always attaches.
  */
-import { FerrogateError, GatewayError, type ErrorKind } from "@ferrogate/core";
+import { type ErrorKind, FerrogateError, GatewayError } from "@ferrogate/core";
 import type { Context, ErrorHandler, MiddlewareHandler, NotFoundHandler } from "hono";
 import type { ControlPlaneEnv } from "../ports.js";
 

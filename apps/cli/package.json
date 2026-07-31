@@ -5,13 +5,12 @@
   "bin": { "ferrogate": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "build": "bun build ./src/index.ts --compile --outfile dist/ferrogate",
     "start": "bun run ./src/index.ts"
   },
   "dependencies": {
-    "@ferrogate/core": "workspace:*",
-    "@ferrogate/schemas": "workspace:*",
-    "@ferrogate/config": "workspace:*"
+    "@ferrogate/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2"

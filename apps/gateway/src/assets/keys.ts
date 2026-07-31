@@ -78,10 +78,7 @@ export function tenantKeyPrefix(tenantId: string): string {
 
 /** `assets/v1/t/{tenant}/obj/{type}/{name}/{version}/{variant}/`. */
 export function assetObjectPrefix(ref: AssetObjectRef): string {
-  const variant =
-    ref.variant === ""
-      ? DEFAULT_VARIANT_SEGMENT
-      : encodeKeySegment(ref.variant);
+  const variant = ref.variant === "" ? DEFAULT_VARIANT_SEGMENT : encodeKeySegment(ref.variant);
   return (
     `${tenantKeyPrefix(ref.tenantId)}obj/` +
     `${encodeKeySegment(ref.assetType)}/${encodeKeySegment(ref.name)}/` +
@@ -111,10 +108,7 @@ export function newAssetObjectKey(ref: AssetObjectRef): string {
  * winner instead of a spurious `asset_version_immutable`, while a *different*
  * upload's commit onto the same version is still refused.
  */
-export function commitObjectKeyPrefix(
-  ref: AssetObjectRef,
-  uploadId: string,
-): string {
+export function commitObjectKeyPrefix(ref: AssetObjectRef, uploadId: string): string {
   return `${assetObjectPrefix(ref)}obj_${encodeKeySegment(uploadId)}_`;
 }
 
@@ -123,10 +117,7 @@ export function commitObjectKeyPrefix(
  * under the upload-derived prefix, so a losing concurrent commit can only ever
  * clean up the bytes IT wrote (Rust `new_final_object_key`, issue #369).
  */
-export function newCommitObjectKey(
-  ref: AssetObjectRef,
-  uploadId: string,
-): string {
+export function newCommitObjectKey(ref: AssetObjectRef, uploadId: string): string {
   return `${commitObjectKeyPrefix(ref, uploadId)}${randomHex128()}`;
 }
 
@@ -161,8 +152,7 @@ export function parseAssetObjectKey(key: string): AssetObjectRef | null {
   const parts = key.split("/");
   // assets / v1 / t / {tenant} / obj / {type} / {name} / {version} / {variant} / obj_xxx
   if (parts.length !== 10) return null;
-  const [root, layout, t, tenant, obj, type, name, version, variant, leaf] =
-    parts;
+  const [root, layout, t, tenant, obj, type, name, version, variant, leaf] = parts;
   if (root !== "assets" || layout !== "v1" || t !== "t" || obj !== "obj") {
     return null;
   }
@@ -182,8 +172,7 @@ export function parseAssetObjectKey(key: string): AssetObjectRef | null {
       assetType: decodeKeySegment(type),
       name: decodeKeySegment(name),
       version: decodeKeySegment(version),
-      variant:
-        variant === DEFAULT_VARIANT_SEGMENT ? "" : decodeKeySegment(variant),
+      variant: variant === DEFAULT_VARIANT_SEGMENT ? "" : decodeKeySegment(variant),
     };
   } catch {
     return null;

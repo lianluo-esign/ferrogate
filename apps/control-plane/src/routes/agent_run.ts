@@ -17,12 +17,7 @@
  * `readHandler`. The distinction matters for `agent_run_id` correlation: the
  * timeline is the join key's evidence trail.
  */
-import {
-  crudGroup,
-  readOnlyCollection,
-  subListHandler,
-  type GroupModule,
-} from "./resource.js";
+import { type GroupModule, crudGroup, readOnlyCollection, subListHandler } from "./resource.js";
 
 export const agentRunRoutes: GroupModule = crudGroup(
   "agent_run",

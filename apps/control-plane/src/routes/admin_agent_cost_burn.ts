@@ -4,7 +4,7 @@
  *
  * `admin.read`, tenant-scoped by the store like every other admin listing.
  */
-import { crudGroup, readOnlyCollection, type GroupModule } from "./resource.js";
+import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
 
 export const adminAgentCostBurnRoutes: GroupModule = crudGroup("admin_agent_cost_burn", [
   readOnlyCollection("agent-cost-burn", "agent_cost_burn"),

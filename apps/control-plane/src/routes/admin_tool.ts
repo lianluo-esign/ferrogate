@@ -25,12 +25,12 @@
  * transition is auditable.
  */
 import {
+  type CollectionSpec,
+  type GroupModule,
   actionHandler,
   crudGroup,
   readOnlyCollection,
   subListHandler,
-  type CollectionSpec,
-  type GroupModule,
 } from "./resource.js";
 
 const TOOL_APPROVAL_SPEC: CollectionSpec = {

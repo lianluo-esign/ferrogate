@@ -31,6 +31,7 @@ import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { adminItem } from "../responses.js";
 import {
+  type GroupModule,
   adminRecordSchema,
   crudGroup,
   json,
@@ -38,7 +39,6 @@ import {
   readJson,
   readOnlyCollection,
   scopeOf,
-  type GroupModule,
 } from "./resource.js";
 
 /** Rust `LifecycleStatus`. */

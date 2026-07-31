@@ -22,7 +22,12 @@ import {
   matchOperation,
   toHonoPath,
 } from "../src/contract.js";
-import { GROUP_MODULES, registeredOperationIds, registeredRoutes } from "../src/routes/index.js";
+import {
+  GROUP_MODULES,
+  diffAgainstContract,
+  registeredOperationIds,
+  registeredRoutes,
+} from "../src/routes/index.js";
 
 interface RawOperation {
   path: string;
@@ -103,6 +108,23 @@ describe("anti-drift: every contract operation has a registered route", () => {
     expect(mismatched).toEqual([]);
   });
 
+  it("NAMES the operations that fell off, rather than just counting them", () => {
+    // Driven with a synthetic handler set so the failure path is exercised
+    // directly — a green suite must not depend on the listing code being
+    // unreachable. This is the message an engineer sees when a contract
+    // operation loses its route.
+    const complete = registeredOperationIds();
+    const dropped = complete.filter(
+      (operationId) => operationId !== "runAdminAgentScheduleNow" && operationId !== "getMetrics",
+    );
+    const diff = diffAgainstContract([...dropped, "notAContractOperation"]);
+    expect(diff.missing).toEqual(["getMetrics", "runAdminAgentScheduleNow"]);
+    expect(diff.extra).toEqual(["notAContractOperation"]);
+
+    // …and the real, live table has neither.
+    expect(diffAgainstContract(complete)).toEqual({ missing: [], extra: [] });
+  });
+
   it("has exactly one route module per owned contract group", () => {
     const claimed = GROUP_MODULES.map((module) => module.group).sort();
     expect(claimed).toEqual([...CONTROL_PLANE_GROUPS].sort());
@@ -166,8 +188,9 @@ describe("path matching (the matchit radix tree, re-implemented)", () => {
   it("prefers a static segment over a parameter", () => {
     // `/admin/v1/x402-spend-policies/effective` is static and must not be
     // swallowed by any parameterised sibling.
-    expect(matchOperation("GET", "/admin/v1/x402-spend-policies/effective")?.operation.operationId)
-      .toBe("getEffectiveX402SpendPolicy");
+    expect(
+      matchOperation("GET", "/admin/v1/x402-spend-policies/effective")?.operation.operationId,
+    ).toBe("getEffectiveX402SpendPolicy");
   });
 
   it("captures path parameters", () => {
@@ -205,7 +228,13 @@ describe("canonicalize_alias_path (ported from control_plane_test.rs)", () => {
   });
 
   it("leaves already-canonical and unrelated paths untouched", () => {
-    for (const path of ["/admin/v1/providers", "/admin/v1", "/v1/chat/completions", "/healthz", "/"]) {
+    for (const path of [
+      "/admin/v1/providers",
+      "/admin/v1",
+      "/v1/chat/completions",
+      "/healthz",
+      "/",
+    ]) {
       expect(canonicalizeAliasPath(path), path).toBeNull();
     }
   });

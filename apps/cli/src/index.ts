@@ -1,168 +1,136 @@
 #!/usr/bin/env bun
 /**
- * `ferrogate` — the management CLI (Bun binary, NOT a Worker).
+ * `ferrogate` — the management CLI (a Bun binary, NOT a Worker).
  *
- * Replaces the Rust crate `ferrogate-cli`. Only the client half survives the
- * port: `serve` verbs collapse to deploy/health wrappers on Cloudflare (see
- * docs/rewrite/PORT-PLAN.md). This is a wired skeleton — every handler prints
- * "not yet implemented" until the corresponding subsystem is ported.
+ * Clean-room port of the Rust crate `ferrogate-cli`
+ * (docs/legacy/inventory-edge-control.md §1). The dispatcher walks the
+ * assembled tree from `tree.ts`, parses the matched leaf's flags with the
+ * dependency-free parser, and terminates on the stable exit-code contract:
+ *
+ *   0 ok · 2 usage · 3 auth · 4 not-found/conflict · 5 validation ·
+ *   6 transport · 7 server
+ *
+ * Everything the process touches — env, files, stdin/stdout, the clock, the
+ * RNG, and the network — arrives through `CliRuntime`, so `main()` is fully
+ * testable with no I/O.
  */
-import { PUBLIC_API_MAJOR } from "@ferrogate/core";
+import { parseArgs } from "./args.js";
+import { createFileContextStorage } from "./context.js";
+import { reportError } from "./diagnostics.js";
+import { asCliError, exitCode } from "./errors.js";
+import { renderCommandHelp, renderRootHelp, versionLine } from "./help.js";
+import {
+  createFetchControlPlaneClient,
+  createFetchGatewayClient,
+  createNodeIo,
+  createNodeKeyHasher,
+  createStructuralConfigValidator,
+} from "./ports.js";
+import type { CliRuntime, CommandNode } from "./runtime.js";
+import { findChild } from "./runtime.js";
+import { COMMANDS } from "./tree.js";
 
-type Handler = (args: string[]) => number | Promise<number>;
+export { COMMANDS } from "./tree.js";
+export type { CliRuntime } from "./runtime.js";
 
-interface Command {
-  readonly summary: string;
-  readonly run: Handler;
-  readonly sub?: Record<string, Command>;
-}
-
-/** Stub handler: reports the command path and a non-zero "unimplemented" code. */
-function notImplemented(path: string): Handler {
-  return () => {
-    process.stderr.write(`ferrogate ${path}: not yet implemented\n`);
-    return 2;
+/** Build the runtime the shipped binary uses. */
+export function createDefaultRuntime(): CliRuntime {
+  const io = createNodeIo();
+  return {
+    io,
+    client: createFetchControlPlaneClient(),
+    gatewayClient: createFetchGatewayClient(),
+    contextStorage: createFileContextStorage(io),
+    configValidator: createStructuralConfigValidator(),
+    keyHasher: createNodeKeyHasher(),
   };
 }
 
-/** Control Plane resource families reachable via `ferrogate ctl <group> <verb>`. */
-const CTL_GROUPS = [
-  "organization",
-  "iam",
-  "agent",
-  "worker",
-  "mcp",
-  "tool-approvals",
-  "guardrail",
-  "asset",
-  "catalog",
-  "billing",
-  "evidence",
-  "ops",
-] as const;
+/** Resolve `argv` to the deepest matching node plus its remaining arguments. */
+function walk(
+  argv: readonly string[],
+): { node: CommandNode; path: string; rest: readonly string[] } | undefined {
+  const first = argv[0];
+  if (first === undefined) return undefined;
+  let node = findChild(COMMANDS, first);
+  if (node === undefined) return undefined;
+  let path = node.name;
+  let rest = argv.slice(1);
+  // Descend only while the next token names a real subcommand; anything else
+  // (a flag, an id segment) belongs to the node we are on.
+  while (node.sub !== undefined && rest.length > 0) {
+    const next = rest[0] as string;
+    const child = findChild(node.sub, next);
+    if (child === undefined) break;
+    node = child;
+    path = `${path} ${child.name}`;
+    rest = rest.slice(1);
+  }
+  return { node, path, rest };
+}
 
-/** Generic registry-driven dispatcher: `ctl <group> <verb> [id...] [--data|--file]`. */
-const ctlDispatch: Handler = (args) => {
-  const group = args[0];
-  const verb = args[1];
-  if (group === undefined || verb === undefined) {
-    process.stderr.write(
-      "usage: ferrogate ctl <group> <verb> [id...] [--data JSON] [--file PATH]\n",
+/** Run one invocation. Returns the exit code; never calls `process.exit`. */
+export async function main(argv: readonly string[], runtime: CliRuntime): Promise<number> {
+  const first = argv[0];
+  if (first === undefined) {
+    runtime.io.stderr(renderRootHelp(COMMANDS));
+    return exitCode("usage");
+  }
+  if (first === "help" || first === "--help" || first === "-h") {
+    runtime.io.stdout(renderRootHelp(COMMANDS));
+    return 0;
+  }
+  if (first === "--version" || first === "-V" || first === "version") {
+    runtime.io.stdout(versionLine());
+    return 0;
+  }
+
+  const matched = walk(argv);
+  if (matched === undefined) {
+    runtime.io.stderr(`ferrogate: unknown command '${first}'\n`);
+    runtime.io.stderr(renderRootHelp(COMMANDS));
+    return exitCode("usage");
+  }
+  const { node, path, rest } = matched;
+
+  if (node.deprecated !== undefined) {
+    runtime.io.stderr(`warning: ${node.deprecated}\n`);
+  }
+
+  const wantsHelp = rest.includes("--help") || rest.includes("-h");
+  if (wantsHelp && node.runRaw === undefined) {
+    runtime.io.stdout(renderCommandHelp(path, node));
+    return 0;
+  }
+
+  // A node that only groups subcommands needs one named.
+  if (node.run === undefined && node.runRaw === undefined) {
+    const attempted = rest[0];
+    runtime.io.stderr(
+      attempted === undefined
+        ? `ferrogate ${path}: a subcommand is required\n`
+        : `ferrogate ${path}: unknown subcommand '${attempted}'\n`,
     );
-    process.stderr.write(`groups: ${CTL_GROUPS.join(", ")}\n`);
-    return 1;
+    runtime.io.stderr(renderCommandHelp(path, node));
+    return exitCode("usage");
   }
-  process.stderr.write(`ferrogate ctl ${group} ${verb}: not yet implemented\n`);
-  return 2;
-};
 
-/** The full native command tree (mirrors the Rust clap surface). */
-const COMMANDS: Record<string, Command> = {
-  run: { summary: "Start the gateway data plane (alias: gateway)", run: notImplemented("run") },
-  gateway: { summary: "Alias of `run`", run: notImplemented("gateway") },
-  auth: {
-    summary: "Identity / RBAC service",
-    run: notImplemented("auth"),
-    sub: { serve: { summary: "Run the identity service", run: notImplemented("auth serve") } },
-  },
-  "control-api": {
-    summary: "Control Plane API service",
-    run: notImplemented("control-api"),
-    sub: {
-      serve: {
-        summary: "Run the Control Plane API service",
-        run: notImplemented("control-api serve"),
-      },
-    },
-  },
-  billing: {
-    summary: "Token-usage billing service",
-    run: notImplemented("billing"),
-    sub: { serve: { summary: "Run the billing service", run: notImplemented("billing serve") } },
-  },
-  validate: { summary: "Validate config + auth posture (alias: check)", run: notImplemented("validate") },
-  check: { summary: "Alias of `validate`", run: notImplemented("check") },
-  reload: { summary: "Validate or hot-reload a running gateway", run: notImplemented("reload") },
-  "hash-key": { summary: "Hash a virtual API key secret", run: notImplemented("hash-key") },
-  assets: {
-    summary: "Manage hosted assets",
-    run: notImplemented("assets"),
-    sub: {
-      push: { summary: "Upload a new asset version", run: notImplemented("assets push") },
-      pull: { summary: "Download an asset", run: notImplemented("assets pull") },
-      list: { summary: "List a tenant's assets", run: notImplemented("assets list") },
-      delete: { summary: "Delete one asset version", run: notImplemented("assets delete") },
-    },
-  },
-  plans: {
-    summary: "Manage subscription plans",
-    run: notImplemented("plans"),
-    sub: {
-      create: { summary: "Create a sellable plan", run: notImplemented("plans create") },
-      list: { summary: "List all plans", run: notImplemented("plans list") },
-      assign: { summary: "Assign a plan to a tenant", run: notImplemented("plans assign") },
-    },
-  },
-  context: {
-    summary: "Manage Control Plane API client contexts",
-    run: notImplemented("context"),
-    sub: {
-      create: { summary: "Create/replace a context", run: notImplemented("context create") },
-      list: { summary: "List contexts", run: notImplemented("context list") },
-      show: { summary: "Show a context", run: notImplemented("context show") },
-      use: { summary: "Select the current context", run: notImplemented("context use") },
-      delete: { summary: "Delete a context", run: notImplemented("context delete") },
-    },
-  },
-  ops: {
-    summary: "Operational status",
-    run: notImplemented("ops"),
-    sub: { status: { summary: "Show Control Plane API status", run: notImplemented("ops status") } },
-  },
-  completions: {
-    summary: "Emit shell completions (bash/zsh/fish/powershell/elvish)",
-    run: notImplemented("completions"),
-  },
-  ctl: {
-    summary: "Generic Control Plane resource families: ctl <group> <verb>",
-    run: ctlDispatch,
-  },
-};
-
-function printHelp(): void {
-  process.stdout.write(`ferrogate — FerroGate management CLI (${PUBLIC_API_MAJOR})\n\n`);
-  process.stdout.write("usage: ferrogate <command> [subcommand] [args...]\n\ncommands:\n");
-  for (const [name, cmd] of Object.entries(COMMANDS)) {
-    process.stdout.write(`  ${name.padEnd(14)}${cmd.summary}\n`);
-    if (cmd.sub) {
-      for (const [subName, sub] of Object.entries(cmd.sub)) {
-        process.stdout.write(`    ${subName.padEnd(12)}${sub.summary}\n`);
-      }
-    }
+  try {
+    if (node.runRaw !== undefined) return await node.runRaw(runtime, rest);
+    const args = parseArgs(rest, node.flags ?? [], {
+      env: runtime.io.env,
+      commandPath: `ferrogate ${path}`,
+    });
+    return await (node.run as NonNullable<CommandNode["run"]>)(runtime, args);
+  } catch (error) {
+    const cliError = asCliError(error);
+    reportError(runtime.io, cliError);
+    return cliError.exitCode();
   }
 }
 
-async function main(argv: readonly string[]): Promise<number> {
-  const name = argv[0];
-  if (name === undefined || name === "help" || name === "--help" || name === "-h") {
-    printHelp();
-    return name === undefined ? 1 : 0;
-  }
-  const cmd = COMMANDS[name];
-  if (cmd === undefined) {
-    process.stderr.write(`ferrogate: unknown command '${name}'\n`);
-    printHelp();
-    return 1;
-  }
-  const rest = argv.slice(1);
-  const subName = rest[0];
-  if (cmd.sub !== undefined && subName !== undefined) {
-    const sub = cmd.sub[subName];
-    if (sub !== undefined) {
-      return await sub.run(rest.slice(1));
-    }
-  }
-  return await cmd.run(rest);
+/* The process entry point; `main` is what the tests drive. */
+const entry = typeof process === "undefined" ? undefined : process.argv[1];
+if (entry !== undefined && (entry.endsWith("/index.ts") || entry.endsWith("/ferrogate"))) {
+  process.exit(await main(process.argv.slice(2), createDefaultRuntime()));
 }
-
-process.exit(await main(process.argv.slice(2)));

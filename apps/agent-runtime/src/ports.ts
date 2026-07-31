@@ -34,6 +34,12 @@ export interface AgentRuntimeBindings {
   readonly FG_REQUIRE_PRODUCTION_MTLS?: string;
   /** Comma-separated bare hostnames. EMPTY MEANS SEALED (#471). */
   readonly CONTAINER_GOVERNED_EGRESS_HOSTS?: string;
+  /** Operator override of Rust `AGENT_JOB_MAX_OPEN_PER_TENANT` (default 200). */
+  readonly AGENT_JOB_MAX_OPEN_PER_TENANT?: string;
+  /** Operator override of Rust `AGENT_JOB_DISPATCH_TTL_SECS` (default 24h). */
+  readonly AGENT_JOB_DISPATCH_TTL_SECS?: string;
+  /** `"0"` disables every run/job verb (`403 agent_runtime_disabled`). */
+  readonly AGENT_RUNTIME_ENABLED?: string;
   /** DEV/TEST ONLY: JSON array of `RegisteredSelfHostedWorker` rows. */
   readonly FG_DEV_SELF_HOSTED_WORKERS?: string;
   /** DEV/TEST ONLY: JSON array of `DevApiKey` rows. */
@@ -582,9 +588,7 @@ export function isCanonicalActionFingerprint(value: string): boolean {
 }
 
 /** In-memory {@link AgentUpstreamPort}. */
-export function inMemoryAgentUpstreamPort(
-  upstreams: readonly AgentUpstream[],
-): AgentUpstreamPort {
+export function inMemoryAgentUpstreamPort(upstreams: readonly AgentUpstream[]): AgentUpstreamPort {
   const byId = new Map(upstreams.map((upstream) => [upstream.id, upstream]));
   return {
     async lookup(agentId: string): Promise<AgentUpstream | undefined> {
@@ -594,9 +598,7 @@ export function inMemoryAgentUpstreamPort(
 }
 
 /** In-memory {@link ConfigPort}. */
-export function inMemoryConfigPort(
-  overrides: Partial<AgentRuntimeConfig> = {},
-): ConfigPort {
+export function inMemoryConfigPort(overrides: Partial<AgentRuntimeConfig> = {}): ConfigPort {
   const config: AgentRuntimeConfig = { ...DEFAULT_AGENT_RUNTIME_CONFIG, ...overrides };
   return { agentRuntime: () => config };
 }
@@ -628,6 +630,37 @@ export function parseGovernedEgressHosts(raw: string | undefined): readonly stri
     .filter((host) => host !== "");
 }
 
+/** Parse a positive-integer operator var, falling back on anything else. */
+function parsePositiveIntVar(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * The operator-tunable slice of {@link AgentRuntimeConfig}, read from `[vars]`.
+ *
+ * These are real deployment knobs, not test seams: the Rust constants they
+ * mirror (`AGENT_JOB_MAX_OPEN_PER_TENANT`, `AGENT_JOB_DISPATCH_TTL_SECS`,
+ * `config.agent_runtime.enabled`) were operator-visible there too. Anything
+ * unset or unparseable falls back to the Rust default rather than to zero,
+ * because a mistyped var must not silently disable the concurrency bound.
+ */
+export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
+  return {
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    enabled: env.AGENT_RUNTIME_ENABLED?.trim() !== "0",
+    maxOpenJobsPerTenant: parsePositiveIntVar(
+      env.AGENT_JOB_MAX_OPEN_PER_TENANT,
+      DEFAULT_AGENT_RUNTIME_CONFIG.maxOpenJobsPerTenant,
+    ),
+    dispatchTtlSecs: parsePositiveIntVar(
+      env.AGENT_JOB_DISPATCH_TTL_SECS,
+      DEFAULT_AGENT_RUNTIME_CONFIG.dispatchTtlSecs,
+    ),
+  };
+}
+
 /**
  * Build the dependency bundle for a request.
  *
@@ -648,7 +681,7 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
     upstreams: inMemoryAgentUpstreamPort(
       parseJsonVar<AgentUpstream[]>(env.FG_DEV_AGENT_UPSTREAMS, []),
     ),
-    config: inMemoryConfigPort(),
+    config: inMemoryConfigPort(configFromEnv(env)),
     clock: systemClock,
   };
 }

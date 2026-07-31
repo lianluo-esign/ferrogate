@@ -31,8 +31,7 @@ export interface SemverVersion {
   readonly build: string;
 }
 
-const VERSION_RE =
-  /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/;
+const VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/;
 
 /** Rust `semver::Version::parse` — `null` when the string is not semver. */
 export function parseVersion(value: string): SemverVersion | null {
@@ -54,10 +53,7 @@ export function parseVersion(value: string): SemverVersion | null {
   };
 }
 
-function comparePrerelease(
-  a: readonly string[],
-  b: readonly string[],
-): number {
+function comparePrerelease(a: readonly string[], b: readonly string[]): number {
   // No pre-release outranks any pre-release.
   if (a.length === 0 && b.length === 0) return 0;
   if (a.length === 0) return 1;
@@ -127,9 +123,7 @@ function parseComparator(value: string): Comparator | null {
   const [, rawOp, rawMajor, rawMinor, rawPatch, rawPre] = match;
   if (rawMajor === undefined) return null;
   const wildcard = (part: string | undefined): number | undefined =>
-    part === undefined || part === "*" || part === "x" || part === "X"
-      ? undefined
-      : Number(part);
+    part === undefined || part === "*" || part === "x" || part === "X" ? undefined : Number(part);
   if (rawMajor === "*" || rawMajor === "x" || rawMajor === "X") {
     return { op: "*", major: 0, minor: undefined, patch: undefined, prerelease: [] };
   }
@@ -158,7 +152,9 @@ export function parseRange(value: string): SemverRange | null {
   const trimmed = value.trim();
   if (trimmed === "") return null;
   if (trimmed === "*") {
-    return { comparators: [{ op: "*", major: 0, minor: undefined, patch: undefined, prerelease: [] }] };
+    return {
+      comparators: [{ op: "*", major: 0, minor: undefined, patch: undefined, prerelease: [] }],
+    };
   }
   const parts = trimmed.split(",");
   const comparators: Comparator[] = [];
@@ -183,11 +179,7 @@ function comparatorLowerBound(comparator: Comparator): SemverVersion {
 /** Upper bound (exclusive) of a caret/tilde/partial comparator. */
 function comparatorUpperBound(comparator: Comparator): SemverVersion | null {
   const { op, major, minor, patch } = comparator;
-  const bound = (
-    nextMajor: number,
-    nextMinor: number,
-    nextPatch: number,
-  ): SemverVersion => ({
+  const bound = (nextMajor: number, nextMinor: number, nextPatch: number): SemverVersion => ({
     major: nextMajor,
     minor: nextMinor,
     patch: nextPatch,
@@ -217,10 +209,7 @@ function comparatorUpperBound(comparator: Comparator): SemverVersion | null {
   return null;
 }
 
-function matchesComparator(
-  version: SemverVersion,
-  comparator: Comparator,
-): boolean {
+function matchesComparator(version: SemverVersion, comparator: Comparator): boolean {
   if (comparator.op === "*") return version.prerelease.length === 0;
 
   // Rust: a pre-release version only satisfies a comparator that pins the same
@@ -270,11 +259,6 @@ function matchesComparator(
 }
 
 /** Rust `VersionReq::matches`. */
-export function rangeMatches(
-  range: SemverRange,
-  version: SemverVersion,
-): boolean {
-  return range.comparators.every((comparator) =>
-    matchesComparator(version, comparator),
-  );
+export function rangeMatches(range: SemverRange, version: SemverVersion): boolean {
+  return range.comparators.every((comparator) => matchesComparator(version, comparator));
 }

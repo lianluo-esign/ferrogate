@@ -26,9 +26,11 @@
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import { adminItem } from "../responses.js";
 import { StoreConflictError, type StoreRecord } from "../ports.js";
+import { adminItem } from "../responses.js";
 import {
+  type CollectionSpec,
+  type GroupModule,
   actionHandler,
   adminRecordSchema,
   crudGroup,
@@ -36,8 +38,6 @@ import {
   pathParam,
   readJson,
   scopeOf,
-  type CollectionSpec,
-  type GroupModule,
 } from "./resource.js";
 
 const VIRTUAL_KEYS = "virtual-keys";

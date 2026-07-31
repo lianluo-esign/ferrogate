@@ -8,7 +8,7 @@
  * the store key so `POST` then `GET /{name}` round-trips.
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const mcpServerSchema = adminRecordSchema.extend({
   name: z.string().trim().min(1),

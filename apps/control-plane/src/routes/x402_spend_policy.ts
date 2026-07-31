@@ -22,7 +22,14 @@
  * documented shapes; the settlement path lands with `@ferrogate/payments`.
  */
 import { z } from "zod";
-import { json, readJson, scopeOf, crudGroup, readOnlyCollection, type GroupModule } from "./resource.js";
+import {
+  type GroupModule,
+  crudGroup,
+  json,
+  readJson,
+  readOnlyCollection,
+  scopeOf,
+} from "./resource.js";
 
 const POLICIES = "x402-spend-policies";
 

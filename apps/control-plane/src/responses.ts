@@ -17,7 +17,7 @@
  * are `skip_serializing_if = "Option::is_none"`, so the un-paginated envelope
  * genuinely omits the three keys rather than sending nulls.
  */
-import type { ListQuery, ListPage, StoreRecord } from "./ports.js";
+import type { ListPage, ListQuery, StoreRecord } from "./ports.js";
 
 /** Rust `AdminList<T>`. `total`/`offset`/`limit` are omitted when absent. */
 export interface AdminList<T> {

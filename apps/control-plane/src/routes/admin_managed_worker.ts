@@ -7,7 +7,7 @@
  * Distinct from `self_hosted_worker`, which is the operator-run worker family
  * with registration, heartbeat and identity rotation.
  */
-import { crudGroup, readOnlyCollection, type GroupModule } from "./resource.js";
+import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
 
 export const adminManagedWorkerRoutes: GroupModule = crudGroup("admin_managed_worker", [
   readOnlyCollection("managed-workers", "managed_worker"),

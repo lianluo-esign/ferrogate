@@ -26,12 +26,12 @@
 import { HttpError } from "../middleware/errors.js";
 import { listResponse, parseListQuery } from "../responses.js";
 import {
+  type GroupModule,
   crudGroup,
   json,
   pathParam,
   readOnlyCollection,
   scopeOf,
-  type GroupModule,
 } from "./resource.js";
 
 const METERING_EVENTS = "metering-events";

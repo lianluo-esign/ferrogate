@@ -6,7 +6,7 @@
  * exposes `has_api_key: bool` rather than the credential itself; the store rows
  * seeded into this app follow the same rule.
  */
-import { crudGroup, readOnlyCollection, type GroupModule } from "./resource.js";
+import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
 
 export const adminProviderRoutes: GroupModule = crudGroup("admin_provider", [
   readOnlyCollection("providers", "provider"),

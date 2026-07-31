@@ -19,12 +19,12 @@
  */
 import { z } from "zod";
 import {
+  type CollectionSpec,
+  type GroupModule,
   adminRecordSchema,
   crudGroup,
   readOnlyCollection,
   subListHandler,
-  type CollectionSpec,
-  type GroupModule,
 } from "./resource.js";
 
 export const pluginSchema = adminRecordSchema.extend({

@@ -46,12 +46,18 @@ import {
   type AssetScreener,
   type AssetVisibility,
   PresignUnavailableError,
+  type PresignedUpload,
   type StoredAsset,
   type StoredAssetChannel,
   isDownloadable,
   isScreeningRejection,
 } from "./ports.js";
-import { compareVersionsNewestFirst, resolveVersion, resolutionHeaderValue, selectVariant } from "./registry.js";
+import {
+  compareVersionsNewestFirst,
+  resolutionHeaderValue,
+  resolveVersion,
+  selectVariant,
+} from "./registry.js";
 import type {
   AssetManifest,
   AssetStorageSummary,
@@ -158,11 +164,7 @@ export function effectiveMaxObjectBytes(
   perObject: number | undefined,
   quota: number | undefined,
 ): number {
-  return Math.min(
-    global,
-    perObject ?? Number.POSITIVE_INFINITY,
-    quota ?? Number.POSITIVE_INFINITY,
-  );
+  return Math.min(global, perObject ?? Number.POSITIVE_INFINITY, quota ?? Number.POSITIVE_INFINITY);
 }
 
 /** Rust `assets::inline_push_byte_limit`. */
@@ -190,10 +192,7 @@ function ifNoneMatchMatches(ifNoneMatch: string, etag: string): boolean {
   return ifNoneMatch
     .split(",")
     .map((candidate) => candidate.trim())
-    .some(
-      (candidate) =>
-        candidate === "*" || candidate.replace(/^W\//, "") === normalized,
-    );
+    .some((candidate) => candidate === "*" || candidate.replace(/^W\//, "") === normalized);
 }
 
 /** IMF-fixdate → unix seconds. `null` when unparseable. */
@@ -572,9 +571,7 @@ export class AssetService {
     const assets = await this.#metadata.listAssets(caller.tenantId, assetType);
     // #366: the ordinary listing withholds pending/quarantined rows. They are
     // surfaced only through the dedicated `withheld` view below.
-    const data = assets
-      .filter((asset) => isDownloadable(asset.visibility))
-      .map(assetSummary);
+    const data = assets.filter((asset) => isDownloadable(asset.visibility)).map(assetSummary);
     return { ok: true, status: 200, body: { object: "list", data } };
   }
 
@@ -588,10 +585,7 @@ export class AssetService {
   ): Promise<AssetResult<AdminList<WithheldAssetSummary>>> {
     const denied = this.#requireTenant(caller);
     if (denied) return denied;
-    const withheld = await this.#metadata.listWithheldAssets(
-      caller.tenantId,
-      input.assetType,
-    );
+    const withheld = await this.#metadata.listWithheldAssets(caller.tenantId, input.assetType);
     // Best-effort correlation with the screening evidence recorded at push time
     // (#366). `undefined` when that audit row is no longer retained — never a
     // fabricated verdict; the authoritative reason is the row's own visibility.
@@ -700,13 +694,7 @@ export class AssetService {
       );
     }
 
-    const id = storedAssetVariantId(
-      caller.tenantId,
-      ref.assetType,
-      ref.name,
-      ref.version,
-      variant,
-    );
+    const id = storedAssetVariantId(caller.tenantId, ref.assetType, ref.name, ref.version, variant);
     const contentHash = await sha256Hex(input.content);
     const now = this.#now();
 
@@ -901,7 +889,8 @@ export class AssetService {
     if (resolved.yanked) {
       // An EXACT pull of a yanked version still succeeds — existing pins keep
       // working — but it says so, loudly and machine-readably.
-      extra["warning"] = `299 ferrogate "asset ${ref.assetType}/${ref.name}/${resolved.version} is yanked"`;
+      extra["warning"] =
+        `299 ferrogate "asset ${ref.assetType}/${ref.name}/${resolved.version} is yanked"`;
       extra["x-ferrogate-asset-yanked"] = "true";
     }
 
@@ -987,13 +976,7 @@ export class AssetService {
     const denied = this.#requireHosting(caller);
     if (denied) return denied;
     const variant = ref.variant ?? "";
-    const id = storedAssetVariantId(
-      caller.tenantId,
-      ref.assetType,
-      ref.name,
-      ref.version,
-      variant,
-    );
+    const id = storedAssetVariantId(caller.tenantId, ref.assetType, ref.name, ref.version, variant);
     const existing = await this.#metadata.getAsset(id);
     // The ROW goes first and the object only after a committed row delete: an
     // orphaned object is reclaimable by GC, a row that outlives its bytes is not.
@@ -1090,9 +1073,7 @@ export class AssetService {
     );
     // Re-read for the RESPONSE only — the mutation already committed durably.
     const rows = await this.#assetVersions(caller.tenantId, ref);
-    const data = rows
-      .filter((asset) => asset.version === ref.version)
-      .map(assetSummary);
+    const data = rows.filter((asset) => asset.version === ref.version).map(assetSummary);
     return { ok: true, status: 200, body: { object: "list", data } };
   }
 
@@ -1139,20 +1120,10 @@ export class AssetService {
     }
 
     const variant = ref.variant ?? "";
-    const id = storedAssetVariantId(
-      caller.tenantId,
-      ref.assetType,
-      ref.name,
-      ref.version,
-      variant,
-    );
+    const id = storedAssetVariantId(caller.tenantId, ref.assetType, ref.name, ref.version, variant);
     const scanner = request.scanner ?? "out-of-band";
     const detail = `scan_outcome=${target} target_visibility=${target} scanner=${scanner} evidence=${evidence}`;
-    const outcome = await this.#metadata.promotePendingAssetVisibility(
-      id,
-      target,
-      this.#now(),
-    );
+    const outcome = await this.#metadata.promotePendingAssetVisibility(id, target, this.#now());
     if (outcome.kind === "not_found") {
       // A scan verdict arriving for an absent asset is security-relevant.
       this.#record(
@@ -1301,11 +1272,7 @@ export class AssetService {
     const denied = this.#requireHosting(caller);
     if (denied) return denied;
     if (version === undefined || version === "") {
-      return fail(
-        400,
-        "channel_target_required",
-        "a channel move requires ?version={version}",
-      );
+      return fail(400, "channel_target_required", "a channel move requires ?version={version}");
     }
     const moved = await this.#moveChannel(caller, ref, channel, version, context);
     if (!moved.ok) return moved;
@@ -1332,11 +1299,7 @@ export class AssetService {
     const id = assetChannelId(caller.tenantId, ref.assetType, ref.name, channel);
     const deleted = await this.#metadata.deleteAssetChannel(id);
     if (!deleted) {
-      return fail(
-        404,
-        "channel_not_found",
-        `no channel ${ref.assetType}/${ref.name}/${channel}`,
-      );
+      return fail(404, "channel_not_found", `no channel ${ref.assetType}/${ref.name}/${channel}`);
     }
     this.#record(
       context,
@@ -1353,10 +1316,7 @@ export class AssetService {
   // manifest
   // -------------------------------------------------------------------------
 
-  async manifest(
-    caller: AssetCaller,
-    ref: AssetName,
-  ): Promise<AssetResult<AssetManifest>> {
+  async manifest(caller: AssetCaller, ref: AssetName): Promise<AssetResult<AssetManifest>> {
     const denied = this.#requireTenant(caller);
     if (denied) return denied;
     const all = await this.#assetVersions(caller.tenantId, ref);
@@ -1452,7 +1412,7 @@ export class AssetService {
     const guard = this.#guardKey(stagingKey, caller.tenantId);
     if (guard) return guard;
 
-    let upload;
+    let upload: PresignedUpload;
     try {
       // #368: the URL is BOUND to the declared size + checksum — those are
       // SigV4-signed headers, so a PUT that changes either is refused at the
@@ -1521,7 +1481,14 @@ export class AssetService {
     const existing = await this.#metadata.getAsset(id);
     if (existing !== null) {
       if (
-        this.#existingMatchesCommit(existing, objectRef, request.upload_id, request.size_bytes, sha256, contentType)
+        this.#existingMatchesCommit(
+          existing,
+          objectRef,
+          request.upload_id,
+          request.size_bytes,
+          sha256,
+          contentType,
+        )
       ) {
         // An idempotent re-commit reports the durable row's CURRENT screening
         // state (#528): the retry's caller is exactly the client that needs to
@@ -1703,7 +1670,14 @@ export class AssetService {
         await this.#bestEffortDelete(finalKey, caller.tenantId);
       }
       if (
-        this.#existingMatchesCommit(winner, objectRef, request.upload_id, request.size_bytes, sha256, contentType)
+        this.#existingMatchesCommit(
+          winner,
+          objectRef,
+          request.upload_id,
+          request.size_bytes,
+          sha256,
+          contentType,
+        )
       ) {
         return {
           ok: true,
@@ -1964,10 +1938,7 @@ export class AssetService {
    * gateway refuses to hold — above the bound it names the presigned download
    * instead of materializing the object.
    */
-  async #loadAssetContent(
-    asset: StoredAsset,
-    tenantId: string,
-  ): Promise<AssetResult<Uint8Array>> {
+  async #loadAssetContent(asset: StoredAsset, tenantId: string): Promise<AssetResult<Uint8Array>> {
     if (asset.size_bytes > this.#limits.inlineMaxBytes) {
       return fail(
         413,
@@ -2016,8 +1987,5 @@ function bucketUnavailable(): AssetFailure {
 
 /** A standalone `ArrayBuffer` copy of a view — R2 `put` wants a BufferSource. */
 function bufferOf(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  ) as ArrayBuffer;
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }

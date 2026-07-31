@@ -9,12 +9,7 @@
  */
 import type { StoredAsset, StoredAssetChannel } from "./ports.js";
 import type { SemverRange, SemverVersion } from "./semver.js";
-import {
-  compareVersions,
-  parseRange,
-  parseVersion,
-  rangeMatches,
-} from "./semver.js";
+import { compareVersions, parseRange, parseVersion, rangeMatches } from "./semver.js";
 
 /** How a pull reference resolved — surfaced as `x-ferrogate-asset-resolved`. */
 export type VersionResolution =
@@ -33,10 +28,7 @@ export interface ResolvedVersion {
 }
 
 /** The `x-ferrogate-asset-resolved` header value. */
-export function resolutionHeaderValue(
-  how: VersionResolution,
-  version: string,
-): string {
+export function resolutionHeaderValue(how: VersionResolution, version: string): string {
   switch (how.kind) {
     case "exact":
       return `exact=${version}`;
@@ -124,9 +116,7 @@ export function resolveVersion(
   const explicit = channels.find((channel) => channel.channel === reference);
   if (explicit !== undefined || reference === "latest") {
     if (explicit) {
-      const target = versions.find(
-        (state) => state.version === explicit.version,
-      );
+      const target = versions.find((state) => state.version === explicit.version);
       // A yanked target is skipped, which is the whole point of yank: the
       // version stays fetchable by exact pin but drops out of channel
       // resolution.

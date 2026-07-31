@@ -7,7 +7,7 @@
  * not a write here: storing a config and activating it are deliberately two
  * operations in the Rust tree.
  */
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const adminGatewayConfigRoutes: GroupModule = crudGroup("admin_gateway_config", [
   { segment: "gateway-configs", object: "gateway_config", body: adminRecordSchema },

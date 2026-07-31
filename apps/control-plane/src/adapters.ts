@@ -14,22 +14,22 @@
  * Store; replace `JsonRbacAuthorizer` with `@ferrogate/policy`'s role
  * resolution.
  */
-import {
-  type ApiKeyAuthenticatorPort,
-  type ApiKeyResolution,
-  type AuthContext,
-  type ControlPlaneBindings,
-  type ControlPlaneDeps,
-  type ControlPlaneStore,
-  type LifecycleDecision,
-  type RbacAuthorizerPort,
-  type RbacDecision,
-  type RuntimeStatus,
-  type RuntimeStatusPort,
-  type TenancyLifecycleGatePort,
+import type {
+  ApiKeyAuthenticatorPort,
+  ApiKeyResolution,
+  AuthContext,
+  ControlPlaneBindings,
+  ControlPlaneDeps,
+  ControlPlaneStore,
+  LifecycleDecision,
+  RbacAuthorizerPort,
+  RbacDecision,
+  RuntimeStatus,
+  RuntimeStatusPort,
+  TenancyLifecycleGatePort,
 } from "./ports.js";
-import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 import { DEFAULT_ADMIN_LIST_LIMIT, DEFAULT_ADMIN_LIST_MAX_LIMIT } from "./responses.js";
+import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 
 // ---------------------------------------------------------------------------
 // Declarative key material

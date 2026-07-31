@@ -23,17 +23,17 @@
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
+import { type CallerScope, type ControlPlaneStore, StoreConflictError } from "../ports.js";
 import { adminDeleted, adminItem } from "../responses.js";
-import { StoreConflictError, type CallerScope, type ControlPlaneStore } from "../ports.js";
 import {
+  type GroupModule,
+  type Handler,
   adminRecordSchema,
   crudGroup,
   json,
   pathParam,
   readJson,
   scopeOf,
-  type GroupModule,
-  type Handler,
 } from "./resource.js";
 
 /** Rust `QuotaScopeKind`. */

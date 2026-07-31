@@ -266,7 +266,12 @@ interface ParsedContract {
  * these that matches no owned operation is a 404/405 *from this Worker*; a
  * request outside them was routed here by mistake.
  */
-const OWNED_PREFIXES = ["/v1/agent-runs", "/v1/agent-jobs", "/v1/agents", "/v1/self-hosted-workers"];
+const OWNED_PREFIXES = [
+  "/v1/agent-runs",
+  "/v1/agent-jobs",
+  "/v1/agents",
+  "/v1/self-hosted-workers",
+];
 
 function parseOwnedContract(raw: RawContract): ParsedContract {
   if (raw.version !== SUPPORTED_CONTRACT_VERSION) {
@@ -391,9 +396,7 @@ export function canonicalRequestPath(rawPath: string): string {
 
 /** `true` when the path falls inside this Worker's contract surface. */
 export function isOwnedPath(path: string): boolean {
-  return CONTRACT.ownedPrefixes.some(
-    (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-  );
+  return CONTRACT.ownedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
 /**

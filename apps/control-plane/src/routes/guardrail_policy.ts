@@ -33,16 +33,9 @@
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import { adminDeleted, listResponse, parseListQuery } from "../responses.js";
 import type { StoreRecord } from "../ports.js";
-import {
-  crudGroup,
-  json,
-  pathParam,
-  readJson,
-  scopeOf,
-  type GroupModule,
-} from "./resource.js";
+import { adminDeleted, listResponse, parseListQuery } from "../responses.js";
+import { type GroupModule, crudGroup, json, pathParam, readJson, scopeOf } from "./resource.js";
 
 const POLICIES = "guardrail-policies";
 const REVISIONS = "guardrail-policy-revisions";
@@ -99,7 +92,11 @@ function revisionNumber(record: StoreRecord): number {
 function readRevisionParam(revision: string, policyId: string): number {
   const parsed = Number.parseInt(revision, 10);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new HttpError(404, "not_found", `guardrail policy ${policyId} revision ${revision} not found`);
+    throw new HttpError(
+      404,
+      "not_found",
+      `guardrail policy ${policyId} revision ${revision} not found`,
+    );
   }
   return parsed;
 }

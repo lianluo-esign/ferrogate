@@ -13,7 +13,7 @@
  * way.
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const promptTemplateSchema = adminRecordSchema.extend({
   template: z.string().optional(),

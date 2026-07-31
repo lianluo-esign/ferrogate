@@ -7,7 +7,7 @@
  * `@ferrogate/core`), so it is typed rather than left free-form.
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const agentWorkflowSchema = adminRecordSchema.extend({
   version: z.number().int().min(0).max(4_294_967_295).optional(),

@@ -31,13 +31,13 @@
  */
 import { z } from "zod";
 import {
-  crudGroup,
+  type GroupModule,
+  type Handler,
   createHandler,
+  crudGroup,
   json,
   raw,
   resolveSpec,
-  type GroupModule,
-  type Handler,
 } from "./resource.js";
 import { SELF_HOSTED_WORKER_SPEC } from "./self_hosted_worker.js";
 

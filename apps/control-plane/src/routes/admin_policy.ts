@@ -7,7 +7,7 @@
  * own revision/activate/rollback lifecycle and its own RBAC actions).
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const adminPolicySchema = adminRecordSchema.extend({
   name: z.string().trim().min(1),

@@ -18,11 +18,11 @@
  */
 import type { Hono } from "hono";
 import {
+  type ApiOperation,
   CONTROL_PLANE_GROUPS,
   CONTROL_PLANE_OPERATIONS,
   EXPECTED_CONTROL_PLANE_OPERATION_COUNT,
   operationsInGroup,
-  type ApiOperation,
 } from "../contract.js";
 import type { ControlPlaneEnv } from "../ports.js";
 import type { GroupModule, Handler } from "./resource.js";
@@ -121,30 +121,44 @@ function buildHandlerTable(): ReadonlyMap<string, Handler> {
 
   const orphanGroups = [...declaredGroups].filter((group) => !coveredGroups.has(group));
   if (orphanGroups.length > 0) {
-    throw new Error(
-      `no route module for contract group(s): ${orphanGroups.sort().join(", ")}`,
-    );
+    throw new Error(`no route module for contract group(s): ${orphanGroups.sort().join(", ")}`);
   }
 
-  const missing = CONTROL_PLANE_OPERATIONS.filter(
-    (operation) => !handlers.has(operation.operationId),
-  ).map((operation) => operation.operationId);
+  const { missing, extra } = diffAgainstContract([...handlers.keys()]);
   if (missing.length > 0) {
-    throw new Error(`no handler for contract operation(s): ${missing.sort().join(", ")}`);
+    throw new Error(`no handler for contract operation(s): ${missing.join(", ")}`);
   }
-
-  const contractIds = new Set(CONTROL_PLANE_OPERATIONS.map((op) => op.operationId));
-  const extra = [...handlers.keys()].filter((operationId) => !contractIds.has(operationId));
   if (extra.length > 0) {
-    throw new Error(`handler(s) for operation(s) not in the contract: ${extra.sort().join(", ")}`);
+    throw new Error(`handler(s) for operation(s) not in the contract: ${extra.join(", ")}`);
   }
-
   if (handlers.size !== EXPECTED_CONTROL_PLANE_OPERATION_COUNT) {
     throw new Error(
       `expected ${EXPECTED_CONTROL_PLANE_OPERATION_COUNT} control-plane handlers, built ${handlers.size}`,
     );
   }
   return handlers;
+}
+
+/**
+ * The anti-drift comparison, as a pure function so a test can drive it with a
+ * synthetic handler set instead of having to edit a route module to observe the
+ * failure. `missing` is the answer to "which contract operation lost its
+ * route"; `extra` is the answer to the opposite drift — a handler for an
+ * operation the contract no longer has. Both are sorted, because the message is
+ * read by a human at the point of failure.
+ */
+export function diffAgainstContract(handlerIds: readonly string[]): {
+  readonly missing: readonly string[];
+  readonly extra: readonly string[];
+} {
+  const registered = new Set(handlerIds);
+  const contractIds = new Set(CONTROL_PLANE_OPERATIONS.map((operation) => operation.operationId));
+  return {
+    missing: CONTROL_PLANE_OPERATIONS.map((operation) => operation.operationId)
+      .filter((operationId) => !registered.has(operationId))
+      .sort(),
+    extra: [...registered].filter((operationId) => !contractIds.has(operationId)).sort(),
+  };
 }
 
 const HANDLERS = buildHandlerTable();

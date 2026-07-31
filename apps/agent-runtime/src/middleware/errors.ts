@@ -1,3 +1,4 @@
+import { GatewayError } from "@ferrogate/core";
 /**
  * The uniform error envelope.
  *
@@ -14,7 +15,6 @@
  * plus the `x-request-id` / `x-trace-id` response headers Rust always attaches.
  */
 import type { Context, ErrorHandler, MiddlewareHandler, NotFoundHandler } from "hono";
-import { GatewayError } from "@ferrogate/core";
 import type { AgentRuntimeEnv } from "../ports.js";
 
 /** Rust `ErrorObject`. `type` is always the literal `ferrogate_error`. */

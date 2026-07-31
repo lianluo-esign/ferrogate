@@ -8,7 +8,7 @@
  * `getGuardrailInvestigation`) — that second gate is applied by the table-driven
  * auth middleware from the contract, so it is not repeated here.
  */
-import { crudGroup, readOnlyCollection, type GroupModule } from "./resource.js";
+import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
 
 export const adminRequestLogRoutes: GroupModule = crudGroup("admin_request_log", [
   readOnlyCollection("request-logs", "request_log"),

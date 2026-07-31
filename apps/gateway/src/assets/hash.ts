@@ -24,11 +24,8 @@ export function toHex(bytes: ArrayBuffer | Uint8Array): string {
 }
 
 /** SHA-256 of raw bytes, hex-encoded — Rust `sha256_hex`. */
-export async function sha256Hex(
-  bytes: ArrayBuffer | Uint8Array | string,
-): Promise<string> {
-  const data =
-    typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
+export async function sha256Hex(bytes: ArrayBuffer | Uint8Array | string): Promise<string> {
+  const data = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
   // `crypto.subtle.digest` wants a BufferSource; a Uint8Array view qualifies.
   const digest = await crypto.subtle.digest("SHA-256", data as BufferSource);
   return toHex(digest);
@@ -47,13 +44,8 @@ export async function hmacSha256(
     false,
     ["sign"],
   );
-  const data =
-    typeof message === "string" ? new TextEncoder().encode(message) : message;
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    cryptoKey,
-    data as BufferSource,
-  );
+  const data = typeof message === "string" ? new TextEncoder().encode(message) : message;
+  const signature = await crypto.subtle.sign("HMAC", cryptoKey, data as BufferSource);
   return new Uint8Array(signature);
 }
 

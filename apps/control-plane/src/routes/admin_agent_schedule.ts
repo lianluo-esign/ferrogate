@@ -17,12 +17,12 @@
  */
 import { z } from "zod";
 import {
+  type CollectionSpec,
+  type GroupModule,
   actionHandler,
   adminRecordSchema,
   crudGroup,
   subListHandler,
-  type CollectionSpec,
-  type GroupModule,
 } from "./resource.js";
 
 export const agentScheduleSchema = adminRecordSchema.extend({

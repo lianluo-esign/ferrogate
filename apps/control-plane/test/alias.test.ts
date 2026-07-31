@@ -53,7 +53,9 @@ describe("/control/v1/* == /admin/v1/*", () => {
   });
 
   it("reaches the same handler for a status read", async () => {
-    const { admin, alias } = await bothSpellings("/status", { headers: bearer(operatorKey.secret) });
+    const { admin, alias } = await bothSpellings("/status", {
+      headers: bearer(operatorKey.secret),
+    });
     expect(admin.status).toBe(200);
     expect(alias.status).toBe(200);
     expect(await alias.json()).toEqual(await admin.json());

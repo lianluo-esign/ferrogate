@@ -20,7 +20,7 @@
  * WOULD load, and never installs it.
  */
 import { z } from "zod";
-import { json, readJson, scopeOf, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, crudGroup, json, readJson, scopeOf } from "./resource.js";
 
 /** State row backing `GET`/`POST /admin/v1/drain`, keyed by a singleton id. */
 const DRAIN_COLLECTION = "runtime-state";

@@ -45,13 +45,13 @@ import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import {
+  type AssetAuthFailure,
+  type AssetCaller,
   BuiltinEicarScreener,
   InMemoryAssetAuditSink,
   InMemoryAssetMetadataStore,
   InMemoryAssetObjectStore,
   UnavailablePresigner,
-  type AssetAuthFailure,
-  type AssetCaller,
   isAuthFailure,
 } from "./ports.js";
 import {
@@ -61,19 +61,19 @@ import {
   assetVersionParamsSchema,
   assetVisibilityPromotionRequestSchema,
   channelMoveQuerySchema,
+  platformQuerySchema,
   presignAbortRequestSchema,
   presignCommitRequestSchema,
   presignUploadIntentRequestSchema,
   pushQuerySchema,
-  platformQuerySchema,
   withheldQuerySchema,
 } from "./schemas.js";
 import {
-  AssetService,
   type AssetFailure,
   type AssetPullResult,
   type AssetRequestContext,
   type AssetResult,
+  AssetService,
   type AssetServiceDeps,
 } from "./service.js";
 
@@ -159,9 +159,7 @@ export function entitlementsFromEnv(env: AssetBindings): AssetEntitlementsPort {
 }
 
 /** Resolves the {@link AssetCaller} for one already-authenticated request. */
-export type AssetCallerResolver = (
-  c: Context<AssetEnv>,
-) => Promise<AssetCaller | AssetAuthFailure>;
+export type AssetCallerResolver = (c: Context<AssetEnv>) => Promise<AssetCaller | AssetAuthFailure>;
 
 /**
  * Default resolver: the `AuthContext` the contract middleware already put on
@@ -171,9 +169,7 @@ export type AssetCallerResolver = (
  * which the service turns into the Rust `403 tenant_required` — an unforgeable
  * value that matches no row, so it can never read another tenant's assets.
  */
-export function defaultCallerResolver(
-  entitlements?: AssetEntitlementsPort,
-): AssetCallerResolver {
+export function defaultCallerResolver(entitlements?: AssetEntitlementsPort): AssetCallerResolver {
   return async (c) => {
     const auth = c.get("auth");
     if (auth === null || auth === undefined) {
@@ -382,12 +378,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const body = await controlBody(c, presignUploadIntentRequestSchema);
         return render(
-          await service.createUploadIntent(
-            await caller(c),
-            refOf(params),
-            body,
-            requestContext(c),
-          ),
+          await service.createUploadIntent(await caller(c), refOf(params), body, requestContext(c)),
         );
       });
 
@@ -409,9 +400,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
 
       on("getAssetDownloadUrl", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
-        return render(
-          await service.downloadUrl(await caller(c), refOf(params), requestContext(c)),
-        );
+        return render(await service.downloadUrl(await caller(c), refOf(params), requestContext(c)));
       });
 
       // --- reserved third/fourth segments -----------------------------------

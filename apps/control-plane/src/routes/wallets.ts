@@ -36,17 +36,17 @@
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import { adminItem, listResponse, parseListQuery } from "../responses.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
+import { adminItem, listResponse, parseListQuery } from "../responses.js";
 import {
+  type GroupModule,
+  type Handler,
   adminRecordSchema,
   crudGroup,
   json,
   pathParam,
   readJson,
   scopeOf,
-  type GroupModule,
-  type Handler,
 } from "./resource.js";
 
 const WALLETS = "wallets";

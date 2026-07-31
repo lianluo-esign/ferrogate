@@ -7,7 +7,7 @@
  * here that filtering is the store's tenant scoping, applied for every
  * collection rather than remembered per handler.
  */
-import { crudGroup, readOnlyCollection, type GroupModule } from "./resource.js";
+import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
 
 export const adminModelRoutes: GroupModule = crudGroup("admin_model", [
   readOnlyCollection("models", "model"),

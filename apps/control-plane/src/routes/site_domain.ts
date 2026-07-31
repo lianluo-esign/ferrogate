@@ -23,12 +23,12 @@ import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { adminItem } from "../responses.js";
 import {
+  type GroupModule,
   adminRecordSchema,
   crudGroup,
   json,
   pathParam,
   scopeOf,
-  type GroupModule,
 } from "./resource.js";
 
 const SITE_DOMAINS = "site-domains";

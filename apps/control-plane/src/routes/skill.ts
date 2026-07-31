@@ -3,7 +3,7 @@
  * the admin side of the `/v1/skills/**` data-plane surface `apps/gateway` owns.
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const skillPackageSchema = adminRecordSchema.extend({
   version: z.string().trim().min(1).optional(),

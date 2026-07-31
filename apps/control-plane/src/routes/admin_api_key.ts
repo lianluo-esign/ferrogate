@@ -13,7 +13,7 @@
  * rather than storing one.
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const adminApiKeySchema = adminRecordSchema
   .extend({

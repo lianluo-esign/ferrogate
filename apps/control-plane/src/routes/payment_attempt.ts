@@ -13,7 +13,7 @@
  * attempt is a record of something that happened, and an admin-writable attempt
  * would be a ledger forgery primitive.
  */
-import { crudGroup, readOnlyCollection, type GroupModule } from "./resource.js";
+import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
 
 export const paymentAttemptRoutes: GroupModule = crudGroup("payment_attempt", [
   readOnlyCollection("payment-attempts", "payment_attempt"),

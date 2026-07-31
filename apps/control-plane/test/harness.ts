@@ -81,7 +81,11 @@ export const operatorKey: StaticKey = {
 };
 
 /** A tenant-scoped native key with full admin scopes. */
-export function tenantKey(secret: string, tenantId: string, scopes = ["admin.read", "admin.write"]): NativeKey {
+export function tenantKey(
+  secret: string,
+  tenantId: string,
+  scopes = ["admin.read", "admin.write"],
+): NativeKey {
   return { secret, id: `key_${tenantId}`, tenant_id: tenantId, scopes };
 }
 
@@ -93,11 +97,7 @@ export function bearer(secret: string): Record<string, string> {
 }
 
 /** JSON request init with a bearer credential. */
-export function jsonRequest(
-  secret: string,
-  method: string,
-  body: unknown,
-): RequestInit {
+export function jsonRequest(secret: string, method: string, body: unknown): RequestInit {
   return {
     method,
     headers: { ...bearer(secret), "content-type": "application/json" },

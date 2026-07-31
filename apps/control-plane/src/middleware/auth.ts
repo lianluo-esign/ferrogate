@@ -39,11 +39,11 @@ import {
   pathIsDocumented,
 } from "../contract.js";
 import {
-  hasScope,
   type ApiKeyResolution,
   type AuthContext,
   type ControlPlaneDeps,
   type ControlPlaneEnv,
+  hasScope,
 } from "../ports.js";
 import { HttpError } from "./errors.js";
 

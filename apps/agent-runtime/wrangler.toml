@@ -64,6 +64,18 @@ FG_REQUIRE_PRODUCTION_MTLS = "0"
 # configuration must fail closed.
 CONTAINER_GOVERNED_EGRESS_HOSTS = ""
 
+# Operator knobs mirroring the Rust constants of the same name. Anything unset
+# or unparseable falls back to the Rust default rather than to zero, so a typo
+# cannot silently remove the concurrency bound.
+#   AGENT_RUNTIME_ENABLED         "0" ⇒ every run/job verb answers 403.
+#   AGENT_JOB_MAX_OPEN_PER_TENANT open jobs one tenant may hold at once (429).
+#   AGENT_JOB_DISPATCH_TTL_SECS   age at which a never-leased start dispatch is
+#                                 swept, so a tenant with NO registered worker
+#                                 self-heals instead of locking itself out.
+AGENT_RUNTIME_ENABLED = "1"
+AGENT_JOB_MAX_OPEN_PER_TENANT = "200"
+AGENT_JOB_DISPATCH_TTL_SECS = "86400"
+
 # TODO(bindings): configure per this app's inventory before first deploy.
 # Do NOT commit real resource IDs — these are placeholders only.
 #   [[durable_objects.bindings]]  name = "CONTAINER_SANDBOX", class_name = "AgentSandbox"

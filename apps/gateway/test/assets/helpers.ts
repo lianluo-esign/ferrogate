@@ -7,23 +7,23 @@
  * `service.ts` that runs against an `R2Bucket` binding runs here unchanged.
  */
 import {
-  AssetService,
-  type AssetLimits,
-  type AssetRequestContext,
-} from "../../src/assets/service.js";
-import {
-  BuiltinEicarScreener,
-  InMemoryAssetAuditSink,
-  InMemoryAssetMetadataStore,
-  InMemoryAssetObjectStore,
   type AssetCaller,
   type AssetObjectPutOptions,
   type AssetPresigner,
   type AssetScreener,
   type AssetScreeningRequest,
   type AssetScreeningVerdict,
+  BuiltinEicarScreener,
+  InMemoryAssetAuditSink,
+  InMemoryAssetMetadataStore,
+  InMemoryAssetObjectStore,
   type PresignedUpload,
 } from "../../src/assets/ports.js";
+import {
+  type AssetLimits,
+  type AssetRequestContext,
+  AssetService,
+} from "../../src/assets/service.js";
 
 /** Deterministic presigner: no network, no credentials, stable URLs. */
 export class FakePresigner implements AssetPresigner {
@@ -119,10 +119,7 @@ export function harness(options: HarnessOptions = {}): Harness {
 }
 
 /** A tenant-attributed caller that may host assets. */
-export function callerFor(
-  tenantId: string,
-  overrides: Partial<AssetCaller> = {},
-): AssetCaller {
+export function callerFor(tenantId: string, overrides: Partial<AssetCaller> = {}): AssetCaller {
   return {
     tenantId,
     scopes: ["assets.read", "assets.write"],

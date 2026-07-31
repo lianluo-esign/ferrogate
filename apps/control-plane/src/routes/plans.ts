@@ -15,7 +15,7 @@
  * `DELETE /admin/v1/plans/{id}` answers 405 rather than silently succeeding.
  */
 import { z } from "zod";
-import { adminRecordSchema, crudGroup, type GroupModule } from "./resource.js";
+import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const planSchema = adminRecordSchema.extend({
   name: z.string().trim().min(1).optional(),

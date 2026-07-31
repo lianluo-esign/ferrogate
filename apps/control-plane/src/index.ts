@@ -1,3 +1,4 @@
+import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 /**
  * `ferrogate-control-plane` Worker — the 197-operation `/admin/v1/**` surface.
  *
@@ -31,7 +32,6 @@
  * `/scim/v2/*` provisioning — see `docs/legacy/inventory-edge-control.md` §5.1.
  */
 import { Hono } from "hono";
-import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 import { resolveDeps } from "./adapters.js";
 import {
   CONTROL_PLANE_GROUPS,

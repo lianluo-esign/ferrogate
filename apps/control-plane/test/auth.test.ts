@@ -261,9 +261,15 @@ describe("405 before authentication", () => {
 
 describe("CSRF: cross-site admin mutations (Rust admin_cross_site_rejection)", () => {
   it("rejects Sec-Fetch-Site: cross-site and same-site, allows same-origin/none", () => {
-    expect(adminCrossSiteRejection(new Headers({ "sec-fetch-site": "cross-site" }), null)).not.toBeNull();
-    expect(adminCrossSiteRejection(new Headers({ "sec-fetch-site": "Same-Site" }), null)).not.toBeNull();
-    expect(adminCrossSiteRejection(new Headers({ "sec-fetch-site": "same-origin" }), null)).toBeNull();
+    expect(
+      adminCrossSiteRejection(new Headers({ "sec-fetch-site": "cross-site" }), null),
+    ).not.toBeNull();
+    expect(
+      adminCrossSiteRejection(new Headers({ "sec-fetch-site": "Same-Site" }), null),
+    ).not.toBeNull();
+    expect(
+      adminCrossSiteRejection(new Headers({ "sec-fetch-site": "same-origin" }), null),
+    ).toBeNull();
     expect(adminCrossSiteRejection(new Headers({ "sec-fetch-site": "none" }), null)).toBeNull();
   });
 
@@ -272,9 +278,14 @@ describe("CSRF: cross-site admin mutations (Rust admin_cross_site_rejection)", (
   });
 
   it("falls back to Origin when Sec-Fetch-Site is absent", () => {
-    expect(adminCrossSiteRejection(new Headers({ origin: "https://evil.test" }), null)).not.toBeNull();
     expect(
-      adminCrossSiteRejection(new Headers({ origin: "https://console.test" }), "https://console.test"),
+      adminCrossSiteRejection(new Headers({ origin: "https://evil.test" }), null),
+    ).not.toBeNull();
+    expect(
+      adminCrossSiteRejection(
+        new Headers({ origin: "https://console.test" }),
+        "https://console.test",
+      ),
     ).toBeNull();
   });
 
