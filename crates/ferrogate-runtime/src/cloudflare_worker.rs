@@ -103,9 +103,12 @@ pub fn cloudflare_backend_descriptor_default() -> IsolationBackendDescriptor {
 /// its own vocabulary (a run can be `Queued` before it is `Running`); reconcile
 /// via [`CloudflareRunStatus::managed_session_status`].
 ///
-/// The serde form is the Worker's own control-route vocabulary — the exact set
-/// `cloudflare_gateway_control::parse_status` accepts — so a status recorded on
-/// a durable receipt reads the same as the wire value it came from.
+/// The serde form is the Worker's own control-route vocabulary, and it is the
+/// SINGLE definition of that vocabulary: `cloudflare_gateway_control::
+/// parse_status` parses the wire `status` string *through this derive* rather
+/// than through a second table of its own. So a status recorded on a durable
+/// receipt reads the same as the wire value it came from, and a variant added
+/// here is accepted off the wire without a matching edit elsewhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CloudflareRunStatus {

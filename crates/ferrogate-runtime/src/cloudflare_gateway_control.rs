@@ -85,6 +85,8 @@
 use std::sync::Arc;
 
 use ferrogate_cloudflare::{HttpMethod, HttpRequest, HttpResponse, HttpTransport};
+use serde::de::value::StrDeserializer;
+use serde::de::IntoDeserializer;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -230,18 +232,22 @@ fn encode_query_value(value: &str) -> String {
 }
 
 /// Parse the Worker's `status` string into a [`CloudflareRunStatus`].
+///
+/// Deliberately delegates to the enum's own serde mapping instead of
+/// re-listing the vocabulary in a second `match`. Two hand-written tables for
+/// the same wire words drift the moment a variant is added: one of them gets
+/// the new word and the other rejects it (or, worse, a durable receipt
+/// serializes a word the wire parser refuses to read back). With the derive as
+/// the single source of truth, the accepted set and the persisted set are the
+/// same set by construction — adding a variant to [`CloudflareRunStatus`]
+/// updates both at once.
 fn parse_status(raw: &str) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
-    match raw {
-        "queued" => Ok(CloudflareRunStatus::Queued),
-        "running" => Ok(CloudflareRunStatus::Running),
-        "completed" => Ok(CloudflareRunStatus::Completed),
-        "failed" => Ok(CloudflareRunStatus::Failed),
-        "stopped" => Ok(CloudflareRunStatus::Stopped),
-        "cleaned_up" => Ok(CloudflareRunStatus::CleanedUp),
-        other => Err(CloudflareControlSurfaceError::Transport(format!(
-            "unknown run status from gateway Worker: {other}"
-        ))),
-    }
+    let deserializer: StrDeserializer<'_, serde::de::value::Error> = raw.into_deserializer();
+    CloudflareRunStatus::deserialize(deserializer).map_err(|_| {
+        CloudflareControlSurfaceError::Transport(format!(
+            "unknown run status from gateway Worker: {raw}"
+        ))
+    })
 }
 
 #[derive(Debug, Deserialize)]
