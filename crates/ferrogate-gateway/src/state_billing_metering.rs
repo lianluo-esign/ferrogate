@@ -224,6 +224,25 @@ impl AppState {
                 );
             }
         }
+        // #428 burn writer: this settled request is agent activity iff it
+        // carries an `agent_run_id`, and its `cost_usd` has just been priced
+        // against the model registry. Fold it into the durable per-agent burn
+        // ledger so the per-agent ceiling `AppState::admit_agent_run` reads at
+        // the NEXT dispatch is backed by real spend rather than a permanent
+        // zero. Attribution is `(organization_id, api_key_id)` -- the same pair
+        // admission keys on, so the write and the read join by construction.
+        //
+        // Recorded whether or not the tenant has a configured ceiling: the
+        // visibility half of #428 (`GET /admin/v1/agent-cost-burn`) is how an
+        // operator sizes a budget before setting one.
+        if let Some((agent_key, run_id)) =
+            AppState::agent_burn_attribution(&draft.request.tenant, event.agent_run_id.as_deref())
+        {
+            if let Some(cost_usd) = cost_usd {
+                self.record_agent_burn(&draft.request.tenant, agent_key, run_id, cost_usd)
+                    .await;
+            }
+        }
         // Runs after the rollup update this settled request just committed
         // (both `append_billing_event` paths increment
         // `usage_monthly_rollups` synchronously), so spend read here

@@ -48,10 +48,10 @@
 use super::*;
 
 use ferrogate_runtime::{
-    AgentCostGovernor, AgentDispatchGuard, AgentInstanceIdentity, CfRuntimeCostModel,
-    CloudflareControlSurface, CloudflareControlSurfaceError, CloudflareRunExecOutcome,
-    CloudflareRunExecRequest, CloudflareRunHandle, CloudflareRunStartRequest, CloudflareRunStatus,
-    CostGovernorError, StorageAgentBurnLedger,
+    AgentBurnLedger, AgentCostGovernor, AgentDispatchGuard, AgentInstanceIdentity,
+    CfRuntimeCostModel, CloudflareControlSurface, CloudflareControlSurfaceError,
+    CloudflareRunExecOutcome, CloudflareRunExecRequest, CloudflareRunHandle,
+    CloudflareRunStartRequest, CloudflareRunStatus, CostGovernorError, StorageAgentBurnLedger,
 };
 
 /// The `agent_key` (the STABLE per-agent component of the identity triple, the
@@ -319,6 +319,111 @@ impl AppState {
             );
         }
         admission
+    }
+
+    /// Fold one settled USD amount of **already-metered agent spend** into the
+    /// durable per-agent burn ledger, and report the new accumulated total.
+    ///
+    /// This is the #428 burn **writer** — the half that was missing when the
+    /// ceiling first landed. Without it `agent_cost_burn` stayed empty in
+    /// production, [`Self::admit_agent_run`] always read 0.0 burn, and the
+    /// configured ceiling could never bind no matter how much an agent spent.
+    ///
+    /// ## Why the metering path, and not a Cloudflare Analytics pull
+    ///
+    /// The Cloudflare-runtime dimensions (DO requests, GB-seconds, SQLite rows)
+    /// need a live CF Analytics feed and credentials, and stay behind the
+    /// [`ferrogate_runtime::AgentRuntimeUsageSource`] seam. **Model / tool / MCP
+    /// egress spend needs none of that**: the gateway already prices and settles
+    /// it per request, and the settled `BillingEvent` already carries the
+    /// `agent_run_id` correlation and the tenant's `api_key_id`. Those two are
+    /// exactly the `(tenant_id, agent_key)` pair the ledger accumulates against
+    /// and [`Self::admit_agent_run`] reads back, so folding the settled cost in
+    /// at metering time closes the loop with no new telemetry source.
+    ///
+    /// ## Unconditional, by design
+    ///
+    /// Burn is recorded whether or not a ceiling is configured for the tenant.
+    /// The "attributed and visible" half of #428 (`GET
+    /// /admin/v1/agent-cost-burn`) must work for an operator who has not set a
+    /// budget yet — that is how they size one — and a tenant that configures a
+    /// budget mid-period must not start from a fabricated zero. Note the
+    /// asymmetry with [`Self::admit_agent_run`], which stays strictly default-off
+    /// on the *read* side: writing a burn row changes no request's outcome,
+    /// whereas constructing a governor for an unbudgeted tenant would.
+    ///
+    /// ## Best-effort, and loud when it fails
+    ///
+    /// A ledger write failure returns `None` after a `warn!` rather than failing
+    /// the request that was just served: the spend already happened, and
+    /// rejecting a completed, already-settled response would neither un-spend it
+    /// nor make the ledger truer. The under-count is real, so it is logged with
+    /// the identity and the amount that was lost — never swallowed silently. The
+    /// *read* side stays fail-closed, which is where a wrong answer can still
+    /// prevent spend.
+    pub(crate) async fn record_agent_burn(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        agent_key: &str,
+        run_id: &str,
+        cost_usd: f64,
+    ) -> Option<f64> {
+        // A non-finite or non-positive delta is not a debit: NaN would poison the
+        // accumulated total permanently (every later comparison against it is
+        // false, so the ceiling silently stops binding) and a negative delta
+        // would let a metering bug *credit* burn back. Zero is a no-op write.
+        if !cost_usd.is_finite() || cost_usd <= 0.0 {
+            return None;
+        }
+        let mut ledger =
+            StorageAgentBurnLedger::new(self.repositories.clone(), self.current_period_month());
+        let identity = AgentInstanceIdentity::new(
+            tenant
+                .organization_id
+                .as_deref()
+                .unwrap_or(UNKNOWN_TENANT_ID),
+            agent_key,
+            run_id,
+        );
+        match ledger.add(&identity, cost_usd).await {
+            Ok(total) => Some(total),
+            Err(error) => {
+                warn!(
+                    %error,
+                    tenant_id = identity.tenant_id.as_str(),
+                    agent_key,
+                    run_id,
+                    cost_usd,
+                    "failed to record settled agent spend in the durable burn ledger; \
+                     the agent cost budget for this tenant is now under-counted by this amount"
+                );
+                None
+            }
+        }
+    }
+
+    /// The `(agent_key, run_id)` a settled billing event attributes agent burn
+    /// to, or `None` when the event is not agent activity at all.
+    ///
+    /// `None` — no `agent_run_id` on the event — is the overwhelmingly common
+    /// case (a plain chat/responses request), and it must stay a cheap early
+    /// return: this runs on every metered request, and a non-agent request must
+    /// not touch the burn ledger. A present `agent_run_id` with no `api_key_id`
+    /// still attributes, to [`UNATTRIBUTED_AGENT_KEY`], so unattributed agent
+    /// spend for a tenant folds into one legible row instead of being dropped or
+    /// keyed on `""`.
+    pub(crate) fn agent_burn_attribution<'a>(
+        tenant: &'a ferrogate_core::TenantContext,
+        agent_run_id: Option<&'a str>,
+    ) -> Option<(&'a str, &'a str)> {
+        let run_id = agent_run_id.map(str::trim).filter(|id| !id.is_empty())?;
+        let agent_key = tenant
+            .api_key_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .unwrap_or(UNATTRIBUTED_AGENT_KEY);
+        Some((agent_key, run_id))
     }
 }
 

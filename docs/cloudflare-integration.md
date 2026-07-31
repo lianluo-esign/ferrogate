@@ -282,6 +282,64 @@ FerroGate's agent-worker abstraction already treats isolation backends as a
 replaceable registry, so a Cloudflare-managed backend registers alongside the
 existing Firecracker/Docker/local-process tiers — see §10.4.
 
+### 4.1 Agent cost governance (issue #428)
+
+Cloudflare provides **no per-agent spend cap**, so FerroGate owns the ceiling
+itself. This section is the operator-facing contract; the engine lives in
+`crates/ferrogate-runtime/src/cloudflare_agent_cost.rs` and the product wiring in
+`crates/ferrogate-gateway/src/state_agent_cost_governor.rs`.
+
+**Setting a budget.** `agent_cost_budget_usd` on any quota policy in the
+tenant → project → workspace → key chain (or its plan default). The effective
+ceiling is the `min` across the chain, and the winning scope's id is stamped onto
+every decision as `policy_version` (e.g. `quota:tenant:acme`), so an audit event
+names the row that governed a run.
+
+**Default-off.** With `agent_cost_budget_usd` unset anywhere in the chain, no
+governor is constructed and no ledger read happens — behaviour is identical to a
+build without this feature. An absent budget is never read as a `0.0` ceiling.
+
+**Where the ceiling binds.** Three surfaces start agent work, and all three
+consult the same admission seam before anything is enqueued or spawned:
+
+| surface | refusal |
+|---|---|
+| `POST /v1/agent-runs` | `402 agent_budget_exceeded` before the run row and before any provider process |
+| `POST /v1/agent-jobs` | `402` before the `StartRun` dispatch is enqueued (after the idempotency dedup gate, so a retried submit of an already-accepted job is never turned into a 402) |
+| agent schedules (tick fire and admin `run-now`) | the fire is recorded with a `agent_budget_exceeded` outcome; no dispatch is enqueued and the schedule still advances on its own cadence |
+
+**⚠️ The effective stop is 80% of the ceiling, not the ceiling.** New dispatch is
+admitted only on `Allow`, and the ladder enters `Throttle` at
+`DEFAULT_WARN_FRACTION` (**0.8**) of `agent_cost_budget_usd`. So a configured
+budget of **100 USD stops admitting new runs at 80 USD of accumulated burn**, and
+the refusal carries the `agent_budget_exceeded` code even though the configured
+budget is not yet exhausted. The 20% band is deliberate headroom for runs already
+in flight, which are never torn down at admission. Size the number accordingly:
+if you want to spend up to 100 USD, configure ~125.
+
+**What counts as burn.** Every settled request carrying an `agent_run_id` folds
+its priced `cost_usd` into the durable `agent_cost_burn` ledger, keyed
+`(tenant_id, api_key_id, YYYY-MM)` — model, tool and MCP egress spend, i.e. the
+spend FerroGate already meters. Cloudflare runtime dimensions (DO requests,
+GB-seconds, SQLite rows) require a live CF Analytics feed and are **not yet
+folded in**; on a CF-hosted deployment the ledger is therefore a **lower bound**.
+Burn is recorded whether or not a ceiling is configured, so an operator can size
+a budget from observed spend before setting one.
+
+**Reading it.** `GET /admin/v1/agent-cost-burn` (CLI: `ferrogate usage
+cost-burn`), and the `agent.run_budget_admitted` / `agent.run_budget_refused`
+audit events.
+
+**Fail-closed.** Once a budget IS configured, every way of *not* knowing the
+answer refuses dispatch: a burn-ledger read failure and a configured-but-unusable
+ceiling both return `503 agent_budget_unavailable` rather than admitting.
+
+**Backend support.** The burn ledger is implemented on the Postgres and in-memory
+control-plane stores. **On a D1 control plane it is not implemented**: with
+`agent_cost_budget_usd` configured, every agent run fails closed with `503
+agent_budget_unavailable` and the admin visibility endpoint errors. Do not
+configure an agent cost budget on a D1 deployment until that lands.
+
 ---
 
 ## 5. Secrets Store

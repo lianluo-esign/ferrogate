@@ -210,6 +210,22 @@ pub const SECONDS_PER_BILLING_MONTH: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 
 /// Default fraction of the ceiling at which a budget starts to **throttle**
 /// (warn). 80% of the hard cap.
+///
+/// ## This fraction, not `ceiling_usd`, is the operator-visible hard stop
+///
+/// [`AgentDispatchGuard::allow_dispatch`] permits a NEW run only on
+/// [`BudgetDecision::Allow`], and `Throttle` starts at
+/// `warn_fraction * ceiling_usd`. So with the default fraction an operator who
+/// configures `agent_cost_budget_usd = 100` stops new dispatch at **80 USD** of
+/// accumulated burn, not at 100. Runs already in flight are unaffected — the
+/// guard is consulted at admission — so the ceiling still bounds total spend
+/// from above; the 0.8 band is deliberate headroom for the in-flight tail.
+///
+/// This is intentional and tested, but it means the refusal at 80 USD carries
+/// the `agent_budget_exceeded` code while the configured budget is not yet
+/// exhausted. Documented for operators in `docs/cloudflare-integration.md`
+/// ("Agent cost governance"); an operator who wants the stop AT the ceiling sets
+/// `warn_fraction = 1.0` via [`AgentBudgetPolicy::with_warn_fraction`].
 pub const DEFAULT_WARN_FRACTION: f64 = 0.8;
 
 // ---------------------------------------------------------------------------
@@ -689,12 +705,41 @@ impl AgentBudgetPolicy {
         self.degrade_fraction.map(|f| self.ceiling_usd * f)
     }
 
-    /// Validate the policy shape: positive ceiling, `0 < warn_fraction <= 1`, and
-    /// (when set) `warn_fraction <= degrade_fraction <= 1`.
+    /// Validate the policy shape: finite, positive ceiling,
+    /// `0 < warn_fraction <= 1`, and (when set)
+    /// `warn_fraction <= degrade_fraction <= 1`.
+    ///
+    /// ## Why every field is `is_finite()`-checked FIRST
+    ///
+    /// Every IEEE-754 comparison against `NaN` is `false`, so a bare
+    /// `ceiling_usd <= 0.0` / `warn_fraction > 1.0` range check **admits `NaN`**:
+    /// each guard reads "not out of range" and the policy validates. A `NaN`
+    /// ceiling then poisons [`Self::warn_threshold_usd`] and every threshold
+    /// comparison in the decision ladder, which silently collapses to
+    /// [`BudgetDecision::Allow`] — an unbounded-spend hole reached through a
+    /// policy that *passed* validation.
+    ///
+    /// The gateway's own connector (`AppState::resolve_agent_budget_policy`)
+    /// dodges this today with an `is_finite()` pre-check of its own, but that
+    /// leaves the hole open for every other caller of `validate()`. The check
+    /// belongs here, on the type, so the guarantee is "a validated policy has
+    /// finite thresholds" rather than "one caller remembers to look".
+    /// `INFINITY` is rejected for the same reason: an infinite ceiling is an
+    /// unbounded budget wearing the shape of a bounded one.
     pub fn validate(&self) -> Result<(), CostGovernorError> {
+        if !self.ceiling_usd.is_finite() {
+            return Err(CostGovernorError::InvalidPolicy(
+                "ceiling_usd must be a finite USD amount".to_string(),
+            ));
+        }
         if self.ceiling_usd <= 0.0 {
             return Err(CostGovernorError::InvalidPolicy(
                 "ceiling_usd must be positive".to_string(),
+            ));
+        }
+        if !self.warn_fraction.is_finite() {
+            return Err(CostGovernorError::InvalidPolicy(
+                "warn_fraction must be a finite fraction".to_string(),
             ));
         }
         if self.warn_fraction <= 0.0 || self.warn_fraction > 1.0 {
@@ -703,6 +748,11 @@ impl AgentBudgetPolicy {
             ));
         }
         if let Some(f) = self.degrade_fraction {
+            if !f.is_finite() {
+                return Err(CostGovernorError::InvalidPolicy(
+                    "degrade_fraction must be a finite fraction".to_string(),
+                ));
+            }
             if f < self.warn_fraction || f > 1.0 {
                 return Err(CostGovernorError::InvalidPolicy(
                     "degrade_fraction must be in [warn_fraction, 1]".to_string(),

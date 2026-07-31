@@ -124,9 +124,12 @@ fn an_unbudgeted_tenant_constructs_no_governor_and_dispatches_exactly_as_before(
 
 #[test]
 fn an_unbudgeted_tenant_is_unaffected_by_burn_already_recorded_against_it() {
-    // Burn can exist (it is recorded by the metering loop regardless of whether
-    // a ceiling is configured). With no ceiling there is nothing to breach, so
-    // admission must still be the untouched default-off path.
+    // Burn can exist: `AppState::record_agent_burn` writes it from the settled
+    // metering path (`state_billing_metering.rs`) for every request carrying an
+    // `agent_run_id`, deliberately WITHOUT consulting whether a ceiling is
+    // configured -- an operator sizes a budget from the burn they can already
+    // see. With no ceiling there is nothing to breach, so admission must still
+    // be the untouched default-off path.
     let state = state_with_agent_budget(None);
     seed_burn(&state, 10_000.0);
 
@@ -390,5 +393,114 @@ fn burn_accumulates_per_agent_across_runs_not_per_run() {
             RUN_ID
         ))),
         "a different agent under the same tenant keeps its own budget",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The burn writer: without it the ceiling can never bind
+// ---------------------------------------------------------------------------
+
+#[test]
+fn settled_agent_spend_accumulates_into_the_durable_ledger_the_ceiling_reads() {
+    // THE loop-closing test. Before the writer landed, `agent_cost_burn` was
+    // only ever written by tests, so admission read 0.0 forever and a configured
+    // ceiling could not bind no matter how much an agent spent. Deleting the
+    // `record_agent_burn` call from `state_billing_metering.rs` turns this red.
+    let state = state_with_agent_budget(Some(100.0));
+    assert_eq!(durable_burn(&state), None, "no burn before any spend");
+
+    let mut running = 0.0;
+    for spend in [40.0, 45.0] {
+        running += spend;
+        let total = block_on(state.record_agent_burn(&tenant(), AGENT_KEY, RUN_ID, spend))
+            .expect("a positive settled cost must be recorded");
+        assert!(
+            (total - running).abs() < 1e-9,
+            "the ledger must return the post-add total, got {total} want {running}",
+        );
+    }
+
+    // 85 USD of burn against a 100 USD ceiling is past the 0.8 warn threshold,
+    // so the NEXT dispatch is refused -- the ceiling now binds on real spend.
+    let admission = block_on(state.admit_agent_run(&tenant(), AGENT_KEY, "next-run"));
+    let AgentRunAdmission::Refused { status, code, .. } = &admission else {
+        panic!("recorded burn past the threshold must refuse the next run, got {admission:?}");
+    };
+    assert_eq!(*status, http::StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(*code, AGENT_BUDGET_EXCEEDED_CODE);
+}
+
+#[test]
+fn burn_is_recorded_for_an_unbudgeted_tenant_so_an_operator_can_size_a_budget() {
+    // Deliberately asymmetric with admission's default-off: writing a burn row
+    // changes no request's outcome, and `GET /admin/v1/agent-cost-burn` has to
+    // show spend BEFORE a ceiling exists -- that is how the ceiling gets chosen.
+    let state = state_with_agent_budget(None);
+
+    assert_eq!(
+        block_on(state.record_agent_burn(&tenant(), AGENT_KEY, RUN_ID, 12.5)),
+        Some(12.5),
+    );
+    assert_eq!(durable_burn(&state), Some(12.5));
+    assert_eq!(
+        block_on(state.admit_agent_run(&tenant(), AGENT_KEY, RUN_ID)),
+        AgentRunAdmission::Unbudgeted,
+        "recording burn must not turn an unbudgeted tenant into a governed one",
+    );
+}
+
+#[test]
+fn a_non_finite_or_non_positive_settled_cost_never_reaches_the_ledger() {
+    // A NaN delta would poison the accumulated total permanently: every later
+    // threshold comparison against NaN is false, so the ceiling silently stops
+    // binding. A negative delta would let a metering bug CREDIT burn back.
+    let state = state_with_agent_budget(Some(100.0));
+    seed_burn(&state, 10.0);
+
+    for delta in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+        assert_eq!(
+            block_on(state.record_agent_burn(&tenant(), AGENT_KEY, RUN_ID, delta)),
+            None,
+            "a {delta} delta must not be written",
+        );
+    }
+    assert_eq!(
+        durable_burn(&state),
+        Some(10.0),
+        "the seeded total must be untouched by every rejected delta",
+    );
+}
+
+#[test]
+fn only_requests_carrying_an_agent_run_id_attribute_burn() {
+    // This runs on EVERY metered request. A plain chat/responses request has no
+    // `agent_run_id` and must never touch the burn ledger; an agent request
+    // attributes to the same `(tenant, api_key_id)` pair admission reads back.
+    let mut tenant = tenant();
+    tenant.api_key_id = Some(AGENT_KEY.to_string());
+
+    assert_eq!(
+        AppState::agent_burn_attribution(&tenant, None),
+        None,
+        "a non-agent request must not attribute burn",
+    );
+    assert_eq!(
+        AppState::agent_burn_attribution(&tenant, Some("   ")),
+        None,
+        "a blank agent_run_id is not a run",
+    );
+    assert_eq!(
+        AppState::agent_burn_attribution(&tenant, Some(RUN_ID)),
+        Some((AGENT_KEY, RUN_ID)),
+        "the agent key must be the api key id admission keys on",
+    );
+
+    // No api key: the spend is still real, so it folds into the one legible
+    // per-tenant row rather than being dropped or keyed on "".
+    let mut anonymous = tenant.clone();
+    anonymous.api_key_id = None;
+    assert_eq!(
+        AppState::agent_burn_attribution(&anonymous, Some(RUN_ID)),
+        Some((UNATTRIBUTED_AGENT_KEY, RUN_ID)),
     );
 }
