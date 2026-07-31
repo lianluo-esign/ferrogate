@@ -45,7 +45,9 @@ use ferrogate_runtime::{
     NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
-use ferrogate_payments::HEADER_PAYMENT_REQUIRED;
+use ferrogate_payments::{
+    HEADER_PAYMENT_REQUIRED, HEADER_PAYMENT_RESPONSE, HEADER_PAYMENT_SIGNATURE,
+};
 
 use crate::recorded_evidence::{
     recorded_argv, recorded_excerpt, recorded_http_excerpt, recorded_metadata,
@@ -4266,6 +4268,18 @@ impl RestSmokeServer {
     }
 }
 
+/// Non-secret marker the smoke origin returns on every credential-shaped
+/// header, so the recorded evidence carries a value that MUST NOT survive.
+///
+/// It is a fixed literal, not a generated token: nothing here authenticates
+/// anything, and a harness has to be able to grep for it verbatim.
+const REST_SMOKE_CREDENTIAL_MARKER: &str = "ferrogate-smoke-credential-must-not-be-recorded";
+
+/// Non-secret marker the smoke origin returns on the PUBLIC x402 protocol
+/// header, which must survive VERBATIM — the settlement evidence the audit
+/// trail is built on is worthless if redaction eats it too (#353).
+const REST_SMOKE_PUBLIC_PAYMENT_MARKER: &str = "ferrogate-smoke-public-payment-evidence";
+
 fn spawn_one_shot_rest_smoke_server() -> RestSmokeServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = listener.local_addr().unwrap();
@@ -4275,11 +4289,37 @@ fn spawn_one_shot_rest_smoke_server() -> RestSmokeServer {
         let read = stream.read(&mut buffer)?;
         let request = String::from_utf8_lossy(&buffer[..read]).to_string();
         let body = "ferrogate governed rest smoke\n";
+        // The canned origin answers with BOTH halves of the recording contract
+        // this issue owns, so the shipped binary's own evidence proves it
+        // rather than only a unit test doing so (#353):
+        //
+        // * `authorization` and `PAYMENT-SIGNATURE` carry a spendable-shaped
+        //   value. If `recorded_http_excerpt`'s redaction were dropped from the
+        //   REST path, `REST_SMOKE_CREDENTIAL_MARKER` would appear verbatim in
+        //   the smoke command's stdout — a visible, greppable regression
+        //   instead of a silent one.
+        // * `PAYMENT-RESPONSE` is public settlement evidence and is deliberately
+        //   NOT on the deny-list, so `REST_SMOKE_PUBLIC_PAYMENT_MARKER` must
+        //   still be there. Over-redaction is a regression too, and this is what
+        //   makes it observable.
+        //
+        // Both values are fixed non-secret literals against a listener this
+        // process just spawned for itself; nothing here is a credential.
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
+            "HTTP/1.1 200 OK\r\n\
+             content-type: text/plain\r\n\
+             content-length: {length}\r\n\
+             authorization: Bearer {credential}\r\n\
+             {signature_header}: {credential}\r\n\
+             {response_header}: {public}\r\n\
+             connection: close\r\n\r\n{body}",
+            length = body.len(),
+            credential = REST_SMOKE_CREDENTIAL_MARKER,
+            signature_header = HEADER_PAYMENT_SIGNATURE,
+            response_header = HEADER_PAYMENT_RESPONSE,
+            public = REST_SMOKE_PUBLIC_PAYMENT_MARKER,
+            body = body
         )?;
         Ok(request.lines().next().unwrap_or_default().to_string())
     });
