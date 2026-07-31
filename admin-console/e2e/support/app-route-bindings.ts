@@ -55,8 +55,91 @@ export interface RouteBinding {
   readonly value: string;
 }
 
-const ROUTE_PATH_RE = /<Route\b[^>]*?\bpath=(?:"([^"]*)"|\{([^}]*)\})/gs;
+const ROUTE_TAG_RE = /<Route\b/g;
+const PATH_ATTR_RE = /(?<![A-Za-z0-9_$])path\s*=\s*/;
 const APP_ROUTES_MEMBER_RE = /^APP_ROUTES\.([A-Za-z0-9_$]+)$/;
+
+/**
+ * The attribute text of every `<Route …>` opening tag in `source`.
+ *
+ * Scanned rather than matched with `[^>]*?`: JSX attribute values routinely
+ * contain `>` (`element={<Shell />}`, `element={cond ? <A /> : <B />}`), and a
+ * regex that stops at the first `>` silently skips any `<Route>` whose `path`
+ * is written AFTER such an attribute — a real, registered, unswept route that
+ * disappears from the inventory and the literal check together. The scanner
+ * tracks brace depth and quoting, so it ends the tag only at a top-level `>`.
+ */
+function routeTagAttributes(source: string): string[] {
+  const tags: string[] = [];
+  for (const match of source.matchAll(ROUTE_TAG_RE)) {
+    const start = (match.index ?? 0) + match[0].length;
+    let index = start;
+    let depth = 0;
+    let quote: string | undefined;
+    while (index < source.length) {
+      const char = source[index];
+      if (quote !== undefined) {
+        if (char === "\\") {
+          index += 2;
+          continue;
+        }
+        if (char === quote) quote = undefined;
+      } else if (char === '"' || char === "'" || char === "`") {
+        quote = char;
+      } else if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+      } else if (char === ">" && depth === 0) {
+        break;
+      }
+      index += 1;
+    }
+    tags.push(source.slice(start, index));
+  }
+  return tags;
+}
+
+/**
+ * The `path=` value of one `<Route>` tag: either the quoted string or the raw
+ * text between the braces (brace- and quote-balanced, so `` path={`/a/${b}`} ``
+ * survives intact). `undefined` when the tag binds no path — a layout route.
+ */
+function pathAttributeValue(
+  attributes: string,
+): { literal: string } | { expression: string } | undefined {
+  const match = PATH_ATTR_RE.exec(attributes);
+  if (!match) return undefined;
+  const start = match.index + match[0].length;
+  const opener = attributes[start];
+  if (opener === '"' || opener === "'") {
+    const end = attributes.indexOf(opener, start + 1);
+    return { literal: attributes.slice(start + 1, end === -1 ? undefined : end) };
+  }
+  if (opener !== "{") return undefined;
+  let depth = 0;
+  let quote: string | undefined;
+  let index = start;
+  while (index < attributes.length) {
+    const char = attributes[index];
+    if (quote !== undefined) {
+      if (char === "\\") {
+        index += 2;
+        continue;
+      }
+      if (char === quote) quote = undefined;
+    } else if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+    index += 1;
+  }
+  return { expression: attributes.slice(start + 1, index) };
+}
 
 /**
  * Find the identifier the `RESOURCE_ROUTE_PATHS` fan-out binds each path to,
@@ -78,13 +161,18 @@ export function resourceSpreadParam(source: string): string | undefined {
 export function parseRouteBindings(source: string): RouteBinding[] {
   const spreadParam = resourceSpreadParam(source);
   const bindings: RouteBinding[] = [];
-  for (const match of source.matchAll(ROUTE_PATH_RE)) {
-    const literal = match[1];
-    if (literal !== undefined) {
-      bindings.push({ source: `"${literal}"`, kind: "literal", value: literal });
+  for (const attributes of routeTagAttributes(source)) {
+    const bound = pathAttributeValue(attributes);
+    if (bound === undefined) continue;
+    if ("literal" in bound) {
+      bindings.push({
+        source: `"${bound.literal}"`,
+        kind: "literal",
+        value: bound.literal,
+      });
       continue;
     }
-    const expression = (match[2] ?? "").trim();
+    const expression = bound.expression.trim();
     const member = APP_ROUTES_MEMBER_RE.exec(expression);
     if (member) {
       bindings.push({
