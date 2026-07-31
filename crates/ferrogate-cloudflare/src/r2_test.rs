@@ -177,36 +177,25 @@ fn create_bucket_serializes_optional_fields_as_camel_case() {
     assert_eq!(body["storageClass"], "InfrequentAccess");
 }
 
+/// `10073`/`BucketConflict`/409 is the one conflict code R2 documents, and the
+/// only member of `R2_BUCKET_ALREADY_EXISTS_CODES` (issue #461 gate: `10004`
+/// was never a real code). Empty the constant and this test goes red — the
+/// swallow is driven by code membership, not by the 409.
 #[test]
-fn create_bucket_already_exists_code_10004_maps_to_ok() {
+fn create_bucket_conflict_code_10073_maps_to_ok() {
     let transport = Arc::new(RecordingTransport::new(vec![ok(
         409,
-        r#"{ "success": false, "errors": [ { "code": 10004,
-            "message": "The bucket you tried to create already exists, and you own it." } ] }"#,
+        r#"{ "success": false, "errors": [ { "code": 10073, "message": "Bucket name already exists." } ] }"#,
     )]));
     let client = cf_client(transport.clone());
 
     let outcome = runtime()
         .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
-        .expect("already-exists should map to Ok");
+        .expect("BucketConflict should map to Ok");
     assert_eq!(outcome, R2BucketCreation::AlreadyExists);
     assert!(!outcome.was_created());
     // The idempotent create still issued exactly one request.
     assert_eq!(transport.recorded().len(), 1);
-}
-
-#[test]
-fn create_bucket_already_exists_s3_sibling_code_10073_maps_to_ok() {
-    let transport = Arc::new(RecordingTransport::new(vec![ok(
-        409,
-        r#"{ "success": false, "errors": [ { "code": 10073, "message": "Bucket name already exists." } ] }"#,
-    )]));
-    let client = cf_client(transport);
-
-    let outcome = runtime()
-        .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
-        .expect("BucketConflict should map to Ok");
-    assert_eq!(outcome, R2BucketCreation::AlreadyExists);
 }
 
 /// Issue #490: the create path used to absorb **any** HTTP 409 into
@@ -234,15 +223,16 @@ fn create_bucket_bare_409_conflict_surfaces_as_a_typed_api_error() {
     }
 }
 
-/// A 409 carrying some *other* conflict code (here: the bucket is mid-deletion)
-/// is a real failure — the bucket does not exist, so reporting it as provisioned
-/// would hand #462 a credential for a name with nothing behind it.
+/// A 409 carrying some *other* documented code (here `10008`/`BucketNotEmpty`,
+/// the only other 409 in R2's error table) is a real failure — no bucket was
+/// created, so reporting it as provisioned would hand #462 a credential for a
+/// name with nothing behind it.
 #[test]
 fn create_bucket_unrelated_409_conflict_code_surfaces_as_a_typed_api_error() {
     let transport = Arc::new(RecordingTransport::new(vec![ok(
         409,
-        r#"{ "success": false, "errors": [ { "code": 10035,
-            "message": "The bucket you tried to create is being deleted." } ] }"#,
+        r#"{ "success": false, "errors": [ { "code": 10008,
+            "message": "The bucket you tried to delete is not empty." } ] }"#,
     )]));
     let client = cf_client(transport);
 
@@ -252,56 +242,19 @@ fn create_bucket_unrelated_409_conflict_code_surfaces_as_a_typed_api_error() {
     match error {
         CloudflareError::Api { status, errors } => {
             assert_eq!(status, 409);
-            assert_eq!(errors[0].code, 10035);
+            assert_eq!(errors[0].code, 10008);
         }
         other => panic!("expected Api error, got {other:?}"),
     }
 }
 
-/// The idempotency signal is the error *code*, not the status: Cloudflare also
-/// answers a duplicate create with `success: false` + `10004` under HTTP 200.
+/// Non-vacuity guard for `R2_BUCKET_ALREADY_EXISTS_CODES` membership, and the
+/// reason `is_bucket_already_exists` matches on the code rather than the
+/// status: `client/v4` reports failures in the envelope (`success: false`), so
+/// a conflict can arrive under a 2xx. Empty the constant and this test goes
+/// red — nothing else in the predicate can absorb this response.
 #[test]
 fn create_bucket_already_exists_code_is_absorbed_regardless_of_status() {
-    let transport = Arc::new(RecordingTransport::new(vec![ok(
-        200,
-        r#"{ "success": false, "errors": [ { "code": 10004, "message": "already exists" } ] }"#,
-    )]));
-    let client = cf_client(transport);
-
-    let outcome = runtime()
-        .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
-        .expect("a 10004 code is the idempotent case whatever the status");
-    assert_eq!(outcome, R2BucketCreation::AlreadyExists);
-}
-
-#[test]
-fn create_bucket_already_exists_code_10004_without_409_status_maps_to_ok() {
-    // Non-vacuity guard for `R2_BUCKET_ALREADY_EXISTS_CODES` membership.
-    // The account REST API (`client/v4`) can answer a duplicate create with
-    // HTTP 200 + `success: false` carrying code 10004 -- i.e. WITHOUT an HTTP
-    // 409. The sibling `code_10004_maps_to_ok` test uses status 409, so the
-    // `status == 409` fast-path in `is_bucket_already_exists` subsumes it and
-    // it would still pass even if 10004 were dropped from the code list. This
-    // case removes the 409 crutch so the code-list membership itself is pinned:
-    // drop 10004 from `R2_BUCKET_ALREADY_EXISTS_CODES` and this test fails.
-    let transport = Arc::new(RecordingTransport::new(vec![ok(
-        200,
-        r#"{ "success": false, "errors": [ { "code": 10004,
-            "message": "The bucket you tried to create already exists, and you own it." } ] }"#,
-    )]));
-    let client = cf_client(transport);
-
-    let outcome = runtime()
-        .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
-        .expect("code 10004 at HTTP 200 must map to Ok via the already-exists code list");
-    assert_eq!(outcome, R2BucketCreation::AlreadyExists);
-}
-
-#[test]
-fn create_bucket_already_exists_code_10073_without_409_status_maps_to_ok() {
-    // Companion non-vacuity guard for the S3-sibling code 10073, again at a
-    // non-409 status so the assertion exercises the code list rather than the
-    // `status == 409` fast-path.
     let transport = Arc::new(RecordingTransport::new(vec![ok(
         200,
         r#"{ "success": false, "errors": [ { "code": 10073, "message": "Bucket name already exists." } ] }"#,
@@ -310,8 +263,76 @@ fn create_bucket_already_exists_code_10073_without_409_status_maps_to_ok() {
 
     let outcome = runtime()
         .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
-        .expect("code 10073 at HTTP 200 must map to Ok via the already-exists code list");
+        .expect("a BucketConflict code is the idempotent case whatever the status");
     assert_eq!(outcome, R2BucketCreation::AlreadyExists);
+}
+
+/// Issue #461 gate, required fix 4: nothing pinned that the predicate ever
+/// returns `false` on a non-409 failure. Every one of these is a documented R2
+/// error that leaves no bucket behind, so each must reach the caller. If the
+/// predicate is ever widened back to "any 4xx", these go red.
+#[test]
+fn create_bucket_non_conflict_4xx_errors_are_never_swallowed() {
+    // `expect_api` records which typed variant each case must land in: a 403
+    // is classified as `Unauthorized` by `CloudflareError::from_response`
+    // before the generic `Api` arm is reached (issue #493 precedence), and
+    // pinning that here keeps the two mappings from drifting apart silently.
+    for (status, code, s3_code, message, expect_api) in [
+        (
+            400,
+            10005,
+            "InvalidBucketName",
+            "The bucket name is invalid.",
+            true,
+        ),
+        (
+            400,
+            10009,
+            "TooManyBuckets",
+            "You have too many buckets.",
+            true,
+        ),
+        (
+            403,
+            10042,
+            "NotEntitled",
+            "You are not entitled to use R2.",
+            false,
+        ),
+    ] {
+        let transport = Arc::new(RecordingTransport::new(vec![ok(
+            status,
+            &format!(
+                r#"{{ "success": false, "errors": [ {{ "code": {code}, "message": "{message}" }} ] }}"#
+            ),
+        )]));
+        let client = cf_client(transport);
+
+        let error = match runtime()
+            .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
+        {
+            Ok(outcome) => {
+                panic!("{s3_code} ({code}) must not read as a provisioned bucket: {outcome:?}")
+            }
+            Err(error) => error,
+        };
+        match (&error, expect_api) {
+            (
+                CloudflareError::Api {
+                    status: got_status,
+                    errors,
+                },
+                true,
+            ) => {
+                assert_eq!(*got_status, status, "{s3_code}");
+                assert_eq!(errors[0].code, code, "{s3_code}");
+            }
+            (CloudflareError::Unauthorized { errors }, false) => {
+                assert_eq!(errors[0].code, code, "{s3_code}");
+            }
+            _ => panic!("{s3_code}: unexpected error variant {error:?}"),
+        }
+    }
 }
 
 #[test]
@@ -569,7 +590,7 @@ fn ensure_tenant_bucket_creates_and_reports_endpoint() {
 fn ensure_tenant_bucket_is_idempotent_when_bucket_exists() {
     let transport = Arc::new(RecordingTransport::new(vec![ok(
         409,
-        r#"{ "success": false, "errors": [ { "code": 10004, "message": "already exists" } ] }"#,
+        r#"{ "success": false, "errors": [ { "code": 10073, "message": "Bucket name already exists." } ] }"#,
     )]));
     let client = cf_client(transport);
 
@@ -1017,16 +1038,16 @@ fn gate_490_list_buckets_returns_every_page_not_just_the_first() {
     assert!(names.contains(&"page2-b"));
 }
 
-/// GATE #490 finding 3. The create path absorbs ONLY a documented
+/// GATE #490 finding 3. The create path absorbs ONLY the documented
 /// already-exists code. Restore the blanket `status == 409` branch and the
 /// three surfacing cases below fail.
 #[test]
 fn gate_490_only_documented_already_exists_codes_are_swallowed() {
-    // Absorbed: the two documented codes.
-    for body in [
-        r#"{ "success": false, "errors": [ { "code": 10004, "message": "already exists, you own it" } ] }"#,
-        r#"{ "success": false, "errors": [ { "code": 10073, "message": "BucketConflict" } ] }"#,
-    ] {
+    // Absorbed: the one documented conflict code (#461 gate removed `10004`,
+    // which R2's error table does not define).
+    for body in
+        [r#"{ "success": false, "errors": [ { "code": 10073, "message": "BucketConflict" } ] }"#]
+    {
         let transport = Arc::new(RecordingTransport::new(vec![ok(409, body)]));
         let client = cf_client(transport);
         let outcome = runtime()
@@ -1039,12 +1060,14 @@ fn gate_490_only_documented_already_exists_codes_are_swallowed() {
     for (label, body) in [
         ("codeless", r#"{ "success": false, "errors": [] }"#),
         (
-            "mid-deletion",
-            r#"{ "success": false, "errors": [ { "code": 10035, "message": "being deleted" } ] }"#,
+            "BucketNotEmpty",
+            r#"{ "success": false, "errors": [ { "code": 10008, "message": "The bucket you tried to delete is not empty." } ] }"#,
         ),
         (
-            "name held by another account",
-            r#"{ "success": false, "errors": [ { "code": 10014, "message": "bucket name unavailable" } ] }"#,
+            // Deliberately a code R2 does not publish: an unrecognised code is
+            // exactly the case the predicate must not guess at.
+            "unrecognised code",
+            r#"{ "success": false, "errors": [ { "code": 19999, "message": "conflict" } ] }"#,
         ),
     ] {
         let transport = Arc::new(RecordingTransport::new(vec![ok(409, body)]));
@@ -1067,7 +1090,7 @@ fn gate_490_only_documented_already_exists_codes_are_swallowed() {
 fn gate_490_ensure_tenant_bucket_does_not_report_a_phantom_bucket_on_an_unrelated_409() {
     let transport = Arc::new(RecordingTransport::new(vec![ok(
         409,
-        r#"{ "success": false, "errors": [ { "code": 10035, "message": "The bucket you tried to create is being deleted." } ] }"#,
+        r#"{ "success": false, "errors": [ { "code": 10008, "message": "The bucket you tried to delete is not empty." } ] }"#,
     )]));
     let client = cf_client(transport);
 
