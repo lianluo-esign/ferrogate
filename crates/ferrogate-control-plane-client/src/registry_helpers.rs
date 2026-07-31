@@ -37,8 +37,25 @@ pub struct ResourceInput {
     /// A complete JSON document for a mutation. Required by write verbs; the
     /// server owns the schema, so it is carried opaquely.
     pub body: Option<Value>,
+    /// An opaque byte payload for a write verb whose contract body is binary
+    /// (`putAsset`). Mutually exclusive with [`ResourceInput::body`] in
+    /// practice: the dispatcher refuses the flag that does not match the verb's
+    /// declared [`RequestMode`](crate::command::RequestMode).
+    pub raw_body: Option<RawRequestBody>,
+    /// Operation-declared request headers supplied by the operator (`putAsset`'s
+    /// `x-asset-*` / `x-site-*` parameters, `getAsset`'s `Range`).
+    pub headers: Vec<(String, String)>,
     /// Pagination and server-side filters for list verbs.
     pub list: ListParams,
+}
+
+/// An opaque request payload plus the media type it is labelled with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRequestBody {
+    /// What the bytes are, on the wire.
+    pub media_type: String,
+    /// The bytes themselves, sent verbatim.
+    pub bytes: Vec<u8>,
 }
 
 impl ResourceInput {
@@ -63,6 +80,47 @@ impl ResourceInput {
         self
     }
 
+    /// Attach an opaque byte payload for a binary-body write verb.
+    pub fn with_raw_body(
+        mut self,
+        media_type: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> ResourceInput {
+        self.raw_body = Some(RawRequestBody {
+            media_type: media_type.into(),
+            bytes: bytes.into(),
+        });
+        self
+    }
+
+    /// Attach operation-declared request headers.
+    pub fn with_headers<I, K, V>(mut self, headers: I) -> ResourceInput
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers = headers
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self
+    }
+
+    /// Fold the operator's request headers onto a built spec.
+    ///
+    /// Called once, centrally, in
+    /// [`build_request`](crate::dispatch::build_request) rather than by each
+    /// family builder — so a header the contract declares reaches the wire for
+    /// every verb in the registry, including verbs written after this one, and
+    /// no family can drop it by forgetting to thread it.
+    pub fn apply_headers(&self, mut spec: RequestSpec) -> RequestSpec {
+        for (name, value) in &self.headers {
+            spec = spec.with_header(name.clone(), value.clone());
+        }
+        spec
+    }
+
     /// Attach list pagination/filters.
     pub fn with_list(mut self, list: ListParams) -> ResourceInput {
         self.list = list;
@@ -80,6 +138,17 @@ impl ResourceInput {
         self.body.clone().ok_or_else(|| {
             CliError::usage(format!(
                 "verb '{verb}' requires a JSON request document (provide one via --file or stdin)"
+            ))
+        })
+    }
+
+    /// The byte payload a binary-body write verb requires, or an actionable
+    /// usage error naming the flag that supplies it.
+    pub fn require_raw_body(&self, verb: &str) -> CliResult<&RawRequestBody> {
+        self.raw_body.as_ref().ok_or_else(|| {
+            CliError::usage(format!(
+                "verb '{verb}' publishes bytes, not a JSON document (provide them via \
+                 --body-file <PATH>, or `--body-file -` to read stdin)"
             ))
         })
     }
@@ -164,7 +233,7 @@ pub fn build_crud_with_item_segments(
     let segments = input.segment_refs();
     match verb {
         "list" => api.read(&segments, &input.list),
-        "get" => api.get(
+        "get" => api.read(
             require_target_segments(api, verb, &segments, required_item_segments)?,
             &input.list,
         ),

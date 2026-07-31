@@ -25,6 +25,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use http::header::{HeaderName, HeaderValue};
 use http::Method;
 
 use crate::action_identity::{ClientActionIdentity, ACTION_TIME_PREFLIGHT_PATH, TIME_TOKEN_HEADER};
@@ -35,6 +36,25 @@ use crate::error::{ApiError, CliError, CliResult, ExitClass};
 /// Media type the client sends and accepts.
 const JSON_MEDIA_TYPE: &str = "application/json";
 
+/// The payload a request carries, together with what it must be labelled as on
+/// the wire.
+///
+/// Most Control Plane operations take a JSON document, and the client keeps it
+/// schema-agnostic. A few take opaque bytes: `putAsset` declares its request
+/// body as `*/*` with `format: binary`, so the publish path must be able to send
+/// an artifact — a tarball, a static-site bundle, a signed binary — without
+/// routing it through `serde_json`. Modelling that as a second variant rather
+/// than a second field is what stops the two from being set at once; there is no
+/// state in which a spec carries both a document and a byte payload and the
+/// preparer has to pick (issue #363 review).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RequestBody {
+    /// A complete JSON document, sent as `application/json`.
+    Json(serde_json::Value),
+    /// Opaque bytes sent verbatim under an explicit media type.
+    Bytes { media_type: String, bytes: Vec<u8> },
+}
+
 /// A logical request against the Control Plane API, independent of endpoint,
 /// credentials, and HTTP client.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,8 +64,13 @@ pub struct RequestSpec {
     pub path: String,
     /// Query parameters, appended in order and percent-encoded at build time.
     pub query: Vec<(String, String)>,
-    /// Optional JSON body for mutating requests.
-    pub body: Option<serde_json::Value>,
+    /// Optional request payload for mutating requests.
+    pub body: Option<RequestBody>,
+    /// Operation-declared request headers (e.g. `putAsset`'s `x-asset-*` and
+    /// `x-site-*` parameters, `getAsset`'s `Range`). Validated and folded in by
+    /// [`prepare_request`]; a reserved header is a usage error there, never a
+    /// silent override of the client's own authorization or audit identity.
+    pub headers: Vec<(String, String)>,
 }
 
 impl RequestSpec {
@@ -56,6 +81,7 @@ impl RequestSpec {
             path: path.into(),
             query: Vec::new(),
             body: None,
+            headers: Vec::new(),
         }
     }
 
@@ -66,13 +92,44 @@ impl RequestSpec {
 
     /// Attach a JSON body.
     pub fn with_json_body(mut self, body: serde_json::Value) -> RequestSpec {
-        self.body = Some(body);
+        self.body = Some(RequestBody::Json(body));
         self
+    }
+
+    /// Attach an opaque byte payload under an explicit media type.
+    pub fn with_raw_body(
+        mut self,
+        media_type: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> RequestSpec {
+        self.body = Some(RequestBody::Bytes {
+            media_type: media_type.into(),
+            bytes: bytes.into(),
+        });
+        self
+    }
+
+    /// The JSON document this request carries, if it carries one.
+    ///
+    /// Callers that inspect the payload (the receipt's `idempotency_key` lookup)
+    /// ask through this rather than matching the variant, so a byte payload is
+    /// simply "no document" instead of a panic or a lossy decode.
+    pub fn json_body(&self) -> Option<&serde_json::Value> {
+        match &self.body {
+            Some(RequestBody::Json(value)) => Some(value),
+            _ => None,
+        }
     }
 
     /// Append a query parameter.
     pub fn with_query(mut self, key: impl Into<String>, value: impl Into<String>) -> RequestSpec {
         self.query.push((key.into(), value.into()));
+        self
+    }
+
+    /// Append an operation-declared request header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> RequestSpec {
+        self.headers.push((name.into(), value.into()));
         self
     }
 
@@ -82,6 +139,24 @@ impl RequestSpec {
         self
     }
 }
+
+/// Headers the HTTP layer derives from the message itself. An operator-supplied
+/// value for one of these cannot be honoured — it would either be overwritten by
+/// the transport or describe a framing the client is not using — so it is
+/// refused rather than silently dropped.
+///
+/// Headers the *client* owns (`authorization`, `accept`, `user-agent`, and the
+/// #548 audit-identity set) are not listed here because they need no list: they
+/// are already present when operator headers are folded in, and a collision with
+/// an already-present header is refused by name. That keeps the guarantee true
+/// for an identity header added tomorrow without anyone remembering to extend a
+/// constant.
+const TRANSPORT_OWNED_REQUEST_HEADERS: &[&str] = &["host", "content-length", "transfer-encoding"];
+
+/// The one header a caller may legitimately restate: `putAsset`'s body is `*/*`,
+/// so labelling a bundle `application/zip` rather than the default is a
+/// contract-visible operator decision, not an override of client policy.
+const OVERRIDABLE_REQUEST_HEADER: &str = "content-type";
 
 /// A fully materialized HTTP request: absolute URL, headers, and body bytes.
 /// This is what a [`Transport`] executes.
@@ -236,11 +311,18 @@ fn prepare_request_accepting(
         headers.push(("x-ferrogate-tenant".to_string(), tenant.clone()));
     }
     let body = match &spec.body {
-        Some(value) => {
-            headers.push(("content-type".to_string(), JSON_MEDIA_TYPE.to_string()));
+        Some(RequestBody::Json(value)) => {
+            headers.push((
+                OVERRIDABLE_REQUEST_HEADER.to_string(),
+                JSON_MEDIA_TYPE.to_string(),
+            ));
             serde_json::to_vec(value).map_err(|error| {
                 CliError::usage(format!("failed to encode request body as JSON: {error}"))
             })?
+        }
+        Some(RequestBody::Bytes { media_type, bytes }) => {
+            headers.push((OVERRIDABLE_REQUEST_HEADER.to_string(), media_type.clone()));
+            bytes.clone()
         }
         None => Vec::new(),
     };
@@ -250,6 +332,7 @@ fn prepare_request_accepting(
             credential.authorization_header(),
         ));
     }
+    apply_spec_headers(&mut headers, &spec.headers)?;
 
     Ok(PreparedRequest {
         method: spec.method.clone(),
@@ -257,6 +340,61 @@ fn prepare_request_accepting(
         headers,
         body,
     })
+}
+
+/// Fold a spec's operation-declared headers onto the headers the client built,
+/// refusing anything that would forge, strip, or contradict what the client owns.
+///
+/// Four refusals, all before a byte leaves the process:
+///
+/// * a syntactically invalid name or value — which is what closes header
+///   injection, since a `\r\n` in an operator-supplied value is exactly how one
+///   header becomes two;
+/// * a header the transport derives from the message (`content-length`);
+/// * a header the client already set (`authorization`, `accept`, the audit
+///   identity) — refused by collision, so it stays true for headers added later;
+/// * `content-type` is the single exception and replaces the default in place,
+///   keeping the header order stable and the request single-valued.
+fn apply_spec_headers(
+    headers: &mut Vec<(String, String)>,
+    declared: &[(String, String)],
+) -> CliResult<()> {
+    let mut seen: Vec<String> = Vec::with_capacity(declared.len());
+    for (name, value) in declared {
+        let canonical = HeaderName::try_from(name.as_str())
+            .map_err(|_| CliError::usage(format!("'{name}' is not a valid HTTP header name")))?;
+        HeaderValue::try_from(value.as_str()).map_err(|_| {
+            CliError::usage(format!(
+                "the value supplied for header '{canonical}' is not a valid HTTP header value"
+            ))
+        })?;
+        let canonical = canonical.as_str().to_string();
+        if TRANSPORT_OWNED_REQUEST_HEADERS.contains(&canonical.as_str()) {
+            return Err(CliError::usage(format!(
+                "header '{canonical}' is derived from the request itself and cannot be set"
+            )));
+        }
+        if seen.contains(&canonical) {
+            return Err(CliError::usage(format!(
+                "header '{canonical}' was supplied more than once; give it a single value"
+            )));
+        }
+        seen.push(canonical.clone());
+        match headers
+            .iter_mut()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(&canonical))
+        {
+            Some(_) if canonical != OVERRIDABLE_REQUEST_HEADER => {
+                return Err(CliError::usage(format!(
+                    "header '{canonical}' is set by the client (credential or audit identity) and \
+                     cannot be overridden"
+                )));
+            }
+            Some((_, existing)) => *existing = value.clone(),
+            None => headers.push((canonical, value.clone())),
+        }
+    }
+    Ok(())
 }
 
 /// A raw HTTP response as seen by the transport, before classification.

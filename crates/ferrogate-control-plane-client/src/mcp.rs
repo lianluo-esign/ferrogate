@@ -122,7 +122,7 @@ impl CommandGroup for McpIdentityGroup {
 pub fn build_mcp_identity(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "authorize" => build_item_action(&MCP_IDENTITY, "mcp-identity", "authorize", input),
-        "get" => MCP_IDENTITY.get(&[first_segment(input, "mcp-identity")?], &input.list),
+        "get" => MCP_IDENTITY.read(&[first_segment(input, "mcp-identity")?], &input.list),
         "revoke" => build_item_delete(&MCP_IDENTITY, "mcp-identity", input),
         "callback" => MCP_IDENTITY.read(&["callback"], &input.list),
         other => build_crud(&MCP_IDENTITY, other, input),

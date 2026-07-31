@@ -1656,8 +1656,7 @@ impl<'a> MutationPlan<'a> {
         // response exists (dry run, refusal, ambiguous failure).
         let resource_id = (!segments.is_empty()).then(|| segments.join("/"));
         let idempotency_key = Attested::or_absent(
-            spec.body
-                .as_ref()
+            spec.json_body()
                 .and_then(|body| body.get("idempotency_key"))
                 .and_then(Value::as_str)
                 .map(str::to_string),

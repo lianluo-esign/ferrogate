@@ -30,7 +30,7 @@ fn build_crud_maps_each_verb_to_method_and_path() {
     )
     .unwrap();
     assert_eq!(create.method, Method::POST);
-    assert_eq!(create.body, Some(body.clone()));
+    assert_eq!(create.json_body(), Some(&body));
 
     let replace = build_crud(
         &API,

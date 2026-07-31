@@ -134,13 +134,17 @@ pub fn resource_builder(group: &str) -> Option<VerbBuilder> {
 /// it only offers group names it read from the same [`resource_builder`] table
 /// via the registry, but which keeps a misconfiguration a stable usage exit
 /// rather than a panic.
+/// Operator-supplied request headers are folded on here rather than inside each
+/// family builder: this is the one function every dispatched verb passes
+/// through, so an operation's declared header parameter reaches the wire without
+/// 200-plus builders each having to remember to thread it.
 pub fn build_request(group: &str, verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     let builder = resource_builder(group).ok_or_else(|| {
         CliError::usage(format!(
             "unknown resource group '{group}'; run `--help` for the command list"
         ))
     })?;
-    builder(verb, input)
+    Ok(input.apply_headers(builder(verb, input)?))
 }
 
 /// The one-time secret fields a group's create/rotate response may carry, which

@@ -1941,3 +1941,132 @@ fn the_contract_describes_the_fingerprint_field_set_the_code_renders() {
          rides: {reported_ip_doc}"
     );
 }
+
+/// An operation-declared header reaches the wire, and a byte payload is sent
+/// verbatim under its own media type.
+#[test]
+fn a_declared_header_and_a_byte_payload_reach_the_prepared_request() {
+    let context = context_with_endpoint("https://host.example.com", None);
+    let artifact = vec![0x50, 0x4b, 0x03, 0x04, 0xff];
+    let spec = RequestSpec::new(Method::PUT, "/v1/assets/static_site/docs/1.0.0")
+        .with_raw_body("application/zip", artifact.clone())
+        .with_header("x-site-public", "true");
+    let prepared =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap();
+    assert_eq!(prepared.header("x-site-public"), Some("true"));
+    assert_eq!(prepared.header("content-type"), Some("application/zip"));
+    assert_eq!(
+        prepared.body, artifact,
+        "the artifact must arrive byte-identical, not JSON-encoded"
+    );
+}
+
+/// `content-type` is the single restatable header: `putAsset` accepts `*/*`, so
+/// naming the artifact's real type is an operator decision, not an override of
+/// client policy. It replaces the default rather than being sent twice.
+#[test]
+fn content_type_is_replaced_in_place_rather_than_duplicated() {
+    let context = context_with_endpoint("https://host.example.com", None);
+    let spec = RequestSpec::new(Method::PUT, "/v1/assets/static_site/docs/1.0.0")
+        .with_raw_body("application/octet-stream", b"bundle".to_vec())
+        .with_header("Content-Type", "application/gzip");
+    let prepared =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap();
+    assert_eq!(prepared.header("content-type"), Some("application/gzip"));
+    assert_eq!(
+        prepared
+            .headers()
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .count(),
+        1,
+        "a duplicated content-type leaves the server to pick one"
+    );
+}
+
+/// The credential and the #548 audit identity cannot be forged or stripped by a
+/// declared header. Refused by collision with what the client already set, so
+/// the guarantee also covers identity headers added after this test.
+#[test]
+fn a_declared_header_cannot_displace_the_credential_or_the_audit_identity() {
+    let context = context_with_endpoint("https://host.example.com", None);
+    let credential = Credential::new("real-token").unwrap();
+    for name in [
+        "authorization",
+        "Authorization",
+        "accept",
+        "user-agent",
+        ACTION_ID_HEADER,
+        CLIENT_FINGERPRINT_HEADER,
+    ] {
+        let spec = RequestSpec::get("/admin/v1/status").with_header(name, "forged");
+        let error = prepare_request(
+            &spec,
+            &context,
+            Some(&credential),
+            &ClientActionIdentity::fixture(),
+        )
+        .expect_err(&format!("'{name}' must not be overridable"));
+        assert!(
+            error.to_string().contains("cannot be overridden"),
+            "unexpected message for '{name}': {error}"
+        );
+    }
+}
+
+/// A value carrying CRLF would split one header into two on the wire. Rejecting
+/// it at preparation time is what makes `--header` safe to expose at all.
+#[test]
+fn a_header_value_cannot_smuggle_a_second_header() {
+    let context = context_with_endpoint("https://host.example.com", None);
+    let spec = RequestSpec::get("/admin/v1/status")
+        .with_header("x-site-public", "true\r\nauthorization: Bearer stolen");
+    let error =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap_err();
+    assert!(
+        error.to_string().contains("not a valid HTTP header value"),
+        "unexpected message: {error}"
+    );
+
+    let spec = RequestSpec::get("/admin/v1/status").with_header("bad name", "value");
+    let error =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap_err();
+    assert!(
+        error.to_string().contains("not a valid HTTP header name"),
+        "unexpected message: {error}"
+    );
+}
+
+/// Framing headers are derived from the message; accepting one silently would
+/// promise the operator something the transport then overwrites.
+#[test]
+fn transport_owned_headers_are_refused_rather_than_silently_dropped() {
+    let context = context_with_endpoint("https://host.example.com", None);
+    for name in ["content-length", "host", "transfer-encoding"] {
+        let spec = RequestSpec::get("/admin/v1/status").with_header(name, "1");
+        let error =
+            prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("derived from the request itself"),
+            "unexpected message for '{name}': {error}"
+        );
+    }
+}
+
+/// Two values for one header is an ambiguity the client resolves by refusing,
+/// not by picking.
+#[test]
+fn a_declared_header_supplied_twice_is_a_usage_error() {
+    let context = context_with_endpoint("https://host.example.com", None);
+    let spec = RequestSpec::get("/admin/v1/status")
+        .with_header("x-site-public", "true")
+        .with_header("X-Site-Public", "false");
+    let error =
+        prepare_request(&spec, &context, None, &ClientActionIdentity::fixture()).unwrap_err();
+    assert!(
+        error.to_string().contains("supplied more than once"),
+        "unexpected message: {error}"
+    );
+}

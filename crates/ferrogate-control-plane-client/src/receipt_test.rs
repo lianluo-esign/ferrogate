@@ -256,6 +256,13 @@ fn full_registry() -> Registry {
 struct ProbeContract {
     path_segments: usize,
     required_query: Vec<String>,
+    /// Every query parameter the operation declares, required or not.
+    ///
+    /// `getAsset`'s `platform` is declared *optional* — "Required when
+    /// resolution is otherwise ambiguous" — which is exactly why checking only
+    /// the required set let it be dropped on the floor for four verbs at once
+    /// (issue #363 review).
+    declared_query: Vec<String>,
 }
 
 /// Required request inputs keyed by OpenAPI operation id.
@@ -287,6 +294,7 @@ fn probe_contracts() -> &'static BTreeMap<String, ProbeContract> {
                     continue;
                 };
                 let mut required_query = BTreeSet::new();
+                let mut declared_query = BTreeSet::new();
                 for raw_parameter in path_item["parameters"]
                     .as_array()
                     .into_iter()
@@ -301,15 +309,17 @@ fn probe_contracts() -> &'static BTreeMap<String, ProbeContract> {
                     } else {
                         raw_parameter
                     };
-                    if parameter["in"] == "query" && parameter["required"] == true {
-                        required_query.insert(
-                            parameter["name"]
-                                .as_str()
-                                .unwrap_or_else(|| {
-                                    panic!("{operation_id} has an unnamed required query parameter")
-                                })
-                                .to_string(),
-                        );
+                    if parameter["in"] == "query" {
+                        let name = parameter["name"]
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                panic!("{operation_id} has an unnamed query parameter")
+                            })
+                            .to_string();
+                        if parameter["required"] == true {
+                            required_query.insert(name.clone());
+                        }
+                        declared_query.insert(name);
                     }
                 }
                 let replaced = contracts.insert(
@@ -317,6 +327,7 @@ fn probe_contracts() -> &'static BTreeMap<String, ProbeContract> {
                     ProbeContract {
                         path_segments: path.matches('{').count(),
                         required_query: required_query.into_iter().collect(),
+                        declared_query: declared_query.into_iter().collect(),
                     },
                 );
                 assert!(
@@ -365,6 +376,12 @@ fn probe_input(
         ResourceInput::new()
             .with_segments(segments.clone())
             .with_body(serde_json::json!({"probe": true}))
+            // A binary-body verb takes its payload from `--body-file`, not
+            // `--data`, so the probe carries both shapes and each builder picks
+            // the one its declared RequestMode requires. Supplying only the JSON
+            // document would drop `assets put` out of every whole-registry
+            // sweep, which is how an unswept verb hides.
+            .with_raw_body("application/octet-stream", b"probe-bytes".to_vec())
             .with_list(list),
         segments,
     ))
@@ -417,6 +434,76 @@ fn probe_spec(group: &str, verb: &str) -> (RequestSpec, Vec<String>) {
     try_probe_spec(group, verb).unwrap_or_else(|failure| panic!("{failure}"))
 }
 
+/// Every query parameter an operation declares reaches the wire when the
+/// operator supplies it — for every verb in the registry, not just the ones
+/// anybody thought to test.
+///
+/// This is the class-level net under the #363 defect. `getAsset`, `putAsset`,
+/// `deleteAsset` and `promoteAssetVisibility` all declare `platform`, all
+/// received it as a `--filter`, and all four dropped it: the read returned some
+/// other variant, and the delete destroyed one. Each was fixed by hand, one
+/// builder arm at a time, which fixes instances and not the class — the next
+/// family builder can forget to thread `input.list` exactly as these did. Only a
+/// registry-wide sweep names the next instance before an operator finds it.
+///
+/// A parameter the verb carries positionally instead (`asset-channels set`'s
+/// `version`) still satisfies this: the assertion is that the parameter name
+/// reaches the query string, not that it carries the probe's value.
+#[test]
+fn every_registered_verb_forwards_every_declared_query_parameter() {
+    let registry = full_registry();
+    let mut dropped: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for group in registry.groups() {
+        for verb in &group.verbs {
+            let Some(operation_id) = verb.operation_id.as_deref() else {
+                continue;
+            };
+            let Some(contract) = probe_contracts().get(operation_id) else {
+                continue;
+            };
+            for parameter in &contract.declared_query {
+                let Ok((input, _)) = probe_input(operation_id, verb.positional_query_segments())
+                else {
+                    continue;
+                };
+                let list = input
+                    .list
+                    .clone()
+                    .with_filter(parameter.clone(), format!("probe-{parameter}"));
+                let input = input.with_list(list);
+                let Ok(spec) = build_request(&group.name, &verb.name, &input) else {
+                    continue;
+                };
+                checked += 1;
+                if !spec.query.iter().any(|(name, _)| name == parameter) {
+                    dropped.push(format!(
+                        "'{} {}' ({operation_id}) silently discards the declared query parameter \
+                         '{parameter}'",
+                        group.name, verb.name
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        dropped.is_empty(),
+        "{} declared query parameter(s) never reach the wire:\n{}",
+        dropped.len(),
+        dropped.join("\n")
+    );
+    // Anti-vacuity: every `continue` above skips a verb silently, so without a
+    // floor a probe that stopped constructing anything would pass as "nothing
+    // dropped". Measured at 93 on this tree; the floor is set below that so
+    // normal contract growth does not trip it, but a collapse to a handful
+    // does.
+    assert!(
+        checked >= 80,
+        "the query-parameter sweep only exercised {checked} parameter(s); it is not covering the \
+         registry"
+    );
+}
+
 /// Every verb builds at exactly the arity declared by the OpenAPI path plus its
 /// explicit positional-query metadata. Every addressed verb also rejects one
 /// segment fewer, so an under-guarded live builder is named rather than trusted
@@ -446,6 +533,7 @@ fn every_registered_verb_is_constructable_by_the_prober() {
                         let short_input = ResourceInput::new()
                             .with_segments(segments[..segments.len() - 1].to_vec())
                             .with_body(serde_json::json!({"probe": true}))
+                            .with_raw_body("application/octet-stream", b"probe-bytes".to_vec())
                             .with_list(short_input.list);
                         if build_request(&group.name, &verb.name, &short_input).is_ok() {
                             unconstructable.push(format!(

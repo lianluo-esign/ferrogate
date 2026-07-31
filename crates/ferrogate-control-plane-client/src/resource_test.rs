@@ -44,7 +44,7 @@ fn list_builds_collection_get_with_page_and_filters() {
 
 #[test]
 fn get_builds_item_path_with_encoded_segment() {
-    let spec = TENANTS.get(&["ten ant/1"], &ListParams::new()).unwrap();
+    let spec = TENANTS.read(&["ten ant/1"], &ListParams::new()).unwrap();
     assert_eq!(spec.method, Method::GET);
     assert_eq!(spec.path, "/admin/v1/tenant-accounts/ten%20ant%2F1");
     assert!(spec.query.is_empty());
@@ -66,14 +66,17 @@ fn create_replace_update_delete_use_the_right_methods() {
     assert_eq!(del.method, Method::DELETE);
     assert!(del.body.is_none());
     // The create body is carried through unchanged.
-    assert_eq!(TENANTS.create(body.clone()).unwrap().body, Some(body));
+    assert_eq!(
+        TENANTS.create(body.clone()).unwrap().json_body(),
+        Some(&body)
+    );
 }
 
 #[test]
 fn composite_key_and_action_paths() {
     // Quota-policy style two-segment key.
     let quota = ResourceApi::new("/admin/v1/quota-policies");
-    let spec = quota.get(&["tenant", "acme"], &ListParams::new()).unwrap();
+    let spec = quota.read(&["tenant", "acme"], &ListParams::new()).unwrap();
     assert_eq!(spec.path, "/admin/v1/quota-policies/tenant/acme");
 
     // A lifecycle action sub-path.
@@ -86,7 +89,7 @@ fn composite_key_and_action_paths() {
 
 #[test]
 fn empty_segment_is_a_usage_error() {
-    let error = TENANTS.get(&["   "], &ListParams::new()).unwrap_err();
+    let error = TENANTS.read(&["   "], &ListParams::new()).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Usage);
     assert!(error.to_string().contains("must not be empty"));
 }

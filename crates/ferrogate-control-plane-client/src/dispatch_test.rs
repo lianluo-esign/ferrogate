@@ -67,7 +67,7 @@ fn representative_verbs_build_expected_requests() {
     .unwrap();
     assert_eq!(create.method, Method::POST);
     assert_eq!(create.path, "/admin/v1/mcp-servers");
-    assert_eq!(create.body, Some(json!({"name": "srv"})));
+    assert_eq!(create.json_body(), Some(&json!({"name": "srv"})));
 
     // #363 Assets: list is a GET on the collection.
     let assets = build_request("assets", "list", &ResourceInput::new()).unwrap();

@@ -404,7 +404,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 Subcommands:
 
@@ -509,6 +509,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -522,7 +524,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts get`
@@ -537,6 +539,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -550,7 +554,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts create`
@@ -565,6 +569,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -578,7 +584,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts replace`
@@ -593,6 +599,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -606,7 +614,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts update`
@@ -621,6 +629,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -634,7 +644,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts resolved-defaults`
@@ -649,6 +659,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -662,7 +674,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-accounts assign-plan`
@@ -677,6 +689,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -690,7 +704,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tenants`
@@ -713,6 +727,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -726,7 +742,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl projects`
@@ -754,6 +770,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -767,7 +785,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects get`
@@ -782,6 +800,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -795,7 +815,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects create`
@@ -810,6 +830,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -823,7 +845,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects replace`
@@ -838,6 +860,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -851,7 +875,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects update`
@@ -866,6 +890,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -879,7 +905,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl projects delete`
@@ -894,6 +920,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -907,7 +935,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl workspaces`
@@ -935,6 +963,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -948,7 +978,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces get`
@@ -963,6 +993,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -976,7 +1008,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces create`
@@ -991,6 +1023,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1004,7 +1038,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces replace`
@@ -1019,6 +1053,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1032,7 +1068,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces update`
@@ -1047,6 +1083,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1060,7 +1098,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl workspaces delete`
@@ -1075,6 +1113,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1088,7 +1128,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl plans`
@@ -1115,6 +1155,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1128,7 +1170,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans get`
@@ -1143,6 +1185,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1156,7 +1200,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans create`
@@ -1171,6 +1215,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1184,7 +1230,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans replace`
@@ -1199,6 +1245,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1212,7 +1260,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plans update`
@@ -1227,6 +1275,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1240,7 +1290,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl quota-policies`
@@ -1268,6 +1318,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1281,7 +1333,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies get`
@@ -1296,6 +1348,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1309,7 +1363,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies create`
@@ -1324,6 +1378,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1337,7 +1393,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies replace`
@@ -1352,6 +1408,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1365,7 +1423,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies update`
@@ -1380,6 +1438,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1393,7 +1453,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl quota-policies delete`
@@ -1408,6 +1468,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1421,7 +1483,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl virtual-keys`
@@ -1451,6 +1513,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1464,7 +1528,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys get`
@@ -1479,6 +1543,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1492,7 +1558,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys create`
@@ -1507,6 +1573,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1520,7 +1588,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys revoke`
@@ -1535,6 +1603,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1548,7 +1618,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys rotate`
@@ -1563,6 +1633,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1576,7 +1648,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys enable`
@@ -1591,6 +1663,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1604,7 +1678,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys disable`
@@ -1619,6 +1693,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1632,7 +1708,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl virtual-keys revoke-action`
@@ -1647,6 +1723,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1660,7 +1738,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl api-keys`
@@ -1688,6 +1766,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1701,7 +1781,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys get`
@@ -1716,6 +1796,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1729,7 +1811,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys create`
@@ -1744,6 +1826,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1757,7 +1841,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys replace`
@@ -1772,6 +1856,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1785,7 +1871,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys update`
@@ -1800,6 +1886,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1813,7 +1901,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl api-keys delete`
@@ -1828,6 +1916,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1841,7 +1931,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl roles`
@@ -1867,6 +1957,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1880,7 +1972,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl roles get`
@@ -1895,6 +1987,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1908,7 +2002,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl roles create`
@@ -1923,6 +2017,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1936,7 +2032,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl roles delete`
@@ -1951,6 +2047,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -1964,7 +2062,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl permissions`
@@ -1990,6 +2088,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2003,7 +2103,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl permissions get`
@@ -2018,6 +2118,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2031,7 +2133,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl permissions create`
@@ -2046,6 +2148,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2059,7 +2163,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl permissions delete`
@@ -2074,6 +2178,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2087,7 +2193,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl access-policies`
@@ -2115,6 +2221,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2128,7 +2236,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies get`
@@ -2143,6 +2251,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2156,7 +2266,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies create`
@@ -2171,6 +2281,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2184,7 +2296,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies replace`
@@ -2199,6 +2311,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2212,7 +2326,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies update`
@@ -2227,6 +2341,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2240,7 +2356,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl access-policies delete`
@@ -2255,6 +2371,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2268,7 +2386,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tenant-roles`
@@ -2293,6 +2411,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2306,7 +2426,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-roles bind`
@@ -2321,6 +2441,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2334,7 +2456,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tenant-roles unbind`
@@ -2349,6 +2471,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2362,7 +2486,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-workflows`
@@ -2390,6 +2514,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2403,7 +2529,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows get`
@@ -2418,6 +2544,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2431,7 +2559,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows create`
@@ -2446,6 +2574,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2459,7 +2589,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows replace`
@@ -2474,6 +2604,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2487,7 +2619,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows update`
@@ -2502,6 +2634,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2515,7 +2649,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-workflows delete`
@@ -2530,6 +2664,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2543,7 +2679,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-schedules`
@@ -2573,6 +2709,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2586,7 +2724,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules get`
@@ -2601,6 +2739,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2614,7 +2754,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules create`
@@ -2629,6 +2769,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2642,7 +2784,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules replace`
@@ -2657,6 +2799,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2670,7 +2814,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules update`
@@ -2685,6 +2829,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2698,7 +2844,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules delete`
@@ -2713,6 +2859,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2726,7 +2874,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules run-now`
@@ -2741,6 +2889,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2754,7 +2904,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-schedules fires`
@@ -2769,6 +2919,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2782,7 +2934,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-upstreams`
@@ -2810,6 +2962,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2823,7 +2977,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams get`
@@ -2838,6 +2992,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2851,7 +3007,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams create`
@@ -2866,6 +3022,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2879,7 +3037,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams replace`
@@ -2894,6 +3052,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2907,7 +3067,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams update`
@@ -2922,6 +3082,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2935,7 +3097,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-upstreams delete`
@@ -2950,6 +3112,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -2963,7 +3127,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-runs`
@@ -2988,6 +3152,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3001,7 +3167,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-runs get`
@@ -3016,6 +3182,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3029,7 +3197,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-runs start`
@@ -3044,6 +3212,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3057,7 +3227,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl agent-jobs`
@@ -3084,6 +3254,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3097,7 +3269,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs get`
@@ -3112,6 +3284,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3125,7 +3299,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs events`
@@ -3140,6 +3314,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3153,7 +3329,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs result`
@@ -3168,6 +3344,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3181,7 +3359,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl agent-jobs cancel`
@@ -3196,6 +3374,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3209,7 +3389,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl self-hosted-workers`
@@ -3240,6 +3420,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3253,7 +3435,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers get`
@@ -3268,6 +3450,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3281,7 +3465,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers register`
@@ -3296,6 +3480,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3309,7 +3495,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers rotate`
@@ -3324,6 +3510,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3337,7 +3525,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers heartbeat`
@@ -3352,6 +3540,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3365,7 +3555,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers events`
@@ -3380,6 +3570,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3393,7 +3585,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers record-event`
@@ -3408,6 +3600,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3421,7 +3615,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers checkpoint`
@@ -3436,6 +3630,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3449,7 +3645,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl self-hosted-workers artifact`
@@ -3464,6 +3660,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3477,7 +3675,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl managed-workers`
@@ -3500,6 +3698,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3513,7 +3713,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl managed-worker-sessions`
@@ -3536,6 +3736,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3549,7 +3751,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl self-hosted-worker-records`
@@ -3572,6 +3774,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3585,7 +3789,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl self-hosted-runs`
@@ -3608,6 +3812,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3621,7 +3827,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl mcp-servers`
@@ -3649,6 +3855,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3662,7 +3870,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers get`
@@ -3677,6 +3885,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3690,7 +3900,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers create`
@@ -3705,6 +3915,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3718,7 +3930,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers replace`
@@ -3733,6 +3945,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3746,7 +3960,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers update`
@@ -3761,6 +3975,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3774,7 +3990,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-servers delete`
@@ -3789,6 +4005,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3802,7 +4020,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl mcp-identity`
@@ -3828,6 +4046,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3841,7 +4061,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-identity get`
@@ -3856,6 +4076,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3869,7 +4091,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-identity revoke`
@@ -3884,6 +4106,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3897,7 +4121,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl mcp-identity callback`
@@ -3912,6 +4136,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3925,7 +4151,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tool-sessions`
@@ -3948,6 +4174,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3961,7 +4189,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tools`
@@ -3985,6 +4213,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -3998,7 +4228,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tools plugin-tools`
@@ -4013,6 +4243,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4026,7 +4258,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl tool-approvals`
@@ -4053,6 +4285,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4066,7 +4300,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals get`
@@ -4081,6 +4315,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4094,7 +4330,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals approve`
@@ -4109,6 +4345,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4122,7 +4360,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals deny`
@@ -4137,6 +4375,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4150,7 +4390,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl tool-approvals expire`
@@ -4165,6 +4405,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4178,7 +4420,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl guardrail-policies`
@@ -4210,6 +4452,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4223,7 +4467,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies create`
@@ -4238,6 +4482,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4251,7 +4497,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies get`
@@ -4266,6 +4512,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4279,7 +4527,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies revisions`
@@ -4294,6 +4542,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4307,7 +4557,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies create-revision`
@@ -4322,6 +4572,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4335,7 +4587,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies get-revision`
@@ -4350,6 +4602,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4363,7 +4617,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies archive`
@@ -4378,6 +4632,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4391,7 +4647,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies activate`
@@ -4406,6 +4662,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4419,7 +4677,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies rollback`
@@ -4434,6 +4692,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4447,7 +4707,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl guardrail-policies dry-run`
@@ -4462,6 +4722,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4475,7 +4737,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl guardrail-evaluations`
@@ -4498,6 +4760,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4511,7 +4775,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl investigations`
@@ -4534,6 +4798,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4547,7 +4813,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl assets`
@@ -4558,12 +4824,13 @@ Subcommands:
 
 - `list` — List all assets
 - `list-by-type` — List assets of one type
-- `get` — Show one asset version
-- `put` — Publish or replace an asset version
+- `get` — Download one asset version's bytes to stdout
+- `put` — Publish an asset version from a file's bytes
 - `delete` — Delete an asset version
 - `manifest` — Show an asset's resolved manifest
 - `storage-summary` — Show asset storage/retention summary
 - `withheld` — List withheld (pending_scan/quarantined) assets
+- `promote-visibility` — Promote an asset version's visibility
 - `yank` — Yank an asset version
 - `unyank` — Reverse a yank on an asset version
 
@@ -4579,6 +4846,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4592,7 +4861,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets list-by-type`
@@ -4607,6 +4876,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4620,12 +4891,12 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets get`
 
-Show one asset version
+Download one asset version's bytes to stdout
 
 Arguments:
 
@@ -4635,6 +4906,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4648,12 +4921,12 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets put`
 
-Publish or replace an asset version
+Publish an asset version from a file's bytes
 
 Arguments:
 
@@ -4663,6 +4936,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4676,7 +4951,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets delete`
@@ -4691,6 +4966,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4704,7 +4981,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets manifest`
@@ -4719,6 +4996,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4732,7 +5011,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets storage-summary`
@@ -4747,6 +5026,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4760,7 +5041,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets withheld`
@@ -4775,6 +5056,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4788,7 +5071,37 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
+
+
+##### `ferrogate ctl assets promote-visibility`
+
+Promote an asset version's visibility
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort. NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares a `sort` query parameter, so the key is forwarded verbatim and currently ignored; a note is printed to stderr on every use
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--dry-run` — Plan a mutating verb without issuing it: print the decision receipt the call would produce, including the exact request and its action fingerprint, and send nothing. Accepted by every mutating verb and echoed as `dry_run` on the receipt; refused on read verbs, which change nothing to begin with
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation. NOT HONORED BY THE SERVER TODAY: it becomes an `x-ferrogate-tenant` request header, which no Control Plane API operation declares — admin requests are scoped by the bearer token, so this neither narrows nor redirects the result; a note is printed to stderr on every use. Where an operation does accept tenant selection it is a `tenant` query parameter: pass `--filter tenant=<id>`
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets yank`
@@ -4803,6 +5116,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4816,7 +5131,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl assets unyank`
@@ -4831,6 +5146,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4844,7 +5161,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl asset-transfer`
@@ -4870,6 +5187,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4883,7 +5202,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-transfer commit`
@@ -4898,6 +5217,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4911,7 +5232,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-transfer abort`
@@ -4926,6 +5247,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4939,7 +5262,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-transfer download-url`
@@ -4954,6 +5277,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -4967,7 +5292,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl asset-channels`
@@ -4992,6 +5317,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5005,7 +5332,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-channels set`
@@ -5020,6 +5347,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5033,7 +5362,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl asset-channels delete`
@@ -5048,6 +5377,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5061,7 +5392,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl site-domains`
@@ -5088,6 +5419,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5101,7 +5434,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains get`
@@ -5116,6 +5449,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5129,7 +5464,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains bind`
@@ -5144,6 +5479,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5157,7 +5494,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains verify`
@@ -5172,6 +5509,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5185,7 +5524,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl site-domains unbind`
@@ -5200,6 +5539,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5213,7 +5554,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl prompt-templates`
@@ -5242,6 +5583,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5255,7 +5598,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates get`
@@ -5270,6 +5613,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5283,7 +5628,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates create`
@@ -5298,6 +5643,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5311,7 +5658,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates replace`
@@ -5326,6 +5673,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5339,7 +5688,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates update`
@@ -5354,6 +5703,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5367,7 +5718,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates archive`
@@ -5382,6 +5733,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5395,7 +5748,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl prompt-templates render`
@@ -5410,6 +5763,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5423,7 +5778,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl skill-packages`
@@ -5451,6 +5806,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5464,7 +5821,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages get`
@@ -5479,6 +5836,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5492,7 +5851,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages create`
@@ -5507,6 +5866,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5520,7 +5881,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages replace`
@@ -5535,6 +5896,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5548,7 +5911,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages update`
@@ -5563,6 +5926,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5576,7 +5941,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl skill-packages delete`
@@ -5591,6 +5956,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5604,7 +5971,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl plugins`
@@ -5631,6 +5998,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5644,7 +6013,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins get`
@@ -5659,6 +6028,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5672,7 +6043,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins create`
@@ -5687,6 +6058,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5700,7 +6073,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins update`
@@ -5715,6 +6088,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5728,7 +6103,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl plugins delete`
@@ -5743,6 +6118,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5756,7 +6133,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl catalog`
@@ -5783,6 +6160,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5796,7 +6175,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog providers`
@@ -5811,6 +6190,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5824,7 +6205,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog provider-models`
@@ -5839,6 +6220,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5852,7 +6235,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog extensions`
@@ -5867,6 +6250,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5880,7 +6265,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl catalog framework-adapters`
@@ -5895,6 +6280,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5908,7 +6295,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl dashboard`
@@ -5933,6 +6320,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5946,7 +6335,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl dashboard alias`
@@ -5961,6 +6350,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -5974,7 +6365,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl dashboard root`
@@ -5989,6 +6380,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6002,7 +6395,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl wallets`
@@ -6031,6 +6424,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6044,7 +6439,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets get`
@@ -6059,6 +6454,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6072,7 +6469,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets create`
@@ -6087,6 +6484,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6100,7 +6499,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets update`
@@ -6115,6 +6514,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6128,7 +6529,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl wallets adjust`
@@ -6143,6 +6544,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6156,7 +6559,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -6172,6 +6575,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6185,7 +6590,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -6201,6 +6606,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6214,7 +6621,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl payment-methods`
@@ -6239,6 +6646,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6252,7 +6661,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl payment-methods create`
@@ -6267,6 +6676,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6280,7 +6691,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl payment-methods delete`
@@ -6295,6 +6706,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6308,7 +6721,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl billing-events`
@@ -6319,7 +6732,7 @@ Subcommands:
 
 - `list` — List billing events
 - `dead-letters` — List billing outbox dead letters
-- `replay` — Replay a dead-lettered billing outbox record
+- `replay` — Replay a dead-lettered billing outbox record (state-changing; requires confirmation)
 
 ##### `ferrogate ctl billing-events list`
 
@@ -6333,6 +6746,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6346,7 +6761,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl billing-events dead-letters`
@@ -6361,6 +6776,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6374,12 +6791,12 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl billing-events replay`
 
-Replay a dead-lettered billing outbox record
+Replay a dead-lettered billing outbox record (state-changing; requires confirmation)
 
 Arguments:
 
@@ -6389,6 +6806,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6402,7 +6821,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -6430,6 +6849,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6443,7 +6864,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage reports`
@@ -6458,6 +6879,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6471,7 +6894,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage metering-events`
@@ -6486,6 +6909,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6499,7 +6924,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage metering-export-status`
@@ -6514,6 +6939,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6527,7 +6954,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl usage cost-burn`
@@ -6542,6 +6969,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6555,7 +6984,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl payment-attempts`
@@ -6579,6 +7008,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6592,7 +7023,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl payment-attempts get`
@@ -6607,6 +7038,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6620,7 +7053,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl request-logs`
@@ -6644,6 +7077,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6657,7 +7092,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl request-logs export`
@@ -6672,6 +7107,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6685,7 +7122,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl audit-events`
@@ -6708,6 +7145,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6721,7 +7160,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl observed-agent-activity`
@@ -6744,6 +7183,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6757,7 +7198,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl system`
@@ -6784,6 +7225,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6797,7 +7240,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system status-alias`
@@ -6812,6 +7255,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6825,7 +7270,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system ready`
@@ -6840,6 +7285,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6853,7 +7300,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system health`
@@ -6868,6 +7315,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6881,7 +7330,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl system observability`
@@ -6896,6 +7345,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6909,7 +7360,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl provider-health`
@@ -6932,6 +7383,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6945,7 +7398,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 #### `ferrogate ctl config`
@@ -6969,6 +7422,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -6982,7 +7437,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl config reload`
@@ -6997,6 +7452,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7010,7 +7467,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -7035,6 +7492,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7048,7 +7507,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl drain set`
@@ -7063,6 +7522,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7076,7 +7537,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 - `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
@@ -7105,6 +7566,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7118,7 +7581,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs get`
@@ -7133,6 +7596,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7146,7 +7611,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs create`
@@ -7161,6 +7626,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7174,7 +7641,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs replace`
@@ -7189,6 +7656,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7202,7 +7671,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs update`
@@ -7217,6 +7686,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7230,7 +7701,7 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
 
 
 ##### `ferrogate ctl gateway-configs delete`
@@ -7245,6 +7716,8 @@ Options:
 
 - `--data <JSON>` — Inline JSON request document for a write verb
 - `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--body-file <PATH>` — Path to the raw bytes a binary write verb publishes (`-` reads stdin). Accepted only by verbs whose contract body is binary (`assets put`); the bytes are sent verbatim, never decoded or re-encoded
+- `--header <NAME=VALUE>` — Request header declared by the operation, as `NAME=VALUE` (repeatable). This is the header-parameter counterpart of `--filter`: `putAsset`'s `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the client owns — the credential and the audit identity — are refused
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
@@ -7258,4 +7731,4 @@ Options:
 - `--token-stdin` — Read the bearer token from stdin
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
-- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+- `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)

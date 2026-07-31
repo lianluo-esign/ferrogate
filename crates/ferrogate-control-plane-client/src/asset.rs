@@ -21,11 +21,15 @@
 //!
 //! * **assets** — the registry itself. An asset version is addressed by the
 //!   composite `{asset_type}/{name}/{version}` key rather than a single id, so
-//!   `get`/`put`/`delete` take three segments. `list`/`list-by-type` read the
-//!   collection and per-type views, `manifest` reads the immutable resolved
-//!   manifest, `storage-summary` exposes retention/GC visibility, `withheld`
-//!   reads the operator view of assets held back by the scan pipeline
-//!   (`pending_scan`/`quarantined`), and
+//!   `get`/`put`/`delete` take three segments. Both content verbs are binary,
+//!   not JSON: `get` is a raw `*/*` read whose bytes go to stdout unchanged
+//!   (`--output` is refused, since there is nothing to render), and `put`
+//!   publishes the artifact's bytes from `--body-file`. `list`/`list-by-type`
+//!   read the collection and per-type views, `manifest` reads the immutable
+//!   resolved manifest, `storage-summary` exposes retention/GC visibility,
+//!   `withheld` reads the operator view of assets held back by the scan pipeline
+//!   (`pending_scan`/`quarantined`), `promote-visibility` posts the scan
+//!   outcome and evidence that moves a version's visibility, and
 //!   `yank`/`unyank` are first-class lifecycle actions (`POST`/`DELETE` on the
 //!   `.../yank` sub-path) so an operator's intent and the audit trail stay
 //!   precise instead of collapsing into a generic update.
@@ -43,11 +47,32 @@
 //!   the contract declares; `delete` retires a channel; `list` reads the current
 //!   channel map.
 //! * **site-domains** — the static-site custom-domain lifecycle. `bind`
-//!   registers a hostname, `get` reads its verification/binding state, `unbind`
-//!   removes it, and `list` enumerates a tenant's bound domains. Static-site
-//!   *content* is published through the asset registry itself (an asset of type
-//!   `static-site` via `assets put`); the API exposes no separate publish
-//!   operation, so this family covers the domain half of the lifecycle.
+//!   registers a hostname, `verify` redeems the DNS-ownership challenge, `get`
+//!   reads its verification/binding state, `unbind` removes it, and `list`
+//!   enumerates a tenant's bound domains.
+//!
+//! # Static-site publish, status, and unpublish
+//!
+//! There is deliberately no `static-sites` family: the contract declares no
+//! publish/status/unpublish operation, and inventing CLI verbs with no
+//! `operationId` behind them is exactly what the #365 parity gate exists to
+//! reject. A site is an asset of type `static_site`, so the lifecycle is the
+//! registry's own verbs plus the header parameters `putAsset` declares for it:
+//!
+//! * **publish** — `assets put static_site <name> <version> --body-file
+//!   bundle.zip --header content-type=application/zip`, adding
+//!   `--header x-site-public=true`, `--header x-site-spa-fallback=true`, or
+//!   `--header x-site-cache-control=…` to set how the bundle is served, and
+//!   `--filter channel=stable` to move a channel once the publish is durable.
+//! * **status** — `assets manifest static_site <name>` for the resolved
+//!   manifest, `site-domains get <hostname>` for the binding.
+//! * **unpublish** — `assets yank` to withdraw a version while keeping the
+//!   audit trail, or `assets delete` to remove the object.
+//!
+//! Both publish-side controls that were previously unreachable — the binary body
+//! and the `x-*` headers — reach the wire through the generic seams
+//! (`--body-file`, `--header`), so no asset-specific flag is hard-coded into the
+//! command layer (issue #363 review).
 //!
 //! Storage credentials stay server-side throughout: every path here is an
 //! authenticated Control Plane API call, never a direct database or bucket
@@ -78,6 +103,12 @@ pub const ASSET_TRANSFER_SECRET_FIELDS: &[&str] = &["upload_url", "download_url"
 /// 200/206 body as `*/*` (`format: binary`), so the CLI must not claim to want
 /// JSON and must not re-encode what comes back.
 const ASSET_CONTENT_MEDIA_TYPE: &str = "*/*";
+
+/// Default `Content-Type` for the publish body. `putAsset` accepts `*/*`, which
+/// is a wildcard the client cannot *send*, so the neutral binary type is the
+/// default and the operator restates it (`--header content-type=application/zip`
+/// for a static-site bundle) when the artifact has a more specific one.
+const ASSET_UPLOAD_MEDIA_TYPE: &str = "application/octet-stream";
 
 /// Require the composite `{asset_type}/{name}/{version}` key from the input
 /// segments, returning an actionable usage error naming the expected shape when
@@ -133,7 +164,17 @@ impl CommandGroup for AssetsGroup {
                     "getAsset",
                     ASSET_CONTENT_MEDIA_TYPE,
                 ),
-                VerbDescriptor::mutating("put", "Publish or replace an asset version", "putAsset"),
+                // `putAsset`'s request body is the artifact — the contract
+                // declares `*/*` with `format: binary`. Declared as a raw write
+                // so the bytes are sent verbatim; a JSON-document verb could
+                // not publish a tarball, a signed binary, or a static-site
+                // bundle at all.
+                VerbDescriptor::raw_write(
+                    "put",
+                    "Publish an asset version from a file's bytes",
+                    "putAsset",
+                    ASSET_UPLOAD_MEDIA_TYPE,
+                ),
                 VerbDescriptor::mutating("delete", "Delete an asset version", "deleteAsset"),
                 VerbDescriptor::read(
                     "manifest",
@@ -180,15 +221,23 @@ pub fn build_assets(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec>
             let key = asset_version_ref(input, verb)?;
             // `platform` (and any other contract query parameter) arrives as a
             // list filter; `getAsset` needs it to resolve a variant.
-            ASSETS.get(&key, &input.list)
+            ASSETS.read(&key, &input.list)
         }
         "put" => {
             let key = asset_version_ref(input, verb)?;
-            ASSETS.replace(&key, input.require_body(verb)?)
+            let payload = input.require_raw_body(verb)?;
+            let spec = ASSETS.replace_bytes(&key, &payload.media_type, payload.bytes.clone())?;
+            // `putAsset` declares `platform` AND `channel`: which variant slot
+            // these bytes occupy, and which channel moves to them once the
+            // publish is durable.
+            Ok(input.list.apply_filters(spec))
         }
         "delete" => {
             let key = asset_version_ref(input, verb)?;
-            ASSETS.delete(&key)
+            // `deleteAsset` declares `platform`. Dropping it does not fail the
+            // call — it destroys whichever variant the server resolves by
+            // default, with exit 0 and no diagnostic.
+            Ok(input.list.apply_filters(ASSETS.delete(&key)?))
         }
         "manifest" => {
             let [asset_type, name] = asset_name_ref(input, verb)?;
@@ -202,7 +251,7 @@ pub fn build_assets(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec>
                 &[asset_type, name, version, "visibility"],
                 Some(input.require_body(verb)?),
             )?;
-            Ok(input.list.apply(spec))
+            Ok(input.list.apply_filters(spec))
         }
         "yank" => {
             let [asset_type, name, version] = asset_version_ref(input, verb)?;
@@ -376,12 +425,18 @@ impl CommandGroup for SiteDomainsGroup {
 pub fn build_site_domains(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "list" => SITE_DOMAINS.read(&[], &input.list),
-        "get" => SITE_DOMAINS.get(&[first_segment(input, "site-domain")?], &input.list),
+        "get" => SITE_DOMAINS.read(&[first_segment(input, "site-domain")?], &input.list),
         "bind" => SITE_DOMAINS.create(input.require_body(verb)?),
-        "verify" => SITE_DOMAINS.action(
-            &[first_segment(input, "site-domain")?, "verify"],
-            input.body.clone(),
-        ),
+        // `verifySiteDomain` declares a `tenant` query parameter: which tenant's
+        // binding is being redeemed. Dropping it redeems against the server's
+        // default resolution instead of the one the operator named.
+        "verify" => {
+            let spec = SITE_DOMAINS.action(
+                &[first_segment(input, "site-domain")?, "verify"],
+                input.body.clone(),
+            )?;
+            Ok(input.list.apply_filters(spec))
+        }
         "unbind" => SITE_DOMAINS.delete(&[first_segment(input, "site-domain")?]),
         other => Err(CliError::usage(format!(
             "verb '{other}' is not a site-domains verb"

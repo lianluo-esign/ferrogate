@@ -203,7 +203,7 @@ fn tenant_role_bind_and_unbind_address_the_right_paths() {
     .unwrap();
     assert_eq!(bind.method, Method::POST);
     assert_eq!(bind.path, "/admin/v1/tenant-roles/t_1");
-    assert_eq!(bind.body.unwrap()["role_id"], "admin");
+    assert_eq!(bind.json_body().unwrap()["role_id"], "admin");
 
     let unbind = build_tenant_roles(
         "unbind",
