@@ -877,8 +877,44 @@ pub struct AgentCostReceipt {
     pub container_cost_unavailable: bool,
     /// The enforcement decision.
     pub decision: BudgetDecision,
+    /// What the kill controls actually observed, when the decision was
+    /// [`BudgetDecision::Kill`]. `None` for every non-kill decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kill_evidence: Option<AgentKillEvidence>,
     /// Reference to the emitted cost/enforcement audit event.
     pub audit_event_ref: String,
+}
+
+/// What one over-budget kill observed, recorded on the receipt rather than left
+/// to a log line.
+///
+/// Exists because a run's *status* cannot answer "did the cancel reach
+/// anything". The Worker reports `running` both for a run nobody cancelled and
+/// for one that was cancelled and has not unwound — deliberately, since
+/// collapsing them is what made [`KillMode::Cancel`]'s verification vacuous. So
+/// an escalation to `cleanup_run` would otherwise be indistinguishable from a
+/// destroy of a run nobody tried to cancel, on the one path whose past failures
+/// were invisible for exactly that reason.
+///
+/// The `Option` fields are three-valued on purpose: `None` is "the control
+/// surface does not report this", which is not the same answer as `Some(false)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentKillEvidence {
+    /// The kill mode that ran.
+    pub mode: KillMode,
+    /// Whether the cancel actually signalled in-flight work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_signalled: Option<bool>,
+    /// Whether the run's durable cancel latch was set when the status was read
+    /// back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_latched: Option<bool>,
+    /// The status observed by the post-cancel verification read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_status: Option<CloudflareRunStatus>,
+    /// Whether the cancel had to be escalated to a `cleanup_run` destroy.
+    pub escalated_to_destroy: bool,
 }
 
 impl AgentCostReceipt {
@@ -909,6 +945,7 @@ impl AgentCostReceipt {
             accumulated_burn_usd,
             policy_version: policy.policy_version.clone(),
             decision,
+            kill_evidence: None,
             audit_event_ref,
         })
     }
@@ -1183,7 +1220,8 @@ impl AgentRuntimeUsageSource for ScriptedUsageSource {
 // ---------------------------------------------------------------------------
 
 /// How the governor tears down an over-budget run on a [`BudgetDecision::Kill`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KillMode {
     /// `this.destroy()` — the hard kill ([`CloudflareControlSurface::cleanup_run`]).
     #[default]
@@ -1389,10 +1427,18 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
         // Record the burn regardless of decision — it happened.
         let accumulated_burn = self.ledger.add(identity, window_cost).await?;
 
+        let mut kill_evidence = None;
         if let BudgetDecision::Kill { reason } = &decision {
             match self.kill_mode {
                 KillMode::Destroy => {
                     self.control.cleanup_run(&instance_name)?;
+                    kill_evidence = Some(AgentKillEvidence {
+                        mode: KillMode::Destroy,
+                        cancel_signalled: None,
+                        cancel_latched: None,
+                        observed_status: None,
+                        escalated_to_destroy: false,
+                    });
                 }
                 KillMode::Cancel => {
                     // Cancel is cooperative and therefore best-effort (see
@@ -1401,23 +1447,43 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
                     // is still alive. `run_status` failing is NOT treated as
                     // "probably fine": it propagates, and the caller fails
                     // closed rather than recording a kill it cannot substantiate.
-                    self.control.cancel_run(&instance_name, reason)?;
-                    let observed = self.control.run_status(&instance_name)?;
-                    if !kill_is_settled(observed) {
+                    //
+                    // Both calls use the `_observed` variants so the receipt can
+                    // say WHY it escalated. `run_status` alone cannot: the Worker
+                    // reports `running` for a run nobody cancelled and for one
+                    // that was cancelled and has not unwound, so without
+                    // `cancel_signalled` / `cancel_latched` an escalation is
+                    // indistinguishable from a destroy of an uncancelled run.
+                    let cancelled = self.control.cancel_run_observed(&instance_name, reason)?;
+                    let observed = self.control.run_status_observed(&instance_name)?;
+                    let escalated_to_destroy = !kill_is_settled(observed.status);
+                    if escalated_to_destroy {
                         self.control.cleanup_run(&instance_name)?;
                     }
+                    kill_evidence = Some(AgentKillEvidence {
+                        mode: KillMode::Cancel,
+                        cancel_signalled: cancelled.signalled,
+                        cancel_latched: observed.cancel_latched,
+                        observed_status: Some(observed.status),
+                        escalated_to_destroy,
+                    });
                 }
             }
         }
 
-        AgentCostReceipt::assemble(
+        let mut receipt = AgentCostReceipt::assemble(
             identity,
             &sample,
             &breakdown,
             accumulated_burn,
             &self.policy,
             decision,
-        )
+        )?;
+        // Attached here rather than threaded through `assemble`: only the branch
+        // above can observe it, and `assemble` stays usable for the non-kill
+        // decisions its other callers build.
+        receipt.kill_evidence = kill_evidence;
+        Ok(receipt)
     }
 
     /// Pull a usage sample from `source` for `window`, then [`Self::enforce`] it.

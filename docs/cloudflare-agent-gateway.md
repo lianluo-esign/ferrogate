@@ -261,6 +261,28 @@ Cloudflare. Concretely:
   the destroy lands. `workers/agent-gateway/test/lifecycle.test.ts` pins this
   with a deliberately defiant workload.
 
+  **Repeat cancels are idempotent, and have to be.** "Is a workload still
+  unwinding" is held in the in-memory abort handle, and only the invoke path may
+  clear it — `cancel` deliberately does not, even though it is the caller that
+  aborted it. A `cancel` that cleared the handle would make the property above
+  hold for exactly one call: a second cancel on the same still-defiant run would
+  see nothing in flight and write `stopped`, restoring the defect verbatim. A
+  second cancel is a normal occurrence, not a pathological one — the cost
+  governor's kill is `cancel_run` → `run_status` → `cleanup_run`, so one
+  transient failure of the last two aborts the tick and the next over-budget
+  window re-issues the cancel. Aborting an already-aborted `AbortController` is a
+  no-op, so the repeat cancel re-reports `aborted: true` and leaves the status
+  alone. The defiant test issues a second cancel for this.
+
+  **What the Rust side records about a kill.** `run_status` alone cannot tell a
+  run nobody cancelled from one that was cancelled and has not unwound — both
+  read `running`, by design. So `CloudflareControlSurface` also exposes
+  `cancel_run_observed` / `run_status_observed`, which decode `aborted` and
+  `cancelRequested`, and `AgentCostGovernor` records them on the receipt as
+  `killEvidence` alongside the observed status and whether it escalated to a
+  destroy. Their `Option` fields are three-valued: `null` means the control
+  surface did not report the flag, which is not the same answer as `false`.
+
   **A cancelled run refuses later work; it does not answer it.** `invoke` against
   a latched run returns **409 `run_cancelled`**, mapped to
   `CloudflareControlSurfaceError::RunCancelled`. It used to return 200 with an

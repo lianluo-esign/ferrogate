@@ -98,6 +98,23 @@ export function observedAborts(runRef: string): string[] {
 }
 
 /**
+ * Clear all three ledgers. Call from a `beforeEach`.
+ *
+ * Module scope is what makes a post-destroy read real (above), but it also means
+ * the ledgers accumulate for the lifetime of the isolate. Without this, every
+ * assertion over them is sound only because each test happens to pick a unique
+ * `runRef` — `addressingCalls.filter(...)[0]` takes the FIRST call ever recorded
+ * for a name, and `sideEffects()` filters by nothing else — so a reused name or a
+ * retried `start` would silently change what they assert. Isolation belongs to the
+ * harness, not to the names people choose.
+ */
+export function resetProbeLedgers(): void {
+  addressingCalls.length = 0;
+  completedWork.clear();
+  observedAbortReasons.clear();
+}
+
+/**
  * `AgentGateway` with a workload that can actually be caught mid-flight
  * (issue #414). The production class inherits everything that matters —
  * `start` / `cancel` / `destroyRun` / `status` / the `#inFlight` abort handle

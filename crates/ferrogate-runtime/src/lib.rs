@@ -55,10 +55,10 @@ pub use capability_boundary::{
 pub use cloudflare_agent_cost::{
     evaluate as evaluate_agent_budget, should_dispatch, AgentBudgetPolicy, AgentBurnLedger,
     AgentBurnLedgerError, AgentCostAttribution, AgentCostGovernor, AgentCostReceipt,
-    AgentDispatchGuard, AgentRuntimeUsageSample, AgentRuntimeUsageSource, BudgetDecision,
-    CfRuntimeCostModel, CfRuntimePricing, ContainerUsageSample, CostBreakdown, CostGovernorError,
-    CostWindow, InMemoryAgentBurnLedger, KillMode, ScriptedUsageSource, StorageAgentBurnLedger,
-    BYTES_PER_GIGABYTE, CONTAINER_EGRESS_USD_PER_GB_OCEANIA_KOREA_TAIWAN,
+    AgentDispatchGuard, AgentKillEvidence, AgentRuntimeUsageSample, AgentRuntimeUsageSource,
+    BudgetDecision, CfRuntimeCostModel, CfRuntimePricing, ContainerUsageSample, CostBreakdown,
+    CostGovernorError, CostWindow, InMemoryAgentBurnLedger, KillMode, ScriptedUsageSource,
+    StorageAgentBurnLedger, BYTES_PER_GIGABYTE, CONTAINER_EGRESS_USD_PER_GB_OCEANIA_KOREA_TAIWAN,
     CONTAINER_EGRESS_USD_PER_GB_ROW, DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND,
     DEFAULT_CONTAINER_EGRESS_USD_PER_GB, DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND,
     DEFAULT_CONTAINER_VCPU_USD_PER_SECOND, DEFAULT_DO_REQUEST_USD_PER_MILLION,
@@ -110,11 +110,12 @@ pub use cloudflare_gateway_deploy::{
 };
 pub use cloudflare_worker::{
     cloudflare_backend_descriptor, cloudflare_backend_descriptor_default,
-    managed_worker_session_status_wire, CloudflareAgentControlClient, CloudflareControlSurface,
-    CloudflareControlSurfaceError, CloudflareRunExecOutcome, CloudflareRunExecRequest,
-    CloudflareRunHandle, CloudflareRunProps, CloudflareRunPropsResolver, CloudflareRunStartRequest,
-    CloudflareRunStatus, MockCloudflareCall, MockCloudflareControlSurface, CLOUDFLARE_BACKEND_NAME,
-    CLOUDFLARE_BACKEND_VERSION, CLOUDFLARE_HOST_LIFECYCLE_OWNER,
+    managed_worker_session_status_wire, CloudflareAgentControlClient, CloudflareCancelObservation,
+    CloudflareControlSurface, CloudflareControlSurfaceError, CloudflareRunExecOutcome,
+    CloudflareRunExecRequest, CloudflareRunHandle, CloudflareRunObservation, CloudflareRunProps,
+    CloudflareRunPropsResolver, CloudflareRunStartRequest, CloudflareRunStatus, MockCloudflareCall,
+    MockCloudflareControlSurface, CLOUDFLARE_BACKEND_NAME, CLOUDFLARE_BACKEND_VERSION,
+    CLOUDFLARE_HOST_LIFECYCLE_OWNER,
 };
 pub use cloudflare_worker_target::{
     prepare_governed_worker_invocation, CloudflareWorkerInvocation, CloudflareWorkerTarget,

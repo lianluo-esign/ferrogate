@@ -89,8 +89,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::cloudflare_worker::{
-    CloudflareControlSurface, CloudflareControlSurfaceError, CloudflareRunExecOutcome,
-    CloudflareRunExecRequest, CloudflareRunHandle, CloudflareRunStartRequest, CloudflareRunStatus,
+    CloudflareCancelObservation, CloudflareControlSurface, CloudflareControlSurfaceError,
+    CloudflareRunExecOutcome, CloudflareRunExecRequest, CloudflareRunHandle,
+    CloudflareRunObservation, CloudflareRunStartRequest, CloudflareRunStatus,
 };
 
 /// A synchronous HTTP seam for talking to the deployed Worker's control routes.
@@ -264,6 +265,19 @@ struct InvokeResponse {
 #[derive(Debug, Deserialize)]
 struct StatusResponse {
     status: String,
+    /// The Worker's durable cancel latch. Absent from `control/destroy`'s
+    /// envelope, so it is optional rather than defaulted-to-false: "not
+    /// reported" and "not latched" are different answers.
+    #[serde(rename = "cancelRequested", default)]
+    cancel_requested: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelResponse {
+    status: String,
+    /// Whether in-flight work on the instance was actually signalled.
+    #[serde(default)]
+    aborted: Option<bool>,
 }
 
 impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayControlSurface<T> {
@@ -354,14 +368,25 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         // is `stopped` only when a workload actually unwound or there was none
         // in flight, and stays `running` while a signalled workload is still
         // going. `KillMode::Cancel` depends on that distinction.
+        self.cancel_run_observed(run_ref, reason).map(|o| o.status)
+    }
+
+    fn cancel_run_observed(
+        &mut self,
+        run_ref: &str,
+        reason: &str,
+    ) -> Result<CloudflareCancelObservation, CloudflareControlSurfaceError> {
         let response = self.post(
             "control/cancel",
             json!({ "runRef": run_ref, "reason": reason }),
         )?;
-        let decoded: StatusResponse = decode_ok(response, |status, body| {
+        let decoded: CancelResponse = decode_ok(response, |status, body| {
             CloudflareControlSurfaceError::StopFailed(format!("HTTP {status}: {body}"))
         })?;
-        parse_status(&decoded.status)
+        Ok(CloudflareCancelObservation {
+            status: parse_status(&decoded.status)?,
+            signalled: decoded.aborted,
+        })
     }
 
     fn cleanup_run(
@@ -379,6 +404,13 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         &mut self,
         run_ref: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
+        self.run_status_observed(run_ref).map(|o| o.status)
+    }
+
+    fn run_status_observed(
+        &mut self,
+        run_ref: &str,
+    ) -> Result<CloudflareRunObservation, CloudflareControlSurfaceError> {
         let response = self.get(&format!(
             "control/status?runRef={}",
             encode_query_value(run_ref)
@@ -386,7 +418,10 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         let decoded: StatusResponse = decode_ok(response, |status, body| {
             CloudflareControlSurfaceError::Transport(format!("status HTTP {status}: {body}"))
         })?;
-        parse_status(&decoded.status)
+        Ok(CloudflareRunObservation {
+            status: parse_status(&decoded.status)?,
+            cancel_latched: decoded.cancel_requested,
+        })
     }
 }
 
