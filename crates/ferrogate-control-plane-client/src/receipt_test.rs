@@ -1678,10 +1678,49 @@ fn first_revision_reversal_is_an_archive_not_a_rollback() {
 /// The live Admin API response for `guardrail-policies activate` is the binding
 /// document, not the immutable revision document:
 /// `{"object":"guardrail_policy_binding","policy_id":...,"active_revision":...}`.
-/// The receipt still owes a rollback pointer for the guardrail family, so
-/// `active_revision` is a revision identifier for this response shape.
+/// The reversal target is the revision that *was* active, which only the server
+/// knows, so it is taken from `previous_active_revision` and never guessed from
+/// `active_revision`: an append-only chain does not imply the predecessor
+/// revision was the one bound before this call.
 #[test]
-fn guardrail_binding_response_yields_a_rollback_pointer() {
+fn guardrail_binding_rollback_restores_the_server_reported_previous_revision() {
+    let report = execute_against(
+        "guardrail-policies",
+        "activate",
+        &["gp_1".to_string()],
+        200,
+        r#"{"object":"guardrail_policy_binding","policy_id":"gp_1","active_revision":2,"previous_active_revision":4,"rollback":false,"reload":{"status":"applied"}}"#,
+    );
+    let receipt = report.output().receipt().expect("receipt");
+
+    assert_eq!(receipt.target.object_version.value.as_deref(), Some("2"));
+    let pointer =
+        receipt.rollback.value.as_ref().expect(
+            "a binding response naming its previous active revision has a rollback pointer",
+        );
+    assert_eq!(
+        pointer.command,
+        vec![
+            "ctl".to_string(),
+            "guardrail-policies".to_string(),
+            "rollback".to_string(),
+            "gp_1".to_string(),
+            "--data".to_string(),
+            "{\"revision\":4}".to_string(),
+        ],
+        "the pointer must restore previous_active_revision, not active_revision - 1"
+    );
+    assert_eq!(pointer.created_revision.value.as_deref(), Some("2"));
+    assert_eq!(pointer.restores_revision.value.as_deref(), Some("4"));
+    assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+}
+
+/// A binding response that names only the new `active_revision` does not carry
+/// enough to reverse itself. Emitting `active_revision - 1` here would be a
+/// fabricated command aimed at a real, wrong revision, so the receipt states the
+/// absence instead and the operator is told a follow-up read is required.
+#[test]
+fn guardrail_binding_without_a_previous_revision_emits_no_rollback_command() {
     let report = execute_against(
         "guardrail-policies",
         "activate",
@@ -1692,25 +1731,41 @@ fn guardrail_binding_response_yields_a_rollback_pointer() {
     let receipt = report.output().receipt().expect("receipt");
 
     assert_eq!(receipt.target.object_version.value.as_deref(), Some("2"));
-    let pointer = receipt
-        .rollback
-        .value
-        .as_ref()
-        .expect("active guardrail binding has a rollback pointer");
-    assert_eq!(
-        pointer.command,
-        vec![
-            "ctl".to_string(),
-            "guardrail-policies".to_string(),
-            "rollback".to_string(),
-            "gp_1".to_string(),
-            "--data".to_string(),
-            "{\"revision\":1}".to_string(),
-        ],
-        "the pointer must be derived from policy_id + active_revision in the binding response"
+    assert!(
+        receipt.rollback.value.is_none(),
+        "a binding response without previous_active_revision must not name a reversal target: {:?}",
+        receipt.rollback.value
     );
-    assert_eq!(pointer.created_revision.value.as_deref(), Some("2"));
-    assert_eq!(pointer.restores_revision.value.as_deref(), Some("1"));
+    assert_eq!(
+        receipt.rollback.absent_code(),
+        Some(absence_codes::RESPONSE_CARRIES_NO_ROLLBACK_TARGET)
+    );
+    assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
+}
+
+/// Re-activating the already-bound revision changes nothing, so there is no
+/// distinct revision to restore. That is reported as its own absence code rather
+/// than as a rollback command that would be a no-op.
+#[test]
+fn guardrail_binding_with_an_unchanged_revision_has_no_distinct_rollback_target() {
+    let report = execute_against(
+        "guardrail-policies",
+        "activate",
+        &["gp_1".to_string()],
+        200,
+        r#"{"object":"guardrail_policy_binding","policy_id":"gp_1","active_revision":2,"previous_active_revision":2,"rollback":false,"reload":{"status":"applied"}}"#,
+    );
+    let receipt = report.output().receipt().expect("receipt");
+
+    assert!(
+        receipt.rollback.value.is_none(),
+        "an unchanged binding must not name a reversal target: {:?}",
+        receipt.rollback.value
+    );
+    assert_eq!(
+        receipt.rollback.absent_code(),
+        Some(absence_codes::NO_DISTINCT_PRIOR_REVISION)
+    );
     assert!(receipt.validate().is_empty(), "{:?}", receipt.validate());
 }
 

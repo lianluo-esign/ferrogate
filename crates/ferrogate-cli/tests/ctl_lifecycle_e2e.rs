@@ -327,6 +327,32 @@ fn guardrail_revision(policy_id: &str, keyword: &str) -> PolicyRevision {
     }
 }
 
+/// The `ctl` argv a mutation receipt's rollback pointer emits, with the leading
+/// `ctl` program word stripped so it can be replayed through [`run_ctl`].
+///
+/// Panics rather than returning an `Option`: a caller reaching here has already
+/// asserted the pointer is present, and a silently-skipped reversal would make
+/// the E2E pass while proving nothing.
+fn receipt_rollback_argv(receipt: &Value) -> Vec<String> {
+    let command = receipt["rollback"]["value"]["command"]
+        .as_array()
+        .unwrap_or_else(|| panic!("receipt rollback pointer must carry a command: {receipt}"));
+    let command: Vec<String> = command
+        .iter()
+        .map(|word| {
+            word.as_str()
+                .unwrap_or_else(|| panic!("rollback command words must be strings: {receipt}"))
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        command.first().map(String::as_str),
+        Some("ctl"),
+        "the reversal command must be a `ctl` invocation: {command:?}"
+    );
+    command[1..].to_vec()
+}
+
 #[test]
 fn guardrail_revision_activation_and_rollback_via_cli() {
     let gateway_addr = free_addr();
@@ -449,20 +475,84 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
         activate.stdout()
     );
 
-    // 5. AC2: `ctl guardrail-policies rollback` atomically returns to revision 1
-    //    (now archived by the revision-2 activation).
-    let rollback = run_ctl(
-        &endpoint,
-        "admin-secret",
-        None,
-        &[
-            "guardrail-policies",
-            "rollback",
-            policy_id,
-            "--data",
-            r#"{"revision":1}"#,
-        ],
+    // 5. AC2 + #505 E2E(b): `ctl guardrail-policies rollback` atomically returns
+    //    to revision 1 (now archived by the revision-2 activation) — and the
+    //    revision it returns to is NOT typed here. The reversal is driven by the
+    //    activation receipt's own `rollback.command`, so this asserts the
+    //    receipt is actually actionable: an operator who holds only the receipt
+    //    can undo the change without knowing the chain's history. A pointer that
+    //    named the wrong revision, or that the CLI could not parse back into its
+    //    own argv, fails here instead of passing because the test re-typed the
+    //    right answer.
+    let activate_receipt = activate.json();
+
+    // #505 E2E(a): the receipt's audit id addresses a real audit row. #552 made
+    // guardrail-policy activate/rollback return one, so this is the one endpoint
+    // where the identifier can be followed instead of explained away. The row is
+    // located by that id alone — nothing here is typed by hand.
+    let audit_id = activate_receipt["audit_id"]["value"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "guardrail-policy activate must return an audit id (#552): {}",
+                activate.stdout()
+            )
+        })
+        .to_string();
+    let audit_events = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events?limit=200",
+        &ADMIN,
+        "",
+    ));
+    let row = audit_events["data"]
+        .as_array()
+        .and_then(|events| events.iter().find(|event| event["id"] == audit_id.as_str()))
+        .unwrap_or_else(|| {
+            panic!("receipt audit_id {audit_id} must address an audit row: {audit_events}")
+        });
+    assert_eq!(
+        row["action"], "guardrail.policy_activate",
+        "the addressed row must be the activation this receipt describes: {row}"
     );
+    assert_eq!(
+        row["target"],
+        format!("{policy_id}@2"),
+        "the addressed row must name the object version the receipt changed: {row}"
+    );
+
+    let pointer = &activate_receipt["rollback"];
+    assert!(
+        pointer["value"].is_object(),
+        "the activation receipt must carry a rollback pointer (absent_reason={}): {}",
+        pointer["absent_reason"],
+        activate.stdout()
+    );
+    assert_eq!(
+        pointer["value"]["created_revision"]["value"], "2",
+        "the pointer must name the revision this activation created: {pointer}"
+    );
+    assert_eq!(
+        pointer["value"]["restores_revision"]["value"], "1",
+        "the reversal target is the server-reported previously active revision, \
+         which is revision 1 here: {pointer}"
+    );
+    let reversal = receipt_rollback_argv(&activate_receipt);
+    assert_eq!(
+        reversal,
+        vec![
+            "guardrail-policies".to_string(),
+            "rollback".to_string(),
+            policy_id.to_string(),
+            "--data".to_string(),
+            r#"{"revision":1}"#.to_string(),
+        ],
+        "the receipt's reversal argv must be the real `ctl` invocation that undoes \
+         the activation: {pointer}"
+    );
+    let reversal_args: Vec<&str> = reversal.iter().map(String::as_str).collect();
+    let rollback = run_ctl(&endpoint, "admin-secret", None, &reversal_args);
     assert_eq!(rollback.code(), 0, "rollback stderr: {}", rollback.stderr());
     let rolled_back = rollback.json();
     assert_eq!(rolled_back["object"], "mutation_receipt");
