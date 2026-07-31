@@ -88,7 +88,10 @@ use crate::auth::{enforce_tenant_filter, AuthContext};
 use crate::{
     auth::authenticate,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
-    state::{AdminAuditEventDraft, AgentRunFilter, AgentRunTimeline, AppState},
+    state::{
+        AdminAuditEventDraft, AgentRunAdmission, AgentRunFilter, AgentRunTimeline, AppState,
+        UNATTRIBUTED_AGENT_KEY,
+    },
 };
 
 use super::{body::read_request_body, FerroGateway, ProxyContext};
@@ -627,6 +630,60 @@ impl FerroGateway {
                 request_id: ctx.request_id.clone(),
             };
             return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
+        }
+
+        // #428 run admission. `/v1/agent-jobs` is a SECOND way to start the same
+        // work `POST /v1/agent-runs` starts, so a tenant refused there could
+        // previously start the identical run through here; the shared
+        // `admit_agent_run` seam is consulted on both.
+        //
+        // Placed AFTER the idempotency dedup gate and BEFORE the enqueue: a
+        // retried submit for an already-accepted job returns the original
+        // run_id above without reaching this point, so a budget that fills
+        // between the first submit and its retry never turns an accepted job
+        // into a 402 the caller cannot act on. New work, and only new work, is
+        // governed.
+        //
+        // An unbudgeted tenant resolves to `Unbudgeted`: no governor, no ledger
+        // read, no audit event, and the pre-#428 path continues unchanged.
+        let admission = state
+            .admit_agent_run(
+                &tenant,
+                auth.api_key_id.as_deref().unwrap_or(UNATTRIBUTED_AGENT_KEY),
+                &run_id,
+            )
+            .await;
+        match &admission {
+            AgentRunAdmission::Unbudgeted => {}
+            AgentRunAdmission::Admitted { policy_version } => {
+                state.record_admin_audit_event(agent_job_audit_event(
+                    ctx,
+                    &auth,
+                    &run_id,
+                    // The SAME action name the synchronous run path emits, so an
+                    // operator auditing "which budget admitted this run" queries
+                    // one action across every surface that starts a run.
+                    "agent.run_budget_admitted",
+                    "allowed",
+                    format!("agent cost budget {policy_version} permits this job's dispatch"),
+                ));
+            }
+            AgentRunAdmission::Refused {
+                status,
+                code,
+                message,
+            } => {
+                state.record_admin_audit_event(agent_job_audit_event(
+                    ctx,
+                    &auth,
+                    &run_id,
+                    "agent.run_budget_refused",
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(session, *status, *code, message.clone(), &ctx.request_id)
+                    .await;
+            }
         }
 
         let now = now_unix_seconds();

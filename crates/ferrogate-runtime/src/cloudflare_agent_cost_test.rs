@@ -565,6 +565,51 @@ fn policy_validation_rejects_malformed_shapes() {
     );
 }
 
+#[test]
+fn policy_validation_rejects_non_finite_fields() {
+    // Every range guard in `validate()` is a comparison, and every comparison
+    // against NaN is false -- so a bare `ceiling_usd <= 0.0` reads NaN as "in
+    // range" and validates a policy whose thresholds are all NaN. A NaN
+    // threshold then makes every ladder comparison false, collapsing the
+    // decision to `Allow` forever: an unbounded-spend hole reached through a
+    // policy that PASSED validation. Each field must be rejected on the type,
+    // not by whichever caller remembers an `is_finite()` pre-check.
+    for ceiling in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            AgentBudgetPolicy::new(ceiling, "v").validate().is_err(),
+            "a {ceiling} ceiling must not validate",
+        );
+    }
+    assert!(AgentBudgetPolicy::new(100.0, "v")
+        .with_warn_fraction(f64::NAN)
+        .validate()
+        .is_err());
+    assert!(AgentBudgetPolicy::new(100.0, "v")
+        .with_degrade_fraction(f64::NAN)
+        .validate()
+        .is_err());
+}
+
+#[test]
+fn the_default_warn_fraction_is_the_effective_hard_stop_for_new_dispatch() {
+    // Documents the operator-visible consequence of the 0.8 default rather than
+    // just its value: `permits_dispatch` is true ONLY for `Allow`, and
+    // `Throttle` begins at 0.8 * ceiling, so a 100 USD budget stops admitting
+    // new runs at 80 USD of burn. Mutating DEFAULT_WARN_FRACTION to 1.0 turns
+    // this red.
+    let policy = AgentBudgetPolicy::new(100.0, "v");
+    assert_close(policy.warn_threshold_usd(), 80.0, "warn threshold");
+
+    assert!(
+        !evaluate(&policy, policy.warn_threshold_usd(), 0.0).permits_dispatch(),
+        "burn AT 0.8 * ceiling must already refuse new dispatch, not wait for the ceiling",
+    );
+    assert!(
+        evaluate(&policy, policy.warn_threshold_usd() - 1.0, 0.0).permits_dispatch(),
+        "burn below the warn threshold must still admit",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Burn ledger
 // ---------------------------------------------------------------------------

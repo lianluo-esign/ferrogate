@@ -147,6 +147,52 @@ impl AppState {
             return ScheduleFireResult::error(format!("{code}: {message}"));
         }
 
+        // #428 run admission for the scheduled-dispatch path. A runaway cron is
+        // precisely the workload a spend cap exists to bound, and it was the one
+        // run-start path with no budget consultation at all -- an over-budget
+        // tenant refused at `POST /v1/agent-runs` and `POST /v1/agent-jobs`
+        // could still burn without limit through a schedule that fires every
+        // minute.
+        //
+        // Placed after the tenancy-lifecycle gate and before EITHER target kind
+        // is acted on, so it covers the self-hosted dispatch and the direct
+        // agent-run record equally, on both the tick loop and the admin
+        // `run-now` trigger (both reach the target through this one function).
+        //
+        // A refusal is a fire OUTCOME, not an error the caller retries: the slot
+        // is still recorded and the schedule still advances, so a budget-blocked
+        // schedule leaves an auditable fire-history row per slot and resumes on
+        // its own cadence once the period rolls over or the ceiling is raised --
+        // rather than silently skipping or backing up a catch-up queue.
+        //
+        // The schedule carries no api-key identity, so burn attributes to
+        // `UNATTRIBUTED_AGENT_KEY` -- the same row every other unattributed run
+        // of this tenant folds into, which is what makes the cap bind across
+        // surfaces instead of handing schedules their own untethered budget.
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some(schedule.tenant_id.clone()),
+            workspace_id: Some(schedule.workspace_id.clone()),
+            ..Default::default()
+        };
+        let run_id = format!("schedule-run-{}-{slot}", schedule.schedule_id);
+        match self
+            .admit_agent_run(&tenant, UNATTRIBUTED_AGENT_KEY, &run_id)
+            .await
+        {
+            AgentRunAdmission::Unbudgeted | AgentRunAdmission::Admitted { .. } => {}
+            AgentRunAdmission::Refused { code, message, .. } => {
+                warn!(
+                    schedule_id = %schedule.schedule_id,
+                    slot,
+                    code,
+                    message = %message,
+                    "scheduler: refused agent schedule fire because the agent cost budget \
+                     halts new dispatch"
+                );
+                return ScheduleFireResult::error(format!("{code}: {message}"));
+            }
+        }
+
         match schedule.target_kind {
             ScheduleTargetKind::SelfHostedDispatch => {
                 let dispatch = match build_self_hosted_dispatch(schedule, slot, now, correlation) {
@@ -936,6 +982,106 @@ mod tests {
         );
         // #307: a tick fire has no governed-action parent either.
         assert_eq!(dispatch.parent_action_fingerprint, None);
+    }
+
+    /// #428: a runaway cron is exactly the workload a spend cap exists to
+    /// bound, and the scheduled-dispatch path had no budget consultation at
+    /// all. An over-budget tenant's schedule must enqueue NOTHING.
+    #[test]
+    fn an_over_budget_tenant_fires_no_scheduled_dispatch() {
+        let state = AppState::new(scheduler_enabled_config());
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        // A 100 USD ceiling on the schedule's own tenant, already burnt past the
+        // 0.8 warn threshold by prior spend recorded through the metering path.
+        ferrogate_sync_bridge::block_on_sync_bridge(state.upsert_quota_policy(
+            crate::state::StoredQuotaPolicy {
+                id: "tenant:tenant-a".into(),
+                scope_type: crate::state::QuotaScopeKind::Tenant,
+                scope_id: "tenant-a".into(),
+                model_allowlist: vec![],
+                rpm_limit: None,
+                tpm_limit: None,
+                monthly_budget_usd: None,
+                asset_storage_quota_bytes: None,
+                asset_max_object_bytes: None,
+                agent_cost_budget_usd: Some(100.0),
+                alert_threshold_pcts: vec![],
+                monthly_egress_bytes_budget: None,
+                download_rpm_limit: None,
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            },
+        ))
+        .expect("seed tenant quota policy");
+        ferrogate_sync_bridge::block_on_sync_bridge(state.repositories.add_agent_burn(
+            "tenant-a",
+            UNATTRIBUTED_AGENT_KEY,
+            &state.current_period_month(),
+            100.0,
+        ))
+        .expect("seed durable agent burn");
+        ferrogate_sync_bridge::block_on_sync_bridge(
+            state
+                .repositories
+                .upsert_agent_schedule(interval_schedule("over-budget", now - 1)),
+        )
+        .expect("seed schedule");
+
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
+
+        let dispatches = ferrogate_sync_bridge::block_on_sync_bridge(
+            state.repositories.self_hosted_run_dispatches(),
+        );
+        assert!(
+            !dispatches.iter().any(|dispatch| dispatch
+                .dispatch_id
+                .starts_with("schedule-dispatch-over-budget-")),
+            "an over-budget tenant's schedule must enqueue no dispatch, got {dispatches:?}",
+        );
+        // The refusal is a recorded fire OUTCOME, not a silent skip: the slot is
+        // claimed and auditable, so an operator can see WHY the cron stopped
+        // producing work rather than watching it vanish.
+        let fires = ferrogate_sync_bridge::block_on_sync_bridge(
+            state
+                .repositories
+                .list_agent_schedule_fires("over-budget", 10),
+        )
+        .expect("list fires");
+        assert!(
+            fires.iter().any(|fire| fire
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("agent_budget_exceeded"))),
+            "the budget refusal must be visible in the fire history, got {fires:?}",
+        );
+    }
+
+    /// The same schedule, on a tenant with NO configured agent budget, must be
+    /// byte-identical to the pre-#428 path: the gate resolves to `Unbudgeted`
+    /// without a ledger read and the dispatch is enqueued as before.
+    #[test]
+    fn an_unbudgeted_tenants_schedule_fires_exactly_as_before() {
+        let state = AppState::new(scheduler_enabled_config());
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        ferrogate_sync_bridge::block_on_sync_bridge(
+            state
+                .repositories
+                .upsert_agent_schedule(interval_schedule("unbudgeted", now - 1)),
+        )
+        .expect("seed schedule");
+
+        ferrogate_sync_bridge::block_on_sync_bridge(state.sweep_agent_schedules_once());
+
+        let dispatches = ferrogate_sync_bridge::block_on_sync_bridge(
+            state.repositories.self_hosted_run_dispatches(),
+        );
+        assert!(
+            dispatches.iter().any(|dispatch| dispatch
+                .dispatch_id
+                .starts_with("schedule-dispatch-unbudgeted-")),
+            "an unbudgeted tenant's schedule must still enqueue its dispatch",
+        );
     }
 
     #[test]
