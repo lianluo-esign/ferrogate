@@ -346,6 +346,34 @@ pub(crate) struct X402ReconcileReport {
     pub(crate) oldest_unresolved_hold_age_secs: u64,
 }
 
+/// Why a reconcile tick ended the way it did — the LIVENESS half of the #354
+/// box-5 signal, published on EVERY tick path without exception.
+///
+/// The per-outcome counters alone cannot distinguish "the reconciler ran and
+/// found nothing to do" from "the reconciler never ran" or "the reconciler
+/// could not even fetch its candidate set": all three render as an unchanging
+/// zero, so a dashboard built on them alone is permanently, misleadingly green
+/// exactly when money is stuck. This enum is the discriminator, so an operator
+/// can alert on the ABSENCE of `Completed` ticks and on any rate of
+/// `ListFailed`/`UnboundRpc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum X402ReconcileTickResult {
+    /// The candidate page was fetched and driven; the outcome counters in the
+    /// accompanying report are meaningful.
+    Completed,
+    /// The tick ran but could not fetch its candidate set (storage error). No
+    /// attempt was inspected; every in-flight hold stayed exactly as it was.
+    /// This is the state the signal most needs to make visible.
+    ListFailed,
+    /// The reconciler is switched off by config (`enabled = false` or
+    /// `max_reconciles_per_tick == 0`). Deliberate, but still worth counting:
+    /// an operator who believes it is on can see that it is not.
+    Disabled,
+    /// Enabled, but no on-chain RPC transport is bound, so nothing can be
+    /// verified. Holds accumulate with no path to resolution.
+    UnboundRpc,
+}
+
 /// The per-attempt reconcile outcome, folded into [`X402ReconcileReport`]. Errors
 /// are an OUTCOME, not a `Result`, so a single attempt can never abort the batch.
 enum ReconcileOutcome {
@@ -376,6 +404,12 @@ impl AppState {
         now_unix: i64,
     ) -> X402ReconcileReport {
         if !self.config.x402_reconciler.enabled {
+            // A disabled reconciler still publishes its LIVENESS result. It
+            // deliberately does NOT publish outcome counters (that would
+            // fabricate a zero-valued reconcile pass that never happened), but
+            // staying entirely silent is what made "switched off" and "running
+            // clean" indistinguishable on a dashboard.
+            self.record_x402_reconcile_tick_result(X402ReconcileTickResult::Disabled);
             return X402ReconcileReport::default();
         }
         match self.production_onchain_settlement_rpc() {
@@ -385,6 +419,7 @@ impl AppState {
                     "x402 settlement reconcile: enabled but no on-chain RPC client is bound \
                      (transport binding is remaining #354 work); skipping tick"
                 );
+                self.record_x402_reconcile_tick_result(X402ReconcileTickResult::UnboundRpc);
                 X402ReconcileReport::default()
             }
         }
@@ -414,6 +449,7 @@ impl AppState {
     ) -> X402ReconcileReport {
         let config = self.config.x402_reconciler.clone();
         if !config.enabled || config.max_reconciles_per_tick == 0 {
+            self.record_x402_reconcile_tick_result(X402ReconcileTickResult::Disabled);
             return X402ReconcileReport::default();
         }
         // Only re-check attempts untouched for at least `reconcile_check_delay_secs`:
@@ -430,10 +466,18 @@ impl AppState {
             Ok(candidates) => candidates,
             Err(error) => {
                 tracing::warn!(error = %error, "x402 reconcile: failed to list reconcilable attempts");
-                return X402ReconcileReport {
+                // A tick that RAN and failed to fetch its candidate set is
+                // precisely the condition the reconcile signal exists to alert
+                // on, so it must publish -- both the `errored` counter and the
+                // `ListFailed` liveness result. Returning the report unpublished
+                // left the whole-batch failure path invisible while every
+                // in-flight hold aged unattended.
+                let report = X402ReconcileReport {
                     errored: 1,
                     ..X402ReconcileReport::default()
                 };
+                self.record_x402_reconcile_metrics(&report, X402ReconcileTickResult::ListFailed);
+                return report;
             }
         };
 
@@ -459,19 +503,36 @@ impl AppState {
             "x402 settlement reconcile complete"
         );
         // #354 box 5: the reconcile signal has to be alertable, not just
-        // greppable. A tick that ran is the only thing that publishes it, so a
-        // disabled/unbound reconciler leaves the previous values in place rather
-        // than reporting a fabricated zero.
-        self.record_x402_reconcile_metrics(&report);
+        // greppable. Outcome counters are published only by a tick that actually
+        // drove a batch, so a disabled/unbound reconciler never reports a
+        // fabricated zero-valued pass -- but every path, including this one,
+        // publishes its liveness result so "ran clean" stays distinguishable
+        // from "did not run".
+        self.record_x402_reconcile_metrics(&report, X402ReconcileTickResult::Completed);
         report
     }
 
     /// Fold one reconcile pass into the Prometheus metrics
-    /// (`ferrogate_x402_reconcile_attempts_total{outcome=…}` and the
-    /// `ferrogate_x402_oldest_unresolved_hold_age_seconds` gauge).
-    fn record_x402_reconcile_metrics(&self, report: &X402ReconcileReport) {
+    /// (`ferrogate_x402_reconcile_attempts_total{outcome=…}`, the
+    /// `ferrogate_x402_oldest_unresolved_hold_age_seconds` gauge, and the
+    /// `ferrogate_x402_reconcile_ticks_total{result=…}` liveness counter).
+    fn record_x402_reconcile_metrics(
+        &self,
+        report: &X402ReconcileReport,
+        result: X402ReconcileTickResult,
+    ) {
         if let Ok(mut metrics) = self.metrics.lock() {
-            metrics.record_x402_reconcile_tick(report);
+            metrics.record_x402_reconcile_tick(report, result);
+        }
+    }
+
+    /// Publish ONLY the liveness result, for tick paths that never drove a batch
+    /// and therefore have no outcome counters to contribute. Kept separate from
+    /// [`Self::record_x402_reconcile_metrics`] so a non-running tick can never
+    /// accidentally fold an all-zero report into the cumulative outcome series.
+    fn record_x402_reconcile_tick_result(&self, result: X402ReconcileTickResult) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_x402_reconcile_tick_result(result);
         }
     }
 

@@ -3801,7 +3801,12 @@ impl GatewayMetricsAccumulator {
     /// GAUGE and is OVERWRITTEN, because the operator needs the current depth of
     /// the oldest in-flight hold, not the worst value ever seen -- a max-forever
     /// gauge would stay pinned at a spike that has since been reconciled.
-    fn record_x402_reconcile_tick(&mut self, report: &state_x402_reconciler::X402ReconcileReport) {
+    fn record_x402_reconcile_tick(
+        &mut self,
+        report: &state_x402_reconciler::X402ReconcileReport,
+        result: state_x402_reconciler::X402ReconcileTickResult,
+    ) {
+        self.record_x402_reconcile_tick_result(result);
         let totals = &mut self.x402_reconcile_totals;
         totals.scanned = totals.scanned.saturating_add(report.scanned);
         totals.settled = totals.settled.saturating_add(report.settled);
@@ -3813,6 +3818,26 @@ impl GatewayMetricsAccumulator {
         totals.skipped = totals.skipped.saturating_add(report.skipped);
         totals.errored = totals.errored.saturating_add(report.errored);
         totals.oldest_unresolved_hold_age_seconds = report.oldest_unresolved_hold_age_secs;
+    }
+
+    /// #354 box 5: bump ONLY the liveness counter for this tick result. Every
+    /// reconcile tick reaches this, including the ones that never drove a batch
+    /// (disabled, no RPC bound, candidate fetch failed) and therefore have no
+    /// outcome counters to fold in — those are exactly the states an
+    /// outcome-only dashboard renders as an indistinguishable green zero.
+    fn record_x402_reconcile_tick_result(
+        &mut self,
+        result: state_x402_reconciler::X402ReconcileTickResult,
+    ) {
+        use state_x402_reconciler::X402ReconcileTickResult as Result_;
+        let totals = &mut self.x402_reconcile_totals;
+        let counter = match result {
+            Result_::Completed => &mut totals.ticks_completed,
+            Result_::ListFailed => &mut totals.ticks_list_failed,
+            Result_::Disabled => &mut totals.ticks_disabled,
+            Result_::UnboundRpc => &mut totals.ticks_unbound_rpc,
+        };
+        *counter = counter.saturating_add(1);
     }
 
     /// #368: fold one presigned-upload outcome into the cumulative counters.

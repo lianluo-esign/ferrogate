@@ -55,6 +55,12 @@ pub const MAX_MEMO_BYTES: usize = 256;
 /// wire format. Any change to the hashed tuple MUST bump this tag so that
 /// persisted hashes from an older revision are distinguishable.
 pub const CHALLENGE_HASH_DOMAIN: &str = "ferrogate-x402-challenge-v1";
+/// Domain-separation tag mixed into [`SelectedPayment::payment_identity_hex`].
+///
+/// Separate from [`CHALLENGE_HASH_DOMAIN`] on purpose: the two hashes answer
+/// different questions and MUST NOT be interchangeable. Any change to the
+/// hashed tuple MUST bump this tag.
+pub const PAYMENT_IDENTITY_DOMAIN: &str = "ferrogate-x402-payment-identity-v1";
 /// Solana wire packet limit; a serialized proof transaction can never exceed
 /// this, so larger signer output is rejected as a failed proof build.
 pub const MAX_SVM_TRANSACTION_BYTES: usize = 1232;
@@ -169,15 +175,63 @@ pub struct SelectedPayment {
 }
 
 impl SelectedPayment {
+    /// Lowercase hex of the SHA-256 over the *economic identity* of this
+    /// payment: scheme, network, mint, recipient, atomic amount, resource URL.
+    ///
+    /// This is NOT [`Self::challenge_hash`] and must not be confused with it.
+    /// `challenge_hash` covers the full audit tuple, which includes
+    /// `fee_payer`, `max_timeout_seconds` and `memo` — fields the MERCHANT
+    /// controls and may legitimately refresh between retries of the same
+    /// logical challenge. That makes `challenge_hash` right for the immutable
+    /// audit record and WRONG as a payment idempotency key: a merchant that
+    /// flips one `memo` byte on a retry would mint a different key, opening a
+    /// second attempt and a second wallet hold for a payment the caller only
+    /// ever authorized once — i.e. it could make the gateway pay twice.
+    ///
+    /// This tuple is exactly the set a merchant cannot vary without changing
+    /// *what is being bought and for how much*: vary any of it and it genuinely
+    /// is a different payment. Transport hints (`recentBlockhash`,
+    /// `lastValidBlockHeight`) and `extensions` are excluded for the same
+    /// refresh reason as in `challenge_hash`.
+    ///
+    /// Callers key durable payment attempts on this. The full `challenge_hash`
+    /// is still stored on the attempt, so a retry that changes a merchant-
+    /// controlled field lands on the SAME attempt id and fails closed against
+    /// the attempt's immutable tuple rather than paying again.
+    pub fn payment_identity_hex(&self) -> String {
+        let mut h = Sha256::new();
+        let amount = self.atomic_amount.to_string();
+        for part in [
+            PAYMENT_IDENTITY_DOMAIN,
+            SCHEME_EXACT,
+            self.network.caip2(),
+            self.mint.as_str(),
+            self.recipient.as_str(),
+            amount.as_str(),
+            self.resource_url.as_str(),
+        ] {
+            h.update(part.as_bytes());
+            h.update([0u8]);
+        }
+        let digest: [u8; 32] = h.finalize().into();
+        hex_lower(&digest)
+    }
+
     /// Lowercase hex form of [`Self::challenge_hash`].
     pub fn challenge_hash_hex(&self) -> String {
-        let mut out = String::with_capacity(64);
-        for b in self.challenge_hash {
-            use std::fmt::Write as _;
-            let _ = write!(out, "{b:02x}");
-        }
-        out
+        hex_lower(&self.challenge_hash)
     }
+}
+
+/// Lowercase hex of a 32-byte digest. One definition, so the two hash
+/// accessors above cannot render the same bytes differently.
+fn hex_lower(digest: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 /// Caller-supplied constraints for requirement selection. This is mechanical

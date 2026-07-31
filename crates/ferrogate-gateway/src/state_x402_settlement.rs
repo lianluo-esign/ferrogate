@@ -229,7 +229,26 @@ pub(crate) struct PaidEgressOpen {
 pub(crate) enum OpenOutcome {
     /// The hold was placed and the attempt exists in `authorized`. Boxed: the
     /// attempt record dwarfs the other variants (`clippy::large_enum_variant`).
-    Opened(Box<StoredPaymentAttempt>),
+    Opened {
+        attempt: Box<StoredPaymentAttempt>,
+        /// True for EXACTLY ONE caller per `attempt_id`: the one whose row
+        /// insert actually created the attempt
+        /// ([`PaymentAttemptCreation::Created`]). Every other caller -- a
+        /// sequential replay or a concurrent one racing in the same
+        /// millisecond -- observes `false`.
+        ///
+        /// This is a CLAIM, not an observation, and it is the only
+        /// serialization point that exists before the signer. The backing
+        /// insert is `INSERT ... ON CONFLICT (id) DO NOTHING` on Postgres
+        /// (`inserted == 1` decides) and an exclusive `&mut` map insert on the
+        /// memory twin, so at most one concurrent caller can ever see `true`.
+        /// Callers MUST gate irreversible, non-idempotent work (signing a
+        /// transfer proof, dispatching a paid replay) on this rather than on
+        /// the attempt's observed `state`: `authorized` is the state `open`
+        /// creates the row in, so a state read is a check-then-act that every
+        /// racing caller passes.
+        claimed: bool,
+    },
     /// The wallet exists but its available balance cannot cover the hold. No
     /// hold is placed and no attempt is created: the signer/paid replay is never
     /// reached (acceptance: "insufficient funds never invokes signer").
@@ -483,11 +502,17 @@ impl X402SettlementLoop {
             updated_at_unix: now_unix,
         };
         let created = self.repositories.create_payment_attempt(attempt).await?;
-        let attempt = match created {
-            PaymentAttemptCreation::Created(attempt) => attempt,
-            PaymentAttemptCreation::Existing(attempt) => attempt,
+        // The insert IS the claim: `Created` is returned to exactly one caller
+        // per id, so `claimed` carries that single-winner fact to the caller
+        // instead of forcing it to re-derive one from a racy state read.
+        let (attempt, claimed) = match created {
+            PaymentAttemptCreation::Created(attempt) => (attempt, true),
+            PaymentAttemptCreation::Existing(attempt) => (attempt, false),
         };
-        Ok(OpenOutcome::Opened(Box::new(attempt)))
+        Ok(OpenOutcome::Opened {
+            attempt: Box::new(attempt),
+            claimed,
+        })
     }
 
     // -- SUBMIT ----------------------------------------------------------

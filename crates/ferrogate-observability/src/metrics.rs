@@ -185,6 +185,28 @@ pub struct X402ReconcileMetricTotals {
     /// Resets to 0 on a tick that resolved everything it scanned, that scanned
     /// nothing, or that did not run (reconciler disabled / no RPC bound).
     pub oldest_unresolved_hold_age_seconds: u64,
+    /// LIVENESS counters: how many ticks ended in each way. Exported as
+    /// `ferrogate_x402_reconcile_ticks_total{result=…}`.
+    ///
+    /// The outcome counters above cannot answer "is the reconciler running at
+    /// all?" — a reconciler that is switched off, that has no RPC bound, or
+    /// that fails to fetch its candidate set every single tick all leave those
+    /// counters frozen at the same values as a reconciler that is running
+    /// perfectly with nothing to do. That makes a dashboard built only on
+    /// outcomes permanently green exactly when payments are stuck. These four
+    /// disjoint counters are the discriminator: alert on the absence of
+    /// `completed` ticks, and on any rate of `list_failed` / `unbound_rpc`.
+    ///
+    /// Ticks that drove a batch (and only those) also contribute to the outcome
+    /// counters; the other three results publish liveness only, so a tick that
+    /// never ran can never be mistaken for a clean zero-valued pass.
+    pub ticks_completed: u64,
+    /// Ticks that ran but could not fetch their candidate set (storage error).
+    pub ticks_list_failed: u64,
+    /// Ticks skipped because the reconciler is disabled by config.
+    pub ticks_disabled: u64,
+    /// Ticks skipped because no on-chain RPC transport is bound.
+    pub ticks_unbound_rpc: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

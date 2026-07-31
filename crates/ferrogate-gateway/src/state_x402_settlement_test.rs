@@ -132,10 +132,13 @@ fn open_reserves_hold_and_creates_authorized_attempt() {
     let loop_ = state.x402_settlement_loop();
     let outcome = block_on(loop_.open(&open_request("a1", 500), 100)).expect("open");
     match outcome {
-        OpenOutcome::Opened(attempt) => {
+        OpenOutcome::Opened { attempt, claimed } => {
             assert_eq!(attempt.state, PAYMENT_ATTEMPT_AUTHORIZED);
             assert_eq!(attempt.hold_id.as_deref(), Some("a1"));
             assert_eq!(attempt.credits_amount, Some(500));
+            // The FIRST open on an id is the claim winner; only this caller may
+            // go on to sign.
+            assert!(claimed, "first open on an attempt id must claim it");
         }
         other => panic!("expected Opened, got {other:?}"),
     }
@@ -666,7 +669,10 @@ proptest! {
                 let id = format!("p{index}");
                 let action = if *settle { Action::Settle } else { Action::Release };
                 let outcome = loop_.open(&open_request(&id, *credits), 100).await.expect("open");
-                prop_assert!(matches!(outcome, OpenOutcome::Opened(_)), "open must succeed");
+                prop_assert!(
+                    matches!(outcome, OpenOutcome::Opened { .. }),
+                    "open must succeed"
+                );
                 authorized_total += *credits;
 
                 match action {

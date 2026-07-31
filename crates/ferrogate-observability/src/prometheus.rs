@@ -527,6 +527,28 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
         "ferrogate_x402_oldest_unresolved_hold_age_seconds {}\n",
         x402.oldest_unresolved_hold_age_seconds
     ));
+    // LIVENESS, not outcomes. Four fixed, disjoint label values, so the
+    // cardinality is constant. Without this series the outcome counters above
+    // are unfalsifiable: a reconciler that is off, unbound, or failing to fetch
+    // its candidate set every tick publishes the same frozen zeros as one that
+    // is running perfectly with nothing to do. Alert on the absence of a
+    // rising `completed`, and on any rate of `list_failed` / `unbound_rpc`.
+    push_help(
+        &mut output,
+        "ferrogate_x402_reconcile_ticks_total",
+        "Total x402 settlement reconciler ticks by how the tick ended; result=completed drove a candidate batch, the others did not run one (result=list_failed could not fetch candidates, result=disabled is switched off by config, result=unbound_rpc has no on-chain RPC bound).",
+        "counter",
+    );
+    for (result, value) in [
+        ("completed", x402.ticks_completed),
+        ("list_failed", x402.ticks_list_failed),
+        ("disabled", x402.ticks_disabled),
+        ("unbound_rpc", x402.ticks_unbound_rpc),
+    ] {
+        output.push_str(&format!(
+            "ferrogate_x402_reconcile_ticks_total{{result=\"{result}\"}} {value}\n"
+        ));
+    }
 
     push_help(
         &mut output,

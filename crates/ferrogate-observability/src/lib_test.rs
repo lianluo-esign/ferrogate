@@ -192,6 +192,10 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
             skipped: 1,
             errored: 0,
             oldest_unresolved_hold_age_seconds: 930,
+            ticks_completed: 12,
+            ticks_list_failed: 3,
+            ticks_disabled: 5,
+            ticks_unbound_rpc: 7,
         },
     };
 

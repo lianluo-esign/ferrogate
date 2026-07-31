@@ -487,10 +487,24 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
     // 4. Open the loop: wallet hold (#281) + durable `authorized` attempt (#352).
     //    Insufficient funds / no wallet never reaches the signer below.
     let credits_amount = credits_i64(&authorization)?;
-    let attempt_id = format!("{}:{}", ctx.idempotency_key, selected.challenge_hash_hex());
+    // The idempotency key is derived from the payment's ECONOMIC IDENTITY
+    // (scheme/network/mint/recipient/amount/resource), NOT from the full
+    // `challenge_hash`. `challenge_hash` folds in `memo`, `fee_payer` and
+    // `max_timeout_seconds` -- all merchant-controlled and legitimately
+    // refreshable between retries -- so keying on it let a merchant flip one
+    // `memo` byte on the 402 retry to mint a fresh attempt id, dodge the
+    // duplicate guard below, take a SECOND wallet hold and get a SECOND proof
+    // signed for one authorized purchase. The merchant cannot vary the identity
+    // tuple without changing what is bought and for how much.
+    //
+    // The full `challenge_hash` still travels into the attempt row's immutable
+    // tuple (`build_open`), so a retry that only mutates a merchant-controlled
+    // field now collides on the SAME attempt id and is refused by storage as a
+    // changed immutable tuple -- a typed failure, never a second payment.
+    let attempt_id = format!("{}:{}", ctx.idempotency_key, selected.payment_identity_hex());
     let open = build_open(ctx, &selected, &authorization, &attempt_id, credits_amount);
-    let opened = match loop_.open(&open, now_unix).await? {
-        OpenOutcome::Opened(attempt) => attempt,
+    let (opened, claimed) = match loop_.open(&open, now_unix).await? {
+        OpenOutcome::Opened { attempt, claimed } => (attempt, claimed),
         OpenOutcome::Insufficient {
             available_credits,
             requested_credits,
@@ -511,18 +525,29 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
         }
     };
 
-    // 4b. `open` is idempotent on `attempt_id`, so a REPLAYED negotiation for the
-    //     same idempotency key + challenge gets the FIRST negotiation's attempt
-    //     back instead of a fresh `authorized` one -- with no second hold and no
-    //     second row. Anything other than `authorized` therefore means a proof
-    //     for this payment already exists, so the signer must not run again:
-    //     signing twice is a second transfer proof for one authorized payment,
-    //     and the `submitted`/`outcome_unknown` cases have money that may already
-    //     be moving on-chain. Fail closed BEFORE the signer, leaving the existing
-    //     attempt and its hold exactly as the first negotiation (or the
-    //     reconciler) left them -- the replay never re-drives a finalize edge,
-    //     because it has no fresh on-chain evidence to justify one.
-    if opened.state != PAYMENT_ATTEMPT_AUTHORIZED {
+    // 4b. The RIGHT TO SIGN is a CLAIM, not an observation. `claimed` is true for
+    //     exactly one caller: the one whose `INSERT ... ON CONFLICT (id) DO
+    //     NOTHING` actually created the row (`PaymentAttemptCreation::Created`).
+    //     Every other caller on this `attempt_id` -- a sequential replay OR a
+    //     concurrent one racing in the same millisecond -- gets `Existing` and is
+    //     refused here.
+    //
+    //     Reading the state and then acting on it is NOT sufficient and was the
+    //     bug: two concurrent negotiations both see `authorized` (it is the state
+    //     `open` creates the row in), both pass a state check, and both reach the
+    //     signer -- two transfer proofs for one authorized payment. The database
+    //     insert is the only serialization point that exists before the signer,
+    //     so it is the one that must decide. The state check is kept as a second,
+    //     independent condition: a `Created` row is always `authorized`, so a row
+    //     that is both claimed and non-`authorized` is a storage invariant
+    //     violation and must also fail closed.
+    //
+    //     Failing closed costs a losing caller its payment, never a double one:
+    //     the hold `open` placed is idempotent on `attempt_id` (no second hold),
+    //     no finalize edge is driven (the loser has no fresh on-chain evidence
+    //     that would justify one), and an attempt abandoned in `authorized` is
+    //     pre-submission, so the TTL sweeper releases its hold.
+    if !claimed || opened.state != PAYMENT_ATTEMPT_AUTHORIZED {
         return Err(X402NegotiationError::DuplicateNegotiation {
             attempt_id,
             state: opened.state,
