@@ -919,11 +919,19 @@ impl SharedAppState {
         self.current()
             .merge_undeclared_durable_control_plane_documents(&mut candidate)?;
         candidate.validate().map_err(|error| {
-            error.context(
+            // Folded into the message rather than attached with `.context()`:
+            // both handlers that surface this render it with `.to_string()`
+            // (`/admin/v1/config/reload` and `/admin/v1/config/validate`), and
+            // `anyhow`'s `Display` shows only the outermost context. A
+            // `.context(...)` here would hand the operator the sentence below
+            // and hide the one actionable part -- which durable key, policy or
+            // field the payload contradicts -- on a rejection that a routine
+            // edit (dropping a model a durable row still references) triggers.
+            anyhow::anyhow!(
                 "config reload rejected: the payload cannot be reconciled with the durable \
                  control-plane documents it does not declare (api-keys, policies and gateway \
                  configs minted through the admin API are restored, not dropped); the running \
-                 config is unchanged",
+                 config is unchanged: {error:#}"
             )
         })?;
         Ok(candidate)

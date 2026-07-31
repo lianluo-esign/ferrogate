@@ -12181,3 +12181,151 @@ mod action_id_admission_tests {
         assert_eq!(governed_action_tenant_key(&TenantContext::default()), "");
     }
 }
+
+#[cfg(test)]
+mod inline_validate_agrees_with_reload_tests {
+    use super::*;
+    use crate::state::SharedAppState;
+    use ferrogate_config::Config;
+
+    /// The node an operator would reload: it runs `fast-chat`, and nothing in
+    /// the document names a credential, because one minted at runtime cannot be
+    /// named by a config document.
+    fn booted_node() -> SharedAppState {
+        let config = Config::from_toml_str(
+            r#"
+listen = "127.0.0.1:18513"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:10001/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-test"
+"#,
+        )
+        .expect("the running config is valid");
+        SharedAppState::with_source_path(config, None)
+    }
+
+    /// A payload that drops `fast-chat`. Valid on its own -- the credential it
+    /// declares constrains nothing -- and illegal the moment the durable row
+    /// that still references the model is merged back into it.
+    ///
+    /// It has to declare SOME credential source: `config_from_admin_payload`
+    /// runs `ensure_auth_posture_is_declared` first (#542), so a payload naming
+    /// none is refused before the merge is ever reached, which would make this
+    /// test pass for the wrong reason.
+    const PAYLOAD_WITHOUT_THE_MODEL: &str = r#"
+listen = "127.0.0.1:18513"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:10001/v1"
+
+[[api_keys]]
+id = "declared"
+name = "declared"
+key = "declared-secret"
+scopes = ["chat.completions"]
+organization_id = "tenant-a"
+"#;
+
+    /// #512 review minor 3: `/validate` merging the durable documents before it
+    /// answers is the only thing keeping the dry run and the apply from
+    /// disagreeing -- and nothing in the tree held it. Replacing the merge with
+    /// a bare `Ok(candidate)` reddened no test, so the guarantee could regress
+    /// silently into `"valid":true` for a payload `/reload` refuses.
+    ///
+    /// Delete the `state.inline_reload_candidate(candidate)` in
+    /// `validation_candidate_from_admin_payload` (return `Ok(candidate)`) and
+    /// this reds on the first assertion: the dry run calls the payload valid
+    /// while the apply still refuses it.
+    #[test]
+    fn validate_refuses_the_inline_payload_reload_also_refuses() {
+        let node = booted_node();
+        node.upsert_api_key(
+            serde_json::from_value(serde_json::json!({
+                "id": "k1",
+                "name": "k1",
+                "key": "k1-secret",
+                "scopes": ["chat.completions"],
+                "organization_id": "tenant-a",
+                "allowed_models": ["fast-chat"],
+            }))
+            .expect("a valid runtime-minted api key"),
+        )
+        .expect("mint a credential scoped to the model the node runs");
+
+        let payload = AdminConfigValidateRequest {
+            config_toml: Some(PAYLOAD_WITHOUT_THE_MODEL.to_string()),
+            config_yaml: None,
+            config_caddyfile: None,
+            filename: None,
+            source: None,
+        };
+
+        let dry_run = validation_candidate_from_admin_payload(&payload, &node)
+            .expect_err("the dry run must refuse what the apply refuses");
+
+        let apply = node
+            .reload_process_local_from_inline_payload(
+                Config::from_toml_str(PAYLOAD_WITHOUT_THE_MODEL)
+                    .expect("the payload parses on its own"),
+            )
+            .expect_err("the apply refuses the merged candidate");
+
+        // Same seam, so the operator is told the same thing by both endpoints --
+        // including which durable row the payload contradicts.
+        assert_eq!(dry_run.to_string(), apply.to_string());
+        assert!(dry_run.to_string().contains("fast-chat"), "{dry_run}");
+    }
+
+    /// `source=file` deliberately keeps the payload-only answer: its reload
+    /// counterpart reconciles the full durable snapshot in
+    /// `reload_from_source_path`, so merging here would report on a candidate
+    /// that path never applies. Guarding the short circuit so the exemption
+    /// stays a decision rather than drift.
+    #[test]
+    fn a_file_sourced_validate_does_not_merge_the_durable_documents() {
+        let node = booted_node();
+        node.upsert_api_key(
+            serde_json::from_value(serde_json::json!({
+                "id": "k1",
+                "name": "k1",
+                "key": "k1-secret",
+                "scopes": ["chat.completions"],
+                "organization_id": "tenant-a",
+                "allowed_models": ["fast-chat"],
+            }))
+            .expect("a valid runtime-minted api key"),
+        )
+        .expect("mint the credential the inline path would restore");
+
+        let payload = AdminConfigValidateRequest {
+            config_toml: Some(PAYLOAD_WITHOUT_THE_MODEL.to_string()),
+            config_yaml: None,
+            config_caddyfile: None,
+            filename: None,
+            source: Some("file".to_string()),
+        };
+
+        let candidate = validation_candidate_from_admin_payload(&payload, &node)
+            .expect("the file path answers about the payload alone");
+        let ids: Vec<&str> = candidate
+            .api_keys
+            .iter()
+            .map(|key| key.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["declared"],
+            "a file-sourced candidate reports on the payload alone -- the durable `k1` is \
+             reconciled by `reload_from_source_path`, not merged in here"
+        );
+    }
+}

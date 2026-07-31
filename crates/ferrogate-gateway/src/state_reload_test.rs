@@ -81,8 +81,31 @@ fn deny_policy(name: &str, api_key_id: &str, model: &str) -> ConfigPolicyRule {
     .expect("a valid deny policy")
 }
 
+/// A gateway-config profile bound to one credential -- the second document
+/// class carrying an `api_key_ids` binding, and so the second one whose loss an
+/// inline reload must not cause.
+fn bound_gateway_config(id: &str, api_key_id: &str) -> GatewayConfigProfile {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "name": id,
+        "api_key_ids": [api_key_id],
+        // Required by `validate_gateway_configs`: a profile slice must state the
+        // cache posture it overrides rather than inheriting one implicitly.
+        "cache_enabled": false,
+    }))
+    .expect("a valid gateway-config profile")
+}
+
 fn api_key_ids(config: &Config) -> Vec<&str> {
     config.api_keys.iter().map(|key| key.id.as_str()).collect()
+}
+
+fn gateway_config_ids(config: &Config) -> Vec<&str> {
+    config
+        .gateway_configs
+        .iter()
+        .map(|profile| profile.id.as_str())
+        .collect()
 }
 
 fn policy_names(config: &Config) -> Vec<&str> {
@@ -245,6 +268,37 @@ fn a_restored_key_does_not_outlive_the_deny_policy_that_constrains_it() {
     );
 }
 
+/// #512 review minor 2: the `gateway_configs` arm was added for the same reason
+/// as the `policies` one -- `GatewayConfigProfile` carries the same
+/// `api_key_ids` binding -- but nothing held it, so deleting it reddened no
+/// test. The compensating control now has the failing test the review's own
+/// standard requires of one.
+///
+/// Delete the `config.gateway_configs` arm of
+/// `merge_undeclared_durable_control_plane_documents` and this reds on the
+/// profile assertion while the key assertion still passes.
+#[test]
+fn a_restored_key_keeps_the_durable_gateway_config_bound_to_it() {
+    let node = booted_node();
+    node.upsert_api_key(minted_key("k1", serde_json::json!({})))
+        .expect("mint a runtime credential");
+    node.upsert_gateway_config(bound_gateway_config("profile-a", "k1"))
+        .expect("create the durable profile bound to it");
+
+    let result = node
+        .reload_process_local_from_inline_payload(payload("\n[scheduler]\nenabled = true\n"))
+        .expect("an unrelated section is not a reason to refuse the reload");
+
+    assert!(result.committed, "{result:?}");
+    let live = node.current();
+    assert_eq!(api_key_ids(&live.config), vec!["k1"]);
+    assert_eq!(
+        gateway_config_ids(&live.config),
+        vec!["profile-a"],
+        "the credential survived, so the profile bound to it must too"
+    );
+}
+
 /// #512 review major: the restored rows were never seen by the validation the
 /// payload itself passed, so the merged whole is validated before it is
 /// committed -- and a failure is a REJECTION, not a silently-persisted illegal
@@ -281,10 +335,24 @@ base_url = "http://127.0.0.1:10001/v1"
     let error = node
         .reload_process_local_from_inline_payload(without_the_model)
         .expect_err("a merged candidate that cannot validate must not commit");
-    let rendered = format!("{error:#}");
+    // `.to_string()`, not `{error:#}`: this is exactly how the `/reload` and
+    // `/validate` handlers render the rejection into the response body and the
+    // audit event, so asserting the richer form would pass while the operator
+    // still saw nothing actionable. Swap the `anyhow!` in
+    // `inline_reload_candidate` back to `.context(...)` and this reds -- the
+    // sentence survives, the identifiers do not.
+    let rendered = error.to_string();
     assert!(
         rendered.contains("config reload rejected"),
         "the operator is told the reload was refused: {rendered}"
+    );
+    assert!(
+        rendered.contains("fast-chat"),
+        "and which reference the merged candidate could not resolve: {rendered}"
+    );
+    assert!(
+        rendered.contains("k1"),
+        "and which durable row still holds it: {rendered}"
     );
 
     let live = node.current();
