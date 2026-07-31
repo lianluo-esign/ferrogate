@@ -4855,3 +4855,172 @@ fn rejects_an_x402_spend_policy_with_a_zero_cap() {
         "was: {error}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #368 acceptance box 5: "maximum object size and URL expiry are explicit and
+// typed". These bounds ARE the upload contract the bucket enforces, so a
+// declaration outside them must be rejected at config load rather than
+// silently rounded into a different promise.
+// ---------------------------------------------------------------------------
+
+/// An `[asset_bucket]` that is otherwise valid, with the two #368 presign
+/// knobs under test set to `ttl` / `max_object_bytes`.
+fn asset_bucket_with_presign_limits(
+    ttl: Option<u64>,
+    max_object_bytes: Option<u64>,
+) -> AssetBucketConfig {
+    AssetBucketConfig {
+        presign_ttl_secs: ttl,
+        presign_max_object_bytes: max_object_bytes,
+        ..enabled_asset_bucket()
+    }
+}
+
+fn presign_limits_result(
+    ttl: Option<u64>,
+    max_object_bytes: Option<u64>,
+) -> anyhow::Result<()> {
+    Config {
+        asset_bucket: asset_bucket_with_presign_limits(ttl, max_object_bytes),
+        ..Config::default()
+    }
+    .validate()
+}
+
+/// The whole range SigV4 can actually sign into `X-Amz-Expires` loads, and
+/// both edges are inclusive. Written as an exhaustive edge sweep so that
+/// tightening the range (e.g. to an exclusive maximum) cannot stay green.
+#[test]
+fn accepts_every_signable_presign_ttl_including_both_edges() {
+    for ttl in [
+        ASSET_PRESIGN_MIN_TTL_SECS,
+        2,
+        900,
+        3_600,
+        ASSET_PRESIGN_MAX_TTL_SECS - 1,
+        ASSET_PRESIGN_MAX_TTL_SECS,
+    ] {
+        presign_limits_result(Some(ttl), None)
+            .unwrap_or_else(|error| panic!("presign_ttl_secs = {ttl} must load: {error:#}"));
+    }
+}
+
+/// A zero TTL signs an already-expired URL and anything past 7 days is refused
+/// outright by S3-compatible backends. Neither may be quietly clamped: the
+/// operator must be told at load.
+#[test]
+fn rejects_an_unsignable_presign_ttl_instead_of_rounding_it() {
+    for ttl in [
+        0,
+        ASSET_PRESIGN_MAX_TTL_SECS + 1,
+        31_536_000,
+        u64::MAX,
+    ] {
+        let error = format!(
+            "{:#}",
+            presign_limits_result(Some(ttl), None)
+                .expect_err("an unsignable presign_ttl_secs must not load")
+        );
+        assert!(
+            error.contains("field asset_bucket.presign_ttl_secs"),
+            "the error must name the offending field, was: {error}"
+        );
+        assert!(
+            error.contains(&ttl.to_string()),
+            "the error must echo the rejected value {ttl}, was: {error}"
+        );
+    }
+}
+
+/// The single-PUT ceiling is inclusive at 5 GiB and anything above it is a
+/// promise no S3-compatible bucket can honour in one request.
+#[test]
+fn bounds_presign_max_object_bytes_to_the_single_put_ceiling() {
+    let ceiling = ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES;
+    assert_eq!(ceiling, 5 * 1024 * 1024 * 1024, "S3's single-PUT limit");
+
+    for accepted in [1, 1_048_576, ceiling - 1, ceiling] {
+        presign_limits_result(None, Some(accepted)).unwrap_or_else(|error| {
+            panic!("presign_max_object_bytes = {accepted} must load: {error:#}")
+        });
+    }
+
+    for rejected in [ceiling + 1, 50_000_000_000, u64::MAX] {
+        let error = format!(
+            "{:#}",
+            presign_limits_result(None, Some(rejected))
+                .expect_err("a ceiling above the single-PUT limit must not load")
+        );
+        assert!(
+            error.contains("field asset_bucket.presign_max_object_bytes")
+                && error.contains(&rejected.to_string())
+                && error.contains(&ceiling.to_string()),
+            "the error must name the field, the rejected value and the ceiling, was: {error}"
+        );
+    }
+}
+
+/// `0` would reject every upload intent; that is a config mistake, not a
+/// "disable uploads" switch, and it has its own message.
+#[test]
+fn rejects_a_zero_presign_max_object_bytes() {
+    let error = format!(
+        "{:#}",
+        presign_limits_result(None, Some(0))
+            .expect_err("a zero per-object ceiling must not load")
+    );
+    assert!(
+        error.contains("field asset_bucket.presign_max_object_bytes")
+            && error.contains('0')
+            && error.contains("every upload intent"),
+        "was: {error}"
+    );
+}
+
+/// Only *declared* values are checked: the overwhelming majority of configs
+/// omit both fields and must be untouched by this validator, including when
+/// `[asset_bucket]` is disabled entirely.
+#[test]
+fn omitted_presign_limits_are_not_validated() {
+    presign_limits_result(None, None).unwrap();
+    Config::default().validate().unwrap();
+    assert!(Config::default().asset_bucket.presign_ttl_secs.is_none());
+    assert!(Config::default()
+        .asset_bucket
+        .presign_max_object_bytes
+        .is_none());
+}
+
+/// The bounds must bite on the real load path, not only on a hand-built
+/// `Config`: an operator's TOML with a year-long URL must fail to load.
+#[test]
+fn a_toml_config_with_out_of_range_presign_limits_fails_to_load() {
+    let base = "listen = \"127.0.0.1:8080\"\n[asset_bucket]\nenabled = true\nendpoint = \
+                \"https://project.supabase.co/storage/v1/s3\"\nbucket = \"ferrogate-assets\"\n\
+                region = \"us-east-1\"\naccess_key_id = \"AKIDEXAMPLE\"\n\
+                secret_access_key_env = \"FERROGATE_ASSET_BUCKET_SECRET\"\n";
+
+    Config::from_toml_str(&format!("{base}presign_ttl_secs = 900\n"))
+        .expect("an in-range TOML config must still load");
+
+    let error = format!(
+        "{:#}",
+        Config::from_toml_str(&format!("{base}presign_ttl_secs = 31536000\n"))
+            .expect_err("a year-long presigned URL must not load")
+    );
+    assert!(
+        error.contains("field asset_bucket.presign_ttl_secs") && error.contains("31536000"),
+        "was: {error}"
+    );
+
+    let error = format!(
+        "{:#}",
+        Config::from_toml_str(&format!("{base}presign_max_object_bytes = 50000000000\n"))
+            .expect_err("a 50 GB single-PUT ceiling must not load")
+    );
+    assert!(
+        error.contains("field asset_bucket.presign_max_object_bytes")
+            && error.contains("50000000000"),
+        "was: {error}"
+    );
+}
