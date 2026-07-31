@@ -958,3 +958,16 @@ fn a_non_canonical_amount_is_never_read_as_covering_the_owed_amount() {
         AmountCoverage::Short
     );
 }
+
+#[test]
+fn probe_settle_on_authorized_attempt() {
+    let state = seed_state(10_000);
+    let loop_ = state.x402_settlement_loop();
+    block_on(loop_.open(&open_request("p1", 500), 100)).expect("open");
+    // NO submit: the attempt is `authorized`.
+    let outcome = block_on(loop_.finalize("p1", &settled_evidence(), 300));
+    println!("PROBE outcome = {outcome:?}");
+    println!("PROBE attempt state = {}", block_on(attempt_state(&state, "p1")));
+    println!("PROBE reservation = {:?}", block_on(reservation_status(&state, "p1")));
+    println!("PROBE balance = {}", block_on(wallet_balance(&state)));
+}
