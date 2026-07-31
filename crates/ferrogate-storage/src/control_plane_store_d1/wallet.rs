@@ -634,17 +634,22 @@ impl D1ControlPlaneStore {
                     newly_applied: false,
                 })
             }
-            crate::WALLET_RESERVATION_RELEASED => Err(StorageError::Conflict(format!(
-                "wallet reservation {reservation_id} was released; cannot settle"
-            ))),
+            crate::WALLET_RESERVATION_RELEASED => Err(StorageError::WalletHoldReleased {
+                reservation_id: reservation_id.to_string(),
+                released_by_expiry: false,
+            }),
             _ if reservation.expires_at_unix <= now_unix => {
                 // Expired before capture: release in-line and reject, so a
-                // settle that races the sweeper still fails closed.
+                // settle that races the sweeper still fails closed. The release
+                // COMMITS, so the error says the hold is gone rather than merely
+                // conflicting -- same contract as the Postgres and in-memory
+                // stores (#507).
                 self.release_reservation_cas(&binding, reservation_id, now_unix)
                     .await?;
-                Err(StorageError::Conflict(format!(
-                    "wallet reservation {reservation_id} expired; cannot settle"
-                )))
+                Err(StorageError::WalletHoldReleased {
+                    reservation_id: reservation_id.to_string(),
+                    released_by_expiry: true,
+                })
             }
             _ => {
                 self.capture_wallet_reservation(&binding, &reservation, now_unix)
@@ -831,7 +836,7 @@ impl D1ControlPlaneStore {
 
         // The active guard missed: a concurrent settle/release won the race.
         // Re-read and report the durable outcome (settled -> the first
-        // settlement; released -> conflict).
+        // settlement; released -> the hold is gone, `WalletHoldReleased`).
         let reloaded = self
             .load_wallet_reservation(binding, &reservation_id)
             .await?
@@ -856,9 +861,10 @@ impl D1ControlPlaneStore {
                 newly_applied: false,
             });
         }
-        Err(StorageError::Conflict(format!(
-            "wallet reservation {reservation_id} was released; cannot settle"
-        )))
+        Err(StorageError::WalletHoldReleased {
+            reservation_id: reservation_id.to_string(),
+            released_by_expiry: false,
+        })
     }
 
     /// The guarded release CAS: `UPDATE ... WHERE status = 'active' RETURNING`.

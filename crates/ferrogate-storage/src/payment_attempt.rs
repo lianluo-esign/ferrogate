@@ -1423,12 +1423,21 @@ payment_attempt_transitions! {
 
     /// `authorized | submitted | outcome_unknown -> failed`: durable evidence
     /// the payment did not settle.
+    ///
+    /// Carries `transaction_signature` for the one failure whose money DID move:
+    /// a settle that found its hold already released (#507). The chain reference
+    /// is then the only pointer to funds the tenant was never charged for, so it
+    /// must land on the terminal row. Same write-once `COALESCE` column and same
+    /// fail-closed [`evidence_conflict`] check as the settle/park edges — a
+    /// differing signature on an idempotent replay is refused, and the ordinary
+    /// failure paths pass `None` and are unaffected.
     fail_payment_attempt, "fail payment attempt",
         [PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_SUBMITTED, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN],
         PAYMENT_ATTEMPT_FAILED,
         a => { TransitionEvidence {
             failure_code: a.failure_code,
             settlement_response: a.settlement_response,
+            transaction_signature: a.transaction_signature,
             ..Default::default()
         } };
 }

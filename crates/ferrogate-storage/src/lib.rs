@@ -719,6 +719,25 @@ pub enum StorageError {
     Serialization(String),
     Conflict(String),
     NotFound(String),
+    /// A settle found the wallet hold it meant to capture already `released`,
+    /// so the credits are back with the tenant and NO capture can ever succeed
+    /// for this reservation (#507).
+    ///
+    /// Split out of [`StorageError::Conflict`] because the caller's correct
+    /// response is the opposite of a conflict's: a conflict leaves the hold
+    /// retained and the attempt open for re-entry, whereas this is terminal —
+    /// retrying can only fail the same way, and describing the hold as
+    /// "retained" is a factual error about where the money is. Callers that
+    /// settle must branch on it; see
+    /// `X402SettlementLoop::settle_edge`.
+    WalletHoldReleased {
+        reservation_id: String,
+        /// True when this very settle released it (the hold's TTL had already
+        /// passed when the capture arrived, and the settle released in-line so
+        /// it still fails closed against the sweeper); false when it was found
+        /// already `released`.
+        released_by_expiry: bool,
+    },
     OperationDeadlineExceeded {
         operation: &'static str,
         stage: &'static str,
@@ -751,6 +770,18 @@ impl std::fmt::Display for StorageError {
             }
             StorageError::Conflict(error) => write!(formatter, "storage conflict: {error}"),
             StorageError::NotFound(error) => write!(formatter, "storage record not found: {error}"),
+            StorageError::WalletHoldReleased {
+                reservation_id,
+                released_by_expiry,
+            } => write!(
+                formatter,
+                "wallet reservation {reservation_id} is released ({}); cannot settle",
+                if *released_by_expiry {
+                    "expired at settle"
+                } else {
+                    "released before settle"
+                }
+            ),
             StorageError::OperationDeadlineExceeded {
                 operation, stage, ..
             } => write!(
@@ -17929,11 +17960,16 @@ mod tests {
             500
         );
 
-        // Releasing again is idempotent; settling a released hold is rejected.
+        // Releasing again is idempotent; settling a released hold is rejected as
+        // terminal -- the credits are already back with the tenant, so no retry
+        // can ever capture them (#507).
         assert!(block_on(repositories.release_wallet_reservation("hold-rel", 5)).is_ok());
         assert!(matches!(
             block_on(repositories.settle_wallet_reservation("hold-rel", 6)),
-            Err(StorageError::Conflict(_))
+            Err(StorageError::WalletHoldReleased {
+                released_by_expiry: false,
+                ..
+            })
         ));
     }
 
@@ -17965,10 +18001,15 @@ mod tests {
         assert_eq!(swept, vec!["hold-exp".to_string()]);
 
         // Settling the expired/released hold is rejected -- the spend never
-        // happened, and the real balance is untouched.
+        // happened, and the real balance is untouched. The sweeper already
+        // flipped it to `released`, so the refusal is the terminal
+        // `WalletHoldReleased` (#507), not a retryable conflict.
         assert!(matches!(
             block_on(repositories.settle_wallet_reservation("hold-exp", 101)),
-            Err(StorageError::Conflict(_))
+            Err(StorageError::WalletHoldReleased {
+                released_by_expiry: false,
+                ..
+            })
         ));
         assert_eq!(
             block_on(repositories.get_wallet("tenant-exp"))

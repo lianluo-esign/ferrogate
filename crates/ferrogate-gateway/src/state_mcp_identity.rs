@@ -2122,6 +2122,7 @@ fn mcp_storage_error_kind(error: &StorageError) -> &'static str {
         StorageError::Serialization(_) => "serialization",
         StorageError::Conflict(_) => "conflict",
         StorageError::NotFound(_) => "not_found",
+        StorageError::WalletHoldReleased { .. } => "wallet_hold_released",
         StorageError::OperationDeadlineExceeded { .. } => "deadline_exceeded",
         StorageError::OperationCancelled { .. } => "cancelled",
         StorageError::OperationCommitOutcomeUnknown { .. } => "commit_outcome_unknown",

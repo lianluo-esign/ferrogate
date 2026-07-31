@@ -270,6 +270,136 @@ fn fail_edge_releases_hold_and_fails_attempt() {
 }
 
 // --------------------------------------------------------------------------
+// #507: a settle whose hold is already released is TERMINAL, not a retryable
+// conflict. The storage layer releases an expired hold in-line and COMMITS it,
+// so the pre-#507 `Conflict` bubbled out of `settle_edge` and the reconciler
+// logged "hold retained" about a hold that had just been released, leaving the
+// attempt to be retried forever by a capture that can never succeed.
+// --------------------------------------------------------------------------
+
+async fn attempt_failure_code(state: &AppState, attempt_id: &str) -> Option<String> {
+    state
+        .repositories_arc()
+        .get_payment_attempt(attempt_id)
+        .await
+        .expect("get attempt")
+        .expect("attempt exists")
+        .failure_code
+}
+
+/// Drives an exact settle against a hold whose TTL has passed and asserts the
+/// full terminal contract. Shared by the exact and overpaid cases because the
+/// #469 overpayment branch must not open a second, softer path to the same
+/// money-loss window.
+fn assert_expired_hold_settle_is_terminal(attempt_id: &str, settled_atomic_amount: &str) {
+    let state = seed_state(10_000);
+    let loop_ = state.x402_settlement_loop();
+    // TTL 3600 from now=100 -> expires at 3700.
+    block_on(loop_.open(&open_request(attempt_id, 500), 100)).expect("open");
+    block_on(loop_.submit(attempt_id, None, 200, 200)).expect("submit");
+    assert_eq!(
+        block_on(reservation_expires_at(&state, attempt_id)),
+        Some(3_700)
+    );
+
+    // Settle evidence arrives AFTER the hold expired: the transfer is confirmed
+    // on-chain, but the capture finds the hold gone.
+    let outcome = block_on(loop_.finalize(
+        attempt_id,
+        &SettlementEvidence::Settled {
+            transaction_signature: "sig-expired",
+            settled_atomic_amount,
+            response: Some("{\"ok\":true}"),
+        },
+        4_000,
+    ))
+    .expect("an expired hold is a terminal outcome, not a bubbled storage error");
+
+    // Terminal, so the reconciler stops re-driving a capture that cannot win.
+    assert!(matches!(outcome, EdgeOutcome::Failed { .. }), "{outcome:?}");
+    assert_eq!(
+        block_on(attempt_state(&state, attempt_id)),
+        PAYMENT_ATTEMPT_FAILED
+    );
+    // The failure code names the money-loss case specifically, so an operator
+    // can query stranded revenue apart from payments that merely did not go
+    // through.
+    assert_eq!(
+        block_on(attempt_failure_code(&state, attempt_id)).as_deref(),
+        Some(X402_HOLD_RELEASED_BEFORE_CAPTURE)
+    );
+    // The chain reference survives on the terminal row: it is the only pointer
+    // to funds the tenant was never charged for.
+    assert_eq!(
+        block_on(attempt_signature(&state, attempt_id)).as_deref(),
+        Some("sig-expired")
+    );
+    // The hold really is released -- this is the fact the old log denied.
+    assert_eq!(
+        block_on(reservation_status(&state, attempt_id)).as_deref(),
+        Some(WALLET_RESERVATION_RELEASED)
+    );
+    // And no capture happened: the wallet is untouched.
+    assert_eq!(block_on(wallet_balance(&state)), 10_000);
+
+    // Re-entry converges on the same terminal instead of oscillating.
+    let replay = block_on(loop_.finalize(
+        attempt_id,
+        &SettlementEvidence::Settled {
+            transaction_signature: "sig-expired",
+            settled_atomic_amount,
+            response: Some("{\"ok\":true}"),
+        },
+        4_100,
+    ))
+    .expect("replay");
+    assert!(matches!(replay, EdgeOutcome::Failed { .. }), "{replay:?}");
+    assert_eq!(block_on(wallet_balance(&state)), 10_000);
+}
+
+#[test]
+fn settle_on_expired_hold_fails_terminally_exact() {
+    // Exact transfer: settled amount equals the authorized `atomic_amount`.
+    assert_expired_hold_settle_is_terminal("x1", "1000000");
+}
+
+#[test]
+fn settle_on_expired_hold_fails_terminally_overpaid() {
+    // Spec-valid overpayment (#469): still must not reach a capture that the
+    // released hold cannot serve.
+    assert_expired_hold_settle_is_terminal("x2", "1500000");
+}
+
+#[test]
+fn settle_on_a_hold_released_before_expiry_is_the_same_terminal() {
+    // The sibling branch: the hold was released by something else (a cancel, the
+    // sweeper) before the settle arrived. `expires_at_unix` has NOT passed, so
+    // this exercises the `status == released` arm rather than the expiry arm --
+    // both mean the credits are back with the tenant and the capture is
+    // impossible, so both must reach the same terminal.
+    let state = seed_state(10_000);
+    let loop_ = state.x402_settlement_loop();
+    block_on(loop_.open(&open_request("x3", 500), 100)).expect("open");
+    block_on(loop_.cancel("x3", "x402_cancelled", 150)).expect("cancel");
+    assert_eq!(
+        block_on(reservation_status(&state, "x3")).as_deref(),
+        Some(WALLET_RESERVATION_RELEASED)
+    );
+
+    // A late settle for the released hold. The attempt is `released`, which
+    // `fail_payment_attempt` does not accept, so the loop must surface a real
+    // error rather than silently claiming a terminal it never wrote.
+    let error = block_on(loop_.finalize("x3", &settled_evidence(), 200))
+        .expect_err("a released pre-submission attempt cannot be failed");
+    assert!(
+        matches!(error, StorageError::Conflict(_)),
+        "expected the attempt state machine to refuse, got {error:?}"
+    );
+    // Whatever the outcome, no capture: the wallet never moved.
+    assert_eq!(block_on(wallet_balance(&state)), 10_000);
+}
+
+// --------------------------------------------------------------------------
 // RELEASE edge (pre-submission cancel / TTL)
 // --------------------------------------------------------------------------
 

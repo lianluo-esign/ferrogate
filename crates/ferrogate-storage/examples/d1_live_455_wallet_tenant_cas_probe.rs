@@ -312,15 +312,23 @@ async fn exercise(
     }
     println!("10 release r3 replay -> released (idempotent)");
 
-    // 11) settle a released hold -> typed Conflict.
+    // 11) settle a released hold -> typed WalletHoldReleased (#507): the hold is
+    // gone, which is terminal, not a retryable conflict.
     match repos
         .settle_wallet_reservation("gate455-r3", now + 50)
         .await
     {
-        Err(StorageError::Conflict(_)) => {}
-        other => return Err(format!("settle(released) must Conflict, got {other:?}").into()),
+        Err(StorageError::WalletHoldReleased {
+            released_by_expiry: false,
+            ..
+        }) => {}
+        other => {
+            return Err(
+                format!("settle(released) must be WalletHoldReleased, got {other:?}").into(),
+            )
+        }
     }
-    println!("11 settle(released r3) -> typed Conflict");
+    println!("11 settle(released r3) -> typed WalletHoldReleased");
 
     // 12) balance reflects only the settled debit: 1000 - 600 = 400.
     let w2 = repos

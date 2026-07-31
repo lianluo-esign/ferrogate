@@ -492,14 +492,18 @@ impl PostgresControlPlaneStore {
         }
         if reservation.status == WALLET_RESERVATION_RELEASED {
             transaction.commit().await.map_err(postgres_error)?;
-            return Err(StorageError::Conflict(format!(
-                "wallet reservation {reservation_id} was released; cannot settle"
-            )));
+            return Err(StorageError::WalletHoldReleased {
+                reservation_id: reservation_id.to_string(),
+                released_by_expiry: false,
+            });
         }
         // status == active
         if reservation.expires_at_unix <= now_unix {
             // Expired before capture: release in-line and reject, so a settle
-            // that races the sweeper still fails closed.
+            // that races the sweeper still fails closed. The release COMMITS --
+            // which is why the error is `WalletHoldReleased` and not a
+            // `Conflict`: the caller is being told the hold is gone, not that it
+            // should retry with the hold still standing (#507).
             transaction
                 .execute(
                     "UPDATE wallet_reservations SET status = 'released', updated_at_unix = $2 \
@@ -509,9 +513,10 @@ impl PostgresControlPlaneStore {
                 .await
                 .map_err(postgres_error)?;
             transaction.commit().await.map_err(postgres_error)?;
-            return Err(StorageError::Conflict(format!(
-                "wallet reservation {reservation_id} expired; cannot settle"
-            )));
+            return Err(StorageError::WalletHoldReleased {
+                reservation_id: reservation_id.to_string(),
+                released_by_expiry: true,
+            });
         }
 
         let delta_credits = -reservation.amount_credits;
@@ -1193,18 +1198,23 @@ impl RuntimeControlPlaneState {
             });
         }
         if reservation.status == WALLET_RESERVATION_RELEASED {
-            return Err(StorageError::Conflict(format!(
-                "wallet reservation {reservation_id} was released; cannot settle"
-            )));
+            return Err(StorageError::WalletHoldReleased {
+                reservation_id: reservation_id.to_string(),
+                released_by_expiry: false,
+            });
         }
         if reservation.expires_at_unix <= now_unix {
+            // Mirrors the Postgres branch: the release is PERSISTED here, so the
+            // error must say the hold is gone rather than merely conflicting
+            // (#507).
             reservation.status = WALLET_RESERVATION_RELEASED.to_string();
             reservation.updated_at_unix = now_unix;
             self.wallet_reservations
                 .insert(reservation.id.clone(), reservation);
-            return Err(StorageError::Conflict(format!(
-                "wallet reservation {reservation_id} expired; cannot settle"
-            )));
+            return Err(StorageError::WalletHoldReleased {
+                reservation_id: reservation_id.to_string(),
+                released_by_expiry: true,
+            });
         }
         let delta_credits = -reservation.amount_credits;
         let balance_after_credits = self

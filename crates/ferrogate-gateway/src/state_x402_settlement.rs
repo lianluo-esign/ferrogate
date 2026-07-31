@@ -74,6 +74,17 @@ use ferrogate_storage::{
 use super::AppState;
 use ferrogate_config::{x402_hold_ttl_floor_secs, X402ReconcilerConfig};
 
+/// Failure code for the one terminal where the money moved but the tenant is
+/// never charged: a settle arrived for a hold that was already `released` (its
+/// TTL had passed, or a release beat the capture), so the credits are back with
+/// the tenant while the merchant keeps the confirmed on-chain transfer (#507).
+///
+/// It is deliberately distinct from ordinary settlement failures: an operator
+/// querying this code is looking at stranded revenue, not a payment that simply
+/// did not go through. The attempt row carries the `transaction_signature`
+/// alongside it so the chain reference survives.
+pub(crate) const X402_HOLD_RELEASED_BEFORE_CAPTURE: &str = "x402_hold_released_before_capture";
+
 /// A durable success/failure classification produced by the injected settlement
 /// verifier/reconciler BEFORE any database mutation (no external work runs
 /// inside a transaction, per AGENTS.md). The trust order between on-chain RPC
@@ -589,8 +600,15 @@ impl X402SettlementLoop {
                 failure_code,
                 response,
             } => {
-                self.fail_edge(attempt_id, &hold_id, failure_code, *response, now_unix)
-                    .await
+                self.fail_edge(
+                    attempt_id,
+                    &hold_id,
+                    failure_code,
+                    None,
+                    *response,
+                    now_unix,
+                )
+                .await
             }
             SettlementEvidence::Unknown {
                 response,
@@ -642,6 +660,42 @@ impl X402SettlementLoop {
                     .mark_unknown(attempt_id, response, Some(transaction_signature), now_unix)
                     .await;
             }
+            Err(StorageError::WalletHoldReleased {
+                released_by_expiry, ..
+            }) => {
+                // The hold is GONE and the transfer is confirmed on-chain: the
+                // merchant keeps the stablecoin and the tenant's credits are
+                // back, so this attempt can never be captured. Bubbling the
+                // error instead (the pre-#507 behaviour) made the reconciler log
+                // "hold retained" about a hold that had just been released, and
+                // left the attempt non-terminal to be retried forever by a
+                // capture that cannot succeed.
+                //
+                // Terminal `failed` is the honest state: the CAPTURE failed
+                // definitively. The failure code names why, and the on-chain
+                // signature rides along so the uncharged funds stay traceable
+                // from the attempt row.
+                tracing::error!(
+                    attempt_id,
+                    hold_id,
+                    transaction_signature,
+                    settled_atomic_amount,
+                    released_by_expiry,
+                    "x402 settle: wallet hold already released, capture impossible; \
+                     on-chain transfer confirmed but the tenant will NOT be charged \
+                     for it -- operator reconciliation required"
+                );
+                return self
+                    .fail_edge(
+                        attempt_id,
+                        hold_id,
+                        X402_HOLD_RELEASED_BEFORE_CAPTURE,
+                        Some(transaction_signature),
+                        response,
+                        now_unix,
+                    )
+                    .await;
+            }
             Err(error) => return Err(error),
         }
 
@@ -684,11 +738,17 @@ impl X402SettlementLoop {
     }
 
     /// FAIL edge (definite failure evidence): release hold, THEN mark failed.
+    ///
+    /// `transaction_signature` is `Some` only for the #507 hold-released-before-
+    /// capture failure, where money did move on-chain and the reference must
+    /// survive on the terminal row; every other failure passes `None` and leaves
+    /// the write-once column untouched.
     async fn fail_edge(
         &self,
         attempt_id: &str,
         hold_id: &str,
         failure_code: &str,
+        transaction_signature: Option<&str>,
         response: Option<&str>,
         now_unix: i64,
     ) -> Result<EdgeOutcome, StorageError> {
@@ -720,6 +780,7 @@ impl X402SettlementLoop {
         let evidence = PaymentAttemptEvidenceArgs {
             failure_code: Some(failure_code),
             settlement_response: response,
+            transaction_signature,
             ..Default::default()
         };
         match self
