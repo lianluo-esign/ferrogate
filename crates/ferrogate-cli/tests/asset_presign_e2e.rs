@@ -20,11 +20,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::NaiveDateTime;
-use ferrogate_providers::{
-    presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_with_content_hash_header,
-    AwsCredentials, PresignBoundPayload, PresignRequest, SigningRequest,
-};
 use ferrogate_storage::sha256_hex;
 use support::{http_request, start_ready_gateway};
 
@@ -148,7 +143,7 @@ fn handle_bucket_connection(mut stream: TcpStream, server_state: Arc<Mutex<Bucke
     } else {
         SignatureKind::Header
     };
-    let signature_valid = verify_sigv4(&request, path, query).is_ok();
+    let signature_valid = sigv4_oracle::verify(&request, path, query).is_ok();
 
     let race_gate = server_state.lock().unwrap().race_gate.clone();
     if signature_valid && request.method == "HEAD" {
@@ -295,120 +290,438 @@ fn read_http_request(stream: &mut TcpStream) -> Option<RawHttpRequest> {
     })
 }
 
-fn verify_sigv4(request: &RawHttpRequest, path: &str, query: Option<&str>) -> Result<(), String> {
-    let host = request
-        .headers
-        .get("host")
-        .ok_or_else(|| "missing Host header".to_string())?;
-    let credentials = AwsCredentials {
-        access_key_id: ACCESS_KEY_ID.to_string(),
-        secret_access_key: SECRET_ACCESS_KEY.to_string(),
-        session_token: None,
-    };
+/// The bucket mock's SigV4 verifier, re-derived from the AWS Signature
+/// Version 4 specification.
+///
+/// The 2026-07-26 test gate on #259 found the previous verifier tautological:
+/// it computed the "expected" signature by calling `presign_sigv4_query_bound`
+/// -- the very function the E2E is supposed to be proving -- and compared that
+/// to what the product had just produced with the same function. It therefore
+/// agreed with the product by construction and could not go red for a
+/// canonicalization defect, which is exactly the bug class #368 hit against
+/// Supabase Storage.
+///
+/// This module imports nothing from `ferrogate_providers`: it names only the
+/// mock's own request type and bucket constants, and builds the canonical
+/// request, string-to-sign and signing key from `sha2` + `hmac` directly. A
+/// change to how the product canonicalizes a request now turns these tests red
+/// instead of being mirrored into the expectation.
+mod sigv4_oracle {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
 
-    if let Some(query) = query {
+    use super::{RawHttpRequest, ACCESS_KEY_ID, REGION, SECRET_ACCESS_KEY};
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    const SERVICE: &str = "s3";
+    const ALGORITHM: &str = "AWS4-HMAC-SHA256";
+    const TERMINATOR: &str = "aws4_request";
+    /// The canonical payload line a *presigned* S3 request signs: the holder
+    /// streams arbitrary bytes, so the hash cannot be part of the URL. #368
+    /// binds the bytes through signed `content-length` /
+    /// `x-amz-content-sha256` headers instead, which is the shape Supabase
+    /// Storage accepts.
+    const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
+
+    /// Verifies one inbound bucket request. A presigned request is one that
+    /// carries `X-Amz-Signature` in the query string; anything else must be
+    /// header-authorized. Returns the first reason the request is not
+    /// authentic, so a failing E2E names the defect instead of just 403-ing.
+    pub(crate) fn verify(
+        request: &RawHttpRequest,
+        path: &str,
+        query: Option<&str>,
+    ) -> Result<(), String> {
+        let query = query.unwrap_or_default();
+        match raw_query_value(query, "X-Amz-Signature") {
+            Some(signature) => verify_presigned(request, path, query, signature),
+            None => verify_header_authorized(request, path, query),
+        }
+    }
+
+    fn verify_presigned(
+        request: &RawHttpRequest,
+        path: &str,
+        query: &str,
+        signature: &str,
+    ) -> Result<(), String> {
         if request.headers.contains_key("authorization") {
             return Err("presigned requests must not carry Authorization".to_string());
         }
-        let timestamp = raw_query_value(query, "X-Amz-Date")
-            .and_then(parse_amz_timestamp)
-            .ok_or_else(|| "missing or invalid X-Amz-Date".to_string())?;
-        let expires_secs = raw_query_value(query, "X-Amz-Expires")
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| "missing or invalid X-Amz-Expires".to_string())?;
-        let presign_request = PresignRequest {
-            method: &request.method,
-            path,
-            host,
-            region: REGION,
-            service: "s3",
-            expires_secs,
-            timestamp_unix: timestamp,
-        };
-        let signed_headers = raw_query_value(query, "X-Amz-SignedHeaders")
-            .ok_or_else(|| "missing X-Amz-SignedHeaders".to_string())?;
-        let expected = match signed_headers {
-            // #368: a bound upload URL. The bucket recomputes the presigned
-            // signature over the headers the client ACTUALLY sent (with the
-            // canonical payload line left as UNSIGNED-PAYLOAD) and, like a
-            // checksum-enforcing bucket, verifies the received bytes against
-            // the declared hash + length. A request that omits a signed
-            // header, lies about size/checksum, or carries different bytes
-            // is refused before the gateway's commit-time checks run.
-            "content-length%3Bhost%3Bx-amz-content-sha256" => {
-                let declared_length = request
-                    .headers
-                    .get("content-length")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .ok_or_else(|| "bound upload missing content-length".to_string())?;
-                let declared_sha256 = request
-                    .headers
-                    .get("x-amz-content-sha256")
-                    .ok_or_else(|| "bound upload missing x-amz-content-sha256".to_string())?;
-                if request.body.len() as u64 != declared_length {
-                    return Err("bound upload body length mismatch".to_string());
-                }
-                if sha256_hex(&request.body) != *declared_sha256 {
-                    return Err("bound upload payload hash mismatch".to_string());
-                }
-                presign_sigv4_query_bound(
-                    &presign_request,
-                    &credentials,
-                    &PresignBoundPayload {
-                        content_length: declared_length,
-                        content_sha256_hex: declared_sha256,
-                    },
-                )
-                .query
-            }
-            "host" => presign_sigv4_query(&presign_request, &credentials),
-            other => return Err(format!("unexpected X-Amz-SignedHeaders: {other}")),
-        };
-        return (query == expected)
-            .then_some(())
-            .ok_or_else(|| "query signature mismatch".to_string());
+
+        let algorithm = decoded_query_value(query, "X-Amz-Algorithm")?;
+        if algorithm != ALGORITHM {
+            return Err(format!("unexpected X-Amz-Algorithm: {algorithm}"));
+        }
+        let expires = decoded_query_value(query, "X-Amz-Expires")?;
+        expires
+            .parse::<u64>()
+            .map_err(|_| format!("X-Amz-Expires is not a number: {expires}"))?;
+
+        let amz_date = decoded_query_value(query, "X-Amz-Date")?;
+        let credential = decoded_query_value(query, "X-Amz-Credential")?;
+        let (date_stamp, credential_scope) = credential_scope(&credential, &amz_date)?;
+
+        let signed_header_names = decoded_query_value(query, "X-Amz-SignedHeaders")?;
+        require_bound_upload(request, &signed_header_names)?;
+        let canonical_headers = canonical_headers(request, &signed_header_names)?;
+        enforce_declared_payload(request, &signed_header_names)?;
+
+        let canonical_request = format!(
+            "{}\n{}\n{}\n{canonical_headers}\n{signed_header_names}\n{UNSIGNED_PAYLOAD}",
+            request.method,
+            canonical_uri(path)?,
+            canonical_query(query, Some("X-Amz-Signature"))?,
+        );
+        expect_signature(
+            &canonical_request,
+            &amz_date,
+            &date_stamp,
+            &credential_scope,
+            signature,
+        )
     }
 
-    let timestamp = request
-        .headers
-        .get("x-amz-date")
-        .and_then(|value| parse_amz_timestamp(value))
-        .ok_or_else(|| "missing or invalid x-amz-date".to_string())?;
-    let expected = sign_sigv4_with_content_hash_header(
-        &SigningRequest {
-            method: &request.method,
-            path,
-            host,
-            region: REGION,
-            service: "s3",
-            body: &request.body,
-            timestamp_unix: timestamp,
-        },
-        &credentials,
-    );
-    let authorization_matches =
-        request.headers.get("authorization") == Some(&expected.authorization);
-    let hash_matches =
-        request.headers.get("x-amz-content-sha256") == expected.x_amz_content_sha256.as_ref();
-    (authorization_matches && hash_matches)
-        .then_some(())
-        .ok_or_else(|| "header signature mismatch".to_string())
-}
+    fn verify_header_authorized(
+        request: &RawHttpRequest,
+        path: &str,
+        query: &str,
+    ) -> Result<(), String> {
+        let authorization = request
+            .headers
+            .get("authorization")
+            .ok_or_else(|| "missing Authorization".to_string())?;
+        let (credential, signed_header_names, signature) = parse_authorization(authorization)?;
 
-fn raw_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    query.split('&').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        (name == key).then_some(value)
-    })
-}
+        let amz_date = request
+            .headers
+            .get("x-amz-date")
+            .ok_or_else(|| "missing x-amz-date".to_string())?;
+        let (date_stamp, credential_scope) = credential_scope(&credential, amz_date)?;
 
-fn parse_amz_timestamp(value: &str) -> Option<u64> {
-    NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
-        .ok()?
-        .and_utc()
-        .timestamp()
-        .try_into()
-        .ok()
+        // A real S3 endpoint re-hashes the body it received and refuses the
+        // request when it disagrees with the signed `x-amz-content-sha256`;
+        // without that, header-authorized writes would be bound to a
+        // declaration rather than to the bytes.
+        let payload_hash = request
+            .headers
+            .get("x-amz-content-sha256")
+            .ok_or_else(|| "missing x-amz-content-sha256".to_string())?;
+        if *payload_hash != sha256_hex(&request.body) {
+            return Err("x-amz-content-sha256 does not match the received body".to_string());
+        }
+
+        let canonical_headers = canonical_headers(request, &signed_header_names)?;
+        let canonical_request = format!(
+            "{}\n{}\n{}\n{canonical_headers}\n{signed_header_names}\n{payload_hash}",
+            request.method,
+            canonical_uri(path)?,
+            canonical_query(query, None)?,
+        );
+        expect_signature(
+            &canonical_request,
+            amz_date,
+            &date_stamp,
+            &credential_scope,
+            &signature,
+        )
+    }
+
+    /// `AWS4-HMAC-SHA256 Credential=<credential>, SignedHeaders=<names>,
+    /// Signature=<hex>` -> its three fields.
+    fn parse_authorization(authorization: &str) -> Result<(String, String, String), String> {
+        let rest = authorization
+            .strip_prefix(ALGORITHM)
+            .ok_or_else(|| format!("unexpected Authorization algorithm: {authorization}"))?
+            .trim_start();
+        let mut credential = None;
+        let mut signed_headers = None;
+        let mut signature = None;
+        for field in rest.split(',') {
+            let field = field.trim();
+            if let Some(value) = field.strip_prefix("Credential=") {
+                credential = Some(value.to_string());
+            } else if let Some(value) = field.strip_prefix("SignedHeaders=") {
+                signed_headers = Some(value.to_string());
+            } else if let Some(value) = field.strip_prefix("Signature=") {
+                signature = Some(value.to_string());
+            } else {
+                return Err(format!("unexpected Authorization field: {field}"));
+            }
+        }
+        match (credential, signed_headers, signature) {
+            (Some(credential), Some(signed_headers), Some(signature)) => {
+                Ok((credential, signed_headers, signature))
+            }
+            _ => Err(format!("incomplete Authorization: {authorization}")),
+        }
+    }
+
+    /// Splits `<access-key-id>/<date>/<region>/<service>/aws4_request`, checks
+    /// every component against what this bucket actually is, and checks the
+    /// scope date against `X-Amz-Date`. Returns `(date_stamp, scope)`.
+    fn credential_scope(credential: &str, amz_date: &str) -> Result<(String, String), String> {
+        let parts: Vec<&str> = credential.split('/').collect();
+        let [access_key_id, date_stamp, region, service, terminator] = parts.as_slice() else {
+            return Err(format!("malformed credential: {credential}"));
+        };
+        if *access_key_id != ACCESS_KEY_ID {
+            return Err(format!("unknown access key id: {access_key_id}"));
+        }
+        if *region != REGION {
+            return Err(format!("wrong credential region: {region}"));
+        }
+        if *service != SERVICE {
+            return Err(format!("wrong credential service: {service}"));
+        }
+        if *terminator != TERMINATOR {
+            return Err(format!("wrong credential terminator: {terminator}"));
+        }
+        // `YYYYMMDDTHHMMSSZ`, whose date half must be the scope's date.
+        let (date, time) = amz_date
+            .split_once('T')
+            .ok_or_else(|| format!("malformed X-Amz-Date: {amz_date}"))?;
+        let well_formed = date.len() == 8
+            && date.bytes().all(|byte| byte.is_ascii_digit())
+            && time.len() == 7
+            && time.ends_with('Z')
+            && time[..6].bytes().all(|byte| byte.is_ascii_digit());
+        if !well_formed {
+            return Err(format!("malformed X-Amz-Date: {amz_date}"));
+        }
+        if date != *date_stamp {
+            return Err(format!(
+                "credential scope date {date_stamp} does not match X-Amz-Date {amz_date}"
+            ));
+        }
+        Ok((
+            (*date_stamp).to_string(),
+            format!("{date_stamp}/{region}/{service}/{TERMINATOR}"),
+        ))
+    }
+
+    /// #368: a presigned upload URL must bind the approved size and checksum,
+    /// so the bucket refuses a PUT whose authorization covers `host` alone --
+    /// such a URL would let its holder store bytes of any size or content.
+    fn require_bound_upload(
+        request: &RawHttpRequest,
+        signed_header_names: &str,
+    ) -> Result<(), String> {
+        if request.method != "PUT" {
+            return Ok(());
+        }
+        let signed: Vec<&str> = signed_header_names.split(';').collect();
+        for required in ["content-length", "x-amz-content-sha256"] {
+            if !signed.contains(&required) {
+                return Err(format!(
+                    "presigned PUT is not bound: {required} is not in SignedHeaders \
+                     ({signed_header_names})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A checksum-enforcing bucket compares the bytes it received against the
+    /// values the signature bound. Verifying the signature alone only proves
+    /// the *declaration* is authentic; this proves the payload matches it, so
+    /// an over-sized or substituted upload is refused before any byte is
+    /// stored -- ahead of the gateway's commit-time checks.
+    fn enforce_declared_payload(
+        request: &RawHttpRequest,
+        signed_header_names: &str,
+    ) -> Result<(), String> {
+        let signed: Vec<&str> = signed_header_names.split(';').collect();
+        if signed.contains(&"content-length") {
+            let declared = request
+                .headers
+                .get("content-length")
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| "bound upload missing content-length".to_string())?;
+            if request.body.len() as u64 != declared {
+                return Err("bound upload body length mismatch".to_string());
+            }
+        }
+        if signed.contains(&"x-amz-content-sha256") {
+            let declared = request
+                .headers
+                .get("x-amz-content-sha256")
+                .ok_or_else(|| "bound upload missing x-amz-content-sha256".to_string())?;
+            if declared != UNSIGNED_PAYLOAD && *declared != sha256_hex(&request.body) {
+                return Err("bound upload payload hash mismatch".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// `name:value\n` for each signed header, taken from what the request
+    /// actually carried. A signed header the client did not send has no value
+    /// to canonicalize, so the request is refused -- this is what makes an
+    /// omitted required header unusable rather than merely non-compliant.
+    fn canonical_headers(
+        request: &RawHttpRequest,
+        signed_header_names: &str,
+    ) -> Result<String, String> {
+        let names: Vec<&str> = signed_header_names.split(';').collect();
+        if names.iter().any(|name| name.contains(char::is_uppercase)) {
+            return Err(format!(
+                "SignedHeaders must be lowercase: {signed_header_names}"
+            ));
+        }
+        if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(format!(
+                "SignedHeaders must be sorted and unique: {signed_header_names}"
+            ));
+        }
+        if !names.contains(&"host") {
+            return Err(format!(
+                "SignedHeaders must include host: {signed_header_names}"
+            ));
+        }
+        names
+            .iter()
+            .map(|name| {
+                request
+                    .headers
+                    .get(*name)
+                    .map(|value| format!("{name}:{}\n", value.trim()))
+                    .ok_or_else(|| format!("signed header missing from the request: {name}"))
+            })
+            .collect()
+    }
+
+    /// The canonical query string: every parameter except `skip`, decoded from
+    /// the wire and re-encoded per RFC 3986, sorted by encoded name. Decoding
+    /// and re-encoding (rather than reusing the bytes as sent) is what makes a
+    /// percent-encoding defect in the product observable here.
+    fn canonical_query(query: &str, skip: Option<&str>) -> Result<String, String> {
+        let mut encoded = Vec::new();
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if Some(name) == skip {
+                continue;
+            }
+            encoded.push((
+                uri_encode(&percent_decode(name)?, true),
+                uri_encode(&percent_decode(value)?, true),
+            ));
+        }
+        encoded.sort();
+        Ok(encoded
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("&"))
+    }
+
+    /// The canonical URI: the request target decoded and re-encoded once, with
+    /// `/` preserved as the path separator (S3 SigV4 encodes the path once,
+    /// not twice).
+    fn canonical_uri(path: &str) -> Result<String, String> {
+        if path.is_empty() {
+            return Ok("/".to_string());
+        }
+        Ok(uri_encode(&percent_decode(path)?, false))
+    }
+
+    fn expect_signature(
+        canonical_request: &str,
+        amz_date: &str,
+        date_stamp: &str,
+        credential_scope: &str,
+        presented: &str,
+    ) -> Result<(), String> {
+        let string_to_sign = format!(
+            "{ALGORITHM}\n{amz_date}\n{credential_scope}\n{}",
+            sha256_hex(canonical_request.as_bytes())
+        );
+        let signing_key = signing_key(SECRET_ACCESS_KEY, date_stamp);
+        let expected = hex_lower(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+        if presented == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "signature mismatch: presented {presented}, expected {expected}, over canonical \
+             request {canonical_request:?}"
+        ))
+    }
+
+    fn signing_key(secret_access_key: &str, date_stamp: &str) -> [u8; 32] {
+        let k_date = hmac_sha256(
+            format!("AWS4{secret_access_key}").as_bytes(),
+            date_stamp.as_bytes(),
+        );
+        let k_region = hmac_sha256(&k_date, REGION.as_bytes());
+        let k_service = hmac_sha256(&k_region, SERVICE.as_bytes());
+        hmac_sha256(&k_service, TERMINATOR.as_bytes())
+    }
+
+    fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+        let mut mac =
+            HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts a key of any length");
+        mac.update(message);
+        mac.finalize().into_bytes().into()
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex_lower(&Sha256::digest(bytes))
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// RFC 3986 encoding: every byte outside `A-Za-z0-9-_.~` is
+    /// percent-encoded. `/` is encoded in query components and preserved in
+    /// the path.
+    fn uri_encode(value: &str, encode_slash: bool) -> String {
+        let mut out = String::with_capacity(value.len());
+        for byte in value.bytes() {
+            let ch = byte as char;
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+                out.push(ch);
+            } else if ch == '/' && !encode_slash {
+                out.push('/');
+            } else {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        out
+    }
+
+    fn percent_decode(value: &str) -> Result<String, String> {
+        let bytes = value.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let escape = value
+                    .get(index + 1..index + 3)
+                    .ok_or_else(|| format!("truncated percent escape in {value:?}"))?;
+                out.push(
+                    u8::from_str_radix(escape, 16)
+                        .map_err(|_| format!("invalid percent escape %{escape}"))?,
+                );
+                index += 3;
+            } else {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8(out).map_err(|_| format!("non-UTF-8 percent escape in {value:?}"))
+    }
+
+    fn raw_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+        query.split('&').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name == key).then_some(value)
+        })
+    }
+
+    fn decoded_query_value(query: &str, key: &str) -> Result<String, String> {
+        percent_decode(raw_query_value(query, key).ok_or_else(|| format!("missing {key}"))?)
+    }
 }
 
 fn write_http_response(

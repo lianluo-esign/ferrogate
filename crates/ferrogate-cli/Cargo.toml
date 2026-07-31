@@ -70,6 +70,12 @@ tracing-subscriber.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# The `asset_presign_e2e` bucket mock re-derives SigV4 from the AWS
+# specification instead of calling the product's signer (#259 gate finding: a
+# verifier built from `presign_sigv4_query_bound` agrees with whatever that
+# function does). It needs HMAC-SHA256 directly; `sha2` is already a runtime
+# dependency above.
+hmac.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 
