@@ -117,6 +117,10 @@ else
   # release mirror, not only in the release-triggered rust-quality workflow.
   python3 -m unittest scripts/test_module_layout.py
   python3 "$ROOT/scripts/check-module-layout.py"
+  # #456: same reason -- keep the D1 surface-map drift gate off the
+  # release-only path.
+  python3 -m unittest scripts/test_check_d1_surface_map.py
+  python3 "$ROOT/scripts/check-d1-surface-map.py"
 fi
 
 if [ "$ENGINE" = "crane" ]; then

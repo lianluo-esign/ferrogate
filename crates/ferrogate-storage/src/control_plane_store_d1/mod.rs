@@ -12,11 +12,16 @@
 //! API (`ferrogate_cloudflare::d1`), replacing shared-Postgres row-level
 //! isolation with physical database-per-tenant isolation.
 //!
-//! **When a family lands (or stops erroring), update `docs/cloudflare-d1-backend.md`
-//! in the SAME commit** — specifically its "Implemented vs erroring trait surface"
-//! and "Remaining scope" sections. That doc is the operator-facing map of which
-//! surfaces work on D1, and it silently drifted across issues #454/#455/#456/#460
-//! (corrected in #456) because it is not derived from this list.
+//! **SOURCE OF TRUTH for what still errors: the `unimplemented_surface("…")`
+//! call sites** under `control_plane_store_d1/`, plus the
+//! `RuntimeControlPlaneBackend::CloudflareD1` arms in
+//! `crates/ferrogate-storage/src/guardrail_evidence.rs` and
+//! `crates/ferrogate-storage/src/mcp_identity.rs`. The `D1-ERRORING-SURFACE`
+//! block below and the matching block in `docs/cloudflare-d1-backend.md` are
+//! hand-written copies of that set; `scripts/check-d1-surface-map.py` re-derives
+//! it and FAILS when the three disagree, so a landing family must update both
+//! blocks in the SAME commit. The doc drifted silently across issues
+//! #454/#455/#456/#460 while the only safeguard was this instruction in prose.
 //!
 //! ## Topology and routing
 //!
@@ -295,31 +300,48 @@
 //! `tenants`), never fanned out over tenant databases — admin identities span
 //! tenants, and quota lookups carry no tenant context.
 //!
-//! Still erroring (typed `unimplemented-backend-surface`, awaiting a later
-//! slice). The proxy-Worker `/d1/batch` + `/d1/query` binding (issue #450) has
-//! landed and now serves the control-DB atomic families
-//! (`append_billing_event_with_outbox_enqueue`, issue #150; the guardrail
-//! activate/archive/restore CAS, issue #454). What remains erroring is the
-//! atomic families that DON'T mirror cleanly onto the control-DB-only binding:
+//! Still erroring (typed `unimplemented-backend-surface`). The proxy-Worker
+//! `/d1/batch` + `/d1/query` binding (issue #450) now serves BOTH the control
+//! database and the per-tenant bindings, selected by the `database` field
+//! (issue #455) — so a missing binding is no longer why anything is deferred.
+//! Each entry below carries its own reason. (The wallet reserve/settle/release
+//! trio + wallet CRUD landed in #455, and the remaining wallet ops in #456 —
+//! both above; only the sweep is still deferred.)
 //!
-//! - The REMAINING wallet/payment surface (the reserve/settle/release trio +
-//!   wallet CRUD landed in #455; `settle_wallet_balance`/`adjust_wallet_balance`/
-//!   `set_wallet_dunning`/`list_wallets` landed in #456, above):
-//!   `sweep_expired_wallet_reservations`, and payment methods/attempts
-//!   (`transition_payment_attempt` CAS). `sweep` is deferred because its
-//!   money-safety guard reads `payment_attempts.hold_id` — coupling wallets to
-//!   the (still-deferred) x402 payment_attempts family into one larger unit.
-//! - Agent cost-burn (#428): `add_agent_burn`, `get_agent_burn`,
-//!   `list_agent_cost_burn`. The durable per-agent burn ledger lands on the
-//!   Postgres control-plane store first; routing its atomic accumulate onto the
-//!   per-tenant proxy binding is a follow-up.
+//! <!-- BEGIN D1-ERRORING-SURFACE -->
+//! - x402 payments (issue #459, deferred org-wide, so this is scope not
+//!   capability): payment methods `upsert_payment_method`,
+//!   `list_payment_methods`, `get_payment_method`, `delete_payment_method`;
+//!   payment attempts `create_payment_attempt`, `get_payment_attempt`,
+//!   `list_payment_attempts`, `get_payment_attempt_links`,
+//!   `list_expirable_due_payment_attempts`, `list_reconcilable_payment_attempts`,
+//!   `transition_payment_attempt`; and `sweep_expired_wallet_reservations`,
+//!   coupled here because its money-safety guard reads
+//!   `payment_attempts.hold_id`.
+//! - Agent cost-burn (issue #428): `add_agent_burn`, `get_agent_burn`,
+//!   `list_agent_cost_burn`. Ordering, not routing — the durable per-agent burn
+//!   ledger lands on the Postgres control-plane store first.
+//! - Guardrail evidence: `append_guardrail_evaluation`,
+//!   `query_guardrail_evaluations`, `list_guardrail_evaluations`,
+//!   `list_guardrail_check_evaluations`. Not an atomic family; it is
+//!   enum-dispatched in `crates/ferrogate-storage/src/guardrail_evidence.rs`,
+//!   outside the #437 per-entity surfaces, and that dispatch has not been
+//!   migrated.
 //! - MCP identity — the last remaining pre-#425 per-entity dispatch surface
 //!   (agent schedules + observed-agent presence landed in issue #460, below).
-//! - Guardrail evidence (`append_guardrail_evaluation`,
-//!   `query_guardrail_evaluations`, `list_guardrail_evaluations`,
-//!   `list_guardrail_check_evaluations`). Enum-dispatched separately from the
-//!   #437 per-entity surfaces (see `guardrail_evidence.rs`), so it is NOT
-//!   covered by the MCP-identity note above.
+//!   Mostly non-atomic reads/writes, also unmigrated dispatch, in
+//!   `crates/ferrogate-storage/src/mcp_identity.rs`: `authorize_mcp_identity`,
+//!   `authorize_mcp_identity_with_operation`,
+//!   `append_mcp_identity_audit_event_with_operation`, `begin_mcp_oauth_flow`,
+//!   `consume_mcp_oauth_flow`, `commit_mcp_oauth_callback`,
+//!   `get_mcp_oauth_credential`, `list_mcp_oauth_credentials`,
+//!   `claim_mcp_oauth_refresh`, `claim_mcp_oauth_refresh_with_operation`,
+//!   `renew_mcp_oauth_refresh`, `renew_mcp_oauth_refresh_with_operation`,
+//!   `complete_mcp_oauth_refresh`, `complete_mcp_oauth_refresh_with_operation`,
+//!   `release_mcp_oauth_refresh`, `release_mcp_oauth_refresh_with_operation`,
+//!   `reconcile_mcp_oauth_refresh_claim`, `reconcile_mcp_oauth_refresh_renewal`,
+//!   `update_mcp_oauth_revocation_outcome`, `revoke_mcp_oauth_identity`.
+//! <!-- END D1-ERRORING-SURFACE -->
 //!
 //! RBAC, site domains, and the budget-alert idempotency ledger were
 //! implemented in issue #445; request/audit logs, agent runs/events, and
@@ -328,9 +350,12 @@
 //! issue #449 -- all above.
 //!
 //! Everything erroring returns the typed `unimplemented-backend-surface` error
-//! ([`is_unimplemented_backend_surface`]) when it can return a `Result`, and
-//! logs a warning + returns an empty/default value when its signature cannot
-//! carry an error (the append/analytics getters). Nothing fails silently.
+//! ([`is_unimplemented_backend_surface`]). Every method listed above carries a
+//! `Result`, so NOTHING on the unimplemented surface degrades to a default —
+//! there is no silent-default half of this set. The `warn!`-and-default paths
+//! elsewhere in this module are runtime-failure degradation on IMPLEMENTED
+//! append/analytics surfaces (issues #447/#449), matching the Postgres backend;
+//! they are not unimplemented surfaces. Nothing fails silently.
 //! Inherent provisioning surface: [`D1ControlPlaneStore::provision_control_database`],
 //! [`D1ControlPlaneStore::provision_tenant_database`],
 //! [`D1ControlPlaneStore::deprovision_tenant_database`],

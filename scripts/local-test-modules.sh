@@ -89,6 +89,8 @@ run_quality() {
   scripts/test-check-workers.sh
   python3 -m unittest scripts/test_module_layout.py
   python3 scripts/check-module-layout.py
+  python3 -m unittest scripts/test_check_d1_surface_map.py
+  python3 scripts/check-d1-surface-map.py
   scripts/check-kubernetes-examples.sh
 }
 

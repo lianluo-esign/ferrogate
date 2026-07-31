@@ -81,6 +81,15 @@ jobs:
           python3 -m unittest scripts/test_module_layout.py
           python3 scripts/check-module-layout.py
 
+      # #456: the D1 backend's "still erroring" map is hand-written in two
+      # places and drifted on four consecutive issues (#454/#455/#456/#460),
+      # because the only safeguard was a prose "update the doc too" convention.
+      # This re-derives the set from the unimplemented_surface() call sites.
+      - name: Validate D1 unimplemented-surface map
+        run: |
+          python3 -m unittest scripts/test_check_d1_surface_map.py
+          python3 scripts/check-d1-surface-map.py
+
       # #561: the reason a 136k-line crate ran nowhere for its whole life is
       # that nothing was watching for it. This fails when a workspace member is
       # selected by no `cargo test` in the workflows ci.yml reaches, or by none

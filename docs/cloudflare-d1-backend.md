@@ -240,9 +240,10 @@ failures, so callers handle one error model.
 - **Proxy (`D1ProxyClient`)** serves the **atomic** hot path only.
   `D1ControlPlaneStore` holds an `Option<D1ProxyClient>` (builder:
   `with_proxy_client`). When it is absent (a REST-only deployment) the atomic
-  families **fail closed** with the typed `unimplemented-backend-surface` error,
-  exactly like the still-deferred atomic families — never a silent or partial
-  write.
+  families **fail closed** with the typed `unimplemented-backend-surface` error
+  — the same typed error the deferred surfaces return, never a silent or partial
+  write. This is a deployment-time condition, not a deferred family: the same
+  method succeeds once a proxy is bound.
 
 ### Wired atomic op: `append_billing_event_with_outbox_enqueue`
 
@@ -400,7 +401,7 @@ listing across tenants is never blocked by one unprovisioned org.
    Only after this redeploy can the tenant's wallet `reserve`/`settle`/`release`
    resolve `env["TENANT_DB_<TENANT_ID>"]`.
 
-## Implemented vs erroring trait surface (first slice)
+## Implemented vs erroring trait surface
 
 Implemented against D1:
 
@@ -522,13 +523,23 @@ Implemented against D1:
   `list_wallets`. See the wallet section above for the guarded-CAS shape and the
   hold-id fan-out; `wallet.rs`.
 - **Workflow run budgets** (issue #456, TENANT databases, proxy Worker):
-  `debit`/`topup` under a bounded internal optimistic-CAS retry that leaves the
-  `WorkflowBudgetDebit` contract unchanged — see the concurrency-contract section
-  above; `workflow_budget.rs`.
+  `open_workflow_run_budget`, `debit_workflow_run_budget`,
+  `topup_workflow_run_budget`, `get_workflow_run_budget`,
+  `list_workflow_run_budgets`. `debit`/`topup` run under a bounded internal
+  optimistic-CAS retry that leaves the `WorkflowBudgetDebit` contract unchanged
+  — see the concurrency-contract section above; `workflow_budget.rs`.
 - **Assets + channels + retention** (issue #456, TENANT databases, proxy
-  Worker): the quota-guarded asset upsert (`23505` → typed `AlreadyExists`), the
-  channel move/yank coordination as one atomic batch, and retention;
-  `assets.rs`.
+  Worker) — the whole family: assets (`upsert_asset`,
+  `create_asset_if_absent`, `create_asset_within_quota` — the quota-guarded
+  upsert, `23505` → typed `AlreadyExists` — `get_asset`, `list_assets`,
+  `list_withheld_assets`, `tenant_asset_storage_bytes_used`, `delete_asset`,
+  `list_all_assets`, `set_asset_version_yank`,
+  `delete_asset_variant_if_unreferenced`, `promote_pending_asset_visibility`),
+  channels (`upsert_asset_channel`, `list_asset_channels`,
+  `delete_asset_channel`, `list_all_asset_channels`,
+  `move_asset_channel_if_resolvable` — the move/yank coordination as one atomic
+  batch), and retention (`upsert_retention_policy`,
+  `list_retention_policies`); `assets.rs`.
 - **Usage monthly + metadata rollups** (issue #456, TENANT databases, proxy
   Worker): `get_usage_monthly_rollup`/`list_usage_monthly_rollups` fan out over
   the provisioned tenant bindings (a scope's rollup lives in the OWNING tenant's
@@ -564,28 +575,56 @@ Implemented against D1:
   (process-local view).
 
 Everything else returns the **typed `unimplemented-backend-surface` error**
-(`is_unimplemented_backend_surface` matches it) wherever the signature carries a
-`Result`, and logs a warning + returns an empty/default value where it cannot.
-Nothing fails silently; tests pin the contract. That set is now exactly:
+(`is_unimplemented_backend_surface` matches it). Every method in the list below
+carries a `Result`, so nothing on the unimplemented surface degrades to a
+default value. The `warn!`-and-default paths elsewhere in the backend are
+runtime-failure degradation on the IMPLEMENTED append/analytics surfaces
+(issues #447/#449), mirroring the Postgres backend — they are not unimplemented
+surfaces. Nothing fails silently; tests pin the contract.
 
-- **x402 payments (issue #459, deferred org-wide):** payment methods
-  (`upsert_payment_method`, `list_payment_methods`, `get_payment_method`,
-  `delete_payment_method`), payment attempts (`create_payment_attempt`,
-  `get_payment_attempt`, `list_payment_attempts`, `get_payment_attempt_links`,
-  `list_expirable_due_payment_attempts`, `list_reconcilable_payment_attempts`,
-  `transition_payment_attempt`), and `sweep_expired_wallet_reservations` — the
-  sweep is coupled here because its money-safety guard reads
-  `payment_attempts.hold_id`.
+The proxy Worker serves both the control database and the per-tenant bindings
+through the `database` selector (#455), so nothing below is deferred for want of
+a binding; each entry carries its own reason. That set is now exactly:
+
+<!-- SOURCE OF TRUTH: the `unimplemented_surface("…")` call sites under
+     crates/ferrogate-storage/src/control_plane_store_d1/, plus the
+     RuntimeControlPlaneBackend::CloudflareD1 arms in
+     crates/ferrogate-storage/src/guardrail_evidence.rs and
+     crates/ferrogate-storage/src/mcp_identity.rs. Re-derive, do not hand-edit:
+     scripts/check-d1-surface-map.py fails when this block, the matching block
+     in control_plane_store_d1/mod.rs, and the call sites disagree. -->
+<!-- BEGIN D1-ERRORING-SURFACE -->
+- **x402 payments (issue #459, deferred org-wide — scope, not capability):**
+  payment methods (`upsert_payment_method`, `list_payment_methods`,
+  `get_payment_method`, `delete_payment_method`), payment attempts
+  (`create_payment_attempt`, `get_payment_attempt`, `list_payment_attempts`,
+  `get_payment_attempt_links`, `list_expirable_due_payment_attempts`,
+  `list_reconcilable_payment_attempts`, `transition_payment_attempt`), and
+  `sweep_expired_wallet_reservations` — the sweep is coupled here because its
+  money-safety guard reads `payment_attempts.hold_id`.
 - **Agent cost-burn (issue #428):** `add_agent_burn`, `get_agent_burn`,
-  `list_agent_cost_burn`. The durable per-agent burn ledger lands on the
-  Postgres control-plane store first; routing its atomic accumulate onto the
-  per-tenant proxy binding is a follow-up.
+  `list_agent_cost_burn`. Ordering, not routing — the durable per-agent burn
+  ledger lands on the Postgres control-plane store first.
 - **Guardrail evidence:** `append_guardrail_evaluation`,
   `query_guardrail_evaluations`, `list_guardrail_evaluations`,
-  `list_guardrail_check_evaluations`. Enum-dispatched separately from the #437
-  per-entity surfaces (see `guardrail_evidence.rs`), so it is NOT covered by the
-  "per-entity dispatch surfaces" note below.
-- **MCP identity:** the last remaining pre-#425 per-entity dispatch surface.
+  `list_guardrail_check_evaluations`. Not an atomic family: it is
+  enum-dispatched in `crates/ferrogate-storage/src/guardrail_evidence.rs`,
+  outside the #437 per-entity surfaces, and that dispatch is unmigrated. NOT
+  covered by the "per-entity dispatch surfaces" note below.
+- **MCP identity:** the last remaining pre-#425 per-entity dispatch surface,
+  in `crates/ferrogate-storage/src/mcp_identity.rs` — mostly non-atomic
+  reads/writes, deferred because the dispatch is unmigrated:
+  `authorize_mcp_identity`, `authorize_mcp_identity_with_operation`,
+  `append_mcp_identity_audit_event_with_operation`, `begin_mcp_oauth_flow`,
+  `consume_mcp_oauth_flow`, `commit_mcp_oauth_callback`,
+  `get_mcp_oauth_credential`, `list_mcp_oauth_credentials`,
+  `claim_mcp_oauth_refresh`, `claim_mcp_oauth_refresh_with_operation`,
+  `renew_mcp_oauth_refresh`, `renew_mcp_oauth_refresh_with_operation`,
+  `complete_mcp_oauth_refresh`, `complete_mcp_oauth_refresh_with_operation`,
+  `release_mcp_oauth_refresh`, `release_mcp_oauth_refresh_with_operation`,
+  `reconcile_mcp_oauth_refresh_claim`, `reconcile_mcp_oauth_refresh_renewal`,
+  `update_mcp_oauth_revocation_outcome`, `revoke_mcp_oauth_identity`.
+<!-- END D1-ERRORING-SURFACE -->
 
 Families that this section previously listed as erroring and that have since
 landed: wallets + reservations and the remaining wallet ops (issues #455, #456);
