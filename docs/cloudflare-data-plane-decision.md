@@ -351,7 +351,8 @@ diverge **silently** — no error, no alarm, just a different answer:
 ## 4. Cold start, CPU and latency
 
 Every row is labelled. **Verified** = quoted from the CF docs (§11, fetched
-2026-07-25). **Assumed** = a reasoned inference we have not measured.
+2026-07-25; the connection rows re-fetched 2026-07-31 — see the §12 correction).
+**Assumed** = a reasoned inference we have not measured.
 **Unknown** = we could not determine it and it needs a live measurement.
 
 ### 4a. Option A — is a Worker big enough to run the governed path?
@@ -366,8 +367,8 @@ Every row is labelled. **Verified** = quoted from the CF docs (§11, fetched
 | **Startup time** (global scope must parse+execute) | **1 s**, both plans; violation is a *deploy* rejection (`10021`) | **Verified** |
 | Memory per isolate | 128 MB (JS heap + WASM allocations) | **Verified** |
 | Subrequests per invocation (Paid) | 10,000 (configurable up to 10 M); Free 50 | **Verified** |
-| Simultaneous open connections | 6 per invocation, incl. `fetch`/KV/R2/D1/`connect()` | **Verified** |
-| Worker invocations per request (service bindings) | max 32 | **Verified** |
+| Simultaneous open connections | 6 per invocation, counting **only** connections still *waiting for response headers* — a connection is freed the moment its headers arrive, not when its body finishes — and a 7th is **queued until a slot frees, not rejected**. Counts `fetch`, KV `get`/`put`/`list`/`delete`, Cache `put`/`match`/`delete`, R2 `list`/`get`/`put`/`delete`/`head`, Queues `send`/`sendBatch`, `connect()` sockets and outbound WebSockets; D1's own limits page states the same cap for D1 connections. Narrowed to the headers phase on **2026-04-09** ([changelog](https://developers.cloudflare.com/changelog/post/2026-04-09-relaxed-connection-limiting/)), which also retired the `Response closed due to connection limit` exception | **Verified** |
+| Worker invocations per request (service bindings) | max 32; Workers invoked through a service binding **share the caller's six-connection budget** — it is measured from the top-level request, not per Worker | **Verified** |
 | Cost of the governed path's CPU (BPE tokenisation of a large prompt + N regex detectors + policy scope matching) | not measured | **Unknown** |
 
 **Reading.** The CPU ceiling is *not* the binding constraint for Option A — 30 s
@@ -376,9 +377,12 @@ tokenisation plus regex evaluation. The real Option-A constraints are the ones
 nobody quotes: **1 s startup** (a WASM tokenizer with embedded `cl100k_base` +
 `o200k_base` vocabularies must instantiate lazily inside the handler, not at
 global scope), **128 MB per isolate** (shared across concurrent requests on that
-isolate), **10 MB gzipped bundle**, and **6 simultaneous connections** (a
-request that fans out to a policy read, a quota counter, a guardrail detector
-and the provider is close to that ceiling before any fallback route). None of
+isolate), **10 MB gzipped bundle**, and the **6-connection concurrency window**
+(a request that fans out to a policy read, a quota counter, a guardrail detector
+and the provider has roughly that many in flight before any fallback route —
+which adds latency rather than failures, since the 7th is queued until an
+earlier connection's headers return, and a connection leaves the window as soon
+as its headers arrive rather than when its body completes). None of
 these is disqualifying; all of them are unmeasured, and the honest statement is
 that **Option A's runtime feasibility is plausible and unproven**.
 
@@ -446,7 +450,7 @@ machinery required: zero.**
 
 | Governed datum | Today | From a Worker | Note |
 |---|---|---|---|
-| config / policy / guardrail policies / model registry | in-process snapshot, hot-reloadable | D1 or KV read per request | D1: 1,000 queries per Worker invocation (Paid), 6 simultaneous connections, 10 GB max DB, single-threaded per DB — **verified** |
+| config / policy / guardrail policies / model registry | in-process snapshot, hot-reloadable | D1 or KV read per request | D1: 1,000 queries per Worker invocation (Paid), 6 connections simultaneously *awaiting response headers* (a 7th queues), 10 GB max DB, single-threaded per DB — **verified** |
 | RPM / TPM / monthly-token counters | `ClusterCounterBackend` — in-memory or Redis (`state.rs:5405`) | a third variant: Durable Object (single-threaded, strongly consistent, globally addressable) or D1 | The seam already exists; adding a variant is **additive and does not fork the decision** |
 | prepaid wallet reservations (CAS) | `state_wallets.rs:190`, atomic against `balance − outstanding` | DO or the #450 D1 proxy `/d1/query` atomic family (#454/#455) | Money path; must be one implementation |
 | billing events / request logs / evidence / audit | storage repositories, outbox-swept | D1 writes, or forward to the origin | |
@@ -482,7 +486,7 @@ narrowed, non-governing version of C's Worker is adopted as the *shell* of B.
 Rationale, in order of weight:
 
 1. **B is the only option with one implementation of the governed path.** §1
-   enumerates ~19,800 lines and 41+ error codes of governed decisions, already
+   enumerates ~19,800 lines and 55 error codes of governed decisions, already
    duplicated four times in one language, and §3 shows this repo losing evidence
    (#383) and money (#476) to divergence between *sibling paths in the same
    process*. A cross-language, cross-runtime fifth copy is the largest
@@ -774,11 +778,13 @@ shell never claims that code without a deny list.
   JSON must be **byte-identical** to Runner A's. Any difference fails.
 - **Directional subset** — for a host whose contract is veto-only (the §6
   Worker shell): assert
-  `worker.outcome ∈ { Defer, authority.outcome, Deny(any) }`, **and**
+  `worker.outcome ∈ { Defer, Deny(any) }`, **and**
   `worker.metered == ∅` (it may never author an amount), **and** a Worker deny
-  must carry a code from the shared vocabulary. `Defer` — "I made no governed
-  call; ask the authority" — is not producible by the origin and exists so the
-  shell can say nothing without saying "allow". This is how a fail-closed
+  must carry a code from the shared vocabulary. `Allow` and `CacheHit` are
+  rejected **unconditionally** — including when the authority itself allowed,
+  because agreeing with an allow is still authoring one. `Defer` — "I made no
+  governed call; ask the authority" — is not producible by the origin and exists
+  so the shell can say nothing without saying "allow". This is how a fail-closed
   pre-filter is proven fail-closed rather than asserted to be.
 - The predicate is implemented **twice**, in Rust and in TypeScript. Two
   implementations of the *check* is fine: a disagreement fails loudly and
@@ -813,8 +819,12 @@ driver turned out to be the corpus itself rather than a third program.
 The corpus covers the **admission** half of the governed path — steps 13-32 of
 §1, which is where 44 of the 55 static governed codes live, including every
 money decision taken before dispatch. The dispatch half (33-52) is still a
-sequence of side effects: 23 of the 25 remaining `write_json_error` sites in
-`chat.rs` are inside the per-candidate loop.
+sequence of side effects: **22** of the 25 remaining `write_json_error` sites in
+`chat.rs` are inside the per-candidate `'routes:` loop (`chat.rs:259-2079`), and
+a 23rd — the post-loop exhaustion path at `chat.rs:2081`, `provider_dispatch_error`
+"provider dispatch failed for all model routes" — is dispatch-stage too. The
+other 2 are the pair inside `deliver_governed_decision` (`chat.rs:2197`/`:2200`),
+which is the **admission** sink the corpus already covers, not a dispatch site.
 
 This is a narrower slice than "extract the decision out of 28 `write_json_error`
 sites", and the narrowing is a judgement, not an omission:
@@ -947,13 +957,19 @@ is precisely the gap code review called.
 
 ## 11. Verified sources
 
-Cloudflare developer docs, all fetched **2026-07-25**:
+Cloudflare developer docs, all fetched **2026-07-25**, except the Workers-limits
+and D1-limits connection rows, re-fetched **2026-07-31** for the §12 correction:
 
 - Workers limits (CPU 30 s default / 5 min max via `limits.cpu_ms`; Free 10 ms;
   no wall-clock limit for HTTP; `waitUntil` 30 s; 128 MB per isolate; Worker
   size 10 MB gzip / 64 MB uncompressed; **1 s startup**; subrequests 10,000
-  Paid / 50 Free; 6 simultaneous connections; 100/500 Workers per account):
+  Paid / 50 Free; 6 connections simultaneously awaiting response headers, a 7th
+  queued rather than rejected; 100/500 Workers per account):
   <https://developers.cloudflare.com/workers/platform/limits/>
+- Relaxed simultaneous connection limiting for Workers, **2026-04-09** — the
+  change that scoped the six-connection limit to the waiting-for-headers phase
+  and retired `Response closed due to connection limit`:
+  <https://developers.cloudflare.com/changelog/post/2026-04-09-relaxed-connection-limiting/>
 - Workers TCP sockets (`connect()` from `cloudflare:sockets`; **no inbound TCP**,
   "coming soon"; sockets cannot be created in global scope or shared across
   requests; Cloudflare IPs/localhost/private IPs blocked; port 25 blocked;
@@ -973,7 +989,8 @@ Cloudflare developer docs, all fetched **2026-07-25**:
   needs a fixed instance count; instances selected "regardless of location" as a
   current limitation): <https://developers.cloudflare.com/containers/scaling-and-routing/>
 - D1 limits (10 GB max DB Paid; 50,000 DBs/account; **1,000 queries per Worker
-  invocation** Paid / 50 Free; 6 simultaneous D1 connections per invocation;
+  invocation** Paid / 50 Free; 6 D1 connections per invocation simultaneously
+  awaiting response headers (the shared Workers limit; a 7th queues);
   100 bound params; 100 KB max statement; 30 s query duration; single-threaded
   per database): <https://developers.cloudflare.com/d1/platform/limits/>
 - Durable Objects (globally-unique name addressable from anywhere;
@@ -1038,6 +1055,19 @@ container cold start is a labelled vendor quote (§4b, source in §11). The
 amortisation claim is labelled **Assumed**. Every unknown is labelled
 **Unknown**. That discipline is the reason this section can say "cannot be
 produced" rather than producing something.
+
+**Correction (this slice): the six-connection limit was over-read.** Earlier
+revisions labelled "6 simultaneous open connections" **Verified** and reasoned
+from it as a hard concurrency ceiling a fan-out request was "close to". Both
+qualifiers Cloudflare states were missing: the six only bounds connections
+*waiting for response headers* — a connection is released once its headers
+arrive, not when its body finishes — and a seventh is **queued, not rejected**.
+Cloudflare narrowed the limit to the headers phase on 2026-04-09 (§11). It is
+recorded rather than silently rewritten because #424, #471-#475 and any future
+A′ evaluation cite this table as fact, and someone designing the A′ decision
+core could otherwise serialise fan-out to stay under a limit that queues. The
+§4a conclusion is unchanged: wide fan-out is a latency consideration under
+Option A, not a failure mode.
 
 **Recommendation to the maintainer: split AC3 into its own issue.** It is an
 operator task with a written runbook, a different set of credentials and a

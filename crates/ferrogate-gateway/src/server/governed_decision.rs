@@ -736,9 +736,9 @@ pub(crate) fn governed_error_code_set() -> BTreeSet<&'static str> {
 /// A host under this contract is never an authorisation, only a veto, and may
 /// never author a metered amount. Concretely:
 ///
-/// 1. `candidate.outcome ∈ { Defer, authority.outcome, Deny }` -- it may agree,
-///    it may abstain, it may deny. It may never *allow* on its own account, and
-///    it may never turn an authority deny into anything but a deny.
+/// 1. `candidate.outcome ∈ { Defer, Deny }` -- it may abstain, or it may deny.
+///    `Allow` and `CacheHit` are rejected unconditionally, including when the
+///    authority allowed: agreeing with an allow is still authoring one.
 /// 2. `candidate.metered == ∅` -- no token estimate, no reservation, no
 ///    capture, ever.
 /// 3. A candidate deny carries a code from the shared vocabulary.
