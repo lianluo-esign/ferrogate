@@ -114,6 +114,9 @@
     "packages/core": {
       "name": "@ferrogate/core",
       "version": "0.0.0",
+      "dependencies": {
+        "zod": "^3.25.76",
+      },
     },
     "packages/guardrails": {
       "name": "@ferrogate/guardrails",
