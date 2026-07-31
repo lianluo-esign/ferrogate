@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, RwLock,
+        Arc, Mutex, MutexGuard, RwLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -113,7 +113,7 @@ use redis::Commands;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
-use tracing::warn;
+use tracing::{error, warn};
 
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
 const GUARDRAIL_EVIDENCE_MAX_IN_FLIGHT: usize = 64;
@@ -884,13 +884,42 @@ impl SharedAppState {
     /// the inline path reconciles by UNION (the caller re-specified some things,
     /// so the payload wins where it speaks and storage holds where it is
     /// silent). See [`AppState::merge_control_plane_snapshot_into_config`].
+    ///
+    /// Snapshot read, merge, validation and commit all run under the reload
+    /// coordinator lock. They must: the commit ends in
+    /// `sync_control_plane_storage_from_config`, which replaces every class
+    /// wholesale, so a `POST /admin/v1/api-keys` that lands between the snapshot
+    /// read and that write is erased by a merge that never saw it -- the same
+    /// loss this function exists to prevent, narrowed to a race.
     pub(crate) fn reload_from_inline_config(
         &self,
-        mut candidate: Config,
+        candidate: Config,
     ) -> anyhow::Result<RuntimeReloadResult> {
+        let coordinator = self.lock_reload_coordinator();
+        let candidate = self.merged_inline_candidate(candidate)?;
+        Ok(self.reload_process_local_locked(candidate, coordinator))
+    }
+
+    /// The candidate an inline `POST /admin/v1/config/reload` will actually
+    /// apply: the operator's payload unioned with the durable control plane,
+    /// then validated as a whole (#605).
+    ///
+    /// `Config::from_toml_str` only judged the payload on its own, and
+    /// `AppState::try_new_with_repositories` does not validate at all, so
+    /// without this the union commits a combination that was never checked --
+    /// e.g. a durable `deny` policy naming a model the payload just removed,
+    /// which `validate_policies` rejects and which would otherwise silently stop
+    /// matching. Mirrors `upsert_agent_upstream`, which validates after its own
+    /// post-snapshot merge.
+    ///
+    /// Exposed so `/admin/v1/config/validate` can answer for the SAME candidate
+    /// `/reload` applies: its `valid`, `snapshot` and `reload_mode` are
+    /// worthless as a pre-flight if they describe the unmerged payload instead.
+    pub(crate) fn merged_inline_candidate(&self, mut candidate: Config) -> anyhow::Result<Config> {
         self.current()
             .merge_control_plane_snapshot_into_config(&mut candidate)?;
-        Ok(self.reload_process_local(candidate))
+        candidate.validate()?;
+        Ok(candidate)
     }
 
     pub(crate) fn reload_plan_for_candidate(&self, candidate: &Config) -> RuntimeReloadPlan {
@@ -898,13 +927,30 @@ impl SharedAppState {
         reload_plan_for_configs(&active.config, candidate)
     }
 
-    pub(crate) fn reload_process_local(&self, candidate: Config) -> RuntimeReloadResult {
-        let active = self.current();
-        let candidate_snapshot = config_snapshot_id(&candidate);
-        let mut coordinator = match self.reload_coordinator.lock() {
+    fn lock_reload_coordinator(&self) -> MutexGuard<'_, ferrogate_runtime::ReloadCoordinator> {
+        match self.reload_coordinator.lock() {
             Ok(coordinator) => coordinator,
             Err(poisoned) => poisoned.into_inner(),
-        };
+        }
+    }
+
+    pub(crate) fn reload_process_local(&self, candidate: Config) -> RuntimeReloadResult {
+        let coordinator = self.lock_reload_coordinator();
+        self.reload_process_local_locked(candidate, coordinator)
+    }
+
+    /// [`Self::reload_process_local`] for a caller that already holds the reload
+    /// coordinator, so it can keep the lock across work that must not interleave
+    /// with another reload -- see [`Self::reload_from_inline_config`]. The lock
+    /// is not reentrant, so such a caller cannot go through the public entry
+    /// point.
+    fn reload_process_local_locked(
+        &self,
+        candidate: Config,
+        mut coordinator: MutexGuard<'_, ferrogate_runtime::ReloadCoordinator>,
+    ) -> RuntimeReloadResult {
+        let active = self.current();
+        let candidate_snapshot = config_snapshot_id(&candidate);
         let reload_candidate = coordinator.prepare(candidate_snapshot);
 
         if let Some(reason) = process_local_reload_rejection(&active.config, &candidate) {
@@ -2094,20 +2140,32 @@ fn apply_tenant_refs_to_api_keys(
 /// lands in the durable document's slot so a reload cannot silently reorder a
 /// class whose evaluation is position-sensitive (routes-by-first-match style
 /// classes such as `policies`).
+///
+/// The id of each merged element is computed exactly once and indexed, rather
+/// than re-derived per comparison: every extractor here clones a `String` out of
+/// the document, so the naive scan cost `n * m` allocations per class and ten
+/// classes per reload -- millions on a deployment with a few thousand api-keys.
 fn merge_control_plane_documents<T>(
     durable: Vec<T>,
     declared: Vec<T>,
     id: impl Fn(&T) -> String,
 ) -> Vec<T> {
     let mut merged = durable;
+    let mut slot_by_id: HashMap<String, usize> = HashMap::with_capacity(merged.len());
+    for (slot, document) in merged.iter().enumerate() {
+        // First slot wins, matching the `find` this index replaced: a durable
+        // class should not contain two rows under one id, and if it somehow
+        // does, the update must not silently land on a different one.
+        slot_by_id.entry(id(document)).or_insert(slot);
+    }
     for document in declared {
         let declared_id = id(&document);
-        match merged
-            .iter_mut()
-            .find(|existing| id(existing) == declared_id)
-        {
-            Some(existing) => *existing = document,
-            None => merged.push(document),
+        match slot_by_id.get(&declared_id) {
+            Some(&slot) => merged[slot] = document,
+            None => {
+                slot_by_id.insert(declared_id, merged.len());
+                merged.push(document);
+            }
         }
     }
     merged
@@ -4960,6 +5018,33 @@ impl AppState {
     fn with_reloaded_config(&self, config: Config) -> anyhow::Result<Self> {
         let mut next =
             AppState::try_new_with_repositories(config, Arc::clone(&self.repositories), false)?;
+        // #605: this write is DESTRUCTIVE -- `replace_control_plane` replaces
+        // each document class wholesale -- so discarding its error (`let _ =`)
+        // meant a reload could report `committed: true` while durable storage
+        // held a half-written or unchanged control plane, with the process now
+        // serving a config that no longer matches it.
+        //
+        // It runs HERE, before every mutation of live state below, and not at
+        // the end of this function: `mcp_manager.reconfigure` and
+        // `apply_analytics_config` write through to the CURRENTLY ACTIVE state
+        // (shared `Arc`s, interior mutability), so failing after them would
+        // leave the process on the old config with the rejected candidate's MCP
+        // sessions and analytics retention already applied -- and the caller
+        // reports `committed: false`. Only `next.config` is needed here, so
+        // there is nothing to wait for.
+        self.sync_control_plane_storage_from_config(&next.config)
+            .map_err(|error| {
+                // The `StorageError` can carry DSN/SQL detail from the Postgres
+                // backend; it goes to the log, never to the admin response body
+                // or the audit event that render `reason` verbatim.
+                error!("control-plane persistence for a config reload failed: {error}");
+                anyhow::anyhow!(
+                    "config reload rejected: the candidate could not be persisted to the \
+                     durable control plane. The running config was not switched; the durable \
+                     control plane may be partially written -- see the gateway log for the \
+                     storage error"
+                )
+            })?;
         next.cluster_identity = Arc::clone(&self.cluster_identity);
         next.cluster_counters = Arc::new(ClusterCounterBackend::from_reloaded_config(
             &next.config,
@@ -4987,21 +5072,6 @@ impl AppState {
         next.acme_renewal = self.acme_renewal.clone();
         next.unauth_rate_limiter = Arc::clone(&self.unauth_rate_limiter);
         self.apply_analytics_config(&next.config.analytics);
-        // #605: this write is DESTRUCTIVE -- `replace_control_plane` replaces
-        // each document class wholesale -- so discarding its error (`let _ =`)
-        // meant a reload could report `committed: true` while durable storage
-        // held a half-written or unchanged control plane, with the process now
-        // serving a config that no longer matches it. It runs BEFORE the
-        // in-memory swap in `reload_process_local`, so failing here leaves the
-        // previously active state live and untouched, and the caller renders
-        // `committed: false` with this reason.
-        self.sync_control_plane_storage_from_config(&next.config)
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "config reload rejected: the candidate could not be persisted to the \
-                     durable control plane, so the running config is unchanged: {error}"
-                )
-            })?;
         Ok(next)
     }
 

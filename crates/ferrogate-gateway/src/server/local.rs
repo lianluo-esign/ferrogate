@@ -4694,7 +4694,7 @@ impl FerroGateway {
             }
         };
 
-        let response = match config_from_admin_payload(&payload, &self.state) {
+        let response = match validation_candidate_from_admin_payload(&payload, &self.state) {
             Ok(candidate) => {
                 let snapshot = config_snapshot_id(&candidate);
                 let reload_plan = self.state.reload_plan_for_candidate(&candidate);
@@ -11598,6 +11598,29 @@ fn policy_from_mutation(
 /// not be swapped in by a process-local reload either. Warnings are logged
 /// rather than returned, since the wire shape of the validate response is a
 /// bool plus an error string.
+/// The candidate `POST /admin/v1/config/validate` must judge: the one its
+/// `/reload` counterpart would actually apply for the same body (#605).
+///
+/// The inline branch reconciles by UNION before it commits, so a pre-flight that
+/// judged the raw payload would answer for a different config than the one that
+/// lands: `valid` could be `true` for a payload whose merged form
+/// `Config::validate` rejects, and `snapshot` would not match the
+/// `candidate_snapshot` the following reload reports -- which is exactly the
+/// comparison an operator uses to tell "already applied" from "will change
+/// something". `source=file` keeps the payload-only answer, because its reload
+/// counterpart is `reload_from_source_path`, which reconciles by REPLACE from
+/// the same durable snapshot the file config is judged against.
+fn validation_candidate_from_admin_payload(
+    payload: &AdminConfigValidateRequest,
+    state: &crate::state::SharedAppState,
+) -> anyhow::Result<Config> {
+    let candidate = config_from_admin_payload(payload, state)?;
+    if payload.source.as_deref() == Some("file") {
+        return Ok(candidate);
+    }
+    state.merged_inline_candidate(candidate)
+}
+
 fn config_from_admin_payload(
     payload: &AdminConfigValidateRequest,
     state: &crate::state::SharedAppState,
@@ -12066,6 +12089,84 @@ mod self_hosted_transport_policy_tests {
         assert!(policy
             .admit(SelfHostedTransportSecurity::MutualTls.observed_channel())
             .is_err());
+    }
+}
+
+/// #605: `/admin/v1/config/validate` must be a pre-flight for the candidate
+/// `/admin/v1/config/reload` actually applies, not for the raw payload.
+#[cfg(test)]
+mod config_validate_candidate_tests {
+    use super::*;
+
+    fn body(config_toml: Option<&str>, source: Option<&str>) -> AdminConfigValidateRequest {
+        AdminConfigValidateRequest {
+            config_toml: config_toml.map(str::to_string),
+            config_yaml: None,
+            config_caddyfile: None,
+            filename: None,
+            source: source.map(str::to_string),
+        }
+    }
+
+    /// The pre-flight sees the durable control plane the reload will merge in.
+    /// Reverting the handler to `config_from_admin_payload` reds this: the raw
+    /// payload declares no api-keys at all.
+    #[test]
+    fn the_inline_validation_candidate_carries_the_durable_control_plane() {
+        let node = crate::state::SharedAppState::with_source_path(Config::default(), None);
+        // Provision the key the way the Admin API does -- through a reload that
+        // names it -- so the durable row is written by the real projection.
+        node.reload_from_inline_config(
+            Config::from_toml_str(
+                "[[api_keys]]\nid = \"minted-at-runtime\"\nname = \"Minted\"\n\
+                 key = \"minted-at-runtime-secret\"\norganization_id = \"tenant-a\"\n",
+            )
+            .expect("the provisioning payload is valid"),
+        )
+        .expect("provision the key");
+
+        // The operator's own body: their static key plus the setting they came
+        // to change. The static key is here because the #542 auth-posture gate
+        // refuses a payload with no credential source at all, not because the
+        // merge needs it.
+        let payload = body(
+            Some(
+                "[[api_keys]]\nid = \"declared-in-file\"\nname = \"Declared\"\n\
+                 key = \"declared-secret\"\norganization_id = \"tenant-a\"\n\n\
+                 [scheduler]\nenabled = true\n",
+            ),
+            None,
+        );
+
+        let raw = config_from_admin_payload(&payload, &node).expect("the payload parses");
+        assert!(
+            !raw.api_keys.iter().any(|key| key.id == "minted-at-runtime"),
+            "the payload itself never names the minted key -- that is the whole point"
+        );
+
+        let candidate = validation_candidate_from_admin_payload(&payload, &node)
+            .expect("the pre-flight passes");
+        assert!(
+            candidate
+                .api_keys
+                .iter()
+                .any(|key| key.id == "minted-at-runtime"),
+            "the pre-flight must judge the merged candidate the reload will apply"
+        );
+    }
+
+    /// `source=file` keeps the payload-only answer: its reload counterpart is
+    /// `reload_from_source_path`, which reconciles by REPLACE from the same
+    /// durable snapshot, so merging here would describe a different candidate.
+    #[test]
+    fn the_file_source_validation_candidate_is_left_alone() {
+        let node = crate::state::SharedAppState::with_source_path(Config::default(), None);
+        let payload = body(None, Some("file"));
+
+        // No source path was configured, so both routes fail identically -- the
+        // assertion is that the file branch does not acquire the inline merge's
+        // behaviour, not that it succeeds.
+        assert!(validation_candidate_from_admin_payload(&payload, &node).is_err());
     }
 }
 

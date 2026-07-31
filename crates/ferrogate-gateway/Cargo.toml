@@ -88,6 +88,10 @@ tracing-subscriber.workspace = true
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [dev-dependencies]
+# #605: the inline-reload tests must drive a FAILING durable control-plane
+# write; the in-memory store cannot fail one. Test-target only -- a release
+# build of the gateway resolves `ferrogate-storage` without this feature.
+ferrogate-storage = { path = "../ferrogate-storage", features = ["fault-injection"] }
 proptest.workspace = true
 # `function_egress`'s SSRF/TLS probes stand up a self-signed local TLS server.
 rcgen.workspace = true

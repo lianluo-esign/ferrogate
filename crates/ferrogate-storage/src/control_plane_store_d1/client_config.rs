@@ -33,6 +33,7 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             guardrail_evaluation_retention_records: Mutex::new(audit_event_retention_records),
+            control_plane_faults: super::super::ControlPlaneFaultInjector::default(),
         }
     }
 

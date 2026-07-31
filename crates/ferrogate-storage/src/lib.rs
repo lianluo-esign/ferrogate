@@ -13043,6 +13043,35 @@ pub struct RuntimeStorageRepositories {
     // dispatches on the backend enum.
     guardrail_evidence: Mutex<InMemoryAppendRepository<StoredGuardrailEvidence>>,
     guardrail_evaluation_retention_records: Mutex<usize>,
+    control_plane_faults: ControlPlaneFaultInjector,
+}
+
+/// Fault injection for the durable control-plane write path, for tests that must
+/// exercise a failing `replace_control_plane` (#605).
+///
+/// The in-memory control-plane store cannot fail that write, so the branch that
+/// turns a failed durable write into `committed: false` is otherwise unreachable
+/// outside a live Postgres/D1 deployment -- unreachable, and therefore untested,
+/// on exactly the path where swallowing the error was the defect.
+///
+/// Carries no state and costs nothing unless the `fault-injection` feature is
+/// on, so a production build cannot be armed: there is no field to set.
+#[derive(Debug, Default)]
+pub(crate) struct ControlPlaneFaultInjector {
+    #[cfg(any(test, feature = "fault-injection"))]
+    next_replace_failure: Mutex<Option<String>>,
+}
+
+impl ControlPlaneFaultInjector {
+    #[cfg(any(test, feature = "fault-injection"))]
+    fn take_replace_failure(&self) -> Option<String> {
+        self.next_replace_failure.lock().ok()?.take()
+    }
+
+    #[cfg(not(any(test, feature = "fault-injection")))]
+    fn take_replace_failure(&self) -> Option<String> {
+        None
+    }
 }
 
 impl RuntimeStorageRepositories {
@@ -13065,6 +13094,7 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             guardrail_evaluation_retention_records: Mutex::new(audit_event_retention_records),
+            control_plane_faults: ControlPlaneFaultInjector::default(),
         }
     }
 
@@ -13129,6 +13159,7 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             guardrail_evaluation_retention_records: Mutex::new(audit_event_retention_records),
+            control_plane_faults: ControlPlaneFaultInjector::default(),
         })
     }
 
@@ -13186,6 +13217,7 @@ impl RuntimeStorageRepositories {
             control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
             guardrail_evidence: Mutex::new(InMemoryAppendRepository::with_retention_limit(0)),
             guardrail_evaluation_retention_records: Mutex::new(0),
+            control_plane_faults: ControlPlaneFaultInjector::default(),
         })
     }
 
@@ -13207,9 +13239,26 @@ impl RuntimeStorageRepositories {
         &self,
         documents: ControlPlaneDocuments,
     ) -> Result<(), StorageError> {
+        if let Some(reason) = self.control_plane_faults.take_replace_failure() {
+            return Err(StorageError::Runtime(reason));
+        }
         self.control_plane
             .store()
             .replace_config_documents(documents)
+    }
+
+    /// Arms the NEXT [`Self::replace_control_plane`] to fail with
+    /// `StorageError::Runtime(reason)`, then disarms itself (#605).
+    ///
+    /// Test-only, and compiled out unless the `fault-injection` feature is
+    /// enabled: the in-memory control plane cannot fail this write, so without
+    /// it no test can reach the branch that reports a reload as
+    /// `committed: false` because the durable write failed.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn fail_next_control_plane_replacement(&self, reason: impl Into<String>) {
+        if let Ok(mut slot) = self.control_plane_faults.next_replace_failure.lock() {
+            *slot = Some(reason.into());
+        }
     }
 
     pub fn export_migration_snapshot(&self) -> Result<StorageMigrationSnapshot, StorageError> {

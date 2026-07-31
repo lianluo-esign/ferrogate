@@ -45,3 +45,9 @@ tempfile.workspace = true
 
 [features]
 default = []
+# Test-only fault injection for the durable control-plane write path (#605).
+# The in-memory control plane cannot fail `replace_control_plane`, so the branch
+# that reports a reload as `committed: false` because persistence failed is
+# otherwise unreachable outside a live Postgres/D1 deployment. Never enabled in
+# a production build.
+fault-injection = []

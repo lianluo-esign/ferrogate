@@ -50,6 +50,8 @@ fn runtime_provisioned_config() -> Config {
         gateway_configs: vec![serde_json::from_value(serde_json::json!({
             "id": "runtime-profile",
             "name": "Runtime profile",
+            "revision": 1,
+            "cache_enabled": false,
         }))
         .expect("gateway config fixture")],
         agent_workflows: vec![serde_json::from_value(serde_json::json!({
@@ -61,6 +63,10 @@ fn runtime_provisioned_config() -> Config {
         skill_packages: vec![serde_json::from_value(serde_json::json!({
             "id": "runtime-skill-package",
             "name": "Runtime skill package",
+            "version": "1.0.0",
+            // A package must expose at least one capability, and the capability
+            // must resolve -- this one points at the MCP server declared below.
+            "capabilities": [{"kind": "mcp_server", "id": "runtimemcp"}],
         }))
         .expect("skill package fixture")],
         prompt_templates: vec![serde_json::from_value(serde_json::json!({
@@ -71,34 +77,68 @@ fn runtime_provisioned_config() -> Config {
         }))
         .expect("prompt template fixture")],
         plugins: vec![serde_json::from_value(serde_json::json!({
-            "id": "runtime-plugin",
+            // An enabled plugin must be one the gateway can actually load;
+            // `hook.noop` is the in-tree request hook that exists for exactly
+            // this purpose.
+            "id": "hook.noop",
             "kind": "request_hook",
         }))
         .expect("plugin fixture")],
         mcp_servers: vec![serde_json::from_value(serde_json::json!({
-            "name": "runtime-mcp",
+            // No '-': `validate_mcp_servers` reserves it as the
+            // `serverName-toolName` separator, and the merged whole is now
+            // validated, so a name the Admin API would itself have rejected can
+            // no longer sit in the fixture.
+            "name": "runtimemcp",
             "transport": "streamable_http",
             "url": "https://mcp.example.com/mcp",
+            // Execution is deny-by-default and an EMPTY list is rejected, so a
+            // registered server has to name at least one tool.
+            "tools_to_execute": ["search"],
         }))
         .expect("mcp server fixture")],
         agent_upstreams: vec![serde_json::from_value(serde_json::json!({
             "id": "runtime-upstream",
             "name": "Runtime upstream",
             "endpoint": "https://agent.example.com/a2a",
+            "capabilities": ["invoke"],
         }))
         .expect("agent upstream fixture")],
         ..Config::default()
     }
 }
 
-/// The operator's inline payload, verbatim from the issue: turn the scheduler
-/// on, mention no control-plane document at all.
+/// The operator's inline payload, from the issue: turn the scheduler on, mention
+/// no control-plane document at all.
 ///
 /// Parsed rather than constructed, so the fixture is a real inline
 /// `config_toml` body walking the same `Config::from_toml_str` the endpoint
 /// runs, not a struct that skipped it.
+///
+/// It carries the providers and models too, because a real inline payload does:
+/// those are NOT control-plane documents, so they come only from the payload and
+/// a body that omitted them would be asking to delete every model. That is also
+/// what keeps the merged whole valid now that it is validated -- the durable
+/// documents below reference `gpt-4o`, and dropping it is the rejection asserted
+/// by `an_inline_reload_whose_payload_orphans_a_durable_reference_is_rejected`.
 fn unrelated_inline_payload() -> Config {
-    Config::from_toml_str("[scheduler]\nenabled = true\n").expect("the operator's payload is valid")
+    Config::from_toml_str(
+        r#"
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:65535/v1"
+
+[[models]]
+name = "gpt-4o"
+provider = "openai"
+provider_model = "gpt-4o"
+
+[scheduler]
+enabled = true
+"#,
+    )
+    .expect("the operator's payload is valid")
 }
 
 fn seed_runtime_provisioned_documents(node: &SharedAppState) {
@@ -213,16 +253,18 @@ fn an_inline_reload_still_introduces_new_documents_and_updates_existing_ones_by_
                 "id": "runtime-upstream",
                 "name": "Renamed by the operator",
                 "endpoint": "https://agent.example.com/a2a",
+                "capabilities": ["invoke"],
             }))
             .expect("updated upstream fixture"),
             serde_json::from_value(serde_json::json!({
                 "id": "introduced-by-payload",
                 "name": "Introduced by the operator",
                 "endpoint": "https://new.example.com/a2a",
+                "capabilities": ["invoke"],
             }))
             .expect("new upstream fixture"),
         ],
-        ..Config::default()
+        ..unrelated_inline_payload()
     };
 
     let result = node
@@ -252,5 +294,146 @@ fn an_inline_reload_still_introduces_new_documents_and_updates_existing_ones_by_
             .iter()
             .any(|key| key.id == "minted-at-runtime"),
         "updating one class must not revoke another"
+    );
+}
+
+/// Acceptance box 4: a failed durable write is surfaced, not swallowed.
+///
+/// This is the box that had no test. The `?` on
+/// `sync_control_plane_storage_from_config` is unreachable on the default
+/// in-memory control plane -- `replace_config_documents` there cannot fail -- so
+/// the failure is injected at the repository boundary instead, which is the same
+/// boundary a Postgres/D1 write error crosses.
+///
+/// Restoring `let _ =` in `with_reloaded_config` reds this on `committed`: the
+/// reload would answer `200 {"committed":true}` for a control plane that was
+/// never written.
+#[test]
+fn an_inline_reload_whose_durable_write_fails_is_not_committed() {
+    let node = SharedAppState::with_source_path(Config::default(), None);
+    seed_runtime_provisioned_documents(&node);
+    let before = node.current().config.clone();
+
+    node.current()
+        .repositories
+        .fail_next_control_plane_replacement("simulated durable control-plane write failure");
+
+    let result = node
+        .reload_from_inline_config(unrelated_inline_payload())
+        .expect("a failed durable write is a rejected reload, not a caller-visible error");
+
+    assert!(
+        !result.committed,
+        "a reload whose durable write failed must not report committed: {result:?}"
+    );
+    let reason = result
+        .reason
+        .as_deref()
+        .expect("a rejected reload must carry a reason");
+    assert!(
+        reason.contains("could not be persisted to the durable control plane"),
+        "the operator must be told persistence is what failed: {reason}"
+    );
+    // The raw `StorageError` goes to the log, never to the response body: on the
+    // Postgres backend it can carry DSN or SQL detail.
+    assert!(
+        !reason.contains("simulated durable control-plane write failure"),
+        "the storage error detail must not reach the admin response: {reason}"
+    );
+
+    // And the running config really is the pre-reload one -- the claim the
+    // rejection message makes.
+    let live = node.current();
+    assert!(
+        !live.config.scheduler.enabled,
+        "the rejected candidate's scheduler setting must not have been applied"
+    );
+    assert_eq!(
+        live.config.models.len(),
+        before.models.len(),
+        "the rejected candidate's models must not have been applied"
+    );
+}
+
+/// The union produces a combination neither side validated on its own, so the
+/// merged whole is validated before it can commit.
+///
+/// `models` is not a control-plane document class, so it comes only from the
+/// payload: a payload that drops `gpt-4o` while a durable `deny` policy still
+/// names it yields a config `validate_policies` rejects. Committing it would
+/// silently retire that deny rule -- a security control disabled by a reload the
+/// operator ran for an unrelated reason.
+///
+/// Deleting `candidate.validate()?` from `merged_inline_candidate` reds this.
+#[test]
+fn an_inline_reload_whose_payload_orphans_a_durable_reference_is_rejected() {
+    let node = SharedAppState::with_source_path(Config::default(), None);
+    seed_runtime_provisioned_documents(&node);
+
+    // Same payload, minus the model the durable `runtime-policy` denies.
+    let payload = Config::from_toml_str("[scheduler]\nenabled = true\n")
+        .expect("the operator's payload parses on its own");
+
+    let error = node
+        .reload_from_inline_config(payload)
+        .expect_err("the merged whole must be rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("runtime-policy") || message.contains("gpt-4o"),
+        "the rejection must name the dangling reference: {message}"
+    );
+
+    let live = node.current();
+    assert!(
+        !live.config.scheduler.enabled,
+        "a rejected candidate must not have been applied"
+    );
+    let snapshot = live
+        .repositories
+        .control_plane_snapshot()
+        .expect("read the control plane back");
+    assert_eq!(
+        snapshot.api_keys.len(),
+        1,
+        "and must not have reached the destructive durable write"
+    );
+}
+
+/// `POST /admin/v1/config/validate` is a pre-flight for `POST
+/// /admin/v1/config/reload`, so for one body it must answer for one candidate.
+///
+/// The inline reload applies the MERGED config, and `reload_process_local`
+/// derives `candidate_snapshot` from it. A validate that judged the raw payload
+/// would return a different `snapshot` for the same body, which breaks the
+/// `active_snapshot` vs `candidate_snapshot` comparison an operator uses to tell
+/// "already applied" from "will change something" -- and would answer
+/// `valid: true` for the payload rejected by the test above.
+///
+/// Reverting the validate handler to `config_from_admin_payload` reds this.
+#[test]
+fn validate_and_reload_describe_the_same_candidate_for_one_inline_body() {
+    let node = SharedAppState::with_source_path(Config::default(), None);
+    seed_runtime_provisioned_documents(&node);
+
+    let validated = node
+        .merged_inline_candidate(unrelated_inline_payload())
+        .expect("the pre-flight accepts the body");
+    let preflight_snapshot = config_snapshot_id(&validated);
+
+    let result = node
+        .reload_from_inline_config(unrelated_inline_payload())
+        .expect("and so does the reload");
+    assert!(result.committed, "{result:?}");
+    assert_eq!(
+        preflight_snapshot, result.candidate_snapshot,
+        "validate and reload must report one snapshot id for one body"
+    );
+
+    // The pre-flight must also REJECT what the reload rejects.
+    let orphaning_payload = Config::from_toml_str("[scheduler]\nenabled = true\n")
+        .expect("the operator's payload parses on its own");
+    assert!(
+        node.merged_inline_candidate(orphaning_payload).is_err(),
+        "a pre-flight that answers valid:true for a body the reload rejects is worthless"
     );
 }
