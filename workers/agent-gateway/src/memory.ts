@@ -434,6 +434,16 @@ export function memorySqlQuery(
 }> {
   const forbidden = reservedTableViolation(sql);
   if (forbidden) {
+    // A governance refusal is an auditable event, not just a status code: the
+    // issue's tethered principle makes memory access an auth/quota/AUDIT
+    // operation, and a 403 that leaves no trace tells an operator nothing
+    // about WHICH instance tried to reach the SDK control tables. The refusal
+    // message (which names the reserved table) is logged; the caller's SQL is
+    // NOT, because it can carry tenant data.
+    console.warn("memory.sql_forbidden", {
+      instance: host.name,
+      reason: forbidden,
+    });
     return { ok: false, code: "sql_forbidden", message: forbidden };
   }
   try {

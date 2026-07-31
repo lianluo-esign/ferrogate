@@ -22,7 +22,7 @@ Code map:
 |---|---|---|---|
 | 1. Synced JSON state | `this.state` / `setState` (persists to SQLite, whole-object replace) | `POST /memory/state/get`, `POST /memory/state/set` | `state_get`, `state_set` |
 | 2. Embedded SQLite | DO `SqlStorage` (`this.ctx.storage.sql.exec`) | `POST /memory/sql/query` | `sql_query`, `sql_query_with_prune_on_full` |
-| 3. Chat history | `cf_ai_chat_agent_messages` (the `AIChatAgent` table) | `POST /memory/chat/append`, `POST /memory/chat/get`, `POST /memory/chat/prune` | `chat_history_append`, `chat_history_get`, `chat_history_prune` |
+| 3. Chat history | `cf_ai_chat_agent_messages` (the `AIChatAgent` table) | `POST /memory/chat/append`, `POST /memory/chat/get`, `POST /memory/chat/prune` | `chat_history_append`, `chat_history_append_with_prune_on_full`, `chat_history_get`, `chat_history_prune` |
 | Semantic (pilot, beta) | Vectorize + Workers AI embeddings | `POST /memory/semantic/query` | `semantic_query` |
 
 All routes are POST + bearer-gated with the same `GATEWAY_CONTROL_TOKEN`
@@ -57,6 +57,13 @@ route is a hole under two invariants this surface documents as enforced:
 The rule is deliberately blunt — a reserved identifier **anywhere** in the
 statement is refused, reads included — because deciding "is this position a
 write" needs a real SQL parser, and a partial parser is how such guards fail.
+
+A refusal is also **audited**, not just status-coded: the verb emits a
+`memory.sql_forbidden` log carrying the instance name (which embeds the
+tenant) and the refusal reason (which names the reserved table). The caller's
+statement is deliberately **not** logged — it can carry tenant data. This is
+what makes memory access a governed auth/quota/**audit** operation rather than
+a 403 that leaves no trace of which tenant probed the control tables.
 
 The scan tokenizes where SQLite does, and reads **every quoted form**:
 `"x"`, `` `x` ``, `[x]` and `'x'` alike. Single quotes are included because
@@ -109,6 +116,13 @@ Worker) is the test agent's to run; it is not locally provable.
   as HTTP 507 / `sqlite_full`; the Rust client maps it to
   `AgentMemoryError::SqliteFull`, and `sql_query_with_prune_on_full` runs the
   prune path (chat-history DELETE) and retries the statement once.
+  `chat_history_append_with_prune_on_full` does the same for the layer-3
+  writer — append is the only path that grows the chat table, so it meets the
+  wall first, and leaving it without recovery would have made layer 2
+  self-heal while the writer that filled the table returned a bare 507. Both
+  retries are bounded to ONE attempt: a second `SQLITE_FULL` after a prune
+  means the space is held by something the retention cap does not govern, and
+  looping would report that as a hang instead of an error.
 - **2 MB row/value limit**: state replaces are measured and rejected (422)
   before `setState`; oversized SQL string params and oversized
   `/memory/chat/append` messages are rejected (413) before they reach the DO.
@@ -116,6 +130,13 @@ Worker) is the test agent's to run; it is not locally provable.
   persisted, not `String.length` — a code-unit count would let a multi-byte
   payload several times over the limit through. `chat/append` also bounds the
   caller-chosen message `id` at 256 characters (400).
+- **Client-side pre-check (append)**: `chat_history_append` mirrors the
+  route's three append limits — 100-message batch, 256-character `id`, 2 MB
+  per message — and rejects locally with `AgentMemoryError::InvalidRequest`
+  before sending. The Worker remains the enforcement point (a client check can
+  never be the boundary for a network API); the local check exists so the
+  caller learns **which** message was too large, which the HTTP 413 does not
+  say. The constants are pinned to the Worker's in both files.
 - **`maxPersistedMessages` cap**: the pinned Agents SDK (`agents` 0.0.109)
   predates the SDK-side `maxPersistedMessages` option, so the gateway enforces
   the cap itself: `MEMORY_MAX_PERSISTED_MESSAGES` (default 200) bounds

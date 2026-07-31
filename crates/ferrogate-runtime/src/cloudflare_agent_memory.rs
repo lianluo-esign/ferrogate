@@ -74,6 +74,22 @@ pub const AGENT_INSTANCE_COMPONENT_MAX_LEN: usize = 64;
 /// Vectorize's hard cap on a namespace name, in **bytes**.
 pub const VECTORIZE_NAMESPACE_MAX_BYTES: usize = 64;
 
+/// Durable Object hard limit on one SQLite row/value, in **bytes**.
+///
+/// Pinned to `MAX_SQL_VALUE_BYTES` in `workers/agent-gateway/src/memory.ts`.
+pub const MAX_SQL_VALUE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Largest batch one [`AgentMemoryClient::chat_history_append`] call accepts.
+///
+/// Pinned to `MAX_CHAT_APPEND_BATCH` in `workers/agent-gateway/src/memory.ts`.
+pub const MAX_CHAT_APPEND_BATCH: usize = 100;
+
+/// Longest chat-message `id` (the row's primary key) the route accepts.
+///
+/// Pinned to `MAX_CHAT_MESSAGE_ID_CHARS` in
+/// `workers/agent-gateway/src/memory.ts`.
+pub const MAX_CHAT_MESSAGE_ID_CHARS: usize = 256;
+
 /// Prefix marking a hashed Vectorize namespace. A minted instance name always
 /// starts `fg.`, and `.` is outside this prefix, so a hashed namespace can
 /// never collide with a verbatim one.
@@ -177,6 +193,10 @@ fn validate_component(label: &str, value: &str) -> Result<(), AgentMemoryError> 
 pub enum AgentMemoryError {
     /// The identity triple cannot be turned into a safe instance name.
     InvalidIdentity(String),
+    /// The request violates a limit the Worker route enforces, caught locally
+    /// before any HTTP is sent. Distinct from [`Self::RequestFailed`]: nothing
+    /// left the process, so the call is safe to retry after shrinking it.
+    InvalidRequest(String),
     /// The Worker rejected the bearer credential (HTTP 401/403).
     Denied(String),
     /// The statement named an Agents SDK control table and was refused by the
@@ -203,6 +223,7 @@ impl fmt::Display for AgentMemoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidIdentity(m) => write!(f, "invalid agent instance identity: {m}"),
+            Self::InvalidRequest(m) => write!(f, "invalid agent memory request: {m}"),
             Self::Denied(m) => write!(f, "agent memory access denied: {m}"),
             Self::SqlForbidden(m) => write!(f, "agent memory statement refused: {m}"),
             Self::SqliteFull(m) => write!(f, "agent sqlite storage full: {m}"),
@@ -456,17 +477,51 @@ impl<T: GatewayControlTransport> AgentMemoryClient<T> {
     /// [`Self::sql_query_with_prune_on_full`]'s recovery able to free bytes at
     /// all. The Worker enforces the retention cap in the same call, so history
     /// never exceeds `maxPersistedMessages` between an append and a prune.
+    ///
+    /// The batch is checked against the route's limits locally first
+    /// ([`validate_append_batch`]) so an over-limit call fails as
+    /// [`AgentMemoryError::InvalidRequest`], naming the offending message,
+    /// rather than as an opaque HTTP 413.
     pub fn chat_history_append(
         &self,
         identity: &AgentInstanceIdentity,
         messages: &[AgentChatMessageInput],
     ) -> Result<AgentChatAppendOutcome, AgentMemoryError> {
         let instance = identity.instance_name()?;
+        validate_append_batch(messages)?;
         self.call(
             "chat_history_append",
             "memory/chat/append",
             json!({ "instance": instance, "messages": messages }),
         )
+    }
+
+    /// Layer 3 + eviction: like [`Self::chat_history_append`], but on
+    /// `SQLITE_FULL` run the prune path and retry the append once.
+    ///
+    /// Append is the ONLY path that grows layer 3, so it is also the path that
+    /// meets the 10 GB wall first. Without this the recovery story is
+    /// asymmetric: layer 2 self-heals via
+    /// [`Self::sql_query_with_prune_on_full`] while the writer that filled the
+    /// table hands the caller a bare 507. DELETE still succeeds on a full
+    /// database, which is exactly what the retry relies on.
+    ///
+    /// The retry is bounded to ONE attempt on purpose: a second `SQLITE_FULL`
+    /// after a prune means the space is held by something the cap does not
+    /// govern (layer-2 tables), and looping would only turn that into a hang
+    /// instead of reporting it.
+    pub fn chat_history_append_with_prune_on_full(
+        &self,
+        identity: &AgentInstanceIdentity,
+        messages: &[AgentChatMessageInput],
+    ) -> Result<AgentChatAppendOutcome, AgentMemoryError> {
+        match self.chat_history_append(identity, messages) {
+            Err(AgentMemoryError::SqliteFull(_)) => {
+                self.chat_history_prune(identity, None)?;
+                self.chat_history_append(identity, messages)
+            }
+            other => other,
+        }
     }
 
     /// Layer 3: read up to `limit` newest persisted chat messages
@@ -521,6 +576,61 @@ impl<T: GatewayControlTransport> AgentMemoryClient<T> {
         }
         self.call("semantic_query", "memory/semantic/query", body)
     }
+}
+
+/// Check an append batch against the limits the Worker route enforces, BEFORE
+/// spending a governed round trip on it.
+///
+/// The route already rejects each of these (413/400), so this is not the
+/// enforcement point — the Worker stays that, because a client-side check can
+/// never be the boundary for a network API. What it buys is a typed,
+/// actionable error instead of an opaque [`AgentMemoryError::RequestFailed`]
+/// carrying a bare status: "which message was too large" is knowable here and
+/// unknowable from the HTTP reply.
+///
+/// Sizes are measured in BYTES on the JSON that is actually persisted, matching
+/// how the route measures. `String::len` on the payload would count something
+/// else entirely, and a multi-byte message several times over the limit would
+/// pass the pre-check and then fail at the route anyway.
+fn validate_append_batch(messages: &[AgentChatMessageInput]) -> Result<(), AgentMemoryError> {
+    if messages.is_empty() {
+        return Err(AgentMemoryError::InvalidRequest(
+            "messages must not be empty".into(),
+        ));
+    }
+    if messages.len() > MAX_CHAT_APPEND_BATCH {
+        return Err(AgentMemoryError::InvalidRequest(format!(
+            "batch of {} exceeds the {MAX_CHAT_APPEND_BATCH}-message limit",
+            messages.len()
+        )));
+    }
+    for entry in messages {
+        if entry.id.is_empty() {
+            return Err(AgentMemoryError::InvalidRequest(
+                "message id must not be empty".into(),
+            ));
+        }
+        if entry.id.chars().count() > MAX_CHAT_MESSAGE_ID_CHARS {
+            return Err(AgentMemoryError::InvalidRequest(format!(
+                "message id {:?} exceeds the {MAX_CHAT_MESSAGE_ID_CHARS}-character limit",
+                entry.id
+            )));
+        }
+        let encoded = serde_json::to_vec(&entry.message).map_err(|e| {
+            AgentMemoryError::InvalidRequest(format!(
+                "message {:?} cannot be encoded as JSON: {e}",
+                entry.id
+            ))
+        })?;
+        if encoded.len() > MAX_SQL_VALUE_BYTES {
+            return Err(AgentMemoryError::InvalidRequest(format!(
+                "message {:?} is {} bytes, over the {MAX_SQL_VALUE_BYTES}-byte Durable Object value limit",
+                entry.id,
+                encoded.len()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Map a non-2xx memory-route response onto the typed error vocabulary.
