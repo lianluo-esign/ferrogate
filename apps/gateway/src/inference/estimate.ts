@@ -29,12 +29,15 @@
  * NOT a platform limit — `js-tiktoken` / `gpt-tokenizer` run fine in workerd,
  * and the Rust vocabularies (`cl100k_base`, `o200k_base`) are embedded rather
  * than fetched, so nothing about Workers forbids it. What is missing is the
- * DEPENDENCY, and precisely that: neither package is in `bun.lock` or
- * `node_modules`, so closing this is a `bun install` + a ~2 MB script-size
- * decision on `apps/gateway`'s dependency list — an owner's call, not a
- * re-implementation. Re-checked: no tokenizer is vendored anywhere in the
- * workspace, so there is nothing already paid for that this slice declined to
- * use.
+ * DEPENDENCY, and precisely that: re-verified for this pass —
+ * `grep -c "tiktoken\|gpt-tokenizer" bun.lock` is **0** and no tokenizer is
+ * vendored anywhere in the workspace, so there is nothing already paid for that
+ * this slice declined to use. Closing it is a `bun install` plus a ~2 MB
+ * Worker-script-size decision on `apps/gateway`'s dependency list. Neither is
+ * available to a porting slice: adding a dependency changes the lockfile every
+ * concurrent workspace shares, and the script-size budget is an operator's call.
+ * It is therefore held OPEN deliberately rather than closed by vendoring a
+ * vocabulary table into the repo.
  *
  * The approximation implemented instead is the Rust tree's OWN documented
  * fallback — `crate::tokenizer::count_tokens` returns `None` for every model

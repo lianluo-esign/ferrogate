@@ -85,6 +85,7 @@
         "@ferrogate/guardrails": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
         "@ferrogate/secrets": "workspace:*",
+        "@ferrogate/storage": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "agents": "^0.0.109",
         "hono": "^4.6.0",

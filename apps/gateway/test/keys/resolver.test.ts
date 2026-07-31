@@ -97,6 +97,17 @@ describe("a valid key", () => {
         scopes: ["chat.completions", "models.read"],
         platformOperator: false,
         source: "durable_native",
+        // The two allowlists are ALWAYS present (the columns are
+        // `NOT NULL DEFAULT '[]'`), and empty means "no allowlist". They are
+        // part of this deep equality on purpose: this assertion is the
+        // anti-drift gate that noticed them arriving, and it is what will
+        // notice them silently disappearing again.
+        allowedModels: [],
+        allowedProviders: [],
+        // `requestLimitPerMinute` is ABSENT, not 0 — the column is nullable and
+        // this row set no cap. `toEqual` treats an absent key and an
+        // `undefined` key alike, so the "never 0" claim is pinned separately in
+        // `credential-limits.test.ts`.
       },
     });
   });
@@ -293,16 +304,49 @@ describe("401 — a SUSPENDED key is 401, not 403", () => {
   });
 
   test("a row that names no tenant cannot serve traffic", async () => {
-    // Rust `finalize_auth` refuses it with 403 `tenant_identity_required`; this
-    // port refuses it as 401 because `ApiKeyResolution` has no variant for that
-    // status (see the PORT-TODO in src/keys/resolver.ts). Either way it is a
-    // DENIAL — a credential whose blast radius is unknown never serves.
+    // Rust `finalize_auth` refuses it with 403 `tenant_identity_required`, and
+    // this port now answers the same thing (it used to collapse onto the 401,
+    // for want of a variant). The DENIAL is the security half and is asserted
+    // first so it keeps holding independently of the exact variant; the variant
+    // is asserted second because the OBSERVABLE half is the parity claim.
     const secret = await seedApiKey({
       id: "key_no_tenant",
       secret: testSecret("no-tenant"),
       tenantId: "",
     });
-    expect((await resolver().authenticate(secret)).outcome).not.toBe("resolved");
+    const resolution = await resolver().authenticate(secret);
+    expect(resolution.outcome).not.toBe("resolved");
+    expect(resolution).toEqual({ outcome: "tenant_identity_required", declaredButBlank: true });
+  });
+
+  test("the blank-tenant refusal does NOT fall through to the config table", async () => {
+    // Rust's durable `find_map` skips a record that is not USABLE (disabled /
+    // revoked / expired) and lets the config table answer; a blank tenant is
+    // not one of those — the record is live, it is chosen, and `finalize_auth`
+    // refuses it downstream. So the config fallback must never rescue it: a key
+    // id that also exists as a static operator key would otherwise be silently
+    // upgraded from "misconfigured tenant row" to "authenticated".
+    const secret = await seedApiKey({
+      id: "key_no_tenant_shadowed",
+      secret: testSecret("no-tenant-shadowed"),
+      tenantId: "",
+    });
+    const rescuing: ApiKeyAuthenticatorPort = {
+      async authenticate(): Promise<ApiKeyResolution> {
+        return {
+          outcome: "resolved",
+          auth: {
+            subject: "key_fallback",
+            tenancy: { tenantId: "tenant_a", projectId: null, workspaceId: null, userId: null },
+            scopes: ["*"],
+            platformOperator: true,
+            source: "static_config",
+          },
+        };
+      },
+    };
+    const resolution = await resolver({ fallback: rescuing }).authenticate(secret);
+    expect(resolution.outcome).toBe("tenant_identity_required");
   });
 });
 

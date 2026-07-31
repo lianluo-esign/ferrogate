@@ -109,30 +109,43 @@ export type PreflightResult =
  * WITHOUT mutating the ledger. The durable debit remains the authoritative,
  * atomic enforcement.
  *
- * PORT-TODO(inventory-policy-core §2.4d, issue #279) — IMPLEMENTED BUT NEVER
- * MOUNTED. REAL GAP: workflow-run budgets are never enforced.
+ * ## THE "IMPLEMENTED BUT NEVER MOUNTED" MARKER IS CLOSED — do not re-add it
  *
- * This function, {@link resolveWorkflowBudgetEnvelope} and the durable half in
- * `@ferrogate/storage` (`workflow-budget.ts` + `d1/workflow-budget-d1.ts`, incl.
- * `dimensionExceededBy`) are all ported and tested, and NOTHING calls them:
- * `grep -rn "preflightWorkflowBudget\|WorkflowRunBudget\|workflow_run_budget" apps/`
- * returns zero hits. Rust's consumer is
- * `crates/ferrogate-gateway/src/server/agent_runs.rs`, which calls
- * `resolve_workflow_budget_envelope` + `preflight_workflow_budget` on the
- * run-creating path; the TS `/v1/agent-runs` surface lives in
- * `apps/agent-runtime/src/runs/lifecycle.ts`, which has an unrelated "open-job
- * budget" and no cost/token/tool-call/wall-clock ledger.
+ * It read: "`grep -rn "preflightWorkflowBudget\|WorkflowRunBudget\|
+ * workflow_run_budget" apps/` returns zero hits … a run opened with
+ * `cost_budget_credits`/`token_budget`/`tool_call_budget`/
+ * `wall_clock_deadline_unix` spends without limit … the fail-closed guarantee
+ * 'exhausted workflow budget ⇒ deny every step' is currently vacuous end to
+ * end."
  *
- * Consequence: a run opened with `cost_budget_credits`/`token_budget`/
- * `tool_call_budget`/`wall_clock_deadline_unix` spends without limit, and the
- * `status = 'exhausted'` flip never gates a subsequent step. The fail-closed
- * guarantee in the security-invariant appendix ("exhausted workflow budget ⇒ deny
- * every step") is currently vacuous end to end.
+ * `apps/gateway/src/ratelimit/workflow.ts` now value-imports this function plus
+ * {@link resolveWorkflowBudgetEnvelope} and the durable `@ferrogate/storage`
+ * half, keying the run off three request headers
+ * (`x-ferrogate-workflow-id` / `-workflow-version` / `-workflow-run-id`, all
+ * three required together because the budget row's primary key is
+ * `workflowRunBudgetId(...)`; a partial declaration is a 400 rather than a
+ * silently ungated request). It pre-flights TWICE: in `rateLimit()` with a zero
+ * proposed spend — which alone settles `exhausted` and `wall_clock` for every
+ * operation, including non-inference ones — and again in `admitTokensPerMinute`
+ * with the real token estimate, so a step that would breach `token_budget` is
+ * refused before the provider is paid.
  *
- * TO CLOSE (agent-runtime/gateway-owned, outside this package): call
- * {@link preflightWorkflowBudget} on the run-step path before dispatch, then the
- * durable debit; add an assertion that a run at its cap is REFUSED, and prove it
- * RED by removing the call.
+ * ## PORT-TODO(inventory-policy-core §2.4d, issue #279) — TWO OF THE FOUR
+ * ## DIMENSIONS ARE STILL NOT DEBITED. NOT A PLATFORM LIMIT. NOT CLOSED.
+ *
+ * `cost` and `tool_calls` cannot be decided by a pure admission-time
+ * pre-flight: they are only known once a step's real spend settles, and the
+ * authority for them is the atomic
+ * `D1WorkflowBudgetStore.debitWorkflowRunBudget`. Nothing calls that debit yet.
+ * The owner is whoever settles a step — `apps/agent-runtime`'s run-step path,
+ * whose Rust counterpart is `crates/ferrogate-gateway/src/server/agent_runs.rs`
+ * — not this package and not the gateway's admission middleware, which would
+ * have to invent a cost estimate to gate on. So today a run's
+ * `cost_budget_credits` and `tool_call_budget` are enforced only insofar as a
+ * PREVIOUS debit already flipped the run to `exhausted`; with no debiter, that
+ * flip never happens on its own. Closing it means calling the debit after a
+ * step settles and asserting a run at its cap is REFUSED on the NEXT step, with
+ * the assertion proven RED by removing the debit call.
  *
  * NOTE — {@link evaluateNodeDispatch} is NOT part of this gap: it has no consumer
  * in the Rust tree either (only `ferrogate-policy`'s own tests), so its absence

@@ -99,6 +99,7 @@ export {
 export {
   SINGLE_PROVIDER_ATTEMPT_INDEX,
   billingEventFromUsage,
+  providerAttemptIndexFor,
   usageSourceFor,
 } from "./event.js";
 export type { BillingEventContext } from "./event.js";

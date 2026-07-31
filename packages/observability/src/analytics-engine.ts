@@ -26,7 +26,7 @@
  *  - exactly ONE index (AE requires it, and it is what the dataset is sharded
  *    and sampled by); its UTF-8 length must be ≤ 96 bytes;
  *  - at most 20 blobs and at most 20 doubles;
- *  - at most 5120 bytes of blobs in total.
+ *  - at most 16 KB (16384 bytes) of blobs in total, per data point.
  *
  * `indexes[0]` is the TENANT for every point this module writes, matching what
  * the collector Worker used the `x-ferrogate-tenant` header for.
@@ -41,8 +41,22 @@ export const AE_MAX_INDEX_BYTES = 96;
 export const AE_MAX_BLOBS = 20;
 /** Max `doubles` entries per data point. */
 export const AE_MAX_DOUBLES = 20;
-/** Max total `blobs` payload per data point, in UTF-8 bytes. */
-export const AE_MAX_BLOB_BYTES = 5120;
+/**
+ * Max total `blobs` payload per data point, in UTF-8 bytes.
+ *
+ * Cloudflare documents **16 KB of total blob size per data point**, and the cap
+ * applies to each individual data point even when several are submitted
+ * together. This constant read `5120` until this slice — a 3x understatement
+ * that made {@link analyticsEngineDataPointViolation} reject legitimate points
+ * at roughly a third of the real ceiling. It survived because nothing outside
+ * this package called it (the "dead code hides a wrong constant" pattern); the
+ * independently-derived collector-side value
+ * (`apps/telemetry/src/limits.ts:AE_MAX_BLOB_BYTES`) has always been `16 * 1024`,
+ * and the two must agree or the same payload is accepted at one hop and dropped
+ * at the other. `test/analytics-engine.test.ts` pins the literal so a silent
+ * re-narrowing fails.
+ */
+export const AE_MAX_BLOB_BYTES = 16 * 1024;
 
 /** One Analytics Engine data point. */
 export interface AnalyticsEngineDataPoint {

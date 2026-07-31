@@ -1,0 +1,84 @@
+# Wrangler config for the DURABLE-PORTS harness.
+#
+# Not a deployable. It exists so `@cloudflare/vitest-pool-workers` can boot the
+# REAL `src/worker.ts` — the module the deployed Worker's `main` points at, not
+# a bespoke test app — with the bindings the committed `apps/agent-runtime/
+# wrangler.toml` does not yet declare, and WITHOUT the dev flag it does.
+#
+# What this proves that the app's own suite cannot: `resolveDeps` really has a
+# durable branch and that branch is really reachable through the deployed
+# composition root. Every request in `test/durable/*.spec.ts` goes through
+# `SELF`, so it is answered by `src/index.ts`'s app and `src/middleware/auth.ts`
+# — nothing is substituted.
+#
+# THE POINT, stated as an invariant: `FG_DEV_IN_MEMORY_PORTS` is DELIBERATELY
+# ABSENT below, and `FG_DEV_API_KEYS` / `FG_DEV_SELF_HOSTED_WORKERS` are
+# DELIBERATELY ABSENT too. Under the pre-existing code (`resolveDeps` returning
+# `undefined` unless the dev flag was "1") every spec in this directory would
+# answer `503 agent_runtime_unavailable`. They pass only because the D1 branch
+# exists and is mounted.
+#
+# `apps/agent-runtime/wrangler.toml` cannot carry the two `[[d1_databases]]`
+# stanzas yet: composition-root files belong to the integrate step. The exact
+# lines to copy are written out in `src/ports.ts` on `resolveDeps` ("WIRING"),
+# and repeated below.
+
+name = "ferrogate-agent-runtime-durable-harness"
+main = "../../../src/worker.ts"
+
+# Must match `apps/agent-runtime/wrangler.toml`: at 2025-11-17 the date CARRIES
+# `enable_ctx_exports`, and listing the flag as well makes workerd refuse to
+# boot. Lowering this date requires adding the flag back in the same edit.
+compatibility_date = "2025-11-17"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "AGENT_RUN_STATE"
+class_name = "AgentRunState"
+
+[[durable_objects.bindings]]
+name = "WORKER_PLANE"
+class_name = "WorkerPlane"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
+
+# ===========================================================================
+# COPY THIS SHAPE INTO apps/agent-runtime/wrangler.toml (integrate step).
+#
+#   DB          — the TENANT schema. `api_keys` lives here; it is the tenant's
+#                 own credential table. Same binding name and schema
+#                 `apps/gateway/wrangler.toml` declares, so one key
+#                 authenticates identically on both Workers.
+#   CONTROL_DB  — the CONTROL schema. `self_hosted_worker_registrations` lives
+#                 here: a self-hosted worker is registered by the control plane
+#                 and is account-global operator state, not tenant data.
+# ===========================================================================
+[[d1_databases]]
+binding = "DB"
+database_name = "ferrogate-tenant"
+database_id = "agent-runtime-durable-harness-tenant"
+migrations_dir = "../../../../../sql/d1-ts/tenant"
+
+[[d1_databases]]
+binding = "CONTROL_DB"
+database_name = "ferrogate-control"
+database_id = "agent-runtime-durable-harness-control"
+migrations_dir = "../../../../../sql/d1-ts/control"
+# ===========================================================================
+
+[vars]
+# NO `FG_DEV_IN_MEMORY_PORTS`. NO `FG_DEV_API_KEYS`. NO
+# `FG_DEV_SELF_HOSTED_WORKERS`. See the header — their absence is the gate.
+
+FG_REQUIRE_PRODUCTION_MTLS = "0"
+CONTAINER_GOVERNED_EGRESS_HOSTS = ""
+AGENT_RUNTIME_ENABLED = "1"
+AGENT_JOB_MAX_OPEN_PER_TENANT = "200"
+AGENT_JOB_DISPATCH_TTL_SECS = "86400"
+FG_DEV_A2A_GUARDRAILS = ""
+
+# The OPERATOR A2A upstream catalog (Rust `config.agent_upstreams`), read by
+# `resolveDeps` in every posture. Empty is fail-closed: no upstream resolves.
+AGENT_UPSTREAMS = "[]"

@@ -28,6 +28,15 @@ import { describe, test } from "vitest";
  *   - `ed25519-dalek::verify_strict`'s small-order / non-canonical `A` and `R`
  *     rejection, which `crypto.subtle.verify` does not make
  *     → signed-snapshot.test.ts > "verify_strict parity"
+ *   - `http::Uri` vs WHATWG `URL` on the `mcp.http` plugin endpoint: an endpoint
+ *     with no authority ("http:///rpc", "http:/rpc") has no `Uri::authority()`
+ *     and Rust refuses it, while `new URL` re-parses it as "http://rpc/" and
+ *     reports the first PATH SEGMENT as the host — so the config was accepted
+ *     and `must include host` was unreachable dead code
+ *     → validate-rule-identity.test.ts > "validate_plugins + validate_builtin_plugin_shape"
+ *   - the ~115 ported validators that had NO assertion at all (a rule with no
+ *     test is a rule that can be deleted while every suite stays green)
+ *     → validate-rule-identity.test.ts
  *
  * KEPT AS PLATFORM LIMITS (never `test.todo`, because they are not pending work
  * — they are pinned approximations with the limitation written at the source):

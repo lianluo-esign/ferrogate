@@ -153,8 +153,12 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
     const response = await chat();
     expect(response.status).toBe(200);
 
-    // THE MOUNT GATE. Remove `emitRequestTelemetry` from
-    // `src/inference/route-module.ts` and this times out at zero.
+    // NOT a mount gate on its own — see "MOUNT" below. `/v1/chat/completions`
+    // is covered by BOTH emitters (`src/inference/route-module.ts` and
+    // `src/telemetry/middleware.ts`), so removing either leaves this green:
+    // the survivor answers in its place, with the same request id, and
+    // `emitRequestTelemetry` de-duplicates on the inbound `Request` so the
+    // count stays 2. What this case pins is the PAYLOAD and the transport.
     await waitForCollected(2);
     expect(collected.map((entry) => entry.path)).toEqual(["/v1/traces", "/v1/metrics"]);
     for (const entry of collected) {
@@ -163,6 +167,46 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
       // The AUTHENTICATED tenant of the api key, used as the AE index.
       expect(entry.tenant).toBe("tenant_a");
     }
+  });
+
+  it("MOUNT: emits for a NON-inference operation, which only the middleware covers", async () => {
+    // THE MOUNT GATE for `requestTelemetry()` (src/telemetry/middleware.ts),
+    // and it had to be written this way to be a gate at all.
+    //
+    // Every other case in this file drives `/v1/chat/completions`, which TWO
+    // emitters cover: the inference route module's own `emitRequestTelemetry`
+    // and this middleware. Either one alone satisfies them, so neither mount
+    // was individually provable and the comment above used to claim otherwise.
+    //
+    // `/v1/tools` is mounted by `registerToolingRoutes`, NOT by the inference
+    // route module, so the middleware is the only thing that can emit for it.
+    // Make `requestTelemetry()` a pass-through and this times out at zero —
+    // which is also the measurement that says what the middleware BUYS: it
+    // widens coverage from the 6 inference operations to all 31.
+    const response = await SELF.fetch(`${BASE}/v1/tools`, {
+      headers: { authorization: "Bearer fg_telemetry" },
+    });
+    // The tooling stub. What matters is that a NON-inference operation ran.
+    expect(response.status).toBe(501);
+
+    await waitForCollected(2);
+    expect(collected.map((entry) => entry.path)).toEqual(["/v1/traces", "/v1/metrics"]);
+
+    const traces = collected[0]?.body as {
+      resourceSpans: [
+        { scopeSpans: [{ spans: { attributes: { key: string; value: { stringValue: string } }[] }[] }] },
+      ];
+    };
+    const attributes = Object.fromEntries(
+      traces.resourceSpans[0].scopeSpans[0].spans[0]!.attributes.map((attribute) => [
+        attribute.key,
+        attribute.value.stringValue,
+      ]),
+    );
+    // The contract operation id, so this cannot pass off some other request.
+    expect(attributes["route"]).toBe("listTools");
+    expect(attributes["path"]).toBe("/v1/tools");
+    expect(attributes["status_code"]).toBe("501");
   });
 
   it("the span names the operation the deployed router matched", async () => {

@@ -54,22 +54,40 @@ import type { Caller } from "./ports.js";
  * Rust `auth::finalize_auth` → the slice of `AuthContext` the inference
  * handlers read.
  *
- * PORT-TODO(inventory-edge-control §5.2): `allowedModels`/`deniedModels` are
- * NOT populated, because `AuthContext` in `src/ports.ts` has no fields for them
- * — see the matching PORT-TODO on `toAuthContext` in `src/keys/resolver.ts`,
- * which already LOADS `allowed_models` off the `api_keys` row and drops it for
- * want of somewhere to put it. `src/ports.ts` is the composition root's file,
- * not this slice's.
+ * ## The per-key model allowlist (was PORT-TODO inventory-edge-control §5.2 —
+ * now wired)
  *
- * Cross-file, not cross-platform, and the omission is scoped precisely: the
- * per-key model ALLOW/DENY list (403 `model_not_allowed`) stays unenforced for
- * durable keys, while the tenant/project visibility gate (issue #515) — which
- * reads `scope` and `projectId`, both of which DO exist here — is live. The
- * remaining change is three optional members on `AuthContext` plus two lines
- * below.
+ * `AuthContext.allowedModels` is populated by `keys/resolver.ts::toAuthContext`
+ * off the `api_keys` row, and it is copied onto the {@link Caller} here so
+ * `ports.ts::callerCanUseModel` — i.e. `handlers.ts`'s 403 `model_not_allowed`
+ * gate — actually sees it. Reading the column and never forwarding it is the
+ * defect shape this wave exists to remove: the resolver's own test would stay
+ * green on a key whose allowlist was enforced nowhere.
+ *
+ * `deniedModels` is NOT forwarded, and that is not an omission: Rust's
+ * `AuthContext` carries `denied_models` as a separate `HashSet`, `AuthContext`
+ * in `src/ports.ts` has no such field, and the `api_keys` row this tree reads
+ * has no denylist COLUMN. Inventing one would be inventing a gate. The port
+ * keeps `Caller.deniedModels` in the type — `callerCanUseModel` implements the
+ * full Rust predicate, deny-wins-then-allowlist, and unit tests exercise both
+ * legs — so the day a denylist column lands the only change is one more line
+ * here. Absent means "no denylist", which is the Rust reading of an empty set.
+ *
+ * PORT-TODO(`auth.rs:146` `can_use_provider`): the sibling PROVIDER allowlist is
+ * still unenforced. `AuthContext.allowedProviders` is loaded off the same row
+ * and there is nowhere in the inference path that consults it, because
+ * `can_use_provider` gates a PHYSICAL ROUTE and this function only builds the
+ * caller. The right home is `candidates.ts::routeExclusionReasons` — a new
+ * `provider_not_allowed` exclusion code beside `region_not_allowed`, since both
+ * are tenant-policy refusals and `routingRejectionFor` already renders that
+ * class as 403 rather than 400. Left undone rather than half-done: adding the
+ * code without the eligibility leg would put a value in the vocabulary that
+ * nothing can emit, and adding the leg needs `Caller` to carry the list, which
+ * changes the shape every injected-caller test in the suite builds.
  */
 export function callerFromAuth(auth: AuthContext): Caller {
   const projectId = auth.tenancy.projectId;
+  const allowedModels = auth.allowedModels;
   return {
     // `callerScope` is the Rust `AuthContext::caller_scope`: platform-operator
     // ONLY when the credential declared it, and an unclassified credential is
@@ -77,6 +95,11 @@ export function callerFromAuth(auth: AuthContext): Caller {
     scope: callerScope(auth),
     ...(auth.subject !== null ? { apiKeyId: auth.subject } : {}),
     ...(projectId !== null && projectId !== undefined ? { projectId } : {}),
+    // Forwarded only when NON-EMPTY. `callerCanUseModel` already treats an empty
+    // allowlist as unrestricted, so this is belt-and-braces in the fail-OPEN
+    // direction on purpose: a credential source with no allowlist column must
+    // never read as "this key may use nothing".
+    ...(allowedModels !== undefined && allowedModels.length > 0 ? { allowedModels } : {}),
   };
 }
 

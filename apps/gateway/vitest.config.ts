@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+
+/** The committed deploy config, read here because workerd has no filesystem. */
+const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), "utf8");
 
 /**
  * The REAL tenant-database migration, read from the same directory
@@ -133,6 +137,13 @@ export default defineConfig({
           GATEWAY_PROVIDERS: "[]",
           GATEWAY_MODELS: "[]",
           TEST_D1_SCHEMA: migrations,
+          // The COMMITTED deploy config, verbatim, so a test can assert against
+          // the parts of it that no binding surfaces. `[triggers] crons` is the
+          // one that matters: workerd never dispatches a scheduled event under
+          // vitest, so the whole suite stays green on a Worker whose Cron was
+          // deleted — the billing-outbox recovery would simply never fire in
+          // production. `test/cron-trigger.test.ts` reads this.
+          TEST_WRANGLER_TOML: WRANGLER_TOML,
         },
         workers: [TELEMETRY_COLLECTOR_STUB],
       },

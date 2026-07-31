@@ -31,6 +31,7 @@ import { responseCache } from "../middleware/response-cache.js";
 import type { GatewayEnv } from "../ports.js";
 import { agentDiscoveryHandler } from "./agent-discovery.js";
 import { readinessResponse } from "./readiness.js";
+import { reverseProxyFallThrough } from "./reverse-proxy.js";
 
 /** Service identity echoed by `/healthz` and `/readyz` (Rust `SERVICE_NAME`). */
 export const SERVICE_NAME = "ferrogate-gateway";
@@ -318,6 +319,19 @@ export interface CreateGatewayAppOptions {
    * cache middleware", only for a cache that is switched off by config.
    */
   readonly responseCache?: MiddlewareHandler<GatewayEnv>;
+  /**
+   * Override the operator reverse-proxy catch-all (`./reverse-proxy.ts`).
+   *
+   * Production never passes this: the default reads `GATEWAY_ROUTES` /
+   * `GATEWAY_UPSTREAMS` and is inert with neither set. It exists so a test can
+   * inject a route table and a stub transport, because the real one performs an
+   * outbound `fetch` that a hermetic suite must not make.
+   *
+   * NOT nullable, for the same reason as the two above: there is no way to ask
+   * for "no fall-through", only for a fall-through with an empty table — and an
+   * empty table is exactly `404 not_found`.
+   */
+  readonly reverseProxy?: MiddlewareHandler<GatewayEnv>;
 }
 
 /** The assembled Worker plus the registry the anti-drift test inspects. */
@@ -376,36 +390,21 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // neither is a contract operation, so both fall through `contractAuth`.
   app.get("/health", (c) => c.json({ ok: true }));
 
-  // PORT-TODO(inventory-request-path §"Cross-crate architecture" step 12,
-  // §1.3): the OPERATOR REVERSE-PROXY FALL-THROUGH is absent. In Rust, a
-  // request that matches no route group does not 404 — it falls through to
-  // `AppState::match_runtime_route` (`state_routing.rs:816`), which resolves the
-  // operator's `[[routes]]` host/path table onto an `[[upstreams]]` entry, and
-  // Pingora proxies it. That is the difference between "an LLM API" and "a
-  // gateway": every non-`/v1/**` surface an operator puts behind FerroGate goes
-  // through this path, and `ROUTE-MAP.md` §"Dynamic surfaces" puts it explicitly
-  // IN scope ("in Hono use a catch-all resolved against the config snapshot").
+  // The OPERATOR REVERSE-PROXY FALL-THROUGH (Rust step 12, §1.3;
+  // `docs/rewrite/parity-audit-request-path.md` F9). See `./reverse-proxy.ts`.
   //
-  // Everything around it is already ported and unused:
-  //   - `packages/config` validates `routes` + `upstreams` (`schema/config.ts:91-92`);
-  //   - `@ferrogate/routing` exports `RouteMatch` + `RouteMatcher` — an INTERFACE
-  //     WITH NO IMPLEMENTATION and no caller (see the PORT-TODO on that package);
-  //   - `select_runtime_upstream_endpoint` / `select_upstream_url` (upstream
-  //     rotation and health) have no counterpart here.
+  // LAST, and the position is the whole correctness argument: Hono runs matched
+  // handlers in REGISTRATION order, so an `app.all("*")` placed any earlier
+  // would shadow all 251 contract operations AND `/health`. It is registered
+  // after every `router.register`, after every caller-supplied module, and after
+  // `/health` above.
   //
-  // Also unported with it, from `proxy.rs::apply_upstream_request_filter` /
-  // `response_filter`: `build_target_uri`, the `Host` rewrite,
-  // `x-forwarded-host`, `x-ferrogate-request-id` / `x-ferrogate-trace-id` /
-  // `traceparent` / `tracestate` injection toward the upstream, and the per-route
-  // request/response header tables. (The gateway-ORIGINATED response headers ARE
-  // ported — see `middleware/errors.ts`.)
-  //
-  // Consequence today: `app.notFound` answers `404 not_found` for every path
-  // the contract does not name, so an operator route is not misrouted — it is
-  // simply not served. Not a platform limit: a Hono `app.all("*", …)` resolved
-  // against the config snapshot is the whole shape, and it must be registered
-  // LAST, after every contract route, or it would shadow them.
-  // See `docs/rewrite/parity-audit-request-path.md` F9.
+  // Inert with `GATEWAY_ROUTES` unset: the handler sees an empty table and calls
+  // `c.notFound()`, so an undocumented path still gets the gateway's own
+  // `404 not_found` envelope. `test/routes/reverse-proxy.test.ts` pins both
+  // halves — that a configured operator route proxies, and that mounting this
+  // changed nothing for a path no operator claimed.
+  app.all("*", options.reverseProxy ?? reverseProxyFallThrough());
 
   return { app, router };
 }

@@ -360,6 +360,33 @@ GATEWAY_DRAIN = "false"
 GATEWAY_AGENT_UPSTREAMS = "{}"
 
 # ---------------------------------------------------------------------------
+# [vars] — the OPERATOR REVERSE-PROXY table (Rust step 12, §1.3; the F9 finding
+# in `docs/rewrite/parity-audit-request-path.md`).
+#
+# Read by `routeTableFromEnv` (src/routes/reverse-proxy.ts), which
+# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 251 contract
+# operations and after `/health`, so nothing it does can shadow a contract
+# route.
+#
+# `GATEWAY_ROUTES` is a JSON array of `[[routes]]` entries (`routeRuleSchema`);
+# `GATEWAY_UPSTREAMS` a JSON array of `[[upstreams]]` (`upstreamSchema`). They
+# are the direct port of the Rust TOML tables of the same names — operator
+# configuration, so a var is the faithful port rather than a stub.
+#
+# EMPTY IS INERT, and that is the committed posture: with no route claimed, the
+# fall-through calls `c.notFound()` and an undocumented path gets the gateway's
+# own `404 not_found` envelope, exactly as before this handler existed. A table
+# that fails to parse is NOT ignored — `RuntimeRouteTableInvalid` renders 503,
+# so a typo cannot silently open or silently close the proxy.
+#
+# Header mutations carrying an unresolvable `{env.NAME}` placeholder are
+# SKIPPED rather than forwarded literally (Rust `compile_header_mutations`), so
+# a missing upstream credential never leaves as the string `{env.…}`.
+# ---------------------------------------------------------------------------
+GATEWAY_ROUTES = "[]"
+GATEWAY_UPSTREAMS = "[]"
+
+# ---------------------------------------------------------------------------
 # [vars] — guardrail policies
 #
 # Read by `guardrailDepsFromEnv` (src/guardrails/config.ts).

@@ -79,8 +79,43 @@ describe("analyticsEngineDataPointViolation — the limits AE drops points for",
     expect(analyticsEngineDataPointViolation({ ...ok, blobs: under })).toBeNull();
     const over = ["a".repeat(AE_MAX_BLOB_BYTES), "a"];
     expect(analyticsEngineDataPointViolation({ ...ok, blobs: over })).toContain(
-      "over the 5120-byte limit",
+      "over the 16384-byte limit",
     );
+  });
+
+  /**
+   * PLATFORM-CONSTANT PIN. Cloudflare documents 16 KB of total blob bytes per
+   * Analytics Engine data point (20 blobs, 20 doubles, one index of at most 96
+   * bytes, 250 `writeDataPoint` calls per invocation). This package declared
+   * 5120 for the blob budget while the collector Worker
+   * (`apps/telemetry/src/limits.ts`) independently declared `16 * 1024`, so the
+   * same payload was accepted at one hop and refused at the other.
+   *
+   * Asserted as LITERALS, deliberately: writing
+   * `expect(AE_MAX_BLOB_BYTES).toBe(AE_MAX_BLOB_BYTES)` — or deriving the
+   * expectation from the constant, which is what the byte-budget test above
+   * necessarily does — cannot fail, and is precisely how the 3x error survived.
+   * A point at exactly the documented ceiling must pass and one byte over must
+   * be refused, so narrowing the constant again breaks this test in two places.
+   */
+  test("the documented Cloudflare per-point limits are the ones enforced", () => {
+    expect(AE_MAX_BLOB_BYTES).toBe(16384);
+    expect(AE_MAX_BLOBS).toBe(20);
+    expect(AE_MAX_DOUBLES).toBe(20);
+    expect(AE_MAX_INDEX_BYTES).toBe(96);
+
+    // 16 KB of blobs is legal on the platform, and must be legal here.
+    expect(
+      analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(16384)] }),
+    ).toBeNull();
+    // The old 5120 ceiling would have refused this; the real one must not.
+    expect(
+      analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(5121)] }),
+    ).toBeNull();
+    // One byte past the documented ceiling still has to be refused.
+    expect(
+      analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(16385)] }),
+    ).toContain("over the 16384-byte limit");
   });
 
   test("a non-finite double is refused (JSON has no NaN/Infinity)", () => {

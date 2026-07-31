@@ -52,7 +52,10 @@ export const INTERNAL_ROUTES = [
  */
 export function workerEnvelopeFor(
   path: string,
-  identity: typeof WORKER_A | typeof WORKER_B = WORKER_A,
+  // Widened from the two literal fixtures so `test/durable/` can drive the SAME
+  // builder with its D1-seeded identities. Sharing it is the point: the six
+  // bodies must not fork between the in-memory suite and the durable one.
+  identity: Readonly<Record<string, unknown>> = WORKER_A,
 ): Record<string, unknown> {
   const base = { protocol_version: 1, identity };
   switch (path) {

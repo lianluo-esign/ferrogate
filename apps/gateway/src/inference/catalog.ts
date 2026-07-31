@@ -54,6 +54,7 @@ import type {
   ModelResolver,
   PhysicalRoute,
 } from "./ports.js";
+import { ROUTING_STRATEGIES } from "./strategy.js";
 
 // ---------------------------------------------------------------------------
 // Wire schemas
@@ -139,15 +140,21 @@ export const providerRecordSchema = z
  * `ModelRoute` except the logical name and the tenancy, which belong to the
  * owning `ModelRegistryEntry` and are inherited.
  *
- * PORT-TODO(inventory-request-path §3.2, F6): three `ModelRegistryEntry` fields
- * are still unrepresentable and each blocks one behavior —
- * `routing_strategy: RoutingStrategy` (`LowestCost`/`LowestLatency`/`Balanced`,
- * declared in `@ferrogate/providers` and consumed by nothing),
- * `input_price_per_1m`/`output_price_per_1m` (`route_estimated_cost`'s only
- * inputs, so `LowestCost` cannot be scored), and `cache_enabled` (the per-model
- * leg of `AppState::ai_cache_enabled`, which has no cache to gate yet — F11).
- * Priority ordering, weight, fallbacks, the context window and the rollout
- * splits ARE expressible as of this slice.
+ * `routing_strategy` and the two prices closed F6 and live on the model row /
+ * every leg respectively — see {@link modelRecordSchema} and `strategy.ts`.
+ *
+ * PORT-TODO(`src/cache/config.ts` `aiCacheEnabled`, F11 residue): the ONE
+ * `ModelRegistryEntry` field still unrepresentable here is `cache_enabled`, the
+ * per-model leg of `AppState::ai_cache_enabled`'s four-level opt-out (global,
+ * profile, model, api-key). It is NOT missing behavior: the response cache
+ * landed in `src/middleware/response-cache.ts` and `aiCacheEnabled` already
+ * takes a `logicalModel` and consults the model leg — it just reads that leg out
+ * of the cache policy var rather than out of `[[models]]`, so an operator
+ * disables caching for one model in the cache policy instead of on the model
+ * row. Adding the key here would put a second, competing source of truth on the
+ * same switch. Whether to fold the two is a decision for `src/cache/`, which
+ * owns the policy shape and is not this slice's directory; until then the switch
+ * exists and works, in the other file.
  */
 const routeFieldsSchema = {
   /** `ModelRoute.provider` — must name a row in the provider table. */
@@ -163,6 +170,17 @@ const routeFieldsSchema = {
   priority: z.number().int().min(0).optional(),
   /** `ModelRoute.weight` — DESCENDING within a priority group. */
   weight: z.number().int().min(0).optional(),
+  /**
+   * `ModelRoute.input_price_per_1m` — USD per 1M prompt tokens, scoring
+   * `routing_strategy = "lowest_cost"` / `"balanced"` (`strategy.ts`).
+   *
+   * `nonnegative`, not `positive`: a genuinely free route prices at 0 and must
+   * be expressible, and `route_estimated_cost` is happy with it. Absent means
+   * UNPRICED, which is not the same as free — see `routeEstimatedUnitCost`.
+   */
+  input_price_per_1m: z.number().nonnegative().optional(),
+  /** `ModelRoute.output_price_per_1m` — USD per 1M completion tokens. */
+  output_price_per_1m: z.number().nonnegative().optional(),
 } as const;
 
 /** One `[[models]].fallbacks` entry — a `ModelRoute` with no rollout split. */
@@ -209,6 +227,18 @@ export const modelRecordSchema = z
     ...routeFieldsSchema,
     /** `ModelRegistryEntry.enabled`; defaults to `true` as in Rust. */
     enabled: z.boolean().optional(),
+    /**
+     * `ModelRegistryEntry.routing_strategy` — the order `strategy.ts` walks the
+     * eligible candidates in. Absent is `RoutingStrategy::default()`, i.e.
+     * `"priority"`, so every catalog written before this field existed keeps its
+     * exact ordering.
+     *
+     * It belongs to the ENTRY, not to a route, which is why it sits here and not
+     * in `routeFieldsSchema`: a fallback cannot have its own strategy in Rust
+     * either. `buildModelCatalog` copies it onto every flattened leg so the
+     * handler can read it off whichever leg survived eligibility.
+     */
+    routing_strategy: z.enum(ROUTING_STRATEGIES).optional(),
     /** `ModelRegistryEntry.fallbacks` — the candidate list `chat.rs:259` walks. */
     fallbacks: z.array(fallbackRouteSchema).optional(),
     /** `ModelRegistryEntry.canary` — the rollout split. */
@@ -235,6 +265,22 @@ interface RouteRollout {
   readonly canaryPercent?: number;
   readonly shadowPercent?: number;
   readonly shadowMaxRequests?: number;
+}
+
+/**
+ * Drop `undefined`-valued keys so a leg can be spread OVER its Rust defaults.
+ *
+ * Zod omits an absent `.optional()` key rather than setting it to `undefined`,
+ * so `{ ...defaults, ...leg }` would already behave — but only as long as that
+ * stays true of every schema and every hand-built `ModelRecord` a test passes to
+ * `buildModelCatalog` directly. An explicit `priority: undefined` silently
+ * erasing the Rust default is exactly the kind of quiet regression the
+ * primary-before-fallback ordering must not depend on.
+ */
+function definedRouting<T extends object>(leg: T): T {
+  return Object.fromEntries(
+    Object.entries(leg).filter(([, value]) => value !== undefined),
+  ) as T;
 }
 
 /** Either the flattened routes, or the reason the whole table was refused. */
@@ -495,17 +541,46 @@ export function buildModelCatalog(
     // (`InMemoryModelResolver.catalog`), and the rollout rows carry the two
     // discriminators (`canaryPercent` / `shadowPercent`) that
     // `candidates.ts` splits them back out on.
+    //
+    // `priority` / `weight` defaults are Rust's and they are NOT the same on
+    // both sides of this list (`state.rs::model_registry_entry`):
+    //
+    //   - the PRIMARY is `ModelRoute::new` ⇒ `priority = 0, weight = 1`;
+    //   - a FALLBACK is `priority.unwrap_or(100), weight.unwrap_or(1)`.
+    //
+    // The 0-vs-100 split is what pins the primary ahead of every undeclared
+    // fallback. Defaulting both to 0 would put them in ONE priority group, where
+    // the order then falls to weight and finally to the provider NAME — so a
+    // fallback whose provider sorts alphabetically before the primary's would be
+    // dispatched first, on a config that declares no ordering at all. The weight
+    // default of 1 rather than 0 matters for the same reason
+    // (`weighted_start_index` reads `weight.max(1)`, so a group of 0-weight
+    // routes would rotate as if uniformly weighted anyway — but the DESCENDING
+    // weight tiebreak would see a declared `weight = 0` as beating an undeclared
+    // one, which is backwards).
+    const primaryDefaults = { priority: 0, weight: 1 } as const;
+    const fallbackDefaults = { priority: 100, weight: 1 } as const;
     const legs: readonly (RouteLeg & { readonly rollout?: RouteRollout })[] = [
-      model,
-      ...(model.fallbacks ?? []),
+      { ...primaryDefaults, ...definedRouting(model) },
+      ...(model.fallbacks ?? []).map((fallback) => ({
+        ...fallbackDefaults,
+        ...definedRouting(fallback),
+      })),
       ...(model.canary === undefined
         ? []
-        : [{ ...model.canary, rollout: { canaryPercent: model.canary.percent } }]),
+        : [
+            {
+              ...fallbackDefaults,
+              ...definedRouting(model.canary),
+              rollout: { canaryPercent: model.canary.percent },
+            },
+          ]),
       ...(model.shadow === undefined
         ? []
         : [
             {
-              ...model.shadow,
+              ...fallbackDefaults,
+              ...definedRouting(model.shadow),
               rollout: {
                 shadowPercent: model.shadow.sample_percent,
                 shadowMaxRequests: model.shadow.max_requests ?? 0,
@@ -566,6 +641,18 @@ export function buildModelCatalog(
         ...(leg.context_window !== undefined ? { contextWindow: leg.context_window } : {}),
         ...(leg.priority !== undefined ? { priority: leg.priority } : {}),
         ...(leg.weight !== undefined ? { weight: leg.weight } : {}),
+        ...(leg.input_price_per_1m !== undefined
+          ? { inputPricePer1m: leg.input_price_per_1m }
+          : {}),
+        ...(leg.output_price_per_1m !== undefined
+          ? { outputPricePer1m: leg.output_price_per_1m }
+          : {}),
+        // `routing_strategy` belongs to the registry ENTRY, so it is copied from
+        // `model` onto EVERY leg — never read off `leg`, which for a fallback
+        // cannot carry one (`fallbackRouteSchema` is `.strict()`).
+        ...(model.routing_strategy !== undefined
+          ? { routingStrategy: model.routing_strategy }
+          : {}),
         ...(leg.rollout ?? {}),
         // `ModelRegistryEntry.enabled` governs the WHOLE entry, fallbacks
         // included: Rust disables the registry entry, not a single route, so a

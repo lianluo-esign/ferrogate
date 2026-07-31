@@ -18,6 +18,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { D1McpAuth } from "../src/auth.js";
 import {
   D1CredentialGrants,
   DurableCredentialStore,
@@ -33,14 +34,14 @@ import {
   loadServerCatalog,
 } from "../src/durable.js";
 import {
-  credentialId,
-  durableIdentityBound,
-  portsBound,
-  resolvePorts,
   type McpEnv,
   type McpIdentityActor,
   type StoredMcpOauthCredential,
   type StoredMcpOauthFlow,
+  credentialId,
+  durableIdentityBound,
+  portsBound,
+  resolvePorts,
 } from "../src/ports.js";
 
 const DB = env.DB as unknown as D1Database;
@@ -118,11 +119,7 @@ describe("D1 schema", () => {
     ).all<{ name: string }>();
     const names = rows.results.map((row) => row.name);
     expect(names).toEqual(
-      expect.arrayContaining([
-        "mcp_oauth_credentials",
-        "mcp_identity_generations",
-        "mcp_servers",
-      ]),
+      expect.arrayContaining(["mcp_oauth_credentials", "mcp_identity_generations", "mcp_servers"]),
     );
   });
 
@@ -242,9 +239,12 @@ describe("D1 grants — authorization generation guard", () => {
     await grants.put(credential({ subject: "existing" }));
     await grants.bumpGeneration(ACTOR, SERVER);
 
-    expect(await grants.commit(flow({ authorizationGeneration: 0 }), credential({ subject: "attacker" }))).toBe(
-      false,
-    );
+    expect(
+      await grants.commit(
+        flow({ authorizationGeneration: 0 }),
+        credential({ subject: "attacker" }),
+      ),
+    ).toBe(false);
     expect((await grants.get(ACTOR, SERVER))?.subject).toBe("existing");
   });
 
@@ -535,12 +535,30 @@ describe("resolvePorts binding postures", () => {
     expect(ports.credentials).not.toBeInstanceOf(DurableCredentialStore);
   });
 
-  it("still fails CLOSED on the durable path — auth is not yet bindable here", async () => {
-    // The durable identity halves being live must NOT be mistaken for
-    // readiness: without an AuthPort no caller can be authenticated.
-    expect(portsBound(base)).toBe(false);
+  it("binds the DURABLE auth port on the durable path and reports READY", async () => {
+    // This assertion used to read `portsBound(base) === false` with the comment
+    // "auth is not yet bindable here" — it pinned the deferral that made a
+    // production Worker answer 503 on every authenticated surface forever. That
+    // deferral is closed (`src/auth.ts`), so the assertion is STRENGTHENED
+    // rather than dropped: the port must now be the durable one, readiness must
+    // follow it, and an unrecognized credential must get the 401 an unknown key
+    // gets — never the 503 that used to be the only possible answer.
+    expect(portsBound(base)).toBe(true);
     const ports = resolvePorts(base);
+    expect(ports.auth).toBeInstanceOf(D1McpAuth);
     const outcome = await ports.auth.authenticate(
+      new Headers({ authorization: "Bearer anything" }),
+      "tools.read",
+    );
+    expect("code" in outcome && outcome.code).toBe("invalid_api_key");
+    expect("status" in outcome && outcome.status).toBe(401);
+  });
+
+  it("STILL fails closed when no database is bound at all", async () => {
+    // The fail-closed arm has not gone anywhere; it moved to the posture that
+    // actually has nothing to authenticate against.
+    expect(portsBound({})).toBe(false);
+    const outcome = await resolvePorts({}).auth.authenticate(
       new Headers({ authorization: "Bearer anything" }),
       "tools.read",
     );

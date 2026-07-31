@@ -188,14 +188,27 @@ export function chunkText(payload: unknown): string | undefined {
 }
 
 /**
- * PORT-TODO(inventory-request-path §1.5): there is deliberately no
- * Anthropic-events -> OpenAI-chunks normalizer here. The Rust tower converts
- * OpenAI -> Anthropic (`MessagesStreamNormalizer`), OpenAI/Anthropic/Gemini ->
- * Responses (`ResponsesStreamNormalizer`), and Anthropic-object -> Anthropic-SSE
- * (`message_to_anthropic_sse`) — the reverse direction does not exist in the
- * Rust tree, because an Anthropic upstream answering a `/v1/chat/completions`
- * request is translated by the *provider adapter* on the non-streaming path
- * before it ever reaches the tower. Adding it here would be new behavior, not a
- * port; it belongs with the adapters in `@ferrogate/providers`.
+ * PORT-TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
+ * GAP.** There is deliberately no Anthropic-events → OpenAI-chunks normalizer
+ * here, because there is none in the Rust tree either.
+ *
+ * Re-verified for this pass, against `crates/`: the tower wires exactly three
+ * conversions — OpenAI → Anthropic (`MessagesStreamNormalizer`),
+ * OpenAI/Anthropic/Gemini → Responses (`ResponsesStreamNormalizer`), and
+ * Anthropic-object → Anthropic-SSE (`message_to_anthropic_sse`). The reverse
+ * direction is absent because an Anthropic upstream answering a
+ * `/v1/chat/completions` request is translated by the PROVIDER ADAPTER on the
+ * non-streaming path before it ever reaches the tower;
+ * `defaults.ts::defaultStreamNormalizers` reproduces that by returning `null`
+ * (passthrough) for the `openai.chat` dialect, exactly as Rust does.
+ *
+ * So this marker does not track missing work. It exists so that the NEXT reader
+ * who notices the asymmetry does not "fix" it: writing this normalizer would be
+ * inventing behavior the tree being ported never had, and a streaming
+ * `/v1/chat/completions` against an Anthropic upstream would start emitting a
+ * chunk shape no Rust deployment ever emitted. If that conversion is genuinely
+ * wanted it is a FEATURE, it belongs with the adapters in
+ * `@ferrogate/providers` beside the non-streaming translation it mirrors, and
+ * it needs its own acceptance criteria — not a silent addition inside a port.
  */
 export const OPENAI_REVERSE_NORMALIZER_UNPORTED = true;

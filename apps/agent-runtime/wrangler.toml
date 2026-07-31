@@ -99,6 +99,70 @@ AGENT_JOB_DISPATCH_TTL_SECS = "86400"
 # ever be a per-deployment default.
 FG_DEV_A2A_GUARDRAILS = ""
 
+# ---------------------------------------------------------------------------
+# AGENT_UPSTREAMS — the operator catalog of A2A upstreams, read by `resolveDeps`
+# (`src/ports.ts`). JSON array of `AgentUpstream`.
+#
+# DELIBERATELY NOT DECLARED, which is NOT the same as "forgotten". `resolveDeps`
+# reads `env.AGENT_UPSTREAMS ?? (dev ? env.FG_DEV_AGENT_UPSTREAMS : undefined)`
+# and `parseJsonVar` defaults to `[]`, so ABSENT and `"[]"` give a deployment
+# the identical empty catalog — every dispatch 404s, the correct unconfigured
+# posture. Declaring the empty string buys nothing and costs something real:
+# `??` makes a committed `AGENT_UPSTREAMS = "[]"` SHADOW the dev fallback, and
+# because `vitest.config.ts` loads this file through `wrangler: { configPath }`,
+# the committed var would silently empty the catalog the test harness seeds —
+# 14 A2A dispatch tests turn red against correct code (verified, not assumed).
+#
+# An operator states the catalog by SETTING this var; leaving it out is how the
+# repo says "no upstreams", in the one way that cannot leak into the harness.
+#   AGENT_UPSTREAMS = '[{"id":"helper","enabled":true,"url":"https://…/a2a"}]'
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# D1 — the two CREDENTIAL AUTHORITIES (`resolveDeps` in `src/ports.ts`)
+#
+#   DB          tenant schema  -> `api_keys`  (`d1ApiKeyPort`)
+#   CONTROL_DB  control schema -> `self_hosted_worker_registrations`
+#                                 (`d1WorkerIdentityPort`)
+#
+# A BOUND DATABASE WINS OVER `FG_DEV_IN_MEMORY_PORTS`, deliberately: a
+# deployment that provisions real databases but forgets to delete the dev flag
+# must still get the real databases (`docs/rewrite/parity-audit-dead-packages.md`
+# §7.2 — a durable identity store bypassed by one leftover variable). With
+# NEITHER a database nor the dev flag, `resolveDeps` returns undefined and every
+# authenticated surface answers `503 agent_runtime_unavailable`. There is no
+# permissive default.
+#
+# COMMENTED OUT, and the reason is a TEST-HARNESS one that must not be lost:
+# `vitest.config.ts` loads THIS file through `wrangler: { configPath }`, so an
+# uncommented stanza injects `env.DB` / `env.CONTROL_DB` into every unit test —
+# where miniflare provisions an EMPTY local database with no migrations applied.
+# The durable-first rule above then routes the whole default suite onto
+# schema-less tables: 106 of 259 tests fail on a correct tree (measured, not
+# assumed — uncomment both stanzas and run `bun run test` to reproduce). The
+# durable path has its own harness that binds these two
+# databases and applies the migrations
+# (`test/durable/harness/vitest.config.ts`, chained from `bun run test`), so the
+# D1 adapters ARE proven — against a migrated database, which is the only way
+# the proof means anything.
+#
+# UNCOMMENT BOTH STANZAS AT DEPLOY TIME and delete `FG_DEV_IN_MEMORY_PORTS`
+# above. `database_id` stays a PLACEHOLDER here: real uuids come from whoever
+# runs `wrangler d1 create`, and are never invented and committed.
+#
+#   [[d1_databases]]
+#   binding = "DB"
+#   database_name = "ferrogate-tenant"
+#   database_id = "replace-at-deploy"
+#   migrations_dir = "../../sql/d1-ts/tenant"
+#
+#   [[d1_databases]]
+#   binding = "CONTROL_DB"
+#   database_name = "ferrogate-control"
+#   database_id = "replace-at-deploy"
+#   migrations_dir = "../../sql/d1-ts/control"
+# ---------------------------------------------------------------------------
+
 # TODO(bindings): configure per this app's inventory before first deploy.
 # Do NOT commit real resource IDs — these are placeholders only.
 #   [[durable_objects.bindings]]  name = "CONTAINER_SANDBOX", class_name = "AgentSandbox"
@@ -109,8 +173,6 @@ FG_DEV_A2A_GUARDRAILS = ""
 #                                 Requires a PAID account, so it is not wired
 #                                 into the offline test harness; see
 #                                 `src/runs/governance.ts` PORT-TODOs.
-#   [[d1_databases]]              binding = "DB"    -> agent_runs / agent_run_events,
-#                                 self_hosted_worker_records, self_hosted_run_dispatches
 #   [[r2_buckets]]                binding = "ARTIFACTS" -> worker-reported artifacts
 #   [[queues]]                    billing/metering fan-out for agent runs
 #   [[analytics_engine_datasets]] run-timeline telemetry sink (apps/telemetry)

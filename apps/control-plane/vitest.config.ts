@@ -34,8 +34,18 @@
  * deliberately NOT declared here, so the "provisioned but not yet redeployed"
  * refusal has something real to refuse.
  */
+import { readFileSync } from "node:fs";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+
+/**
+ * The committed deploy config, read here because workerd has no filesystem.
+ *
+ * It is bound so `test/cron-trigger.test.ts` can assert on `[triggers] crons` —
+ * the half of the schedule wiring no binding surfaces and no behavioural test
+ * can see, because the pool never dispatches a scheduled event of its own.
+ */
+const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), "utf8");
 
 const controlMigrations = await readD1Migrations("../../sql/d1-ts/control");
 const tenantMigrations = await readD1Migrations("../../sql/d1-ts/tenant");
@@ -55,6 +65,7 @@ export default defineConfig({
         bindings: {
           TEST_D1_SCHEMA: controlMigrations,
           TEST_TENANT_D1_SCHEMA: tenantMigrations,
+          TEST_WRANGLER_TOML: WRANGLER_TOML,
         },
       },
     }),

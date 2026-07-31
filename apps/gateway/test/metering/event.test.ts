@@ -16,6 +16,7 @@ import {
   creditsToWire,
   ledgerEntryFromWire,
   ledgerEntryToWireDocument,
+  providerAttemptIndexFor,
   usageSourceFor,
 } from "../../src/metering/index.js";
 import { chargeFixture, usageFixture } from "./fixtures.js";
@@ -47,6 +48,48 @@ describe("billingEventFromUsage", () => {
     expect(ledgerEntryId(event)).toBe(
       "ferrogate:provider-attempt:fg-000000000000002a:provider-attempt:0",
     );
+  });
+
+  describe("provider attempt index (issue #135)", () => {
+    // The failover ladder (`inference/reliability.ts::dispatchWithFailover`) can
+    // make several provider dispatches per logical request, and each is
+    // separately billable. This module used to HARD-CODE index 0, which would
+    // have collapsed two attempts of one request onto one `ledgerEntryId` — the
+    // second absorbed by `ON CONFLICT DO NOTHING` as a healthy replay, i.e. a
+    // silent under-bill. These four cases are what make the index real here so
+    // the day `Usage` carries one, nothing else has to change.
+
+    it("PARTITIONS the ledger key when the dispatcher declares an attempt", () => {
+      const first = billingEventFromUsage(
+        { ...usageFixture(), providerAttemptIndex: 0 },
+        { nowUnixSeconds: 1 },
+      );
+      const second = billingEventFromUsage(
+        { ...usageFixture(), providerAttemptIndex: 1 },
+        { nowUnixSeconds: 1 },
+      );
+      expect(second.provider_attempt.provider_attempt_index).toBe(1);
+      // The whole point: SAME request id, DIFFERENT ledger key.
+      expect(first.request_id).toBe(second.request_id);
+      expect(ledgerEntryId(second)).not.toBe(ledgerEntryId(first));
+    });
+
+    it("falls back to 0 when the dispatcher declares nothing", () => {
+      expect(providerAttemptIndexFor(usageFixture())).toBe(SINGLE_PROVIDER_ATTEMPT_INDEX);
+    });
+
+    it("refuses a non-integer / negative index rather than keying on it", () => {
+      // A `NaN` or `-1` reaching `ledgerEntryId` would build a primary key that
+      // no replay of the same request could ever match, turning idempotent
+      // retry into DOUBLE-billing — strictly worse than the under-bill above.
+      for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+        expect(providerAttemptIndexFor({ ...usageFixture(), providerAttemptIndex: bad })).toBe(0);
+      }
+    });
+
+    it("accepts a large but safe index", () => {
+      expect(providerAttemptIndexFor({ ...usageFixture(), providerAttemptIndex: 7 })).toBe(7);
+    });
   });
 
   it("stamps the settlement time (issue #153), never leaving it null", () => {

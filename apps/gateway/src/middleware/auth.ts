@@ -85,6 +85,19 @@ function resolveOrThrow(resolution: ApiKeyResolution): AuthContext {
       throw new HttpError(403, "api_key_expired", "API key is expired");
     case "token_budget_exhausted":
       throw new HttpError(429, "token_budget_exceeded", "API key token budget is exhausted");
+    case "tenant_identity_required":
+      // Rust `finalize_auth` (#540), including its two-shape message: an
+      // operator whose row carries a BLANK tenant is not helped by being told
+      // the key "declares neither" — it declared one, and the value is the
+      // problem. Same `code` either way, because the refusal and its
+      // conformance fixture are one contract.
+      throw new HttpError(
+        403,
+        "tenant_identity_required",
+        resolution.declaredButBlank
+          ? "the organization_id this credential carries is blank, so it names no tenant to authorize against and is not platform_operator = true"
+          : "API key declares neither an organization_id nor platform_operator = true, so it has no tenant identity to authorize against",
+      );
     case "unavailable":
       throw new HttpError(
         503,

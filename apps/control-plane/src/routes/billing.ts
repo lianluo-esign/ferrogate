@@ -37,6 +37,95 @@ import {
 const METERING_EVENTS = "metering-events";
 const DEAD_LETTERS = "billing-outbox-dead-letters";
 
+/** The shared gateway→billing outbox (`sql/d1-ts/control/0001_init_control.sql`). */
+export const BILLING_OUTBOX_TABLE = "billing_report_outbox";
+
+/**
+ * Whether THIS deployment has the gateway's outbox table at all.
+ *
+ * The table belongs to the migrations slice, and a control database that has
+ * never had the gateway's billing families applied simply does not have it —
+ * which is a different thing from a database that has it and cannot be read.
+ * The distinction is drawn STRUCTURALLY (a `sqlite_master` lookup) rather than
+ * by string-matching a D1 error, because the two states must produce opposite
+ * answers below: "not provisioned" degrades to the document-only transition
+ * this route has always performed, while "provisioned but unreadable" must
+ * REFUSE, so the operator can retry instead of burning the one-shot 409 guard
+ * on a replay that re-armed nothing.
+ */
+async function outboxTableExists(db: D1Database): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .bind(BILLING_OUTBOX_TABLE)
+    .first<{ name: string }>();
+  return row !== null;
+}
+
+/**
+ * Put a dead-lettered outbox row back on the sweeper's due list.
+ *
+ * The three columns are exactly the ones `BILLING_OUTBOX_LIST_DUE_SQL` in
+ * `apps/gateway/src/metering/d1.ts` filters and orders on, which is why all
+ * three move together: clearing `dead_lettered_at_unix` alone would leave the
+ * row's `next_attempt_unix` wherever the backoff ladder had pushed it, and
+ * resetting `attempts` alone would not make it selectable at all.
+ *
+ * Returns whether a row was actually re-armed. `RETURNING` (D1 supports it on a
+ * native binding) is what makes that answer real rather than assumed.
+ *
+ * THROWS a 503 `HttpError` when the table is there and the write fails. Never a
+ * silent `false`: "the re-arm did not happen" and "there was nothing to re-arm"
+ * are different facts and the caller acts on them differently.
+ */
+async function rearmOutboxRow(
+  router: { control(): D1Database },
+  reportId: string,
+  now: number,
+): Promise<boolean> {
+  let db: D1Database;
+  try {
+    db = router.control();
+  } catch {
+    // No control database on this deployment — nothing to re-arm, and the
+    // document transition below is still the correct, safe half.
+    return false;
+  }
+
+  let provisioned: boolean;
+  try {
+    provisioned = await outboxTableExists(db);
+  } catch (error) {
+    throw new HttpError(
+      503,
+      "storage_unavailable",
+      `the billing outbox could not be reached: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!provisioned) return false;
+
+  try {
+    const row = await db
+      .prepare(
+        `UPDATE ${BILLING_OUTBOX_TABLE}
+            SET dead_lettered_at_unix = NULL,
+                attempts = 0,
+                next_attempt_unix = ?,
+                updated_at_unix = ?
+          WHERE id = ? AND dead_lettered_at_unix IS NOT NULL
+          RETURNING id`,
+      )
+      .bind(now, now, reportId)
+      .first<{ id: string }>();
+    return row !== null;
+  } catch (error) {
+    throw new HttpError(
+      503,
+      "storage_unavailable",
+      `the billing outbox row could not be re-armed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 export const billingRoutes: GroupModule = crudGroup(
   "billing",
   [
@@ -78,47 +167,65 @@ export const billingRoutes: GroupModule = crudGroup(
         );
       }
 
-      // PORT-TODO(inventory-data-billing §2.5 "billing_report_outbox") — KEPT,
-      // sharpened: this app cannot perform the RE-EMISSION, only record that one
-      // was authorized. Two concrete reasons, neither of which a change here can
-      // remove:
+      // MARKER CLOSED — the `inventory-data-billing §2.5 "billing_report_outbox"`
+      // marker that stood here, whose second reason read: "There is no
+      // drainer to hand the row to … the Cron sweep that would drain it is
+      // itself unbuilt … Re-arming a row nothing reads would look like a queued
+      // re-emission and be a no-op, which is the worst of both. It closes when
+      // the sweep lands (this route then re-arms the row in the same call)").
       //
-      //  1. **The queue is not this Worker's.** The billing Queue producer
-      //     binding is declared on `apps/gateway/wrangler.toml`
-      //     (`[[queues.producers]] binding = "BILLING"`), whose consumer owns the
-      //     dead-letter queue. A second producer here would be a `[[queues]]`
-      //     block in this app's `wrangler.toml` naming a queue this app does not
-      //     own, and Queue bindings — like every Workers binding — are resolved
-      //     at DEPLOY time, so it cannot be picked up dynamically either.
-      //  2. **There is no drainer to hand the row to.** The shared
-      //     `billing_report_outbox` table does live in the SAME control database
-      //     this Worker binds (`apps/gateway` binds it as `BILLING_DB`,
-      //     `database_name = "ferrogate-control"`), so a re-arm — clearing
-      //     `dead_lettered_at_unix`, resetting `attempts`, setting
-      //     `next_attempt_unix` — is physically writable from here. It is
-      //     deliberately NOT done, because the Cron sweep that would drain it is
-      //     itself unbuilt (`apps/gateway/src/metering/outbox.ts` carries that
-      //     PORT-TODO). Re-arming a row nothing reads would look like a queued
-      //     re-emission and be a no-op, which is the worst of both.
+      // The sweep landed. `apps/gateway/wrangler.toml` now carries
+      // `[triggers] crons = ["* * * * *"]` on the DEFAULT export, and
+      // `apps/gateway/src/metering/outbox.ts`'s `MeteringUsageSink.sweep`
+      // selects due rows with `BILLING_OUTBOX_LIST_DUE_SQL`
+      // (`dead_lettered_at_unix IS NULL AND next_attempt_unix <= now`). So this
+      // route now does exactly what the marker said it would: it RE-ARMS the
+      // shared row, which lives in the same control database this Worker binds
+      // (`deps.tenantDatabases.control()`; the gateway binds it as
+      // `BILLING_DB`, `database_name = "ferrogate-control"`).
       //
-      // What IS implemented is the half that makes the operation SAFE, and it is
-      // the half that matters most: the transition is durable and guarded, so a
-      // replay is at-most-once. `test/billing-replay.test.ts` pins that a second
-      // replay is refused and that the response never claims an emission
-      // happened. It closes when the sweep lands (this route then re-arms the
-      // row in the same call) or when a billing Queue producer is bound here.
+      // ORDER IS LOAD-BEARING — re-arm FIRST, mark the document SECOND. A crash
+      // between them then leaves a re-armed row and an unmarked document, so
+      // the operator can replay again and the sweep still delivers (it is
+      // idempotent on the ledger entry id). The other order leaves a report
+      // marked "replayed" that nothing will ever pick up — permanently stuck,
+      // and invisible.
+      //
+      // The `AND dead_lettered_at_unix IS NOT NULL` in the WHERE is a CAS, not
+      // decoration: it refuses to touch a row that is already live in the
+      // retry ladder, so a replay cannot reset the `attempts` counter of a
+      // report the sweeper is currently backing off on.
+      //
+      // WHAT REMAINS TRUE, and why `emitted` is still `false`: this Worker does
+      // not perform the re-emission itself. The billing Queue producer binding
+      // is declared on `apps/gateway/wrangler.toml`
+      // (`[[queues.producers]] binding = "BILLING"`), Queue bindings resolve at
+      // DEPLOY time, and this app's `wrangler.toml` does not name that queue.
+      // The endpoint authorizes and re-arms; the gateway's sweeper emits, on its
+      // next minute. `emitted: true` would be the dangerous lie — an operator
+      // reading it during a billing incident would stop chasing a report that
+      // has not gone anywhere yet.
+      const now = Math.floor(Date.now() / 1000);
+      const rearmed = await rearmOutboxRow(deps.tenantDatabases, reportId, now);
+
       const stored = await deps.store.merge(DEAD_LETTERS, scope, reportId, {
         replayed: true,
-        replayed_at: Math.floor(Date.now() / 1000),
+        replayed_at: now,
         status: "replayed",
+        rearmed,
       });
       return json(c, 200, {
         object: "billing_outbox_dead_letter",
         billing_outbox_dead_letter: stored,
         replayed: true,
-        // Says exactly what happened. `emitted: true` would be the dangerous
-        // lie: an operator reading it during a billing incident would stop
-        // chasing a report that has not actually gone anywhere.
+        /**
+         * Whether the shared `billing_report_outbox` row was actually put back
+         * on the sweeper's due list. `false` means the dead-letter DOCUMENT
+         * existed but the physical row did not (already drained, already
+         * re-armed, or never written), and an operator needs to see that
+         * difference rather than infer it.
+         */
+        rearmed,
         emitted: false,
         propagation: "on_next_outbox_sweep",
       });

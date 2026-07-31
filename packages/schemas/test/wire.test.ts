@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
@@ -32,16 +34,79 @@ describe("scopeSchema", () => {
   });
 });
 
-describe("errorEnvelopeSchema", () => {
-  test("requires code+message and allows an optional requestId", () => {
-    expect(errorEnvelopeSchema.parse({ code: "x", message: "y" })).toEqual({
-      code: "x",
-      message: "y",
-    });
+/**
+ * WIRE-PARITY PIN for the corrected error envelope.
+ *
+ * This schema used to declare a flat `{ code, message, requestId? }` that
+ * matched no response FerroGate emits. The fixtures below are the real emitted
+ * bodies, copied from the shipped producers, so the test fails if the schema
+ * drifts back — including the two easy-to-miss cases (`request_id: null` and
+ * `request_id` absent) that a "tidier" `z.string()` would silently reject.
+ */
+describe("errorEnvelopeSchema — the shape the gateway actually writes", () => {
+  test("accepts the envelope every FerroGate surface emits", () => {
+    const emitted = {
+      error: {
+        message: "invalid api key",
+        type: "ferrogate_error",
+        code: "invalid_api_key",
+        request_id: "fg-0123456789abcdef",
+      },
+    };
+    expect(errorEnvelopeSchema.parse(emitted)).toEqual(emitted);
+  });
+
+  test("request_id null and request_id absent are both real emissions", () => {
+    // Rust `request_id: Option<String>` has no `skip_serializing_if`, so `None`
+    // is written as an explicit null, not an absent key.
     expect(
-      errorEnvelopeSchema.parse({ code: "x", message: "y", requestId: "r" }).requestId,
-    ).toBe("r");
-    expect(errorEnvelopeSchema.safeParse({ code: "x" }).success).toBe(false);
+      errorEnvelopeSchema.safeParse({
+        error: { message: "m", type: "ferrogate_error", code: "c", request_id: null },
+      }).success,
+    ).toBe(true);
+    // Mid-stream SSE error frames carry no id at all — the id already left in
+    // the response headers before the stream opened.
+    expect(
+      errorEnvelopeSchema.safeParse({
+        error: { message: "blocked", type: "ferrogate_error", code: "guardrail_blocked" },
+      }).success,
+    ).toBe(true);
+  });
+
+  test("the OLD flat shape is refused — it is not a FerroGate response", () => {
+    expect(errorEnvelopeSchema.safeParse({ code: "x", message: "y" }).success).toBe(false);
+    expect(
+      errorEnvelopeSchema.safeParse({ code: "x", message: "y", requestId: "r" }).success,
+    ).toBe(false);
+  });
+
+  test("`type` is the discriminating literal, and `message`/`code` are required", () => {
+    expect(
+      errorEnvelopeSchema.safeParse({
+        error: { message: "m", type: "openai_error", code: "c" },
+      }).success,
+    ).toBe(false);
+    expect(
+      errorEnvelopeSchema.safeParse({ error: { type: "ferrogate_error", code: "c" } }).success,
+    ).toBe(false);
+    expect(
+      errorEnvelopeSchema.safeParse({ error: { message: "m", type: "ferrogate_error" } }).success,
+    ).toBe(false);
+    // A bare `{ error: "..." }` (the OpenAI-ish string form) is not this envelope.
+    expect(errorEnvelopeSchema.safeParse({ error: "boom" }).success).toBe(false);
+  });
+
+  test("an unknown sibling key does not make a consumer reject the error", () => {
+    const parsed = errorEnvelopeSchema.parse({
+      error: {
+        message: "m",
+        type: "ferrogate_error",
+        code: "c",
+        request_id: "r",
+        param: "model",
+      },
+    });
+    expect(parsed.error.code).toBe("c");
   });
 });
 
@@ -56,6 +121,36 @@ describe("jsonValueSchema", () => {
   test("rejects undefined and functions", () => {
     expect(jsonValueSchema.safeParse(undefined).success).toBe(false);
     expect(jsonValueSchema.safeParse(() => 1).success).toBe(false);
+  });
+});
+
+/**
+ * ANTI-DRIFT GATE for the third copy of 251.
+ *
+ * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
+ * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
+ * `apps/control-plane/src/contract.ts` are three independent declarations of
+ * one number. Collapsing them into a single import is an `apps/*` edit, but
+ * THIS copy no longer has to be taken on faith: it is checked against the
+ * committed contract document itself, so adding or removing an operation
+ * fails here instead of leaving a leaf package quietly counting a document it
+ * disagrees with.
+ *
+ * Read off disk rather than `import`ed: a static import would pull a 79 KB JSON
+ * into every bundle that touches this package, for a value only a test needs.
+ */
+describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", () => {
+  test("it equals `operations.length` in docs/openapi/runtime-api-contract.json", () => {
+    const contractPath = fileURLToPath(
+      new URL("../../../docs/openapi/runtime-api-contract.json", import.meta.url),
+    );
+    const contract = JSON.parse(readFileSync(contractPath, "utf8")) as {
+      operations: unknown[];
+    };
+    // Fail loudly if the path ever stops resolving, rather than comparing
+    // against `undefined` and passing for the wrong reason.
+    expect(Array.isArray(contract.operations)).toBe(true);
+    expect(contract.operations.length).toBe(OPENAPI_OPERATION_COUNT);
   });
 });
 

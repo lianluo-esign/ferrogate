@@ -51,6 +51,32 @@ export interface AuthContext {
   readonly scopes: readonly string[];
   readonly platformOperator: boolean;
   readonly source: KeySource;
+
+  // -------------------------------------------------------------------------
+  // Per-credential limits. Rust `AuthContext` carries all three; they are
+  // populated by `keys/resolver.ts::toAuthContext` off the `api_keys` row and
+  // are `undefined` for every credential source that has no such row (static
+  // config, external auth, development).
+  //
+  // Each is OPTIONAL and each absence means "no limit from this credential" —
+  // never "deny". That asymmetry is deliberate: a source with no column for a
+  // limit must not become a source that denies everything.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rust `AuthContext.allowed_models` — the per-key model allowlist. Empty or
+   * absent means "no allowlist" (every model the tenant can see). Consumed by
+   * `inference/identity.ts::callerFromAuth` → `callerCanUseModel`.
+   */
+  readonly allowedModels?: readonly string[];
+  /** Rust `AuthContext.allowed_providers` — the per-key provider allowlist. */
+  readonly allowedProviders?: readonly string[];
+  /**
+   * Rust `AuthContext.request_limit_per_minute` (TOK-12) — the per-credential
+   * RPM cap carried on the key row itself, independent of the quota-policy
+   * chain. Read by `ratelimit/middleware.ts::subjectFor`.
+   */
+  readonly requestLimitPerMinute?: number;
 }
 
 /** Rust `AuthContext::caller_scope`. */
@@ -106,6 +132,16 @@ export function hasScope(scopes: readonly string[], required: string): boolean {
  * | `static_key_expired`  | static config key past `expires_at`         | 403  |
  * | `token_budget_exhausted` | static key `monthly_token_budget == 0`   | 429  |
  * | `unavailable`       | external auth service unreachable             | 503  |
+ * | `tenant_identity_required` | `finalize_auth`: the credential          | 403  |
+ * |                     | authenticated but names no tenant             |      |
+ *
+ * `tenant_identity_required` is the ONE authenticated-but-refused variant that
+ * is NOT indistinguishable from `unknown`, and that is the Rust behaviour
+ * (`auth.rs::finalize_auth`, #540): a key row whose `organization_id` is blank
+ * is an operator CONFIGURATION error, not a credential probe, and reporting it
+ * as `invalid_api_key` sends the operator hunting for a bad secret. The secret
+ * itself was already proven correct by the hash comparison that reached this
+ * branch, so nothing about the credential is disclosed by saying so.
  */
 export type ApiKeyResolution =
   | { readonly outcome: "resolved"; readonly auth: AuthContext }
@@ -114,6 +150,8 @@ export type ApiKeyResolution =
   | { readonly outcome: "static_key_disabled" }
   | { readonly outcome: "static_key_expired" }
   | { readonly outcome: "token_budget_exhausted" }
+  /** Rust `finalize_auth`: authenticated, but the row declares no tenant. */
+  | { readonly outcome: "tenant_identity_required"; readonly declaredButBlank: boolean }
   | { readonly outcome: "unavailable"; readonly detail: string };
 
 /** Resolves a presented credential. Rust `ApiKeyAuthenticator` + config fallback. */
@@ -260,6 +298,29 @@ export interface GatewayBindings {
   readonly GATEWAY_PROVIDERS?: string;
   /** JSON array of logical model entries — read by `inference/catalog.ts`. */
   readonly GATEWAY_MODELS?: string;
+
+  /**
+   * The OPERATOR REVERSE-PROXY TABLE — Rust `[[routes]]` / `[[upstreams]]`,
+   * read by `routes/reverse-proxy.ts`. On this platform the vars ARE the config
+   * document, so these are the `configSnapshot` the ROUTE-MAP's "Dynamic
+   * surfaces" catch-all is resolved against.
+   *
+   * Both are parsed with `routeRuleSchema` / `upstreamSchema` from
+   * `@ferrogate/config`. BOTH ABSENT ⇒ the catch-all is inert and every
+   * uncontracted path keeps answering `404 not_found`; PRESENT BUT UNPARSEABLE
+   * ⇒ `503 runtime_route_table_invalid`, never a silent empty table.
+   *
+   * Neither is declared in `wrangler.toml` (an operator with no reverse-proxy
+   * routes should not carry two empty vars). The exact lines to add when one is
+   * needed, in the `[vars]` block next to `GATEWAY_PROVIDERS`:
+   *
+   * ```toml
+   * GATEWAY_ROUTES = "[]"
+   * GATEWAY_UPSTREAMS = "[]"
+   * ```
+   */
+  readonly GATEWAY_ROUTES?: string;
+  readonly GATEWAY_UPSTREAMS?: string;
 
   // -------------------------------------------------------------------------
   // Wave-5 bindings. Each is declared in `wrangler.toml` and read by the

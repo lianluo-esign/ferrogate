@@ -133,34 +133,33 @@ function last4Matches(row: StoredApiKey, presentedKey: string): boolean {
  * Rust `api_key_tenant_context` + `authenticate_durable`'s `AuthContext`
  * construction, narrowed to what `../ports.ts::AuthContext` carries.
  *
- * PORT-TODO(inventory-edge-control §5.2): `StoredApiKey` also carries
- * `allowed_models`, `allowed_providers` and `request_limit_per_minute`, which
- * Rust threads into `AuthContext` for the routing/quota gates. `AuthContext` in
- * `src/ports.ts` has no fields for them yet and `ports.ts` is not this slice's
- * to edit, so they are resolved and returned by
- * {@link D1ApiKeyResolver.resolveStoredKey} but not yet enforced. Add the three
- * fields to `AuthContext` and read them here — the values are already loaded.
+ * ## The three per-credential limits (marker CLOSED — the transport now lands)
  *
- * Cross-file, not cross-platform. The exact change is three optional members on
- * `AuthContext` (`src/ports.ts`) — `allowedModels?: readonly string[]`,
- * `allowedProviders?: readonly string[]`, `requestLimitPerMinute?: number` —
- * plus the three lines below that copy them off the row.
+ * `StoredApiKey` also carries `allowed_models`, `allowed_providers` and
+ * `request_limit_per_minute`, which Rust threads into `AuthContext` for the
+ * routing/quota gates. They were loaded here and DROPPED, because `AuthContext`
+ * had no fields for them; it now does (`src/ports.ts`), and all three are
+ * copied below.
  *
- * THREE consumers are already built and waiting on exactly those members, which
- * is the measure of how narrow the remaining work is:
+ * What each one reaching `AuthContext` turns on:
  *
- *  - `RateLimitDeps.perKeyRequestLimit` (`src/ratelimit/middleware.ts`) exists
- *    ONLY because `requestLimitPerMinute` has nowhere to live;
- *  - `callerFromAuth` (`src/inference/identity.ts`) builds the inference
- *    `Caller` from this very `AuthContext` and has two lines commented on it
- *    for `allowedModels`/`deniedModels`;
- *  - `callerCanUseModel` (`src/inference/ports.ts`) is the gate itself — fully
- *    implemented and unit-tested, and it evaluates against empty lists.
+ *  - `requestLimitPerMinute` → `subjectFor` (`src/ratelimit/middleware.ts`)
+ *    reads it directly, so the TOK-12 per-credential RPM cap is enforced in the
+ *    DEPLOYED Worker and not only where a test injects the
+ *    `perKeyRequestLimit` hook. That hook is now an OVERRIDE, not the only
+ *    source.
+ *  - `allowedModels` / `allowedProviders` → consumed by `callerFromAuth`
+ *    (`src/inference/identity.ts`), which builds the inference `Caller` fed to
+ *    the already-implemented `callerCanUseModel` gate. `src/inference/` is a
+ *    different owner, so that consumer carries its own marker
+ *    (`identity.ts`); what is closed HERE is the transport — the values now
+ *    arrive on `AuthContext` instead of being discarded at this function.
  *
- * Consequence while it is open, precisely scoped: for a D1-resolved credential
- * the per-key RPM cap and the model/provider ALLOWLIST are not enforced. The
- * tenant/project model-VISIBILITY gate (issue #515) is unaffected and IS
- * enforced, because it reads `scope`/`projectId`, which this function does set.
+ * An EMPTY list means "no allowlist", never "deny everything": that is the Rust
+ * reading (`callerCanUseModel` treats an empty `allowedModels` as unrestricted)
+ * and it is why the fields are copied verbatim rather than normalized here.
+ * `request_limit_per_minute` is `null` for a row with no cap, and `null` must
+ * NOT become `0` — `0` is a real Rust value meaning "refuse every request".
  */
 function toAuthContext(row: StoredApiKey): AuthContext {
   return {
@@ -177,6 +176,12 @@ function toAuthContext(row: StoredApiKey): AuthContext {
     // NEVER read from the row. See the cross-tenant isolation note above.
     platformOperator: false,
     source: "durable_native",
+    allowedModels: row.allowedModels,
+    allowedProviders: row.allowedProviders,
+    // `null` (no cap) must stay ABSENT, not become 0 — see the header.
+    ...(row.requestLimitPerMinute === null
+      ? {}
+      : { requestLimitPerMinute: row.requestLimitPerMinute }),
   };
 }
 
@@ -303,24 +308,16 @@ export class D1ApiKeyResolver implements ApiKeyAuthenticatorPort {
       // must not serve traffic, because `organization_id` is also the
       // attribution key for quota, metering and lifecycle.
       //
-      // PORT-TODO(inventory-edge-control §5.2): CROSS-FILE, not
-      // cross-platform. `ApiKeyResolution` in `src/ports.ts` has no variant for
-      // that 403, and `ports.ts` is the composition root's file, so the
-      // credential is refused as `key_suspended` (→ 401 `invalid_api_key`)
-      // instead of 403 `tenant_identity_required`.
+      // This used to collapse onto `key_suspended` (→ 401 `invalid_api_key`)
+      // because `ApiKeyResolution` had no variant for the 403. It now does, so
+      // the OBSERVABLE half matches Rust too: an operator whose key row carries
+      // a blank tenant sees the configuration error it is, not a bad secret.
       //
-      // The approximation is a DENIAL either way, which is the security-
-      // relevant half and is pinned by "a row that names no tenant cannot serve
-      // traffic" in `test/keys/resolver.test.ts` (asserted as `not.toBe
-      // ("resolved")`, so it keeps holding when the exact variant changes).
-      // What differs is observable: the operator sees 401 rather than 403, so
-      // a misconfigured key row looks like a bad secret rather than like the
-      // configuration error it is.
-      //
-      // To close: add a `tenant_identity_required` variant to
-      // `ApiKeyResolution` (`src/ports.ts`), map it to 403 in
-      // `src/middleware/auth.ts`, and return it here.
-      return { outcome: "key_suspended", reason: "disabled" };
+      // `declaredButBlank` is true here by construction — this branch is only
+      // reached from a `api_keys` ROW, which always has an `organization_id`
+      // column, so the value was declared and is blank. The other Rust shape
+      // (no `organization_id` at all) belongs to the external-auth source.
+      return { outcome: "tenant_identity_required", declaredButBlank: true };
     }
     if (row.monthlyTokenBudget === 0) {
       // Rust `authenticate_durable`: `Some(0)` is 429 `token_budget_exceeded`.

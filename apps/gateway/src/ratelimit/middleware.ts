@@ -205,25 +205,21 @@ export interface RateLimitDeps extends RateLimitOptions {
    */
   readonly nowUnixSeconds?: () => number;
   /**
-   * The TOK-12 per-credential `request_limit_per_minute`, which lives on the API
-   * key row rather than in a quota policy. `AuthContext` in `src/ports.ts` does
-   * not carry it yet, so it is supplied here.
+   * OPTIONAL OVERRIDE for the TOK-12 per-credential `request_limit_per_minute`.
    *
-   * PORT-TODO(inventory-edge-control §5.2): CROSS-FILE, not cross-platform.
-   * `D1ApiKeyResolver` ALREADY reads `request_limit_per_minute` off the
-   * `api_keys` row (`src/keys/resolver.ts::resolveStoredKey`) and then drops it,
-   * because `AuthContext` in `src/ports.ts` — the composition root's file, not
-   * this slice's — has no field to carry it.
+   * This used to be the ONLY source of that cap, because `AuthContext` had no
+   * field to carry it: `D1ApiKeyResolver` read `request_limit_per_minute` off
+   * the `api_keys` row and dropped it, so in the deployed Worker the column was
+   * inert and only the quota-policy chain limited a D1-resolved credential.
+   * `AuthContext.requestLimitPerMinute` now exists and `subjectFor` reads it, so
+   * the DEPLOYED path enforces the column with no hook injected at all.
    *
-   * The remaining change is one optional member on `AuthContext`
-   * (`requestLimitPerMinute?: number`), one line in `toAuthContext`, and
-   * replacing this hook with `auth.requestLimitPerMinute` in `subjectFor`.
-   *
-   * Consequence while it is open, stated plainly: a durable key's per-credential
-   * TOK-12 RPM cap is enforced ONLY where a caller injects this hook
-   * (`test/ratelimit/harness/worker.ts` does; `src/index.ts` does not), so in
-   * the deployed Worker that column is currently inert and only the quota-policy
-   * chain limits a D1-resolved credential.
+   * The hook survives for the two cases the credential row cannot answer:
+   * a caller whose key state lives outside `api_keys` (the ratelimit harness
+   * seeds limits by api-key id), and an operator override in front of the row.
+   * It WINS when it returns a number, and falls back to the credential when it
+   * returns `undefined` — so injecting it can only tighten or redirect, never
+   * silently disable the row's own cap.
    */
   readonly perKeyRequestLimit?: (auth: AuthContext) => number | undefined;
 }
@@ -245,7 +241,17 @@ export function limiterForEnv(env: RateLimitBindings): RateLimiter {
     : new DurableObjectRateLimiter(namespace);
 }
 
-/** Build the {@link QuotaSubject} for the authenticated caller, or `null`. */
+/**
+ * Build the {@link QuotaSubject} for the authenticated caller, or `null`.
+ *
+ * `perKeyLimit` is the {@link RateLimitDeps.perKeyRequestLimit} override; when
+ * it is `undefined` the cap comes off the CREDENTIAL
+ * (`AuthContext.requestLimitPerMinute`, populated from the `api_keys` row by
+ * `src/keys/resolver.ts`). `0` is a real Rust value — "refuse every request" —
+ * so the fallback is written as an explicit `undefined` check and never as
+ * `perKeyLimit || auth.requestLimitPerMinute`, which would silently upgrade a
+ * `0` override into the row's own (larger) cap.
+ */
 export function subjectFor(c: Context<GatewayEnv>, perKeyLimit?: number): QuotaSubject | null {
   const auth = c.get("auth");
   if (auth === null || auth === undefined) return null;
@@ -261,7 +267,7 @@ export function subjectFor(c: Context<GatewayEnv>, perKeyLimit?: number): QuotaS
       workspaceId: auth.tenancy.workspaceId ?? undefined,
       keyId: apiKeyId,
     },
-    requestLimitPerMinute: perKeyLimit,
+    requestLimitPerMinute: perKeyLimit ?? auth.requestLimitPerMinute,
   };
 }
 

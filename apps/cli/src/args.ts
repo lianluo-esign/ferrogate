@@ -169,14 +169,31 @@ function isShortFlag(token: string): boolean {
   return token.startsWith("-") && token.length > 1 && !token.startsWith("--");
 }
 
-/** Scan for `--help`/`-h` and `--version`/`-V` ahead of any strict validation. */
-function scanEarlyExits(argv: readonly string[]): { help: boolean; version: boolean } {
+/**
+ * Scan for `--help`/`-h` and `--version`/`-V` ahead of any strict validation.
+ *
+ * `owned` names the early-exit tokens the COMMAND declares as flags of its own.
+ * Those are NOT early exits — they belong to the command's grammar.
+ *
+ * That distinction is load-bearing rather than cosmetic. `assets push|pull|
+ * list|delete` and every `plans` verb declare a required `--version VERSION`
+ * (the asset/plan version they address). While `--version` was swallowed
+ * unconditionally here, the value token after it fell through to the positional
+ * list and the command died with `--version is required` — so
+ * `ferrogate assets pull --type binary --name agent --version 1.0.0` could
+ * never run at all. Nothing caught it: the CLI suite drove those commands only
+ * with `--help`. Pinned by `test/args.test.ts`.
+ */
+function scanEarlyExits(
+  argv: readonly string[],
+  owned: { readonly help: boolean; readonly version: boolean },
+): { help: boolean; version: boolean } {
   let help = false;
   let version = false;
   for (const token of argv) {
     if (token === "--") break;
-    if (token === "--help" || token === "-h") help = true;
-    if (token === "--version" || token === "-V") version = true;
+    if (!owned.help && (token === "--help" || token === "-h")) help = true;
+    if (!owned.version && (token === "--version" || token === "-V")) version = true;
   }
   return { help, version };
 }
@@ -201,7 +218,13 @@ export function parseArgs(
     if (spec.short !== undefined) byShort.set(spec.short, spec);
   }
 
-  const early = scanEarlyExits(argv);
+  // A command that declares `help` / `version` as flags of its own owns those
+  // tokens; only the ones it does NOT declare stay global early exits.
+  const owned = {
+    help: byName.has("help") || byShort.has("h"),
+    version: byName.has("version") || byShort.has("V"),
+  };
+  const early = scanEarlyExits(argv, owned);
   const values = new Map<string, string[]>();
   const positionals: string[] = [];
   let passthrough: string[] = [];
@@ -254,7 +277,10 @@ export function parseArgs(
       passthrough = [...queue];
       break;
     }
-    if (token === "--help" || token === "-h" || token === "--version" || token === "-V") continue;
+    // Skip ONLY the early-exit tokens this command has not claimed. A claimed
+    // one falls through to the normal flag path below and takes its value.
+    if (!owned.help && (token === "--help" || token === "-h")) continue;
+    if (!owned.version && (token === "--version" || token === "-V")) continue;
 
     if (isLongFlag(token)) {
       const body = token.slice(2);

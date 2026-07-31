@@ -21,13 +21,16 @@
  * | `credentials` | `DurableCredentialStore` (D1 + KV + DO) — BOUND           |
  * | `cipher`      | `identityCipherFrom(FERROGATE_MCP_IDENTITY_KEY)` — BOUND   |
  * | `upstreams`   | `HttpMcpUpstreams` + the `MCP_SESSION` DO — BOUND          |
- * | `auth`        | {@link UnboundAuth} — NOT BOUND, fails closed (see below)  |
+ * | `auth`        | `D1McpAuth` over the CONTROL database (`src/auth.ts`) — BOUND |
  * | `oauth`       | {@link unboundOauthProvider} — NOT BOUND, fails closed     |
+ * | `approvals`   | {@link AutoApproval} — NO durable queue exists (see below) |
+ * | `assets`      | {@link InMemoryAssets} — isolate-local (see below)         |
  * | `audit`       | {@link InMemoryAuditSink} — isolate-local (see wrangler)   |
  *
- * `guardrails` and `secrets` are each bound in EVERY posture and each has a
- * mount-gate test that goes red when the binding is dropped
- * (`test/guardrails.test.ts`, `test/secrets-mount.test.ts`).
+ * `guardrails`, `secrets` and `auth` are each bound in EVERY posture that can
+ * serve them, and each has a mount-gate test that goes red when the binding is
+ * dropped (`test/guardrails.test.ts`, `test/secrets-mount.test.ts`,
+ * `test/d1-auth.test.ts`).
  *
  * PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — stdio MCP upstreams
  * are impossible in a Worker. The Rust host
@@ -44,17 +47,23 @@
  * note and the tests that pin it.
  */
 import type { JsonValue } from "@ferrogate/core";
-import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
 import {
   DeterministicDetector,
   type SecretPattern,
   envelopeManagedAction,
   flattenedText,
 } from "@ferrogate/guardrails";
+import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
+import { EnvBindingTenantDatabaseRouter } from "@ferrogate/storage";
 
 // `./durable.js` imports the TYPES and `webCryptoIdentityCipher` back out of
 // this module. The cycle is safe because neither side touches the other at
 // module-evaluation time — every reference is inside a function body.
+// `./auth.js` imports the AuthPort TYPES back out of this module. The cycle is
+// safe for the same reason `./durable.js`'s is: every reference on both sides is
+// inside a function body, so nothing is evaluated at module-load time.
+import { D1ToolApprovals } from "./approvals.js";
+import { D1McpAuth, type D1McpAuthOptions } from "./auth.js";
 import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
 import type { ParsedToolDef } from "./jsonrpc.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
@@ -364,11 +373,7 @@ export interface GuardrailVerdict {
  */
 export interface GuardrailsPort {
   /** Runs BEFORE execution: may block or quarantine the arguments. */
-  inspectInput(
-    context: DispatchContext,
-    tool: McpTool,
-    args: JsonValue,
-  ): Promise<GuardrailVerdict>;
+  inspectInput(context: DispatchContext, tool: McpTool, args: JsonValue): Promise<GuardrailVerdict>;
   /** Runs AFTER execution: may redact or withhold the result. */
   inspectOutput(
     context: DispatchContext,
@@ -526,8 +531,7 @@ export function deterministicManagedActionGuardrails(
     : undefined;
 
   /** Rust `managed_selector_matches`: an EMPTY target list matches everything. */
-  const selects = (target: string): boolean =>
-    targets.length === 0 || targets.includes(target);
+  const selects = (target: string): boolean => targets.length === 0 || targets.includes(target);
 
   const evaluate = async (
     stage: "request" | "response",
@@ -595,13 +599,7 @@ export function deterministicManagedActionGuardrails(
     },
     async inspectOutput(context, tool, content) {
       const target = managedActionTarget(tool.serverName, tool.remoteName);
-      return evaluate(
-        "response",
-        context,
-        tool.name,
-        () => guardrailPayloadText(content),
-        target,
-      );
+      return evaluate("response", context, tool.name, () => guardrailPayloadText(content), target);
     },
   };
 }
@@ -609,14 +607,21 @@ export function deterministicManagedActionGuardrails(
 /**
  * Approves anything already allowlisted.
  *
- * PORT-TODO(inventory-edge-control §MCP): NOT a platform limit — a deferral on
- * ANOTHER APP. The human-approval queue is control-plane state
- * (`apps/control-plane`), so binding it means a `[[services]]` service binding
- * or a shared D1 read, neither of which this Worker can create unilaterally.
- * Note the standing behavior: the deny-by-default `toolsToExecute` allowlist in
- * `src/tools.ts` is enforced INDEPENDENTLY of this port, so an un-allowlisted
- * tool is still refused — what is missing is the interactive step-up, not the
- * allowlist.
+ * MARKER CLOSED (was: "NOT a platform limit — a deferral on ANOTHER APP … the
+ * human-approval queue is control-plane state, so binding it means a
+ * `[[services]]` service binding or a shared D1 read, neither of which this
+ * Worker can create unilaterally"). It was the shared D1 read, and it needed no
+ * new binding: `apps/control-plane` keeps approvals as `control_plane_resources`
+ * rows of kind `tool-approvals` in the CONTROL database this Worker already
+ * binds as `env.DB`. {@link D1ToolApprovals} (`src/approvals.ts`) reads and
+ * raises them, and {@link resolvePorts} binds it wherever `env.DB` exists.
+ *
+ * THIS class survives ONLY as the no-database fallback, and its behaviour is
+ * the reason the closure mattered: it approves EVERYTHING, so a deployment
+ * running on it executes every non-`auto_execute` MCP tool with no human
+ * decision at all. The deny-by-default `toolsToExecute` allowlist in
+ * `src/tools.ts` is enforced independently and still refuses an un-allowlisted
+ * tool; what this class skips is the interactive step-up on an allowlisted one.
  */
 export class AutoApproval implements ApprovalPort {
   // eslint-disable-next-line @typescript-eslint/require-await
@@ -628,11 +633,43 @@ export class AutoApproval implements ApprovalPort {
 /**
  * In-memory asset catalog.
  *
- * PORT-TODO(inventory-edge-control §MCP): NOT a platform limit — CF has both
- * primitives this needs (R2 for the bytes, D1 for the catalog rows). It is a
- * deferral pending `@ferrogate/storage`'s asset surface. CONSEQUENCE while it
- * stands: assets do not survive an isolate recycle, so this is usable for the
- * dev bundle and not for a deployment.
+ * PORT-TODO(inventory-edge-control §MCP) — KEPT, and RE-DIAGNOSED. The previous
+ * wording ("a deferral pending `@ferrogate/storage`'s asset surface") is no
+ * longer true and would have sent the next reader to the wrong place: that
+ * surface exists (`packages/storage/src/assets.ts`), and since `resolvePorts`
+ * mounted `EnvBindingTenantDatabaseRouter` for the auth port, the CATALOG half
+ * is reachable from here too — `stored_assets` is a TENANT-database table
+ * (`sql/d1-ts/tenant/0001_init_tenant.sql`) and the router resolves a tenant
+ * database by binding NAME at runtime.
+ *
+ * What actually blocks it is the BYTES half, and it is a binding this Worker
+ * does not have. `stored_assets` deliberately dropped the inline `content`
+ * column in this rewrite; `storage_uri` points at an R2 object, and
+ * `apps/mcp/wrangler.toml` declares NO `[[r2_buckets]]`. Workers bindings
+ * resolve at DEPLOY time, so this file cannot open a bucket at runtime, and an
+ * `AssetReaderPort.read` that returned metadata with no body would be a worse
+ * lie than the in-memory map.
+ *
+ * TO CLOSE IT, the composition/deploy step must add to `apps/mcp/wrangler.toml`:
+ *
+ * ```toml
+ * [[r2_buckets]]
+ * binding = "ASSETS"
+ * bucket_name = "ferrogate-assets"
+ * ```
+ *
+ * ...after which this class is replaced by a reader that routes `tenantId`
+ * through the tenant router for the `stored_assets` row and fetches
+ * `storage_uri` from `env.ASSETS`. NOTE (memory: the live account has R2
+ * unactivated) that a bucket must be enabled on the account first; a
+ * `[[r2_buckets]]` stanza against an account without the R2 plan fails the
+ * deploy with error 10042, not 10000.
+ *
+ * CONSEQUENCE while it stands: assets do not survive an isolate recycle, so
+ * `resources/list` and `resources/read` answer only for what this isolate was
+ * seeded with. The #366 property that DOES hold regardless of the backing store
+ * is pinned in `read` below and by `test/assets.test.ts`: an undownloadable
+ * (pending / quarantined) asset is indistinguishable from a missing one.
  */
 export class InMemoryAssets implements AssetReaderPort {
   readonly #assets = new Map<string, { asset: StoredAsset; content: Uint8Array }>();
@@ -1555,6 +1592,23 @@ export function durableIdentityBound(env: McpEnv): boolean {
 }
 
 /**
+ * Whether the deploy-time binding the DURABLE {@link AuthPort} needs is present.
+ *
+ * One binding, because the credential tables `src/auth.ts` reads —
+ * `static_api_keys` and `api_key_directory` — live in the CONTROL database this
+ * Worker already binds as `env.DB` (`wrangler.toml`,
+ * `database_name = "ferrogate-control"`). The per-tenant databases the NATIVE
+ * leg's second hop needs are resolved by NAME at runtime through
+ * `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter`, so they are not part
+ * of this predicate: a deployment with no tenant bindings still authenticates
+ * operator/static keys and refuses virtual ones with a 401, which is a partial
+ * capability rather than an unready Worker.
+ */
+export function durableAuthBound(env: McpEnv): boolean {
+  return env.DB !== undefined;
+}
+
+/**
  * Whether this Worker has a usable port bundle for authenticated traffic.
  *
  * This is the single source of truth {@link resolvePorts} branches on, so
@@ -1562,21 +1616,18 @@ export function durableIdentityBound(env: McpEnv): boolean {
  * {@link UnboundAuth} — the Workers equivalent of the Rust readiness probe
  * reporting `not_ready` while the cluster has no healthy peer.
  *
- * It is now a REAL binding check on the durable path
- * ({@link durableIdentityBound}) rather than the dev flag alone.
- *
- * // PORT-TODO(inventory-edge-control §MCP): NOT a platform limit — a
- * // cross-app wiring deferral. The last port with no durable
- * // implementation is {@link AuthPort} — the tenant API-key table lives in the
- * // control plane (`apps/control-plane`), not here, so binding it means either
- * // a `[[services]]` service binding to that Worker or a shared D1 read of its
- * // `api_keys` table. Until one exists, a non-dev Worker reports NOT READY
- * // even when {@link durableIdentityBound} is satisfied, because authenticating
- * // a caller is a precondition for every authenticated surface. The identity,
- * // flow and catalog halves ARE durable-bound below.
+ * MARKER CLOSED (was: "the last port with no durable implementation is
+ * `AuthPort` … binding it means either a `[[services]]` service binding to
+ * `apps/control-plane` or a shared D1 read of its `api_keys` table"). It was
+ * the SECOND of those, and it needed no new binding: `env.DB` already IS the
+ * control database, so `D1McpAuth` (`src/auth.ts`) reads `static_api_keys`,
+ * `api_key_directory` and the tenant-routed `api_keys` row directly. A
+ * production Worker that correctly refuses to set `FG_DEV_IN_MEMORY_PORTS` is
+ * therefore READY and authenticates real credentials, where before it answered
+ * `503 mcp_auth_unavailable` on every authenticated surface forever.
  */
 export function portsBound(env: McpEnv): boolean {
-  return env.FG_DEV_IN_MEMORY_PORTS === "1";
+  return env.FG_DEV_IN_MEMORY_PORTS === "1" || durableAuthBound(env);
 }
 
 /**
@@ -1606,14 +1657,29 @@ export function parseGuardrailVar(raw: string | undefined): ManagedActionGuardra
  *
  * Three postures, in order:
  *
- *  1. **dev bundle** (`FG_DEV_IN_MEMORY_PORTS === "1"`) — everything in memory.
+ *  1. **dev bundle** (`FG_DEV_IN_MEMORY_PORTS === "1"`) — everything in memory,
+ *     EXCEPT that the durable auth leg still runs FIRST when `env.DB` is bound
+ *     (see below).
  *  2. **durable identity** — D1 + KV + key material bound: the credential store
  *     and cipher are the real, isolate-surviving implementations, so a revoked
  *     grant stays revoked and an OAuth callback that lands on a different
- *     isolate than the one that began the flow still completes. `auth` is still
- *     {@link UnboundAuth}, so the surface answers 503 rather than defaulting
- *     open — see {@link portsBound}.
- *  3. **nothing bound** — fail closed.
+ *     isolate than the one that began the flow still completes.
+ *  3. **nothing bound** — fail closed with {@link UnboundAuth}.
+ *
+ * The AUTH PORT is bound to {@link D1McpAuth} in every posture where `env.DB`
+ * exists, including the dev one, and that is deliberate on two counts:
+ *
+ *  * **Order.** The durable row is consulted BEFORE the in-memory dev table,
+ *    which is passed as its fallback. A stale dev key therefore can never
+ *    re-enable a credential the control database revoked, and the fallback is
+ *    reached only for a credential no durable table knows.
+ *  * **Provability.** The dev bundle is the only posture the offline suite can
+ *    drive end to end over `SELF`, so binding the durable authenticator only in
+ *    the non-dev posture would leave the mount testable exclusively through its
+ *    own constructor — which is the "implemented, tested, never mounted" defect
+ *    this project keeps being bitten by. `test/d1-auth.test.ts` seeds real rows
+ *    into the real `env.DB` and drives the REAL Worker; deleting the
+ *    `auth: durableAuth(env)` line below turns that suite RED.
  *
  * Within posture 2 the flow store is chosen by capability, not by config: when
  * {@link McpEnv.MCP_OAUTH_FLOWS} is bound the single-use claim is the ATOMIC
@@ -1640,12 +1706,14 @@ export function resolvePorts(env: McpEnv): McpPorts {
     parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS),
   );
   const secrets = secretResolverOverride ?? workerSecretResolver(env);
-  if (env.FG_DEV_IN_MEMORY_PORTS === "1") return { ...inMemoryPorts(), guardrails, secrets };
-  const ports = { ...inMemoryPorts(), guardrails, secrets };
+  const auth = durableAuth(env);
+  const approvals = durableApprovals(env);
+  if (env.FG_DEV_IN_MEMORY_PORTS === "1")
+    return { ...inMemoryPorts(), guardrails, secrets, auth, approvals };
+  const ports = { ...inMemoryPorts(), guardrails, secrets, auth, approvals };
   if (durableIdentityBound(env)) {
     return {
       ...ports,
-      auth: new UnboundAuth(),
       credentials: new DurableCredentialStore(
         env.MCP_OAUTH_KV as KVNamespace,
         env.DB as D1Database,
@@ -1656,5 +1724,45 @@ export function resolvePorts(env: McpEnv): McpPorts {
       cipher: identityCipherFrom(env.FERROGATE_MCP_IDENTITY_KEY) as IdentityCipherPort,
     };
   }
-  return { ...ports, auth: new UnboundAuth() };
+  return ports;
+}
+
+/**
+ * Choose the {@link AuthPort} for this env.
+ *
+ * `env.DB` bound ⇒ {@link D1McpAuth} over the CONTROL database, with
+ * `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter` for the NATIVE leg's
+ * second hop and — in the dev posture only — the in-memory table as fallback.
+ * No `env.DB` ⇒ {@link UnboundAuth}, which is a 503 and never an open door.
+ *
+ * The router is constructed here rather than inside `D1McpAuth` so the class
+ * stays testable against a stub, and so this file remains the ONE place that
+ * decides where a credential is allowed to come from.
+ */
+/**
+ * Choose the {@link ApprovalPort} for this env.
+ *
+ * `env.DB` bound ⇒ {@link D1ToolApprovals} over the shared `tool-approvals`
+ * queue in the CONTROL database. Absent ⇒ {@link AutoApproval}, which approves
+ * EVERYTHING — the honest name for "there is no queue to consult", and the
+ * reason the D1 binding is what a real deployment must have.
+ *
+ * Bound in the dev posture too, for the same provability reason the auth port
+ * is: the offline suite can only drive the deployed app end to end there, so a
+ * gate mounted anywhere else would be untestable over `SELF`.
+ */
+function durableApprovals(env: McpEnv): ApprovalPort {
+  if (env.DB === undefined) return new AutoApproval();
+  return new D1ToolApprovals(env.DB);
+}
+
+function durableAuth(env: McpEnv): AuthPort {
+  if (env.DB === undefined) return new UnboundAuth();
+  const options: D1McpAuthOptions = {
+    router: new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
+  };
+  return new D1McpAuth(
+    env.DB,
+    env.FG_DEV_IN_MEMORY_PORTS === "1" ? { ...options, fallback: inMemoryPorts().auth } : options,
+  );
 }

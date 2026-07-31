@@ -24,52 +24,58 @@
  *
  * ---------------------------------------------------------------------------
  * PORT-TODO(inventory-data-billing §1.7 "Proposed CF/TS mapping") — THE DURABLE
- * HALF OF THIS PACKAGE IS NOT MOUNTED ON ANY WORKER.
+ * HALF OF THIS PACKAGE IS MOUNTED IN PART. Seven exports are still dead.
  *
- * Every class exported below `./tenant-router.js` — `D1WalletStore`,
- * `D1WorkflowBudgetStore`, `D1UsageLedger`, `D1BillingEventLedger`,
- * `D1ReferenceGuardedDeletes`, `TenantMonotonicUpserts`,
- * `ControlMonotonicUpserts`, `R2AssetBlobStore`,
- * `EnvBindingTenantDatabaseRouter`, `ControlDatabaseTenantRegistry` — plus every
- * every `Memory…Store` above it, has ZERO importers under any app's `src`. A
- * grep for `@ferrogate/storage` across the apps returns three call sites and all
- * three take PURE helpers only: `periodMonthFromUnix` / `boolFromSqlite` /
- * `optionalNumber` / `WALLET_RESERVATION_ACTIVE`
- * (`apps/gateway/src/ratelimit/quota.ts`), `sha256Hex`
- * (`apps/control-plane/src/site_domain_txt.ts`), and the site-domain value types
- * (`apps/control-plane/src/routes/site_domain.ts`).
+ * This marker used to say "not mounted on any Worker … ZERO importers". That is
+ * NO LONGER TRUE, and a marker that overstates the damage is as misleading as
+ * one that understates it, so it is restated against a re-grep of `apps/`:
  *
- * Why it matters: this is precisely the repo's recurring defect — implemented,
- * proven (104 pure + 152 D1 tests, mutation-tested per README §3), and DEAD in
- * production. The no-oversell wallet guard is not protecting any money, because
- * nothing calls `reserveWalletCredits`; the tenant router is not routing
- * anything, so the database-per-tenant topology is not in effect on any deployed
- * path. Neither the gateway nor the control plane holds a `TENANT_DB` handle:
- * `apps/gateway/src/ratelimit/quota.ts` and `apps/control-plane/src/store/d1.ts`
- * each hand-roll their own D1 access against the same migrations instead.
+ * MOUNTED, on the real request path, through a routed tenant handle:
+ *   - `EnvBindingTenantDatabaseRouter` → `apps/gateway/src/tenancy/*`
+ *     (+ `src/index.ts`),
+ *     `apps/control-plane/src/{adapters,store/tenancy,store/api_keys}.ts`,
+ *     `apps/mcp/src/{ports,auth}.ts`. `ControlDatabaseTenantRegistry` rides
+ *     along INSIDE it (the router constructs one); no app names it directly, so
+ *     it is mounted transitively, not directly — the three apps that appear to
+ *     import it only mention it in comments.
+ *   - `D1WalletStore` → `apps/gateway/src/ratelimit/{wallet,middleware}.ts`;
+ *     the no-oversell reserve now guards real money.
+ *   - `D1WorkflowBudgetStore` → `apps/gateway/src/ratelimit/workflow.ts`.
+ *   - `D1UsageLedger` → `apps/gateway/src/metering/{runtime,sink,usage-ledger}.ts`
+ *     and `src/ratelimit/{middleware,token-budget}.ts`.
+ *   - `D1ReferenceGuardedDeletes` → `apps/control-plane/src/{ports,store/tenancy}.ts`.
  *
- * The close is the composition roots, NOT this package: `apps/gateway` and
- * `apps/control-plane` must construct `EnvBindingTenantDatabaseRouter(env,
- * env.CONTROL_DB)` and route the money/usage paths through the stores here (see
- * `packages/storage/README.md` §4 for the exact wiring). Whoever does it must
- * add an assertion that FAILS when the store is unmounted — deleting the mount
- * has to turn a test red, or this comment will be true again in a month.
+ * STILL DEAD — zero importers anywhere under `apps/`, so deleting any of them
+ * would leave every suite in this repo green:
+ *   - `D1BillingEventLedger`      (the billing outbox drain)
+ *   - `D1BudgetAlertStore`        (see `./budget-alerts.js`)
+ *   - `D1RetentionPolicyStore`    (see `./retention.js` — no cron calls it)
+ *   - `D1AgentScheduleStore`      (see the §1.4.7 marker below)
+ *   - `D1SiteDomainVerificationStore`
+ *   - `TenantMonotonicUpserts` / `ControlMonotonicUpserts`
+ *   - `R2AssetBlobStore`
+ *   - `D1AssetMetadataStore`      (duplicated app-locally, see below)
  *
- * PARTIAL CLOSE (tenant ROUTING half): `apps/gateway/src/tenancy/` now imports
- * `EnvBindingTenantDatabaseRouter`, `ControlDatabaseTenantRegistry`,
- * `requireAtomicBatch` and `NonAtomicD1RestTenantDatabaseRouter` and exposes
- * them to the request path as `tenantDatabase()` + `tenantDatabaseOf(c)`, with
- * the unmount gate the paragraph above demands: `apps/gateway/test/tenancy/`
- * asserts the resolver IS `EnvBindingTenantDatabaseRouter` (a hand-rolled
- * replacement turns it red), that two tenants get two PHYSICALLY different D1
- * databases, and that an unresolvable tenant errors instead of falling back to
- * the shared/control database. STILL OPEN: the `D1*Store` half — nothing yet
- * calls `reserveWalletCredits`/`debitWorkflowBudget`/`D1UsageLedger` through a
- * routed handle, so the guards still guard no money.
+ * TWO of those are dead by DUPLICATION rather than by a missing trigger, which
+ * is the worse failure: a second implementation exists, is live, and can drift
+ * from the one that has the tests.
+ *   - assets: `apps/gateway/src/assets/d1.ts` declares its own
+ *     `D1AssetMetadataStore` and imports nothing from here
+ *     (`docs/rewrite/parity-audit-storage.md` §4.11 records the decision).
+ *   - agent schedules: `apps/control-plane/src/schedule/{cron,engine,model,
+ *     scheduled}.ts` is a SECOND, independent ~1650-line schedule engine with
+ *     its own 5-field cron parser, and it does not import `@ferrogate/storage`.
+ *
+ * The close is the composition roots, NOT this package (a library cannot mount
+ * itself); `packages/storage/README.md` §4 has the exact wiring. The split above
+ * is not just prose: `test/mount-inventory.test.ts` re-derives it from `apps/`
+ * on every run, so mounting one of the dead exports — or unmounting a live one —
+ * turns this package RED and forces the marker to be corrected with it.
  * ---------------------------------------------------------------------------
  *
  * PORT-TODO(inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`)
- * — SHARPENED. The ENGINE is no longer absent; the TICK TRIGGER still is.
+ * — SHARPENED. The ENGINE is no longer absent; the TICK TRIGGER still is, and a
+ * RIVAL ENGINE has landed in `apps/control-plane` in the meantime.
  *
  * CLOSED in this package: `./agent-schedule.js` ports the whole engine
  * clean-room — a 5-field cron parser (no `croner`), IANA-timezone wall-clock
@@ -86,19 +92,28 @@
  * the claim. `test/d1/agent-schedule-d1.test.ts` races two claimers on one slot,
  * asserts exactly one wins, and mutation-pins the gate.
  *
- * STILL OPEN, and NOT CLOSABLE FROM A LIBRARY PACKAGE: nothing TICKS. A
- * `packages/*` library has no Worker entry module and no `wrangler.toml`, so it
- * cannot declare `[triggers] crons` or a Durable Object alarm. Until a
- * deployable calls `listDueSchedules` → `planScheduleTick` → `insertScheduleFire`
- * → `advanceSchedule` on a schedule, a schedule an operator creates STILL never
- * fires. What exists on the deployed path today is CRUD only:
- * `apps/control-plane/src/routes/admin_agent_schedule.ts` stores schedules as
- * generic `control_plane_resources` documents, its `/fires` route lists a
- * collection nothing appends to, and `run-now` merely sets `{ run_now: true }`
- * on the document. The wiring owed is: swap that route onto
- * `D1AgentScheduleStore` on the tenant handle, and add a `scheduled` handler
- * (plus a `[triggers] crons` stanza) that drives the four calls above. A Durable
- * Object alarm is the answer for sub-minute cadences, since cron triggers do not
+ * STILL OPEN, and NOT CLOSABLE FROM A LIBRARY PACKAGE: nothing TICKS *this*
+ * engine. A `packages/*` library has no Worker entry module and no
+ * `wrangler.toml`, so it cannot declare `[triggers] crons` or a Durable Object
+ * alarm; `listDueSchedules` → `planScheduleTick` → `insertScheduleFire` →
+ * `advanceSchedule` has no caller under `apps/`.
+ *
+ * WHAT CHANGED, and why it is worse than "no trigger": a trigger now exists, on
+ * a DIFFERENT engine. `apps/control-plane/src/schedule/{cron,engine,model,
+ * scheduled}.ts` (~1650 lines) re-implements the cron parser, the timezone
+ * arithmetic, the overlap/catch-up policies and the tick, and imports nothing
+ * from here. So the repo carries TWO schedule engines: the one that ticks, and
+ * the one with `test/agent-schedule.test.ts` + `test/d1/agent-schedule-d1.test.ts`
+ * behind it (including the two-claimer race on the at-most-once fire gate). They
+ * can disagree about when a schedule fires and no test in either tree would
+ * notice.
+ *
+ * The resolution is a DELETION, not more code, and it belongs to whoever owns
+ * the composition root: point `apps/control-plane/src/schedule/` at
+ * `@ferrogate/storage`'s engine + `D1AgentScheduleStore` on the tenant handle
+ * and delete the duplicate, or delete THIS engine and move its tests over.
+ * Keeping both is the option that guarantees a divergence. A Durable Object
+ * alarm remains the answer for sub-minute cadences, since cron triggers do not
  * go below one minute.
  */
 

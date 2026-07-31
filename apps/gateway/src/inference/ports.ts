@@ -46,6 +46,7 @@
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
+import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
 
 export type ProviderAuthScheme = "bearer" | "x-api-key";
 
@@ -153,6 +154,29 @@ export interface PhysicalRoute {
   /** `ModelRoute.weight` — DESCENDING within a priority group. Absent is `0`. */
   readonly weight?: number | undefined;
   /**
+   * `ModelRoute.input_price_per_1m` — USD per 1,000,000 PROMPT tokens.
+   *
+   * Read only by `strategy.ts::routeEstimatedCost` / `balancedRouteScore`; it is
+   * NOT the billing price (metering prices the provider's REPORTED usage from
+   * its own tables). Absent means "unpriced", which `lowest_cost` treats as
+   * infinitely expensive and `balanced` treats as 1,000 — the two Rust readings,
+   * and they differ on purpose.
+   */
+  readonly inputPricePer1m?: number | undefined;
+  /** `ModelRoute.output_price_per_1m` — USD per 1,000,000 COMPLETION tokens. */
+  readonly outputPricePer1m?: number | undefined;
+  /**
+   * `ModelRegistryEntry.routing_strategy` — the order the ladder walks the
+   * eligible candidates in (`strategy.ts`).
+   *
+   * It lives on the registry ENTRY in Rust, not on a route, so every leg
+   * flattened out of one `[[models]]` row carries the same value and
+   * `handlers.ts` reads it off whichever leg it has. Absent is `"priority"`,
+   * which is `RoutingStrategy::default()` and is the behavior this data plane
+   * had before the strategies landed.
+   */
+  readonly routingStrategy?: RoutingStrategy | undefined;
+  /**
    * `CanaryRoute.percent` (0–100). Present ⇒ this route is a CANARY: it is
    * promoted to the head of the candidate list for the sticky subset of callers
    * `canarySelected` picks, and dropped for everyone else. See
@@ -207,21 +231,25 @@ export interface PhysicalRoute {
  *
  * ### Still open on this seam
  *
- * PORT-TODO(`src/metering/event.ts` `SINGLE_PROVIDER_ATTEMPT_INDEX`): the
- * provider ATTEMPT INDEX is not yet threaded onto {@link Usage}. The ladder can
- * now make more than one attempt per request, and the metering event's
- * `ledgerEntryId` is derived without it, so two attempts of one request would
- * collapse onto one ledger row and the second be absorbed by `ON CONFLICT DO
- * NOTHING` as a silent under-bill. Today that is latent rather than live —
- * usage is recorded exactly once, from the attempt that actually produced the
- * served response, and abandoned attempts are never metered — but the moment a
- * failed attempt is metered (for provider-cost attribution) the index has to
- * land with it. The fix is in `src/metering/`, which this slice does not own.
+ * ### The provider attempt index (was PORT-TODO #135 — now wired)
  *
- * PORT-TODO(state_routing.rs:517, F6): `RoutingStrategy::{LowestCost,
- * LowestLatency,Balanced}` and the weighted round-robin WITHIN a priority group
- * are still unported; `candidates.ts::orderCandidates` implements the
- * priority→weight ORDERING only. See the marker on that function.
+ * The ladder can make more than one attempt per request, so
+ * `metering/event.ts::providerAttemptIndexFor` partitions `ledgerEntryId` on
+ * {@link Usage.providerAttemptIndex}, which `handlers.ts` sets from
+ * `FailoverOutcome.attempts`. Without it two attempts of one request derived one
+ * ledger id and the second was absorbed by `ON CONFLICT DO NOTHING` as a silent
+ * under-bill.
+ *
+ * ### Routing strategies (was PORT-TODO F6 — now wired)
+ *
+ * `candidates` returns the list in `orderCandidates` order (priority ASC, weight
+ * DESC, then a total order). `handlers.ts::planRequest` then re-orders the
+ * ELIGIBLE survivors through `strategy.ts::orderCandidatesByStrategy`, which is
+ * the port of `candidate_model_routes`'s four `RoutingStrategy` arms including
+ * the weighted round-robin (`weighted_start_index`) the priority arm applies
+ * within each priority group. `PhysicalRoute.routingStrategy` /
+ * `.inputPricePer1m` / `.outputPricePer1m` are the config fields that were
+ * previously unrepresentable; `catalog.ts` reads them off `[[models]]`.
  */
 export interface ModelResolver {
   /** Resolve a logical model to the physical route to dispatch on. */
@@ -408,6 +436,23 @@ export interface Usage {
   readonly metadata?: Readonly<Record<string, string>> | undefined;
   readonly tenantId?: string | undefined;
   readonly projectId?: string | undefined;
+  /**
+   * Rust `ProviderAttempt.index` (#135) — the ZERO-BASED dispatch attempt within
+   * ONE logical request, counting retries of a provider and failovers to the
+   * next candidate alike.
+   *
+   * `metering/event.ts::providerAttemptIndexFor` folds it into `ledgerEntryId`,
+   * which is a PRIMARY KEY in three tables. Before this field existed, two
+   * attempts of one request derived the SAME ledger id, and the second was
+   * absorbed by `ON CONFLICT DO NOTHING` as a healthy replay — a silent
+   * under-bill rather than a crash. That was latent (only the attempt that
+   * produced the served response is metered today) and stops being latent the
+   * moment a failed attempt is metered for provider-cost attribution.
+   *
+   * Absent ⇒ `SINGLE_PROVIDER_ATTEMPT_INDEX` (0), which is the pre-ladder
+   * behavior and stays correct for every single-attempt request.
+   */
+  readonly providerAttemptIndex?: number | undefined;
 }
 
 /**
@@ -471,10 +516,15 @@ export type CallerScope =
  * unit test stayed green. `test/inference/wiring.test.ts` is the assertion that
  * goes red if the wiring is removed again.
  *
- * `allowedModels`/`deniedModels` are still never populated from a real
- * credential; see the PORT-TODO on `callerFromAuth`, which names the exact
- * `src/ports.ts` change (that file is the composition root's, not this
- * slice's).
+ * `allowedModels` IS now populated from a real credential — `callerFromAuth`
+ * copies `AuthContext.allowedModels`, which `keys/resolver.ts` reads off the
+ * `api_keys` row. `deniedModels` and `regionAllowlist` are still only ever set
+ * by an injected caller: neither has a column on that row, so populating them
+ * would be inventing a policy rather than porting one. Both stay on the type
+ * because {@link callerCanUseModel} and
+ * `candidates.ts::routeExclusionReasons` implement the full Rust predicate for
+ * them and are tested on both legs. See the PORT-TODO on `callerFromAuth` for
+ * the provider allowlist, which is loaded and not yet consulted.
  */
 export interface Caller {
   readonly scope: CallerScope;
@@ -680,6 +730,15 @@ export interface InferenceDeps {
   readonly shadowBudget?:
     | AsyncShadowBudgetLedger
     | ((env: InferenceBindings) => AsyncShadowBudgetLedger);
+  /**
+   * `AppState::provider_routing_metrics` — the latency/failure observations the
+   * `lowest_latency` and `balanced` strategies steer on.
+   *
+   * Absent ⇒ the per-isolate {@link ProviderRoutingMetrics} in `defaults.ts`.
+   * Injected by tests so a strategy can be exercised against a known set of
+   * observations without driving real dispatches.
+   */
+  readonly routingMetrics?: RoutingMetrics;
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -696,4 +755,5 @@ export interface ResolvedInferenceDeps {
   readonly reliability: ReliabilitySettings;
   readonly circuit: ProviderCircuit;
   readonly shadowBudget: AsyncShadowBudgetLedger;
+  readonly routingMetrics: RoutingMetrics;
 }

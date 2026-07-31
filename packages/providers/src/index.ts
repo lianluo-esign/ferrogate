@@ -79,6 +79,8 @@ export {
   modelRouteWithRouting,
   newModelRegistryEntry,
   newModelRoute,
+  routingStrategyAsStr,
+  routingStrategyFromStr,
 } from "./models.js";
 export type {
   ModelCapability,

@@ -30,9 +30,17 @@
  *     (`build_messages_request_plan`). The element schema stays open (`role` is
  *     a free string, `content` may be a string, an array of parts, or null) so
  *     no legitimate OpenAI payload is rejected.
- *     // PORT-TODO(inventory-request-path §1.4): if a provider ever needs a
- *     // message shape this schema rejects, widen the element schema — never
- *     // narrow the passthrough.
+ *     // PORT-TODO(inventory-request-path §1.4) — **KEPT AS A STANDING
+ *     // CONSTRAINT, NOT A GAP.** Nothing is unported behind this marker: this
+ *     // schema is STRICTER than the Rust extractor, deliberately, because
+ *     // `docs/rewrite/TESTING.md` makes the edge 400 an invariant of the port.
+ *     // The marker tracks the RISK that strictness carries — the Rust tree
+ *     // could not reject a legitimate payload here and this one can. If a
+ *     // provider ever needs a message shape this schema refuses, widen the
+ *     // element schema; NEVER narrow the `.passthrough()`, which is what keeps
+ *     // `temperature`/`tools`/`response_format` reaching the upstream. It is
+ *     // closed the day the strictness is either removed or proven against
+ *     // every adapter family's accepted message shapes.
  *
  *  2. Nothing else. `max_tokens` stays optional on `/v1/messages` even though
  *     Anthropic requires it, because the Rust `AnthropicAdapter` defaults it to

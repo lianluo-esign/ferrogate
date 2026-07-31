@@ -6,7 +6,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run && vitest run --config test/durable/harness/vitest.config.ts"
   },
   "dependencies": {
     "hono": "^4.6.0",

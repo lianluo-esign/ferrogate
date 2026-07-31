@@ -74,6 +74,11 @@ export function isCacheableResolution(resolution: ApiKeyResolution): boolean {
     case "resolved":
     case "key_suspended":
     case "token_budget_exhausted":
+    // Also from a MATCHED row: the hash comparison passed and the row's
+    // `tenant_id` was blank. Cacheable for exactly the same reason the three
+    // above are — the answer is a property of a row that was really read, not
+    // of a miss, so caching it cannot make a non-existent key appear to exist.
+    case "tenant_identity_required":
       return true;
     case "unknown":
     case "unavailable":

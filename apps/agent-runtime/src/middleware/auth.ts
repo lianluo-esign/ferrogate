@@ -495,7 +495,15 @@ async function internalAuth(c: Context<AgentRuntimeEnv>): Promise<void> {
   }
 
   const envelope = requireIdentityEnvelope(document);
-  const resolution = await deps.workerIdentities.validate(envelope.identity);
+  // Rust security fix #113 (`validate_worker_identity`): identity expiry is
+  // judged against the SERVER's trusted clock, so `observed_at_unix` is
+  // overwritten UNCONDITIONALLY here. Honouring the caller's value would let a
+  // worker whose registration has expired keep authenticating forever by
+  // reporting `0` — or by omitting the field entirely.
+  const resolution = await deps.workerIdentities.validate({
+    ...envelope.identity,
+    observed_at_unix: deps.clock.nowUnix(),
+  });
   if (resolution.outcome === "rejected") throw workerIdentityError(resolution.failure);
   c.set("worker", resolution.worker);
   // Publish the PLAINTEXT document so the six callbacks read the unsealed

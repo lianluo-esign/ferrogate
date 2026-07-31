@@ -46,6 +46,7 @@ export {
 } from "./shadow.js";
 export type { ShadowMirror } from "./shadow.js";
 export * from "./reliability.js";
+export * from "./strategy.js";
 export {
   DurableObjectProviderCircuit,
   ProviderCircuitDurableObject,
@@ -63,6 +64,7 @@ export {
   defaultStreamNormalizers,
   emptyModelResolver,
   fetchDispatcher,
+  isolateRoutingMetrics,
   passthroughNormalizers,
   platformOperatorCaller,
   providerCircuitFor,

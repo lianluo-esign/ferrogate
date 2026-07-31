@@ -64,18 +64,124 @@ describe("billing dead-letter replay: at-most-once (real D1)", () => {
     expect((await replay("rep_missing")).status).toBe(404);
   });
 
-  it("writes NOTHING to the shared billing_report_outbox table", async () => {
-    // The kept platform limit, pinned: `billing_report_outbox` lives in this
-    // same control database (the gateway binds it as `BILLING_DB`), so a re-arm
-    // is physically writable from here — and is deliberately not done, because
-    // the Cron sweep that would drain it does not exist yet. A change that
-    // starts writing the table has to make this assertion fail, which is the
-    // moment to check the sweep is real.
+  it("reports rearmed:false when there is no physical outbox row to re-arm", async () => {
+    // The dead-letter DOCUMENT exists (seeded above) but the shared row does
+    // not. The operator must be able to tell that apart from a real re-arm.
+    const body = (await (await replay("rep_1")).json()) as { rearmed: boolean };
+    expect(body.rearmed).toBe(false);
+    expect(await rawDocument(DEAD_LETTERS, "rep_1")).toMatchObject({ rearmed: false });
+  });
+});
+
+/**
+ * The RE-ARM half — the marker in `src/routes/billing.ts` that used to say
+ * "there is no drainer to hand the row to".
+ *
+ * `apps/gateway` now runs the sweep on a `[triggers] crons = ["* * * * *"]`
+ * schedule, so this route puts the shared `billing_report_outbox` row back on
+ * the sweeper's due list. The test that used to live here asserted the exact
+ * opposite ("writes NOTHING to the shared billing_report_outbox table") and its
+ * own comment said a change that starts writing the table "has to make this
+ * assertion fail, which is the moment to check the sweep is real". It was
+ * checked (`apps/gateway/src/metering/outbox.ts` + the cron trigger), and the
+ * assertion is replaced by the stronger one below: not merely that the table is
+ * written, but that the row becomes SELECTABLE by the sweeper's own predicate.
+ */
+describe("billing dead-letter replay: the outbox row is re-armed (real D1)", () => {
+  /**
+   * `BILLING_OUTBOX_LIST_DUE_SQL` from `apps/gateway/src/metering/d1.ts`,
+   * reduced to its WHERE. Asserting through the SWEEPER'S predicate rather than
+   * through the three columns separately is what makes this test mean
+   * "the report will actually be delivered".
+   */
+  async function dueReportIds(now: number): Promise<string[]> {
+    const rows = await db()
+      .prepare(
+        `SELECT id FROM billing_report_outbox
+          WHERE dead_lettered_at_unix IS NULL AND next_attempt_unix <= ?
+          ORDER BY next_attempt_unix ASC, id ASC`,
+      )
+      .bind(now)
+      .all<{ id: string }>();
+    return rows.results.map((row) => row.id);
+  }
+
+  async function seedOutboxRow(
+    id: string,
+    fields: { attempts: number; nextAttempt: number; deadLetteredAt: number | null },
+  ): Promise<void> {
+    await db()
+      .prepare(
+        `INSERT INTO billing_report_outbox
+           (id, attempts, next_attempt_unix, dead_lettered_at_unix, created_at_unix,
+            updated_at_unix, event_json)
+         VALUES (?, ?, ?, ?, 1, 1, '{}')`,
+      )
+      .bind(id, fields.attempts, fields.nextAttempt, fields.deadLetteredAt)
+      .run();
+  }
+
+  async function outboxRow(id: string) {
+    return db()
+      .prepare(
+        "SELECT attempts, next_attempt_unix, dead_lettered_at_unix FROM billing_report_outbox WHERE id = ?",
+      )
+      .bind(id)
+      .first<{
+        attempts: number;
+        next_attempt_unix: number;
+        dead_lettered_at_unix: number | null;
+      }>();
+  }
+
+  beforeEach(async () => {
+    await resetD1();
+    await db().prepare("DELETE FROM billing_report_outbox").run();
+    arm({ staticKeys: [operatorKey], store: "d1" });
+    await seedD1(DEAD_LETTERS, [{ id: "rep_1", status: "dead_lettered" }]);
+  });
+
+  it("makes a dead-lettered report DUE for the gateway's sweeper again", async () => {
+    const future = Math.floor(Date.now() / 1000) + 86_400;
+    await seedOutboxRow("rep_1", { attempts: 20, nextAttempt: future, deadLetteredAt: 1_700 });
+
+    // Control: the sweeper cannot see it before the replay — dead-lettered AND
+    // scheduled a day out, so neither half of the predicate is satisfied.
+    expect(await dueReportIds(Math.floor(Date.now() / 1000))).toEqual([]);
+
+    const body = (await (await replay("rep_1")).json()) as { rearmed: boolean; emitted: boolean };
+    expect(body.rearmed).toBe(true);
+    // Re-arming is not emitting, and the endpoint still says so.
+    expect(body.emitted).toBe(false);
+
+    expect(await dueReportIds(Math.floor(Date.now() / 1000))).toEqual(["rep_1"]);
+    // All three columns moved together; a partial re-arm is not a re-arm.
+    const row = await outboxRow("rep_1");
+    expect(row?.dead_lettered_at_unix).toBeNull();
+    expect(row?.attempts).toBe(0);
+    expect(row?.next_attempt_unix).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
+  });
+
+  it("REFUSES to touch a row that is not dead-lettered", async () => {
+    // A live row mid-backoff. Resetting its attempts would restart a retry
+    // ladder the sweeper is deliberately backing off on.
+    const future = Math.floor(Date.now() / 1000) + 600;
+    await seedOutboxRow("rep_1", { attempts: 3, nextAttempt: future, deadLetteredAt: null });
+
+    const body = (await (await replay("rep_1")).json()) as { rearmed: boolean };
+    expect(body.rearmed).toBe(false);
+
+    const row = await outboxRow("rep_1");
+    expect(row?.attempts).toBe(3);
+    expect(row?.next_attempt_unix).toBe(future);
+  });
+
+  it("never re-arms a report the caller did not name", async () => {
+    await seedOutboxRow("rep_1", { attempts: 9, nextAttempt: 1, deadLetteredAt: 1_700 });
+    await seedOutboxRow("rep_other", { attempts: 9, nextAttempt: 1, deadLetteredAt: 1_700 });
+
     await replay("rep_1");
-    const outbox = await db()
-      .prepare("SELECT COUNT(*) AS total FROM billing_report_outbox")
-      .first<{ total: number }>();
-    expect(outbox?.total).toBe(0);
+    expect((await outboxRow("rep_other"))?.dead_lettered_at_unix).toBe(1_700);
   });
 });
 

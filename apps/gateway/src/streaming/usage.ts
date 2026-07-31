@@ -116,10 +116,24 @@ function extractOpenAiUsage(payload: unknown): NormalizedUsage | undefined {
  * `message_delta` reports the final `usage.output_tokens` at the tail of the
  * stream. `total_tokens` is only synthesized when both halves are known.
  *
- * PORT-TODO(inventory-request-path §1.5): Anthropic's newer
- * `cache_creation_input_tokens` / `cache_read_input_tokens` counters are not
- * read here because the Rust adapter does not read them either; adding them is
- * a metering change, not a port, and must land in `@ferrogate/providers`.
+ * PORT-TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
+ * GAP.** Anthropic's newer `cache_creation_input_tokens` /
+ * `cache_read_input_tokens` counters are not read here.
+ *
+ * Re-verified for this pass against `crates/ferrogate-providers/src/anthropic.rs`
+ * `extract_usage` (line 131): it reads `input_tokens` and `output_tokens` and
+ * nothing else, and `grep -rn "cache_creation_input_tokens" crates/` returns
+ * zero hits across the whole Rust tree. So this port is byte-faithful and there
+ * is no missing work behind this marker.
+ *
+ * It is kept because the omission is CONSEQUENTIAL and invisible: a tenant using
+ * Anthropic prompt caching is billed on `input_tokens` alone, which excludes the
+ * cache-write and cache-read tokens Anthropic charges for separately — an
+ * under-count in the Rust tree that this port inherits exactly. Fixing it is a
+ * metering/pricing change (the two counters bill at different rates from
+ * ordinary input tokens, so summing them into `promptTokens` would be a
+ * different wrong answer), it must land in `@ferrogate/providers` beside the
+ * rate card, and it must not be smuggled in as a port.
  */
 function extractAnthropicUsage(payload: unknown): NormalizedUsage | undefined {
   const usage =

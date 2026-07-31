@@ -5,15 +5,24 @@
  * {@link canonicalProviderAdapterFamily}, wraps every trait method, and — after
  * preparation — applies Cloudflare AI Gateway routing (issue #406).
  *
- * ## PORT-TODO(inventory-request-path §3.2 "Registry", issue #406) — THIS CLASS IS NOT MOUNTED
+ * ## PORT-TODO(inventory-request-path §3.2 "Registry", issue #406) — THE
+ * ## CLOUDFLARE AI GATEWAY LEG OF THIS CLASS IS NOT MOUNTED. NOT A PLATFORM
+ * ## LIMIT. NOT CLOSED.
  *
- * `ProviderAdapterRegistry` has no importer outside this package. `apps/gateway`
- * builds its OWN registry — `defaultAdapterRegistry` in
- * `apps/gateway/src/inference/adapters.ts` — from the eight adapter classes
- * directly, via `packageProviderAdapter(kind, new XAdapter())`. That wrapper
- * adapts one adapter at a time and never goes through this class, so the
- * `CloudflareRouting` capture/apply below is skipped on every request the
- * deployed data plane serves.
+ * NARROWED — the class itself is no longer unimported. `ProviderAdapterRegistry`
+ * is constructed at module scope in
+ * `apps/gateway/src/inference/reliability.ts` (`RETRY_PREDICATE_REGISTRY`) and
+ * its `isRetryableStatus` decides upstream retry on the deployed path, so the
+ * "no importer outside this package" claim this marker used to make is stale.
+ *
+ * What is STILL dead is the routing leg. `apps/gateway` dispatches through its
+ * OWN registry — `defaultAdapterRegistry` in
+ * `apps/gateway/src/inference/adapters.ts` — built from the eight adapter
+ * classes directly via `packageProviderAdapter(kind, new XAdapter())`. That
+ * wrapper adapts one adapter at a time and never goes through this class, so
+ * the `CloudflareRouting` capture/apply below is skipped on every request the
+ * deployed data plane serves, and `applyCloudflareAiGatewayRouting` has zero
+ * callers outside this package.
  *
  * Consequence: **Cloudflare AI Gateway routing is unreachable in production.**
  * `./cloudflare.ts` (`applyCloudflareAiGatewayRouting`, the per-family
@@ -21,8 +30,8 @@
  * fully ported and tested, and cannot be reached — the free caching,
  * rate-limiting and observability the AI Gateway product provides are not in
  * effect for any tenant. This is the "implemented, tested, never mounted"
- * defect class, in its second instance in the request path (see the matching
- * marker in `packages/routing/src/index.ts`).
+ * defect class — the same one `packages/routing`'s canary/shadow leg was in
+ * until it was wired; that one is now closed, this one is not.
  *
  * It is also not CONFIGURABLE today, which is why fixing the wiring alone is
  * not enough: the Rust `Provider.cloudflare_ai_gateway` block

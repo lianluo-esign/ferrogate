@@ -18,45 +18,56 @@
  * the ledger INTERFACE, whose import is type-only and therefore erased, is
  * re-exported below.
  *
- * ## PORT-TODO(inventory-request-path §2, §1.7) — THIS PACKAGE IS NOT MOUNTED
+ * ## THE "THIS PACKAGE IS NOT MOUNTED" MARKER IS CLOSED — do not re-add it
  *
- * Every export below is fully ported, covered by 28 tests, and **imported by
- * zero application code**. A recursive grep for `from "@ferrogate/routing"`
- * across every `src` directory in `apps` and `packages` returns exactly one
- * hit, and it is inside a docstring in
- * `./shadow-budget-do.ts`. `@ferrogate/routing` is a declared dependency of
- * `apps/gateway/package.json` and no module in `apps/gateway/src` imports it.
+ * It claimed a recursive grep for `from "@ferrogate/routing"` across every
+ * `src` under `apps` and `packages` returned exactly one hit, inside a
+ * docstring. That is now false in every clause, and each replacement is
+ * checkable:
  *
- * This is the defect class the porting rules name: implemented, tested, green —
- * and dead in production. Concretely unreachable today:
+ *  - **Canary rollout is live.** `apps/gateway/src/inference/candidates.ts`
+ *    value-imports `canarySelected`, and `applyCanary` runs on the deployed
+ *    resolution path in `src/inference/handlers.ts`.
+ *    `apps/gateway/test/inference/reliability.test.ts` drives the real
+ *    `createInferenceRouter` with only the outbound provider `fetch`
+ *    intercepted, declares the canary at a LOWER priority than the primary so
+ *    nothing but `applyCanary` can promote it, and computes the expected split
+ *    from this package's own `rolloutBucket` — a second bucketing
+ *    implementation in the gateway would diverge and fail.
+ *  - **Shadow mirroring is live.** `apps/gateway/src/inference/shadow.ts`
+ *    value-imports `shadowSampled` + `ShadowBudgetLedger` here and
+ *    `DurableObjectShadowBudgetLedger` from the `/durable-objects` subpath,
+ *    and `handlers.ts` fires the mirror.
+ *  - **`ShadowBudgetDurableObject` is mounted.** `apps/gateway/src/worker.ts`
+ *    re-exports it from `@ferrogate/routing/durable-objects` and
+ *    `apps/gateway/wrangler.toml` declares the `SHADOW_BUDGET` binding, so the
+ *    shadow cap is cross-isolate rather than N-per-isolate. Both halves are
+ *    required by the workerd entry-module rule and both are present.
  *
- *  - **Canary rollout.** Rust `AppState::canary_route` (`state_rollout.rs:47`)
- *    calls `canary_selected(sticky_key, canary.percent)` to divert a sticky
- *    subset of traffic to a canary route. `packages/config` validates
- *    `canaryRouteSchema` (`schema/entities.ts:65`), so an operator can configure
- *    a canary, pass validation, and have 0% of traffic reach it.
- *  - **Shadow mirroring.** `server/shadow.rs:69` gates the mirror on
- *    `shadow_sampled(...)` and `:78` caps it with
- *    `shadow_budget_try_consume(logical_model, shadow.max_requests)`. No shadow
- *    dispatch exists in `apps/gateway` at all.
- *  - **`ShadowBudgetDurableObject`.** Exported from no `worker.ts` and bound in
- *    no `wrangler.toml`. Per the workerd entry-module rule, wiring it requires
- *    the owning app to add `export { ShadowBudgetDurableObject } from
- *    "@ferrogate/routing/durable-objects";` to its entry module AND a matching
- *    `[[durable_objects.bindings]]` + `[[migrations]]` block, or the Worker
- *    fails at startup with "Durable Object class ... not found" — a failure
- *    `@cloudflare/vitest-pool-workers` does NOT reproduce.
- *  - **`RouteMatcher`** is an interface with no implementation and no caller;
- *    see the PORT-TODO in `apps/gateway/src/routes/index.ts` on the operator
- *    reverse-proxy fall-through, which is what would implement it.
+ * ## PORT-TODO(inventory-request-path §1.3) — `RouteMatcher` HAS NO IMPLEMENTOR.
+ * ## DEFERRED FEATURE, NOT A PLATFORM LIMIT, NOT A WIRING MISS, NOT CLOSED.
  *
- * The bucketing itself is byte-exact against Rust and must stay that way when
- * this is wired up (`fnv.ts` keeps the `0xcbf29ce484222325` /
- * `0x100000001b3` constants and the `salt\0key` framing). When a consumer
- * lands, it must ship an assertion that FAILS if the rollout call is removed —
- * a test that only exercises `canarySelected` directly would stay green through
- * exactly the state this marker describes.
- * See `docs/rewrite/parity-audit-request-path.md` F7.
+ * `route.ts` ships `RouteMatch` + `RouteMatcher` and stops there, which is
+ * FAITHFUL: the Rust crate `ferrogate-routing` also ships only the trait — the
+ * concrete matcher lives in the gateway over `AppState`'s hot-reloadable
+ * runtime route table (`state_routing.rs:816 match_runtime_route`). Adding a
+ * concrete matcher to this package would diverge from the crate, not close the
+ * gap, so it deliberately is not here.
+ *
+ * What is genuinely missing is the CONSUMER, and it is outside this package:
+ * the operator reverse-proxy fall-through marked at
+ * `apps/gateway/src/routes/index.ts:379`. Until it lands, an operator's
+ * `[[routes]]`/`[[upstreams]]` config validates cleanly in `packages/config`
+ * and proxies nothing — a request matching no route group 404s instead of
+ * falling through. That implementor is what `RouteMatcher` exists for; the
+ * upstream rotation it needs (`select_runtime_upstream_endpoint`) has no
+ * counterpart here either.
+ *
+ * The bucketing must stay byte-exact against Rust (`fnv.ts` keeps the
+ * `0xcbf29ce484222325` / `0x100000001b3` constants and the `salt\0key`
+ * framing); `test/fnv.test.ts` pins it against the Rust vectors.
+ * See `docs/rewrite/parity-audit-request-path.md` F7 and
+ * `docs/rewrite/parity-audit-dead-packages.md` §4.
  */
 
 export { fnv1a64, rolloutBucket } from "./fnv.js";

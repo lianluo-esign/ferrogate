@@ -92,34 +92,33 @@ export interface PolicyEngine {
 /**
  * First-match-wins rule engine over an ordered rule list (Rust `BasicPolicyEngine`).
  *
- * PORT-TODO(inventory-policy-core §2.4a) — IMPLEMENTED BUT NEVER MOUNTED.
- * REAL GAP: operator `[[policies]]` are VALIDATED at load and NEVER ENFORCED.
+ * ## THE "IMPLEMENTED BUT NEVER MOUNTED" MARKER IS CLOSED — do not re-add it
  *
- * The algorithm below is a 1:1 port and is covered by `test/policy-engine.test.ts`,
- * but nothing constructs it. In Rust the composition root is
- * `crates/ferrogate-gateway/src/state.rs::build_policy_engine(&config.policies)`
- * (state.rs:7079), stored as `policy_engine: Arc<BasicPolicyEngine>` (state.rs:1516)
- * and evaluated per request in `state_quota_and_policy.rs`. On the TS side
+ * It read: "operator `[[policies]]` are VALIDATED at load and NEVER ENFORCED …
  * `grep -rn "BasicPolicyEngine\|PolicyDecision\|PolicySubject" apps/` returns
- * ZERO hits, while `packages/config` fully validates the `[[policies]]` section
- * (`validatePolicies` cross-checks every rule's api-key / model / provider id).
+ * ZERO hits", with the consequence "an operator writes a deny rule, the config
+ * loads clean, the admin surface shows it, and every request it names is
+ * ALLOWED."
  *
- * Consequence, stated plainly: an operator writes a deny rule, the config loads
- * clean, the admin surface shows it, and every request it names is ALLOWED. This
- * is the repo's recurring "fully implemented, fully tested, never mounted" defect
- * — the config-driven deny path is not the same thing as the per-key
- * `allowedModels`/`deniedModels` check in `apps/gateway/src/inference/ports.ts`,
- * which is sourced from the D1 `api_keys` row and cannot express a
- * `(subject × models × providers)` rule.
+ * That grep is no longer zero. `apps/gateway/src/ratelimit/policy.ts`
+ * value-imports `BasicPolicyEngine`, `PolicyDecision`, `PolicyRule` and
+ * `denyRule` from this package, compiles the validated `[[policies]]` section
+ * into rules, and evaluates the engine inside `rateLimit()` — the admission
+ * middleware every deployed operation passes through — rendering a
+ * `PolicyDecision` deny as **403** carrying the rule's own `code` and
+ * `message`, exactly as Rust's five AI handlers do.
  *
- * TO CLOSE (gateway-owned, outside this package):
- *   1. build the engine from `config.policies` in the gateway composition root;
- *   2. evaluate it after auth + before dispatch, mapping `deny` → the rule's
- *      `{code, message}`;
- *   3. add a wiring assertion that FAILS when the engine is unmounted (a config
- *      with one deny rule must produce a denied response), and prove it RED by
- *      deleting the call — per the composition-root rule, a green suite with an
- *      unmounted engine is the exact failure this marker exists to prevent.
+ * Two deliberate, documented deltas from Rust, both recorded at the mount site
+ * rather than here: the evaluation sits in the admission middleware instead of
+ * being repeated in each handler (so a sixth handler cannot forget it), which
+ * means a request tripping BOTH a guardrail and a deny rule reports the deny
+ * rule where Rust reports the guardrail. Both are a 403 naming the cause and
+ * neither admits an upstream call, so no request is admitted that Rust would
+ * have refused.
+ *
+ * The engine still cannot express what a per-key `allowedModels`/`deniedModels`
+ * check expresses and vice versa — they are different mechanisms with different
+ * sources (config section vs. the D1 `api_keys` row), and both are now live.
  */
 export class BasicPolicyEngine implements PolicyEngine {
   readonly rules: PolicyRule[];

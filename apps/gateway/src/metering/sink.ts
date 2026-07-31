@@ -188,10 +188,22 @@ export interface MeteringSinkOptions {
    * PORT-TODO(inventory-data-billing §2.3 "source-of-truth rule", issue #135) —
    * a missing upstream feature, not a platform limit. The Rust gateway settles
    * `cost_usd` BEFORE dispatch because it enforces the tenant budget against
-   * that figure, and `charge()` then treats it as authoritative. Nothing in
-   * `apps/gateway` does budget enforcement yet — that arrives with
-   * `@ferrogate/policy`, in the request path, which this module does not own —
-   * so nothing supplies a settled cost and the rate card is the source.
+   * that figure, and `charge()` then treats it as authoritative.
+   *
+   * The REASON this marker used to give is now out of date and is corrected
+   * here rather than left to mislead: it said "nothing in `apps/gateway` does
+   * budget enforcement yet". It does — `src/ratelimit/middleware.ts` runs the
+   * Rust admission ladder, including `monthly_budget_usd` (step 2), the wallet
+   * balance (step 3) and the no-oversell reservation (step 3b), through
+   * `@ferrogate/policy` and `@ferrogate/storage`.
+   *
+   * What is still missing is narrower and is the actual gap: that ladder
+   * enforces against ACCUMULATED spend (a rollup read and a wallet balance), it
+   * does not PRICE THIS REQUEST before dispatch. So no call site has a
+   * per-request settled figure to hand this hook, and the rate card remains the
+   * source. Closing it means pricing the estimate at admission — the same place
+   * the token estimate is already computed for TPM — and carrying that number
+   * forward to settlement.
    *
    * The seam is here and it is EXERCISED (`test/metering/sink.test.ts`: the
    * authoritative branch records the supplied cost verbatim, and a >5%

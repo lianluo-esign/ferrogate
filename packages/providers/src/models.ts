@@ -4,26 +4,40 @@
  * `ModelRegistry.resolve` sorts fallback routes by priority → weight (desc) →
  * provider → provider_model, matching the Rust `resolve` tiebreak exactly.
  *
- * ## PORT-TODO(inventory-request-path §3.2, §"routing/failover") — NO CONSUMER
+ * ## PORT-TODO(inventory-request-path §3.2, §"routing/failover") — `ModelRegistry`
+ * ## HAS NO CONSUMER, AND ITS ENUM IS NOW DECLARED TWICE. NOT A PLATFORM LIMIT.
+ * ## NOT CLOSED.
  *
  * `ModelRegistry` is not the registry `apps/gateway` dispatches on: the gateway
  * declares its own `ModelResolver` port (`apps/gateway/src/inference/ports.ts`)
  * returning ONE flattened `PhysicalRoute`, built from the `GATEWAY_MODELS` var
  * by `apps/gateway/src/inference/catalog.ts`. So the `fallbacks` /
  * `routingStrategy` / `contextWindow` / price fields modelled here reach no
- * dispatcher, and {@link RoutingStrategy} in particular is a four-variant enum
- * with **zero readers anywhere in the tree** — `LowestCost`, `LowestLatency`
- * and `Balanced` are declared and never implemented.
+ * dispatcher, and `resolve` below runs on no request.
  *
- * The Rust behavior they stand for lives in
- * `crates/ferrogate-gateway/src/state_routing.rs:489 candidate_model_routes`,
- * not in `models.rs`, and it is more than a sort: `LowestCost` scores routes
- * through `route_estimated_cost` against the estimated usage, `LowestLatency`
- * reads `provider_routing_metrics`, `Balanced` blends the two, and `Priority`
- * does a WEIGHTED ROUND-ROBIN inside each priority group (`model_route_counter`
- * / `weighted_start_index` / `total_weight`) rather than a plain sort. Porting
- * the strategies therefore belongs with the gateway's dispatch loop, and this
- * `resolve` covers only the `Priority` ordering.
+ * PARTLY STALE, corrected rather than deleted: this marker used to say
+ * `LowestCost`, `LowestLatency` and `Balanced` were "declared and never
+ * implemented", with "zero readers anywhere in the tree". All four strategies
+ * ARE implemented now — in `apps/gateway/src/inference/strategy.ts`, over the
+ * gateway's own eligible-candidate ladder, including the `route_estimated_cost`
+ * scoring, the `provider_routing_metrics` read, the blend, and the weighted
+ * round-robin inside a priority group. That was always the right home: the Rust
+ * behavior lives in `crates/ferrogate-gateway/src/state_routing.rs:489
+ * candidate_model_routes`, not in `models.rs`, and this `resolve` covers only
+ * the `Priority` ORDERING.
+ *
+ * What that left behind is the residual defect: `strategy.ts` also re-declared
+ * the enum, as a snake_case `ROUTING_STRATEGIES` tuple, so one closed
+ * vocabulary is now declared in three places — the PascalCase variants here,
+ * `routingStrategySchema` in `./schemas.ts`, and the gateway's tuple. This
+ * package's half is closed by {@link routingStrategyAsStr} /
+ * {@link routingStrategyFromStr}, the serde bridge Rust derives, whose table is
+ * pinned against `routingStrategySchema.options` by `test/routing-strategy.test.ts`. The
+ * remaining half is a gateway edit: `strategy.ts` should import the wire values
+ * from `@ferrogate/providers` instead of re-listing them, and its
+ * `RoutingStrategy` type should be `z.infer<typeof routingStrategySchema>`.
+ * Until it does, adding a fifth strategy means editing three files and the
+ * suite stays green if you edit two.
  *
  * See the paired markers on `ModelResolver` (`inference/ports.ts`) and
  * `modelRecordSchema` (`inference/catalog.ts`), and
@@ -32,6 +46,45 @@
 
 export type RoutingStrategy = "Priority" | "LowestCost" | "LowestLatency" | "Balanced";
 export const DEFAULT_ROUTING_STRATEGY: RoutingStrategy = "Priority";
+
+/**
+ * The `#[serde(rename_all = "snake_case")]` bridge for {@link RoutingStrategy}.
+ *
+ * Rust derives this and gets it for free; `ModelCapability` next to it was
+ * given an explicit `as_str`/`FromStr` pair in the port and `RoutingStrategy`
+ * was not, which left the in-memory PascalCase variants and the snake_case wire
+ * form ({@link ../schemas.js routingStrategySchema}) with no stated
+ * correspondence at all. `apps/gateway/src/inference/strategy.ts` consequently
+ * re-declared its own `ROUTING_STRATEGIES` snake_case tuple — a second
+ * vocabulary for one enum, with nothing forcing the two to move together.
+ *
+ * `test/routing-strategy.test.ts` asserts this table's values are EXACTLY
+ * `routingStrategySchema.options`, so adding a strategy to one and not the
+ * other fails inside this package instead of silently splitting the enum.
+ */
+const ROUTING_STRATEGY_STRINGS: Record<RoutingStrategy, string> = {
+  Priority: "priority",
+  LowestCost: "lowest_cost",
+  LowestLatency: "lowest_latency",
+  Balanced: "balanced",
+};
+
+/** `Serialize` for `RoutingStrategy` — the snake_case wire name. */
+export const routingStrategyAsStr = (strategy: RoutingStrategy): string =>
+  ROUTING_STRATEGY_STRINGS[strategy];
+
+/** `Deserialize`/`FromStr` for `RoutingStrategy`; throws on an unknown name. */
+export function routingStrategyFromStr(value: string): RoutingStrategy {
+  const entry = (Object.entries(ROUTING_STRATEGY_STRINGS) as [RoutingStrategy, string][]).find(
+    ([, name]) => name === value,
+  );
+  if (!entry) {
+    throw new Error(
+      `unknown routing strategy ${JSON.stringify(value)}; expected one of priority, lowest_cost, lowest_latency, balanced`,
+    );
+  }
+  return entry[0];
+}
 
 /** Closed vocabulary for capabilities declared by one physical model route. */
 export type ModelCapability =

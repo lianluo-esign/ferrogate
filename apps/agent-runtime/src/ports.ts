@@ -24,12 +24,17 @@ import {
   flattenedText,
 } from "@ferrogate/guardrails";
 
+import { normalizedCapabilities } from "./capabilities.js";
 import { timingSafeEqualStrings } from "./crypto.js";
-import {
-  type FrameOpenResult,
-  type SealedWorkerFrame,
-  openWorkerFrame,
-} from "./workers/frame.js";
+import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
+import { type FrameOpenResult, type SealedWorkerFrame, openWorkerFrame } from "./workers/frame.js";
+
+/**
+ * Re-exported so every existing importer of `normalizedCapabilities` from this
+ * module keeps working; the implementation lives in the leaf `capabilities.ts`
+ * so `durable/adapters.ts` can share it without an import cycle.
+ */
+export { normalizedCapabilities } from "./capabilities.js";
 
 // ---------------------------------------------------------------------------
 // Worker environment
@@ -41,6 +46,34 @@ export interface AgentRuntimeBindings {
   readonly AGENT_RUN_STATE: DurableObjectNamespace;
   /** Per-`${tenant_id}:${workspace_id}` self-hosted dispatch queue. */
   readonly WORKER_PLANE: DurableObjectNamespace;
+  /**
+   * The TENANT database (`sql/d1-ts/tenant`), holding `api_keys`.
+   *
+   * Bound ⇒ tenant bearer credentials resolve from D1 through
+   * {@link d1ApiKeyPort}. Absent ⇒ see {@link resolveDeps} for what is left.
+   * Same binding name and same schema `apps/gateway/wrangler.toml` declares, so
+   * one key authenticates identically on both Workers.
+   */
+  readonly DB?: D1Database;
+  /**
+   * The CONTROL database (`sql/d1-ts/control`), holding
+   * `self_hosted_worker_registrations`.
+   *
+   * Bound ⇒ worker-plane identities resolve from D1 through
+   * {@link d1WorkerIdentityPort}. The registry is account-global operator
+   * state, which is why it is not in the tenant database.
+   */
+  readonly CONTROL_DB?: D1Database;
+  /**
+   * OPERATOR config: JSON array of {@link AgentUpstream} rows (Rust
+   * `config.agent_upstreams`).
+   *
+   * This is a real deployment knob, not a test seam — the A2A upstream catalog
+   * was TOML configuration in Rust too, exactly as `GATEWAY_PROVIDERS` /
+   * `GATEWAY_MODELS` are vars in `apps/gateway`. Absent ⇒ no upstream resolves
+   * ⇒ every `/v1/agents/*` dispatch is 404, which is fail-closed.
+   */
+  readonly AGENT_UPSTREAMS?: string;
   /** DEV/TEST ONLY: install the in-memory port bundle. Absent ⇒ fail closed. */
   readonly FG_DEV_IN_MEMORY_PORTS?: string;
   /** `"1"` selects the Rust `RequireProductionMtls` transport posture. */
@@ -498,18 +531,6 @@ export interface DevSelfHostedWorker {
   readonly active?: boolean;
 }
 
-/** Rust `normalized_capabilities`: trimmed, lowercased, deduped, sorted. */
-export function normalizedCapabilities(
-  capabilities: readonly string[] | undefined,
-): readonly string[] {
-  const seen = new Set<string>();
-  for (const raw of capabilities ?? []) {
-    const value = raw.trim().toLowerCase();
-    if (value !== "") seen.add(value);
-  }
-  return [...seen].sort();
-}
-
 /** Rust `worker_key` — the registry is keyed by the full tenancy triple. */
 function workerKey(tenantId: string, workspaceId: string, workerId: string): string {
   return `${tenantId}${workspaceId}${workerId}`;
@@ -591,10 +612,18 @@ export function inMemoryWorkerIdentityPort(
           },
         };
       }
+      // Rust security fix #113: expiry is judged against the SERVER's clock. An
+      // identity that carries no `observed_at_unix` is judged against wall-clock
+      // now, so an expired registration can never be admitted by OMITTING the
+      // field. `middleware/auth.ts` additionally overwrites any client-supplied
+      // value before calling this, exactly as Rust `validate_worker_identity`
+      // does — a caller-supplied number is honoured here only so unit tests can
+      // drive expiry deterministically.
       if (
         row.identity_expires_at_unix !== null &&
-        typeof identity.observed_at_unix === "number" &&
-        identity.observed_at_unix >= row.identity_expires_at_unix
+        (typeof identity.observed_at_unix === "number"
+          ? identity.observed_at_unix
+          : Math.floor(Date.now() / 1000)) >= row.identity_expires_at_unix
       ) {
         return {
           outcome: "rejected",
@@ -907,52 +936,114 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
 /**
  * Build the dependency bundle for a request.
  *
- * Returns `undefined` when `FG_DEV_IN_MEMORY_PORTS` is unset and no real
- * adapters are bound — the Worker then fails CLOSED (503) on every
- * authenticated surface rather than defaulting to a permissive stub.
+ * ## The two credential authorities, and how each is chosen
  *
- * PORT-TODO(inventory-edge-control §8) — EVERY PORT IS IN-MEMORY IN THE
- * COMMITTED DEPLOYMENT. Not a platform limit. Not closed. See
- * `docs/rewrite/parity-audit-dead-packages.md` §7.1.
+ * `apiKeys` and `workerIdentities` are the only ports that decide whether a
+ * caller is admitted, and each is resolved INDEPENDENTLY, DURABLE FIRST:
  *
- * Two facts, together:
+ * | port | durable source | dev source |
+ * |---|---|---|
+ * | `apiKeys` | `env.DB` → `api_keys` ({@link d1ApiKeyPort}) | `FG_DEV_API_KEYS` |
+ * | `workerIdentities` | `env.CONTROL_DB` → `self_hosted_worker_registrations` ({@link d1WorkerIdentityPort}) | `FG_DEV_SELF_HOSTED_WORKERS` |
  *
- *  1. This function has EXACTLY ONE branch. There is no real-adapter path
- *     anywhere in this app — not unbound, UNWRITTEN. `apiKeys`,
- *     `workerIdentities`, `governance` and `upstreams` have no durable
- *     implementation to fall back to. (`guardrails` is the real
- *     `@ferrogate/guardrails` detector, `config`/`clock` are genuinely real,
- *     and the `AGENT_RUN_STATE` / `WORKER_PLANE` Durable Objects ARE bound —
- *     so the run lifecycle is durable while identity and governance are not.)
- *  2. `wrangler.toml:64` COMMITS `FG_DEV_IN_MEMORY_PORTS = "1"`, three lines
- *     under a comment reading "DEV / TEST ONLY … Production MUST NOT set this."
- *     The committed deployment configuration contradicts its own docstring:
- *     deploy this file and every port is the dev bundle.
+ * **A bound database WINS over the dev flag**, and that ordering is deliberate
+ * rather than incidental: `wrangler.toml` commits `FG_DEV_IN_MEMORY_PORTS = "1"`
+ * under a comment reading *"Production MUST NOT set this"*, so a deployment
+ * that binds real databases but forgets to delete the var must still get the
+ * real databases. Reversing the order would reproduce
+ * `docs/rewrite/parity-audit-dead-packages.md` §7.2 — a fully-built durable
+ * identity store bypassed by one leftover variable.
  *
- * Consequence: everything a self-hosted worker authenticates against is a JSON
- * `[vars]` entry, and no agent-run identity survives isolate eviction. The only
- * test that touches the flag (`test/contract.test.ts:514`) asserts the
- * FAIL-CLOSED direction (unset ⇒ 503); nothing asserts a real adapter is ever
- * reachable, because none exists — so this whole seam is invisible to the suite.
+ * Either authority missing BOTH sources ⇒ `undefined` ⇒ the Worker answers
+ * `503 agent_runtime_unavailable` on every authenticated surface. There is no
+ * permissive default: an unconfigured deployment admits nobody.
  *
- * Closing it needs the bindings listed in the `TODO(bindings)` block of
- * `wrangler.toml` (D1 for `agent_runs`/`self_hosted_worker_records`, R2 for
- * artifacts, the Secrets-Store worker registry) plus adapters over them, and
- * then removal of the var from the committed `[vars]` — a COMPOSITION-ROOT edit
- * this file may not make.
+ * ## The remaining ports
+ *
+ *  - `upstreams` — operator config, from `AGENT_UPSTREAMS` (falling back to the
+ *    dev var). A catalog of A2A endpoints was TOML configuration in Rust too;
+ *    a var is the faithful port, not a stub. Empty ⇒ every dispatch 404s.
+ *  - `guardrails` — the REAL `@ferrogate/guardrails` deterministic detector.
+ *  - `config`, `clock` — real; `configFromEnv` reads operator vars.
+ *  - `AGENT_RUN_STATE` / `WORKER_PLANE` — real Durable Objects, declared in
+ *    `wrangler.toml` and re-exported from `src/worker.ts`.
+ *
+ * ## PORT-TODO(inventory-edge-control §8) — KEPT for `governance` ONLY
+ *
+ * §7.1 of the audit found EVERY port in-memory in the committed deployment.
+ * The two credential authorities above close that finding and are gated by
+ * `test/durable/*.spec.ts`, which drives the REAL Worker with the dev flag
+ * ABSENT and only D1 bound — deleting either durable branch turns those specs
+ * red (503) while the rest of the suite stays green.
+ *
+ * `governance` is NOT closed and is not closable here. `inMemoryGovernancePort`
+ * already evaluates the real capability-envelope / sealed-egress DECISION over
+ * a real operator var, and that decision is complete; what is missing is an
+ * isolation HOST to hand the grant to. The only Cloudflare equivalent of Rust's
+ * four backends is Containers / `@cloudflare/sandbox`, whose
+ * `[[containers]]` + `CONTAINER_SANDBOX` binding needs a PAID account and a
+ * published image, so it cannot be exercised in the offline docker-free
+ * harness — and `wrangler.toml`, where the binding would be declared, is the
+ * integrate step's file. See the PORT-TODOs in `src/runs/governance.ts` for the
+ * three Rust backends (Firecracker microVM, Docker `--network none`, `unshare`
+ * namespaces) that have no CF equivalent at any effort.
+ *
+ * ## WIRING — the exact `apps/agent-runtime/wrangler.toml` edits (integrate step)
+ *
+ * ```toml
+ * [[d1_databases]]
+ * binding = "DB"                       # tenant schema: api_keys
+ * database_name = "ferrogate-tenant"
+ * database_id = "replace-at-deploy"
+ * migrations_dir = "../../sql/d1-ts/tenant"
+ *
+ * [[d1_databases]]
+ * binding = "CONTROL_DB"               # control schema: self_hosted_worker_registrations
+ * database_name = "ferrogate-control"
+ * database_id = "replace-at-deploy"
+ * migrations_dir = "../../sql/d1-ts/control"
+ * ```
+ *
+ * and in `[vars]`: DELETE the committed `FG_DEV_IN_MEMORY_PORTS = "1"` line
+ * (or move it into an `[env.dev]` block), and add
+ * `AGENT_UPSTREAMS = "[]"` as the operator catalog. Nothing else changes:
+ * `src/index.ts` and `src/worker.ts` need no edit at all, because the posture
+ * is chosen inside this function.
  */
 export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undefined {
-  if (env.FG_DEV_IN_MEMORY_PORTS !== "1") return undefined;
+  const dev = env.FG_DEV_IN_MEMORY_PORTS === "1";
+
+  const apiKeys: ApiKeyPort | undefined =
+    env.DB !== undefined
+      ? d1ApiKeyPort(env.DB)
+      : dev
+        ? inMemoryApiKeyPort(parseJsonVar<DevApiKey[]>(env.FG_DEV_API_KEYS, []))
+        : undefined;
+
+  const workerIdentities: WorkerIdentityPort | undefined =
+    env.CONTROL_DB !== undefined
+      ? d1WorkerIdentityPort(env.CONTROL_DB)
+      : dev
+        ? inMemoryWorkerIdentityPort(
+            parseJsonVar<DevSelfHostedWorker[]>(env.FG_DEV_SELF_HOSTED_WORKERS, []),
+          )
+        : undefined;
+
+  // FAIL CLOSED. A Worker that cannot consult one of its credential authorities
+  // must refuse every authenticated surface, not serve the ones it can.
+  if (apiKeys === undefined || workerIdentities === undefined) return undefined;
+
   return {
-    apiKeys: inMemoryApiKeyPort(parseJsonVar<DevApiKey[]>(env.FG_DEV_API_KEYS, [])),
-    workerIdentities: inMemoryWorkerIdentityPort(
-      parseJsonVar<DevSelfHostedWorker[]>(env.FG_DEV_SELF_HOSTED_WORKERS, []),
-    ),
+    apiKeys,
+    workerIdentities,
     governance: inMemoryGovernancePort({
       governedEgressHosts: parseGovernedEgressHosts(env.CONTAINER_GOVERNED_EGRESS_HOSTS),
     }),
     upstreams: inMemoryAgentUpstreamPort(
-      parseJsonVar<AgentUpstream[]>(env.FG_DEV_AGENT_UPSTREAMS, []),
+      parseJsonVar<AgentUpstream[]>(
+        env.AGENT_UPSTREAMS ?? (dev ? env.FG_DEV_AGENT_UPSTREAMS : undefined),
+        [],
+      ),
     ),
     guardrails: deterministicGuardrailPort(
       parseJsonVar<{

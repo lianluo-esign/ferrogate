@@ -91,6 +91,7 @@ import {
   validateRequestMetadata,
 } from "./schemas.js";
 import type { OpenAiModelList, RequestMetadata } from "./schemas.js";
+import { DEFAULT_ROUTING_STRATEGY, orderCandidatesByStrategy } from "./strategy.js";
 import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
 import type { ProviderUsage, UsageDialect } from "./usage.js";
 
@@ -305,12 +306,17 @@ function endpointKindFor(operation: InferenceOperation): ModelEndpointKind {
  * candidate route. Returns a rejection instead of throwing so the caller keeps
  * the Rust status/code pairs verbatim.
  *
- * `inputTokenUpperBound` is the prompt half of the pre-dispatch estimate,
- * threaded in because the context-window leg of the eligibility gate needs it
- * (Rust passes the same quantity as `request_input_token_upper_bound`). It is
- * a pure computation, so hoisting it above the TPM admission — which still runs
- * AFTER planning, for the reason documented on {@link admitTokens} — changes
- * nothing about when the caller is charged.
+ * `estimated` is the pre-dispatch token estimate, threaded in for the two Rust
+ * arguments that read it: `request_input_token_upper_bound` (the prompt half,
+ * feeding the context-window leg of the eligibility gate) and `estimated_usage`
+ * (the whole thing, feeding `route_estimated_cost` under
+ * `routing_strategy = "lowest_cost"`). It is a pure computation, so hoisting it
+ * above the TPM admission — which still runs AFTER planning, for the reason
+ * documented on {@link admitTokens} — changes nothing about when the caller is
+ * charged. Absent (the `/v1/images` surface, whose estimate is a count of
+ * generated images and prices nothing on the prompt side) leaves the
+ * context-window leg unarmed and falls `lowest_cost` back to the unit cost,
+ * which is `route_estimated_cost`'s own `None` arm.
  */
 function planUpstream(
   deps: ResolvedInferenceDeps,
@@ -320,8 +326,9 @@ function planUpstream(
   metadata: RequestMetadata | undefined,
   stream: boolean,
   body: Record<string, unknown>,
-  inputTokenUpperBound = 0,
+  estimated?: EstimatedUsage,
 ): PlannedRequest | InferenceRejection {
+  const inputTokenUpperBound = estimated?.promptTokens ?? 0;
   const metadataReason = validateRequestMetadata(metadata);
   if (metadataReason !== null) {
     return reject(400, "invalid_request_metadata", metadataReason);
@@ -337,36 +344,42 @@ function planUpstream(
     );
   }
 
-  // PORT-TODO(inventory-request-path §1.5 "gateway config profiles", §1.7
-  // "Caches"): two Rust behaviors sit between the model gate above and the
-  // dispatch below, and neither exists anywhere in this tree.
+  // Re-checked against the tree, not against the audit: F10 and F11 have SINCE
+  // LANDED and this marker no longer describes them.
   //
-  //  1. **Gateway config profiles.** Rust reads the `x-ferrogate-config`
-  //     request header (`chat.rs:115 GATEWAY_CONFIG_HEADER`) and resolves it
-  //     through `AppState::resolve_gateway_config_profile`
-  //     (`state_routing.rs:262`) into a `GatewayConfigUse` that overrides
-  //     per-request cache and routing behavior, with a typed
-  //     `GatewayConfigResolveError::NotFound` for an unknown id. `packages/config`
-  //     ALREADY ports the `[[gateway_configs]]` table (schema + validation);
-  //     `grep -ri "x-ferrogate-config" apps packages` returns zero. A client
-  //     selecting a profile today is silently served the default one.
-  //  2. **Response caching.** `ai_cache_enabled` (`state_routing.rs:223` — a
-  //     four-level opt-out: global, profile, model, api-key),
-  //     `ai_response_cache_key` (tenant + project + user + api-key + logical
-  //     model + provider + provider model + body), `lookup_ai_response_cache` /
-  //     `store_ai_response_cache`, and the separate `SemanticResponseCache`
-  //     (`semantic_cache.rs`, feature-hashed embeddings + cosine threshold).
-  //     Neither exists. Note that `@ferrogate/observability` ALREADY exports
-  //     `semanticCacheHitsTotal` and renders
-  //     `ferrogate_ai_cache_requests_total{status="semantic_hit"}` — a metric
-  //     with no producer, which will read 0 forever and looks like "the cache is
-  //     cold" rather than "there is no cache". The exact-match half is
-  //     half-tracked as the `CACHE` KV binding note in `wrangler.toml`; the
-  //     semantic half is tracked nowhere else. CF maps both cleanly (KV or the
-  //     Cache API for exact, Vectorize + Workers AI for semantic), so neither is
-  //     a platform limit.
+  //  - **Gateway config profiles (F10).** `src/middleware/response-cache.ts:88`
+  //    exports `GATEWAY_CONFIG_HEADER = "x-ferrogate-config"`, reads it off the
+  //    request and passes the id into `aiCacheEnabled`. Note that Rust's
+  //    `GatewayConfigUse` (`state.rs:3325`) carries EXACTLY ONE override —
+  //    `cache_enabled` — so "overrides per-request cache and routing behavior"
+  //    overstated it: there is no routing leg to port.
+  //  - **Exact-match response cache (F11).** `src/middleware/response-cache.ts`
+  //    + `src/cache/{config,key,store,fingerprint,metrics}.ts`, mounted by
+  //    `createGatewayApp` immediately before the routes, with the four-level
+  //    `ai_cache_enabled` opt-out and the #233 guardrail-fingerprint rotation.
   //
-  // See `docs/rewrite/parity-audit-request-path.md` F10/F11.
+  // PORT-TODO(`state_routing.rs:262` `GatewayConfigResolveError`, `src/cache/`):
+  // two residues, neither of them in this directory, both stated precisely so
+  // the next owner does not re-derive them from `crates/`.
+  //
+  //  1. **The typed profile-resolution errors.** Rust's
+  //     `resolve_gateway_config_profile` returns `NotFound(id)` / `Disabled` /
+  //     `NotAllowed` and REFUSES the request; the TS reader treats an unknown or
+  //     forbidden `x-ferrogate-config` as "no profile", so a client that
+  //     misspells a profile id silently gets the default posture instead of an
+  //     error. Fail-open on a caching hint rather than on a policy, so it is a
+  //     fidelity gap and not a hole — but it is a real one. The change is in
+  //     `src/cache/config.ts` (which owns the profile table) plus one rejection
+  //     arm here.
+  //  2. **The SEMANTIC cache.** `semantic_cache.rs` (feature-hashed local
+  //     embeddings + a cosine threshold) has no TS counterpart, and
+  //     `@ferrogate/observability` still renders
+  //     `ferrogate_ai_cache_requests_total{status="semantic_hit"}` — a series
+  //     with no producer, which reads 0 forever and looks like a cold cache
+  //     rather than an absent one. NOT a platform limit: Vectorize + Workers AI
+  //     map onto it cleanly. It belongs beside the exact-match cache in
+  //     `src/cache/`, not in the dispatch path here.
+  //
   // `AppState::candidate_model_routes` — every ENABLED route for the model,
   // primary then fallbacks, priority→weight ordered.
   const resolved = resolveCandidates(deps.models, logicalModel);
@@ -413,9 +426,21 @@ function planUpstream(
     return reject(rejection.status, rejection.code, rejection.message);
   }
 
+  // `candidate_model_routes`'s `match model.routing_strategy` — applied to the
+  // SURVIVORS, after eligibility and before the first socket, which is the whole
+  // point of the Rust ordering ("an incompatible cheap/healthy route therefore
+  // cannot influence ordering"). The strategy is a property of the registry
+  // ENTRY, so every leg carries the same value and the first survivor is as good
+  // a place to read it as any; absent ⇒ `"priority"`, the pre-strategy order.
+  const ordered = orderCandidatesByStrategy(
+    decision.eligible,
+    (decision.eligible[0] as PhysicalRoute).routingStrategy ?? DEFAULT_ROUTING_STRATEGY,
+    { estimatedUsage: estimated, metrics: deps.routingMetrics },
+  );
+
   const candidates: AttemptCandidate[] = [];
   let firstFailure: InferenceRejection | null = null;
-  for (const route of decision.eligible) {
+  for (const route of ordered) {
     const adapter = deps.adapters.adapterFor(route.providerKind);
     if (adapter === null) {
       firstFailure ??= reject(
@@ -491,7 +516,21 @@ async function dispatchCandidates(
   deps: ResolvedInferenceDeps,
   planned: PlannedRequest,
 ): Promise<
-  { readonly route: PhysicalRoute; readonly response: Response } | InferenceRejection
+  | {
+      readonly route: PhysicalRoute;
+      readonly response: Response;
+      /**
+       * Rust `ProviderAttempt.index` (#135) — the ZERO-BASED index of the
+       * attempt that produced this response. `FailoverOutcome.attempts` counts
+       * attempts MADE (so a first-try success is 1), and the served attempt is
+       * always the last one made, hence `- 1`. Threaded onto {@link Usage} so
+       * `metering/event.ts` can partition `ledgerEntryId` on it: without it two
+       * attempts of one request derive one ledger id and the second is absorbed
+       * by `ON CONFLICT DO NOTHING` as a silent under-bill.
+       */
+      readonly attemptIndex: number;
+    }
+  | InferenceRejection
 > {
   const signal = clientSignal(c);
   if (planned.shadow !== undefined) {
@@ -504,13 +543,36 @@ async function dispatchCandidates(
     candidates: planned.candidates,
     circuit: deps.circuit,
     settings: deps.reliability,
-    attempt: async (candidate) => await dispatchUpstream(deps, candidate.upstream, signal),
+    // `ProviderRoutingMetrics::record_request_log` — recorded HERE rather than
+    // inside `dispatchWithFailover` because the ladder is a pure decision
+    // procedure over an injected `attempt`, and because the classification is
+    // Rust's request-LOG rule, not the ladder's retry rule: a request counts as
+    // failed on `status_code >= 400 || error_code.is_some()`, so a provider
+    // answering 400 to a malformed body still counts against its observed
+    // failure rate even though the circuit breaker (which guards on
+    // `retryable_status`) deliberately ignores it. Latency is added only on the
+    // success arm, so a provider that fails fast never looks fast.
+    attempt: async (candidate) => {
+      const startedAt = Date.now();
+      const result = await dispatchUpstream(deps, candidate.upstream, signal);
+      const provider = candidate.route.provider;
+      if (isRejection(result) || !result.ok) {
+        deps.routingMetrics.recordFailure(provider);
+      } else {
+        deps.routingMetrics.recordSuccess(provider, Date.now() - startedAt);
+      }
+      return result;
+    },
     isRejection: (value): value is InferenceRejection => isRejection(value),
   });
   if (!outcome.ok) {
     return outcome.rejection;
   }
-  return { route: outcome.candidate.route, response: outcome.response };
+  return {
+    route: outcome.candidate.route,
+    response: outcome.response,
+    attemptIndex: Math.max(0, outcome.attempts - 1),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -974,7 +1036,7 @@ async function handleOpenAiInference(
     metadata,
     stream,
     request,
-    estimated.promptTokens,
+    estimated,
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -990,7 +1052,7 @@ async function handleOpenAiInference(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
 
   const routeLabel = ROUTE_LABELS[operation];
   const usageDialect = usageProviderKindFor(operation, servedRoute.providerKind);
@@ -1004,6 +1066,7 @@ async function handleOpenAiInference(
     status: upstreamResponse.status,
     ...(metadata !== undefined ? { metadata } : {}),
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
@@ -1095,7 +1158,7 @@ async function handleMessages(
     undefined,
     stream,
     translated.body,
-    estimated.promptTokens,
+    estimated,
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -1111,7 +1174,7 @@ async function handleMessages(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
 
   const usageDialect = usageProviderKindFor("messages", servedRoute.providerKind);
   const meterBase = {
@@ -1123,6 +1186,7 @@ async function handleMessages(
     stream,
     status: upstreamResponse.status,
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
@@ -1199,7 +1263,7 @@ async function handleEmbeddings(
     metadata,
     false,
     request,
-    estimated.promptTokens,
+    estimated,
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -1215,7 +1279,7 @@ async function handleEmbeddings(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
 
   const text = await readUpstreamBody(deps, upstreamResponse);
   if (isRejection(text)) {
@@ -1231,6 +1295,7 @@ async function handleEmbeddings(
     status: upstreamResponse.status,
     ...(metadata !== undefined ? { metadata } : {}),
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
@@ -1278,16 +1343,31 @@ async function handleImages(
   const logicalModel = String(request["model"]);
   const metadata = request["metadata"] as RequestMetadata | undefined;
 
-  const planned = planUpstream(deps, caller, "images", logicalModel, metadata, false, request);
-  if (isRejection(planned)) {
-    return errorResponse(planned, requestId);
-  }
-
   // Rust `estimate_images_usage` (issue #275): the pre-charge unit is GENERATED
   // IMAGES on the completion dimension, and `n` is clamped to
   // `MAX_ESTIMATED_IMAGE_COUNT` so a hostile `"n": 1e9` cannot pre-charge the
   // caller's entire window on a request the provider would refuse anyway.
-  const admitted = await admitTokens(c, estimateImagesUsage(request));
+  //
+  // Computed BEFORE planning (it is pure, and the charge below is unmoved) so
+  // that `lowest_cost` can price this surface too. Its prompt side is 0, which
+  // leaves the context-window eligibility leg exactly as unarmed as it was.
+  const estimated = estimateImagesUsage(request);
+
+  const planned = planUpstream(
+    deps,
+    caller,
+    "images",
+    logicalModel,
+    metadata,
+    false,
+    request,
+    estimated,
+  );
+  if (isRejection(planned)) {
+    return errorResponse(planned, requestId);
+  }
+
+  const admitted = await admitTokens(c, estimated);
   if (isRejection(admitted)) {
     return errorResponse(admitted, requestId);
   }
@@ -1297,7 +1377,7 @@ async function handleImages(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
 
   const text = await readUpstreamBody(deps, upstreamResponse);
   if (isRejection(text)) {
@@ -1326,6 +1406,7 @@ async function handleImages(
       ...(imageCount !== undefined ? { imageCount } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
       ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
     },
     undefined,
   );

@@ -351,12 +351,20 @@ export function routingRejectionFor(
  * configuration could fail over differently across two deployments. Sorting is
  * stable in JS, but the config array is not a meaningful tiebreak.
  *
- * The weighted round-robin WITHIN a priority group (`model_route_counter`,
- * `weighted_start_index`) is not ported: it needs a shared rotating counter,
- * which on Workers is either per-isolate (wrong) or a DO round trip on the hot
- * path for a load-spreading hint. Weight still ORDERS within a priority, so a
- * higher-weight route is preferred; it does not yet SPREAD across them.
- * PORT-TODO(state_routing.rs:517, F6).
+ * This is the BASE order only — the one every strategy tiebreaks on and the one
+ * `RoutingStrategy::Priority` rotates. The four `candidate_model_routes` arms,
+ * including the weighted round-robin within a priority group
+ * (`model_route_counter` / `weighted_start_index`), are
+ * `strategy.ts::orderCandidatesByStrategy`, applied by `handlers.ts` to the
+ * ELIGIBLE survivors — which is where Rust applies them too, after
+ * `model_routing.rs` and before the first dispatch.
+ *
+ * It stays a separate, strategy-free function because `ModelResolver.candidates`
+ * is synchronous and knows neither the request's token estimate nor the provider
+ * observations, and because a total order is what makes the strategy arms
+ * deterministic: without the provider/provider-model tiebreak the candidate list
+ * would depend on `GATEWAY_MODELS` array order and two deployments of the same
+ * config could fail over differently.
  */
 export function orderCandidates(routes: readonly PhysicalRoute[]): readonly PhysicalRoute[] {
   return [...routes].sort((left, right) => {

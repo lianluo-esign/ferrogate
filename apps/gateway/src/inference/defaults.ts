@@ -43,6 +43,8 @@ import type {
   Usage,
   UsageSink,
 } from "./ports.js";
+import { ProviderRoutingMetrics } from "./strategy.js";
+import type { RoutingMetrics } from "./strategy.js";
 
 /**
  * `config.limits` defaults.
@@ -183,6 +185,21 @@ export function providerCircuitFor(
   }
   return new InMemoryProviderCircuit(settings);
 }
+
+/**
+ * `AppState::provider_routing_metrics` — the isolate's own observations.
+ *
+ * Rust holds one `Arc<Mutex<ProviderRoutingMetrics>>` per process and carries it
+ * across config reloads (`state.rs:4914` explicitly clones the Arc into the next
+ * state rather than starting fresh, so a hot reload does not blind the router).
+ * The Workers equivalent of "for the life of the process" is module scope, so
+ * this is a module-scope singleton and it survives every per-request `resolveDeps`
+ * for the same reason.
+ *
+ * See `strategy.ts` for why per-isolate is the honest ceiling here and why the
+ * error direction is "reacts later", never "reacts wrongly".
+ */
+export const isolateRoutingMetrics: RoutingMetrics = new ProviderRoutingMetrics();
 
 /** An empty registry — every model resolves to `model_not_found` (400). */
 export const emptyModelResolver: ModelResolver = new InMemoryModelResolver([]);
@@ -375,5 +392,11 @@ export function resolveDeps(
       typeof deps.shadowBudget === "function"
         ? deps.shadowBudget(env)
         : (deps.shadowBudget ?? shadowBudgetFor(env)),
+    // The default is the ISOLATE-WIDE singleton, not a per-request instance:
+    // `lowest_latency` / `balanced` steer on observations accumulated ACROSS
+    // requests, so a fresh recorder per request would record diligently and
+    // score every provider `NO_ROUTING_OBSERVATIONS` forever — a metric with no
+    // reader, which is the exact defect shape this wave exists to remove.
+    routingMetrics: deps.routingMetrics ?? isolateRoutingMetrics,
   };
 }

@@ -349,13 +349,31 @@ export function extractTextDeltas(
 /**
  * `extract_function_call_deltas`.
  *
- * PORT-TODO(inventory-request-path §1.5): for `kind: "anthropic"` the Rust
- * reads the tool-argument fragment from `delta.text` — the same field a plain
- * `text_delta` uses — so an Anthropic *text* delta is emitted BOTH as
- * `response.output_text.delta` and as `response.function_call_arguments.delta`.
- * That double-emission is replicated here verbatim (it is observable behavior
- * clients may depend on); narrowing it to `delta.partial_json` is a behavior
- * change that must be raised as its own slice, not smuggled into the port.
+ * PORT-TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
+ * GAP.** For `kind: "anthropic"` the Rust reads the tool-argument fragment from
+ * `delta.text` — the same field a plain `text_delta` uses — so an Anthropic
+ * *text* delta is emitted BOTH as `response.output_text.delta` and as
+ * `response.function_call_arguments.delta`. That double-emission is replicated
+ * here verbatim.
+ *
+ * Anthropic's own wire format puts tool-argument fragments in
+ * `delta.partial_json` and prose in `delta.text`, so the Rust reading is almost
+ * certainly a bug: a plain streamed sentence against an Anthropic upstream on
+ * `/v1/responses` produces spurious `function_call_arguments` deltas, and the
+ * `ToolCallAccumulator` accrues them into a tool call the model never made.
+ *
+ * It is reproduced rather than fixed for two reasons, and both are why the
+ * marker stays rather than becoming a silent correction:
+ *
+ *  1. it is OBSERVABLE — a client that has been consuming this stream shape has
+ *     been seeing those deltas since the Rust tree shipped, and a port is not
+ *     the place to change what a deployed client receives;
+ *  2. the fix is not one line. Narrowing to `delta.partial_json` also changes
+ *     which blocks the accumulator opens and therefore what
+ *     `response.function_call_arguments.done` reports at the tail, so it needs
+ *     its own fixtures and its own acceptance criteria.
+ *
+ * Raise it as a defect slice against the Rust behavior; do not close it here.
  */
 export function extractFunctionCallDeltas(
   kind: ResponsesStreamProviderKind,

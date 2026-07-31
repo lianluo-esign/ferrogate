@@ -142,3 +142,57 @@ describe("parseArgs — flag > env > default", () => {
     );
   });
 });
+
+/**
+ * `--version` / `-V` are GLOBAL early exits — unless the command declares a
+ * flag of that name, in which case they belong to the command.
+ *
+ * The bug this pins was live and untested: `assets push|pull|list|delete` and
+ * every `plans` verb declare a REQUIRED `--version VERSION` (the asset/plan
+ * version they address), and `parseArgs` swallowed the token unconditionally.
+ * The value fell through to the positional list and the command exited 2 with
+ * `--version is required`, so those eight verbs could not be run at all. The
+ * CLI suite only ever drove them with `--help`, which never reaches the flag.
+ */
+describe("command-owned --version / --help", () => {
+  const VERSIONED: readonly FlagSpec[] = [
+    { name: "version", kind: "string", valueName: "VERSION", help: "asset version" },
+    { name: "name", kind: "string", valueName: "NAME", help: "asset name" },
+  ];
+
+  test("a command that DECLARES --version receives its value", () => {
+    const args = parseArgs(["--name", "agent", "--version", "1.0.0"], VERSIONED);
+    expect(args.getString("version")).toBe("1.0.0");
+    expect(args.getString("name")).toBe("agent");
+    // The value must NOT have leaked into the positionals, which is exactly
+    // where it went while the token was being swallowed.
+    expect(args.positionals).toEqual([]);
+    expect(args.version).toBe(false);
+  });
+
+  test("`-V` is the command's short flag too when it declares one", () => {
+    const specs: readonly FlagSpec[] = [
+      { name: "version", short: "V", kind: "string", valueName: "VERSION", help: "v" },
+    ];
+    expect(parseArgs(["-V", "2.1.0"], specs).getString("version")).toBe("2.1.0");
+  });
+
+  test("a command that does NOT declare it still gets the global early exit", () => {
+    const args = parseArgs(["--version"], SPECS);
+    expect(args.version).toBe(true);
+    // ...and it is still not an unknown-flag usage error.
+    expect(args.positionals).toEqual([]);
+  });
+
+  test("the same rule governs --help", () => {
+    const withHelpFlag: readonly FlagSpec[] = [
+      { name: "help", kind: "string", valueName: "TOPIC", help: "topic" },
+    ];
+    const owned = parseArgs(["--help", "routing"], withHelpFlag);
+    expect(owned.getString("help")).toBe("routing");
+    expect(owned.help).toBe(false);
+
+    const global = parseArgs(["--help"], SPECS);
+    expect(global.help).toBe(true);
+  });
+});

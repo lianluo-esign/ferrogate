@@ -12,6 +12,34 @@
  * the inbound `Request` object, so an inference request that passes through
  * both emits exactly once.
  *
+ * ## Provability of the two mounts — verified, not assumed
+ *
+ * THIS mount is independently provable and is proved twice: make
+ * `requestTelemetry()` a pass-through and
+ * `test/telemetry/middleware-mount.test.ts` (an asset push) plus the "MOUNT:
+ * emits for a NON-inference operation" case in `test/telemetry/mount.test.ts`
+ * (a tooling operation) both time out at zero. Both drive operations the
+ * inference route module does not mount, which is what makes them gates rather
+ * than coincidences.
+ *
+ * The ROUTE-MODULE emission is NOT individually provable any more, and that is
+ * stated here rather than left to be rediscovered. It once was: this middleware
+ * published `c.get("requestId")` while the route module published the `fg-…` id
+ * it mints, so removing the route module's call changed the id on the wire.
+ * That was a BUG in this middleware (a span attached to an id no client ever
+ * saw) and it was fixed by reading `x-request-id` off the response the client
+ * got — after which the two emissions are byte-identical for an inference
+ * request and either one alone satisfies every assertion.
+ *
+ * So the route-module emission is now REDUNDANT: this middleware covers all 31
+ * gateway operations including the 6 inference ones, with the same payload and
+ * the same id. It is kept only because `src/inference/` is a different owner and
+ * deleting a caller across an ownership boundary is not this slice's call. If
+ * that slice wants it gone, nothing here changes; if it wants it KEPT, it needs
+ * a gate this middleware cannot answer for — e.g. asserting an attribute only
+ * the route module can know — because "remove it and a test goes red" is not
+ * currently true and must not be claimed.
+ *
  * Like `meteringDrain`, it does its work on the way OUT — it wraps `await
  * next()` so it can see the final `Response` — which is why it belongs at the
  * TOP of the middleware array rather than the bottom.
