@@ -261,18 +261,65 @@ async fn exercise(
     }
     println!("2 list_all_agent_schedules fans out over 2 tenant DBs, ordered");
 
-    // 3) list_due (cheapest-first, global) surfaces both (B's fires sooner).
-    let due = repos.list_due_agent_schedules(now + 200, 10).await?;
-    let due_ids: Vec<&str> = due.iter().map(|s| s.schedule_id.as_str()).collect();
-    let a_pos = due_ids.iter().position(|id| *id == sched_a);
-    let b_pos = due_ids.iter().position(|id| *id == sched_b);
-    match (a_pos, b_pos) {
-        (Some(a), Some(b)) if b < a => {}
-        other => {
-            return Err(format!("list_due order/coverage wrong: {other:?} in {due_ids:?}").into())
-        }
+    // 3) list_due (cheapest-first, global) — and every boundary of the due
+    //    predicate, which no mocked-transport test can reach: the fake replays its
+    //    canned rows whatever the SQL says, so `enabled = 1`, `IS NOT NULL` and
+    //    `<=` are only ever pinned as substrings there. Seed one schedule per
+    //    boundary and require the due set to be EXACTLY the two that have arrived
+    //    plus the exactly-`now` one.
+    let sched_exact = format!("{tenant_a}-sched-exact");
+    let sched_future = format!("{tenant_a}-sched-future");
+    let sched_disabled = format!("{tenant_a}-sched-disabled");
+    let sched_null = format!("{tenant_a}-sched-null");
+    let scan_at = now + 200;
+    // Exactly due: next_fire == the scan's `now`. `<=` must include it; a `<`
+    // regression drops a schedule for a whole tick.
+    repos
+        .upsert_agent_schedule(schedule(&sched_exact, tenant_a, "exact", Some(scan_at)))
+        .await?;
+    // Not yet due. Under a broken TEXT-vs-INTEGER affinity the comparison stops
+    // being numeric and this row starts appearing — i.e. PREMATURE FIRING.
+    repos
+        .upsert_agent_schedule(schedule(
+            &sched_future,
+            tenant_a,
+            "future",
+            Some(scan_at + 1),
+        ))
+        .await?;
+    // Disabled but long overdue: excluded by `enabled = 1` alone.
+    let mut disabled = schedule(&sched_disabled, tenant_a, "disabled", Some(now));
+    disabled.enabled = false;
+    repos.upsert_agent_schedule(disabled).await?;
+    // Unscheduled: excluded by `next_fire_at_unix IS NOT NULL`.
+    repos
+        .upsert_agent_schedule(schedule(&sched_null, tenant_a, "unscheduled", None))
+        .await?;
+
+    let due = repos.list_due_agent_schedules(scan_at, 10).await?;
+    let probe_ids = [
+        sched_a.as_str(),
+        sched_b.as_str(),
+        sched_exact.as_str(),
+        sched_future.as_str(),
+        sched_disabled.as_str(),
+        sched_null.as_str(),
+    ];
+    let due_ids: Vec<&str> = due
+        .iter()
+        .map(|s| s.schedule_id.as_str())
+        .filter(|id| probe_ids.contains(id))
+        .collect();
+    // Cheapest-first across the union: B (now+50), A (now+100), exact (now+200).
+    let expected = vec![sched_b.as_str(), sched_a.as_str(), sched_exact.as_str()];
+    if due_ids != expected {
+        return Err(format!(
+            "list_due boundary set wrong: got {due_ids:?}, expected {expected:?} \
+             (not-yet-due, disabled and null-next-fire must all be excluded)"
+        )
+        .into());
     }
-    println!("3 list_due_agent_schedules fans out, cheapest next-fire first");
+    println!("3 list_due_agent_schedules: exactly-due in; not-yet-due/disabled/null out; ordered");
 
     // 4) the at-most-once fire gate: first insert wins, replaying the SAME slot
     //    (even with a different fire id) loses.
@@ -440,6 +487,19 @@ async fn exercise(
     if row.last_seen_at_unix != now + 20 + (N - 1) || row.first_seen_at_unix != now + 5 {
         return Err(format!("delayed touch broke monotonic max/min: {row:?}").into());
     }
+    // The FOURTH coalesced column. Nothing else in this probe reads it, so
+    // dropping its `max(...)` (writing `excluded.updated_at_unix` straight
+    // through) would regress the stamp on any late touch with every other check
+    // still green.
+    if row.updated_at_unix != now + 20 + (N - 1) {
+        return Err(format!(
+            "delayed touch REGRESSED updated_at_unix: {} (expected {}) — the 4th \
+             coalesced field lost its max()",
+            row.updated_at_unix,
+            now + 20 + (N - 1)
+        )
+        .into());
+    }
     if row.request_count != 2 + N {
         return Err(format!(
             "delayed touch did not increment count: {}",
@@ -447,7 +507,7 @@ async fn exercise(
         )
         .into());
     }
-    println!("9 delayed older touch keeps last_seen max, first_seen min, count++");
+    println!("9 delayed older touch keeps last_seen/updated_at max, first_seen min, count++");
 
     // 10) operator cross-tenant view fans out over BOTH tenant DBs.
     repos
