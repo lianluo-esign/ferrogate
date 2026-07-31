@@ -81,7 +81,10 @@ function assertInnerRouteExists(inner: Hono<InferenceEnv>, operationId: string):
  *
  * With no arguments every port falls back to the in-memory default in
  * `defaults.ts` — enough to boot, but it resolves no models, so every
- * invocation answers `model_not_found` until real routing is wired in.
+ * invocation answers `model_not_found`. The deployed Worker passes
+ * `{ models: modelsFromEnv, dispatcher: fetchDispatcher }` (see
+ * `apps/gateway/src/index.ts`); `models` is a factory precisely because the
+ * inner app is built ONCE here while Worker bindings are per request.
  */
 export function inferenceRouteModule(deps: InferenceDeps = {}): RouteModule {
   const inner = createInferenceRouter(deps);

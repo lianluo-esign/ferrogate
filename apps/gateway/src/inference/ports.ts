@@ -28,6 +28,21 @@
 // Model catalog / routing
 // ---------------------------------------------------------------------------
 
+/**
+ * How a provider carries its credential on the wire.
+ *
+ * Rust hard-codes one scheme per adapter family — `Authorization: Bearer` in
+ * `openai.rs::provider_headers`, `x-api-key` in `anthropic.rs::anthropic_headers`
+ * — because `ProviderConfig` describes the *vendor* endpoint, where the scheme
+ * is a property of the vendor. A FerroGate deployment also points at
+ * Anthropic-Messages-COMPATIBLE relays, which speak the same body grammar but
+ * authenticate like OpenAI, so the scheme is expressible per provider here.
+ * `undefined` keeps the Rust default for the family verbatim
+ * (`defaultAuthScheme` in `adapters.ts`); a route only ever deviates because an
+ * operator wrote `auth_scheme` in the provider table.
+ */
+export type ProviderAuthScheme = "bearer" | "x-api-key";
+
 /** `ferrogate_providers::ModelCapability` — the closed capability vocabulary. */
 export type ModelCapability =
   | "chat"
@@ -60,6 +75,8 @@ export interface PhysicalRoute {
   readonly baseUrl: string;
   /** Provider credential. Resolved from Secrets Store in production. */
   readonly apiKey?: string | undefined;
+  /** Credential scheme; `undefined` = the Rust default for `providerKind`. */
+  readonly authScheme?: ProviderAuthScheme | undefined;
   /** `owned_by` in the `/v1/models` listing — the Rust code echoes the provider name. */
   readonly ownedBy?: string | undefined;
   /** `ModelRoute.capabilities`; empty is the legacy capability-neutral case. */
@@ -90,6 +107,37 @@ export interface ModelResolver {
   /** Every configured route, enabled or not — backs `GET /v1/models`. */
   catalog(): readonly PhysicalRoute[];
 }
+
+/**
+ * Worker bindings the inference data plane reads.
+ *
+ * `GATEWAY_PROVIDERS` / `GATEWAY_MODELS` are the JSON-var form of the Rust
+ * config's `[[providers]]` and `[[models]]` tables (`config/ferrogate.example.toml`).
+ * Provider CREDENTIALS are never in either var: a provider names the binding
+ * that holds its key in `api_key_var`, exactly as the Rust config names an
+ * environment variable in `api_key_env`, and that binding is a Worker SECRET.
+ * The index signature is what lets `api_key_var` name an arbitrary one.
+ */
+export interface InferenceBindings {
+  /** JSON array of provider connections — Rust `[[providers]]`. */
+  readonly GATEWAY_PROVIDERS?: string | undefined;
+  /** JSON array of logical model entries — Rust `[[models]]`. */
+  readonly GATEWAY_MODELS?: string | undefined;
+  /** Secret bindings, reached by name through a provider's `api_key_var`. */
+  readonly [binding: string]: unknown;
+}
+
+/**
+ * A {@link ModelResolver} that can only be built once the Worker bindings
+ * exist.
+ *
+ * Worker `env` is a per-request value, so the composition root in
+ * `apps/gateway/src/index.ts` cannot construct an env-backed registry at module
+ * scope. It injects this factory instead and the router calls it once per env
+ * object (memoized) — the same shape `middleware/auth.ts` already uses for its
+ * `DepsResolver`.
+ */
+export type ModelResolverFactory = (env: InferenceBindings) => ModelResolver;
 
 // ---------------------------------------------------------------------------
 // Provider adapters
@@ -386,7 +434,11 @@ export interface InferenceLimits {
 
 /** Everything the inference router needs, all optional (defaults in `defaults.ts`). */
 export interface InferenceDeps {
-  readonly models?: ModelResolver;
+  /**
+   * The model registry, or a {@link ModelResolverFactory} resolved per Worker
+   * `env`. Absent = the empty registry, i.e. every model is `model_not_found`.
+   */
+  readonly models?: ModelResolver | ModelResolverFactory;
   readonly adapters?: AdapterRegistry;
   readonly dispatcher?: UpstreamDispatcher;
   readonly usage?: UsageSink;

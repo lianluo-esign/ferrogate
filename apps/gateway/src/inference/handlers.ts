@@ -43,6 +43,7 @@ import {
 } from "./ports.js";
 import type {
   Caller,
+  InferenceBindings,
   InferenceDeps,
   InferenceOperation,
   PhysicalRoute,
@@ -66,11 +67,25 @@ import type { ProviderUsage, UsageDialect } from "./usage.js";
 
 /** Hono variable map: the request id and caller resolved once per request. */
 export interface InferenceEnv {
+  Bindings: InferenceBindings;
   Variables: {
     requestId: string;
     inferenceCaller: Caller;
     /** The already-parsed JSON body (see {@link readInferenceBody}). */
     inferenceBody: unknown;
+    /**
+     * Ports for THIS request. Identical to the injected set except for a
+     * `models` dependency supplied as a factory, which needs the Worker `env`
+     * that only exists per request (see {@link envScopedDeps}).
+     */
+    inferenceDeps: ResolvedInferenceDeps;
+    /**
+     * The INBOUND request's abort signal, captured before
+     * {@link readInferenceBody} replaces `c.req.raw` (the replacement Request
+     * carries a fresh, never-aborted signal, so reading it at dispatch time
+     * would silently disable client-disconnect propagation).
+     */
+    inferenceClientSignal: AbortSignal | undefined;
   };
 }
 
@@ -113,10 +128,10 @@ const ROUTE_LABELS = {
  * so when the body IS valid JSON the request is rewritten with an
  * `application/json` content-type before the validator runs.
  */
-function readInferenceBody(deps: ResolvedInferenceDeps): MiddlewareHandler<InferenceEnv> {
+function readInferenceBody(): MiddlewareHandler<InferenceEnv> {
   return async (c, next) => {
     const requestId = c.get("requestId");
-    const max = deps.limits.inferenceBodyMaxBytes;
+    const max = c.get("inferenceDeps").limits.inferenceBodyMaxBytes;
 
     const declared = c.req.header("content-length");
     if (declared !== undefined) {
@@ -302,17 +317,45 @@ function planUpstream(
 // Step 7 — dispatch
 // ---------------------------------------------------------------------------
 
-/** `dispatch_provider_request` transport failures → 502 `provider_dispatch_error`. */
+/**
+ * `dispatch_provider_request` transport failures → 502 `provider_dispatch_error`.
+ *
+ * `signal` is the INBOUND request's signal, forwarded to the provider fetch so a
+ * client that hangs up stops the upstream generating (and billing) tokens
+ * nobody will read. In Rust this was implicit — dropping the `reqwest::Response`
+ * closed the provider connection — and `src/streaming/abort.ts` documents why
+ * Workers has to wire it explicitly.
+ */
 async function dispatchUpstream(
   deps: ResolvedInferenceDeps,
   upstream: UpstreamRequest,
+  signal?: AbortSignal,
 ): Promise<Response | InferenceRejection> {
   try {
-    return await deps.dispatcher.dispatch(upstream);
+    return await deps.dispatcher.dispatch(upstream, signal);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return reject(502, "provider_dispatch_error", `provider dispatch failed: ${detail}`);
   }
+}
+
+/**
+ * The inbound request's abort signal, when the runtime exposes one.
+ *
+ * `Request.signal` is present in workerd and in `undici`, but a hand-built
+ * `Request` in a unit test may not carry one, so this never throws.
+ */
+function inboundSignal(request: Request): AbortSignal | undefined {
+  try {
+    return request.signal ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The captured inbound signal for this request (see {@link InferenceEnv}). */
+function clientSignal(c: InferenceContext): AbortSignal | undefined {
+  return c.get("inferenceClientSignal");
 }
 
 function isRejection(value: unknown): value is InferenceRejection {
@@ -426,27 +469,32 @@ function isStreamingUpstream(response: Response): boolean {
  * the mount point is `/`.
  */
 export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceEnv> {
-  const resolved = resolveDeps(deps);
+  const depsFor = envScopedDeps(deps);
   const app = new Hono<InferenceEnv>();
 
-  // Request identity + caller, once per request (Rust middleware step 1).
+  // Ports, request identity and caller, once per request (Rust middleware
+  // step 1). The ports come first because the body reader below reads the
+  // request-size cap off them.
   app.use("*", async (c, next) => {
+    const resolved = depsFor(c.env);
+    c.set("inferenceDeps", resolved);
+    c.set("inferenceClientSignal", inboundSignal(c.req.raw));
     c.set("requestId", c.req.header("x-request-id") ?? resolved.requestIds.next());
     c.set("inferenceCaller", resolved.caller(c.req.raw));
     await next();
   });
 
-  const body = readInferenceBody(resolved);
+  const body = readInferenceBody();
 
   // -- GET /v1/models --------------------------------------------------------
-  app.get("/v1/models", (c) => handleModels(c, resolved));
+  app.get("/v1/models", (c) => handleModels(c, c.get("inferenceDeps")));
 
   // -- POST /v1/chat/completions --------------------------------------------
   app.post(
     "/v1/chat/completions",
     body,
     validateBody(chatCompletionRequestSchema, "invalid chat completion request"),
-    (c) => handleOpenAiInference(c, resolved, "chat.completions"),
+    (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "chat.completions"),
   );
 
   // -- POST /v1/responses ----------------------------------------------------
@@ -454,7 +502,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     "/v1/responses",
     body,
     validateBody(responsesRequestSchema, "invalid responses request"),
-    (c) => handleOpenAiInference(c, resolved, "responses"),
+    (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "responses"),
   );
 
   // -- POST /v1/messages -----------------------------------------------------
@@ -462,7 +510,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     "/v1/messages",
     body,
     validateBody(anthropicMessagesRequestSchema, "invalid Anthropic messages request"),
-    (c) => handleMessages(c, resolved),
+    (c) => handleMessages(c, c.get("inferenceDeps")),
   );
 
   // -- POST /v1/embeddings ---------------------------------------------------
@@ -470,7 +518,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     "/v1/embeddings",
     body,
     validateBody(embeddingsRequestSchema, "invalid embeddings request"),
-    (c) => handleEmbeddings(c, resolved),
+    (c) => handleEmbeddings(c, c.get("inferenceDeps")),
   );
 
   // -- POST /v1/images/generations ------------------------------------------
@@ -478,10 +526,40 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     "/v1/images/generations",
     body,
     validateBody(imagesRequestSchema, "invalid image generation request"),
-    (c) => handleImages(c, resolved),
+    (c) => handleImages(c, c.get("inferenceDeps")),
   );
 
   return app;
+}
+
+/**
+ * Resolve the injected ports against a Worker `env`, memoized per env object.
+ *
+ * Only a `models` dependency given as a {@link ModelResolverFactory} actually
+ * depends on `env`; everything else is env-free, so this is a cache lookup on
+ * the hot path rather than a per-request rebuild. Memoizing matters: the model
+ * registry is long-lived state (`route-module.ts` explains why the inner app is
+ * built once), and rebuilding it per request would throw away the isolate's
+ * warm catalog. `env` is immutable for the life of a Worker version, so an
+ * entry can never go stale.
+ */
+function envScopedDeps(deps: InferenceDeps): (env: unknown) => ResolvedInferenceDeps {
+  const byEnv = new WeakMap<object, ResolvedInferenceDeps>();
+  let envless: ResolvedInferenceDeps | undefined;
+  return (env: unknown): ResolvedInferenceDeps => {
+    // `app.request(path, init)` in a unit test passes no bindings at all.
+    if (typeof env !== "object" || env === null) {
+      envless ??= resolveDeps(deps);
+      return envless;
+    }
+    const cached = byEnv.get(env);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const built = resolveDeps(deps, env as InferenceBindings);
+    byEnv.set(env, built);
+    return built;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +620,7 @@ async function handleOpenAiInference(
     return errorResponse(planned, requestId);
   }
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream);
+  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
   }
@@ -641,7 +719,7 @@ async function handleMessages(
     return errorResponse(planned, requestId);
   }
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream);
+  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
   }
@@ -723,7 +801,7 @@ async function handleEmbeddings(
     return errorResponse(planned, requestId);
   }
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream);
+  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
   }
@@ -789,7 +867,7 @@ async function handleImages(
     return errorResponse(planned, requestId);
   }
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream);
+  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
   }

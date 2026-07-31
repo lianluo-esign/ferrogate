@@ -3,6 +3,10 @@
 Cargo.lock.bak
 *.log
 .env
+# Wrangler local secrets (`wrangler dev` reads these). They hold real provider
+# tokens and dev API keys; never commit one.
+.dev.vars
+.dev.vars.*
 .DS_Store
 .references/
 perf-reports/

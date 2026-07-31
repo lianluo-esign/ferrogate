@@ -24,6 +24,7 @@ export type { InferenceEnv } from "./handlers.js";
 export { inferenceRouteModule } from "./route-module.js";
 
 export * from "./ports.js";
+export * from "./catalog.js";
 export * from "./schemas.js";
 export * from "./errors.js";
 export * from "./usage.js";
@@ -45,6 +46,7 @@ export {
   anthropicAdapter,
   canonicalProviderKind,
   defaultAdapterRegistry,
+  defaultAuthScheme,
   isOpenAiCompatibleKind,
   openAiCompatibleAdapter,
 } from "./adapters.js";

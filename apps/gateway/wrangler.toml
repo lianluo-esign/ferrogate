@@ -82,6 +82,85 @@ TENANCY_LIFECYCLE = "{}"
 # regardless, so an empty map cannot lock the operator out.
 TENANT_RBAC_ACTIONS = "{}"
 
+# ---------------------------------------------------------------------------
+# Local-development credential gate — read by `developmentApiKeys`
+# (src/adapters.ts).
+#
+# `"false"` here is the production posture and is what a plain `wrangler deploy`
+# ships, because top-level `[vars]` is the deployed var set. The development key
+# path needs ALL THREE of:
+#
+#   1. GATEWAY_DEV_AUTH == "true"      (this var — an explicit, reviewable edit)
+#   2. GATEWAY_DEV_API_KEY bound       (a SECRET, ≥30 chars, never a var)
+#   3. that key starting with `fg_dev_`
+#
+# so it cannot be switched on by forgetting something. `test/auth.test.ts`
+# ("development key path") holds each condition, including that the shipped
+# default answers 401 for a well-formed dev key.
+#
+# Locally: put the key in `apps/gateway/.dev.vars` (gitignored, never committed)
+#
+#     GATEWAY_DEV_AUTH = "true"
+#     GATEWAY_DEV_API_KEY = "fg_dev_<32 random chars you generate>"
+#
+# and `wrangler dev --local` picks both up. The key grants the six inference
+# scopes and nothing else — never `admin.*`.
+# ---------------------------------------------------------------------------
+GATEWAY_DEV_AUTH = "false"
+
+# `GATEWAY_DEV_API_KEY` and `GATEWAY_DEV_TENANT_ID` are deliberately NOT
+# declared with values. The first is a secret; the second defaults to
+# `tenant_local_dev` in code.
+
+# ---------------------------------------------------------------------------
+# [vars] — the provider table and the logical model registry
+#
+# Read by `modelCatalogFromEnv` (src/inference/catalog.ts), which is the port of
+# the Rust config's `[[providers]]` + `[[models]]` tables. `GATEWAY_MODELS` maps
+# a LOGICAL model name (what a client sends) to a provider plus that provider's
+# own physical model id — the client's string is never forwarded as-is.
+#
+# Both default to the empty table, which is the fail-closed posture: an empty
+# registry answers `400 model_not_found` for every model and dispatches nowhere.
+# A malformed or internally inconsistent table (duplicate model name, unknown
+# provider reference, unknown adapter family, unbound `api_key_var`) is refused
+# WHOLE and behaves identically to the empty one — a typo can only close the
+# gateway, never widen it, exactly as the auth vars above.
+#
+# CREDENTIALS ARE NOT IN THESE VARS. A provider names the Worker SECRET binding
+# holding its key in `api_key_var`, mirroring `api_key_env` in the Rust config:
+#
+#   GATEWAY_PROVIDERS = '''
+#   [{ "name": "anthropic",
+#       "kind": "anthropic",
+#       "base_url": "https://api.anthropic.com/v1",
+#       "api_key_var": "ANTHROPIC_AUTH_TOKEN" }]
+#   '''
+#   GATEWAY_MODELS = '''
+#   [{ "name": "best-reasoning",
+#       "provider": "anthropic",
+#       "provider_model": "claude-3-5-sonnet-latest",
+#       "capabilities": ["chat", "streaming", "tools"] }]
+#   '''
+#
+# then `wrangler secret put ANTHROPIC_AUTH_TOKEN` (or a `.dev.vars` line for
+# local runs). The secret's NAME appears here; its value never does.
+#
+# `auth_scheme` (optional, `"bearer"` | `"x-api-key"`) overrides the credential
+# header for one provider. Omit it and the adapter family's Rust hard-coding is
+# used verbatim — `x-api-key` for `anthropic`, `Authorization: Bearer` for the
+# OpenAI-compatible family. Set it to `"bearer"` for an Anthropic-Messages
+# COMPATIBLE relay, which speaks the Anthropic body grammar but authenticates
+# like OpenAI.
+#
+# PORT-TODO(inventory-request-path §1.6 "Provider secrets"): the credential
+# lookup moves from a named binding to Cloudflare Secrets Store via
+# `@ferrogate/secrets`, and the tables to D1 via `@ferrogate/routing`, once
+# those packages land. The join semantics do not change.
+# ---------------------------------------------------------------------------
+GATEWAY_PROVIDERS = "[]"
+GATEWAY_MODELS = "[]"
+
 # Read by `entitlementsFromEnv` (src/assets/handlers.ts).
 # JSON map tenant id → { asset_hosting_enabled, asset_storage_quota_bytes,
 # asset_max_object_bytes }. Fail-closed: a tenant with no row may NOT publish

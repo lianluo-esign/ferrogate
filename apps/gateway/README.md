@@ -32,6 +32,11 @@ each.
 | `TENANCY_LIFECYCLE` | var (JSON map) | `ConfiguredTenancyLifecycleGate.fromEnv`, `src/adapters.ts` | A suspended/deleted tenant keeps serving: `403 tenancy_suspended` / `tenancy_deleted` has no source. |
 | `TENANT_RBAC_ACTIONS` | var (JSON map) | `ConfiguredRbacAuthorizer.fromEnv`, `src/adapters.ts` | Every `rbac_action`-carrying operation is `403 rbac_denied` for a tenant credential (platform operators are unaffected). |
 | `ASSET_ENTITLEMENTS` | var (JSON map) | `entitlementsFromEnv`, `src/assets/handlers.ts` | Fail-closed `NO_ASSET_HOSTING`: no tenant may publish assets. Reads of already-published assets still work. |
+| `GATEWAY_PROVIDERS` | var (JSON array) | `modelCatalogFromEnv`, `src/inference/catalog.ts` | No provider exists, so no logical model resolves: every inference request is `400 model_not_found` and nothing is dispatched. |
+| `GATEWAY_MODELS` | var (JSON array) | `modelCatalogFromEnv`, `src/inference/catalog.ts` | Same — this is the logical→physical mapping itself. `GET /v1/models` lists nothing. |
+| *(per provider)* `api_key_var` target | **secret** | `buildModelCatalog`, `src/inference/catalog.ts` | A provider naming an unbound key var refuses the WHOLE catalog, rather than dispatching an unauthenticated request to a paid upstream. |
+| `GATEWAY_DEV_AUTH` | var (`"true"`/`"false"`) | `developmentApiKeys`, `src/adapters.ts` | Ships as `"false"`; the local development key path stays closed. |
+| `GATEWAY_DEV_API_KEY` | **secret** | `developmentApiKeys`, `src/adapters.ts` | No development key exists. Required *and* `GATEWAY_DEV_AUTH == "true"` *and* an `fg_dev_` prefix. |
 | `ASSETS` | `[[r2_buckets]]` | `AssetObjectStore` (`src/assets/ports.ts`) — the port is R2-shaped, so a live `R2Bucket` satisfies it structurally | Falls back to `InMemoryAssetObjectStore`: bytes vanish with the isolate, so a push "succeeds" and a later read 404s. The presign family answers `503 asset_bucket_unavailable`. |
 
 Notes that matter before you deploy:
@@ -82,9 +87,9 @@ Cloudflare account. Add `--remote` only when you want the real R2 bucket, which
 requires the placeholders to be filled in first.
 
 To exercise the auth taxonomy locally, override the vars with a `.dev.vars`
-file, which Wrangler reads for local dev only and which wins over `[vars]`. The
-repo's `.gitignore` covers `.env` and `.wrangler/` but **not** `.dev.vars` yet —
-do not commit it, and add the pattern when you touch `.gitignore`:
+file, which Wrangler reads for local dev only and which wins over `[vars]`.
+`.dev.vars` is gitignored at the repo root — it holds real tokens, so keep it
+that way:
 
 ```ini
 GATEWAY_NATIVE_API_KEYS=[{"key":"fg_dev","id":"key_dev","tenant_id":"tenant_a","scopes":["tools.read"]}]
@@ -96,6 +101,62 @@ ASSET_ENTITLEMENTS={"tenant_a":{"asset_hosting_enabled":true}}
 curl -H 'Authorization: Bearer fg_dev' http://localhost:8787/v1/tools
 curl http://localhost:8787/healthz      # anonymous
 ```
+
+### Run the whole inference path locally, against a real upstream
+
+Client → auth → Zod → resolve logical model → dispatch → stream → meter, with
+nothing stubbed. Everything below goes in `apps/gateway/.dev.vars`; nothing goes
+in `wrangler.toml`.
+
+```ini
+# --- the development credential ------------------------------------------
+# ALL THREE conditions are required (see `developmentApiKeys`, src/adapters.ts):
+# this var is exactly "true", the key is bound, and the key starts `fg_dev_`
+# and is at least 30 characters. `wrangler.toml` ships GATEWAY_DEV_AUTH="false",
+# which is the var a plain `wrangler deploy` carries, so this cannot leak into
+# production by omission. The key grants the six inference scopes and nothing
+# else — never `admin.*`.
+GATEWAY_DEV_AUTH = "true"
+GATEWAY_DEV_API_KEY = "fg_dev_<32 random characters you generate>"
+
+# --- the provider table and the logical model registry --------------------
+# `api_key_var` names the binding holding the credential; the credential value
+# only ever appears on the last line, which is a secret in every real
+# deployment (`wrangler secret put UPSTREAM_TOKEN`).
+#
+# `auth_scheme = "bearer"` is for an Anthropic-Messages-COMPATIBLE relay: it
+# speaks the Anthropic body grammar but authenticates like OpenAI. Drop it for
+# api.anthropic.com itself and the adapter uses `x-api-key`, as in Rust.
+GATEWAY_PROVIDERS = '[{"name":"my-relay","kind":"anthropic","base_url":"https://<host>/v1","api_key_var":"UPSTREAM_TOKEN","auth_scheme":"bearer"}]'
+GATEWAY_MODELS = '[{"name":"ferrogate-reasoning","provider":"my-relay","provider_model":"<the upstream's own model id>","capabilities":["chat","streaming","tools"]}]'
+UPSTREAM_TOKEN = "<the provider credential>"
+```
+
+```sh
+bunx wrangler dev --local --port 8799
+
+# the registry, with no upstream call
+curl -H "Authorization: Bearer $DEV_KEY" http://localhost:8799/v1/models
+
+# the full path — the OpenAI ingress translated onto an Anthropic upstream
+curl http://localhost:8799/v1/chat/completions \
+  -H "Authorization: Bearer $DEV_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"ferrogate-reasoning","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
+
+# the same, streamed (add -N so curl does not buffer the SSE)
+curl -N http://localhost:8799/v1/chat/completions \
+  -H "Authorization: Bearer $DEV_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"ferrogate-reasoning","messages":[{"role":"user","content":"ping"}],"max_tokens":16,"stream":true}'
+```
+
+`ferrogate-reasoning` is a LOGICAL name: it is not a model id any upstream
+knows, and the gateway never forwards it. `GATEWAY_MODELS` maps it to
+`provider_model`, and that is what goes on the wire — re-point it and every
+client follows with no client change. A model name that is not in the table is
+`400 model_not_found`; a table that is malformed, self-contradictory (duplicate
+model, unknown provider, unported adapter family) or names an unbound
+`api_key_var` is refused whole, so the gateway resolves nothing rather than
+dispatching somewhere unintended.
 
 ## Test it
 

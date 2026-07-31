@@ -26,6 +26,7 @@ import type {
   AdapterRegistry,
   AdapterResult,
   ProviderAdapter,
+  ProviderAuthScheme,
   UpstreamPlan,
   UpstreamRequest,
 } from "./ports.js";
@@ -62,24 +63,58 @@ function requestOpenAiStreamUsage(body: Record<string, unknown>): void {
   body["stream_options"] = options;
 }
 
-/** `provider_headers` — content-type always, bearer only when a key is set. */
-function openAiHeaders(apiKey: string | undefined): Record<string, string> {
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (apiKey !== undefined && apiKey.trim().length > 0) {
-    headers["authorization"] = `Bearer ${apiKey}`;
+/**
+ * Write the credential header for `scheme`. No key ⇒ no header at all, which is
+ * the Rust behavior (`api_key.filter(|value| !value.trim().is_empty())`) and is
+ * what lets an unauthenticated local upstream be pointed at without a secret.
+ */
+function credentialHeader(
+  headers: Record<string, string>,
+  apiKey: string | undefined,
+  scheme: ProviderAuthScheme,
+): void {
+  if (apiKey === undefined || apiKey.trim().length === 0) {
+    return;
   }
+  if (scheme === "bearer") {
+    headers["authorization"] = `Bearer ${apiKey}`;
+  } else {
+    headers["x-api-key"] = apiKey;
+  }
+}
+
+/**
+ * The credential scheme a family uses when the provider table does not say.
+ *
+ * These two values ARE the Rust hard-codings: `openai.rs::provider_headers`
+ * writes `Authorization: Bearer`, `anthropic.rs::anthropic_headers` writes
+ * `x-api-key`. A route with no `auth_scheme` is therefore byte-identical to the
+ * Rust request.
+ */
+export function defaultAuthScheme(providerKind: string): ProviderAuthScheme {
+  return canonicalProviderKind(providerKind) === "anthropic" ? "x-api-key" : "bearer";
+}
+
+/** `provider_headers` — content-type always, credential only when a key is set. */
+function openAiHeaders(
+  apiKey: string | undefined,
+  scheme: ProviderAuthScheme = "bearer",
+): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  credentialHeader(headers, apiKey, scheme);
   return headers;
 }
 
 /** `anthropic_headers`. `anthropic-version` is pinned exactly as in Rust. */
-function anthropicHeaders(apiKey: string | undefined): Record<string, string> {
+function anthropicHeaders(
+  apiKey: string | undefined,
+  scheme: ProviderAuthScheme = "x-api-key",
+): Record<string, string> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "anthropic-version": "2023-06-01",
   };
-  if (apiKey !== undefined && apiKey.trim().length > 0) {
-    headers["x-api-key"] = apiKey;
-  }
+  credentialHeader(headers, apiKey, scheme);
   return headers;
 }
 
@@ -173,7 +208,7 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
     // or contradict the resolved stream decision.
     body["model"] = plan.providerModel;
 
-    const headers = openAiHeaders(plan.route.apiKey);
+    const headers = openAiHeaders(plan.route.apiKey, plan.route.authScheme ?? "bearer");
     const base: Omit<UpstreamRequest, "endpoint" | "body" | "stream"> = {
       provider: plan.route.provider,
       method: "POST",
@@ -317,7 +352,7 @@ export const anthropicAdapter: ProviderAdapter = {
         provider: plan.route.provider,
         method: "POST",
         endpoint: endpoint(plan.route.baseUrl, "/messages"),
-        headers: anthropicHeaders(plan.route.apiKey),
+        headers: anthropicHeaders(plan.route.apiKey, plan.route.authScheme ?? "x-api-key"),
         body: anthropicBody,
         stream: plan.stream,
       },

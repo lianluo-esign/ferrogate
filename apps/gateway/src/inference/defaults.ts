@@ -17,6 +17,7 @@ import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
 import type {
   Caller,
+  InferenceBindings,
   InferenceDeps,
   InferenceLimits,
   ModelResolver,
@@ -229,10 +230,23 @@ export function defaultCallerResolver(): Caller {
   return platformOperatorCaller;
 }
 
-/** Fill every unset dependency with its default. */
-export function resolveDeps(deps: InferenceDeps = {}): ResolvedInferenceDeps {
+/**
+ * Fill every unset dependency with its default.
+ *
+ * `env` is the Worker bindings object. It is only consulted for a `models`
+ * dependency supplied as a {@link ModelResolverFactory} — the env-backed model
+ * registry cannot be built at module scope because bindings are per request, so
+ * the composition root injects the factory and the router calls this once per
+ * env object. An explicitly injected `ModelResolver` always wins, which is what
+ * keeps every existing test independent of the environment.
+ */
+export function resolveDeps(
+  deps: InferenceDeps = {},
+  env: InferenceBindings = {},
+): ResolvedInferenceDeps {
+  const models = typeof deps.models === "function" ? deps.models(env) : deps.models;
   return {
-    models: deps.models ?? emptyModelResolver,
+    models: models ?? emptyModelResolver,
     adapters: deps.adapters ?? defaultAdapterRegistry,
     dispatcher: deps.dispatcher ?? fetchDispatcher,
     usage: deps.usage ?? new InMemoryUsageSink(),

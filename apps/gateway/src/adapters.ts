@@ -105,6 +105,87 @@ function toAuthContext(record: ApiKeyRecord, scopes: readonly string[]): AuthCon
   };
 }
 
+// ---------------------------------------------------------------------------
+// Local development key  (OFF unless three independent conditions all hold)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prefix a development key MUST carry.
+ *
+ * A real tenant key can never accidentally take this path, and a leaked dev key
+ * is self-identifying in a log or a bug report.
+ */
+export const DEV_API_KEY_PREFIX = "fg_dev_";
+
+/** Minimum length of the secret part, so a guessable placeholder is refused. */
+export const DEV_API_KEY_MIN_LENGTH = DEV_API_KEY_PREFIX.length + 24;
+
+/**
+ * The ONLY scopes a development key may hold.
+ *
+ * The six data-plane inference scopes, spelled out. It is not `["*"]` and it is
+ * not the empty set — an empty native scope set already means "data-plane
+ * scopes, never `admin.*`" (`hasScope`), but naming them makes the grant
+ * auditable and keeps a dev key off every non-inference operation too.
+ */
+export const DEV_API_KEY_SCOPES: readonly string[] = [
+  "models.read",
+  "chat.completions",
+  "responses.create",
+  "messages.create",
+  "embeddings.create",
+  "images.generate",
+];
+
+/**
+ * The local-development credential path, and the gate that keeps it out of
+ * production.
+ *
+ * Wiring a request end-to-end against a real upstream needs a key that resolves.
+ * Hand-editing `GATEWAY_NATIVE_API_KEYS` for that is how a developer credential
+ * ends up committed, so this supplies one — behind a gate with THREE
+ * independent conditions, ALL of which must hold:
+ *
+ *  1. `GATEWAY_DEV_AUTH` is exactly `"true"`. The value committed in
+ *     `wrangler.toml` `[vars]` is `"false"`, and top-level `[vars]` is what a
+ *     plain `wrangler deploy` ships — so turning this on for a deployed Worker
+ *     takes an explicit, reviewable edit or an explicit `[env.<name>.vars]`
+ *     override. It cannot happen by forgetting something.
+ *  2. `GATEWAY_DEV_API_KEY` is bound and long enough. It is a SECRET (a
+ *     `.dev.vars` entry locally, `wrangler secret put` otherwise), never a var,
+ *     so no key value is ever committed.
+ *  3. The key carries the {@link DEV_API_KEY_PREFIX}. A production credential
+ *     shape can never be served by this path.
+ *
+ * The record is a *native* key, so every native rule applies to it unchanged —
+ * notably that suspending it answers `401 invalid_api_key`, not 403. Its scopes
+ * are {@link DEV_API_KEY_SCOPES}: inference only, `admin.*` never.
+ *
+ * Returns `[]` — i.e. contributes nothing at all to the key table — whenever any
+ * condition fails. There is no partial state.
+ */
+export function developmentApiKeys(env: GatewayBindings): readonly ApiKeyRecord[] {
+  if (env.GATEWAY_DEV_AUTH !== "true") {
+    return [];
+  }
+  const key = env.GATEWAY_DEV_API_KEY;
+  if (typeof key !== "string") {
+    return [];
+  }
+  const trimmed = key.trim();
+  if (!trimmed.startsWith(DEV_API_KEY_PREFIX) || trimmed.length < DEV_API_KEY_MIN_LENGTH) {
+    return [];
+  }
+  return [
+    {
+      key: trimmed,
+      id: "key_local_dev",
+      tenant_id: env.GATEWAY_DEV_TENANT_ID?.trim() || "tenant_local_dev",
+      scopes: DEV_API_KEY_SCOPES,
+    },
+  ];
+}
+
 /**
  * Resolves a presented key against the durable/native store first, then the
  * static operator config store — the Rust order.
@@ -130,7 +211,13 @@ export class ConfiguredApiKeyAuthenticator implements ApiKeyAuthenticatorPort {
 
   static fromEnv(env: GatewayBindings): ConfiguredApiKeyAuthenticator {
     return new ConfiguredApiKeyAuthenticator(
-      parseJsonVar<ApiKeyRecord[]>(env.GATEWAY_NATIVE_API_KEYS, []),
+      // The development record goes FIRST so a configured native record with
+      // the same value overrides it: the scan below takes the LAST match, so
+      // explicit configuration always wins over the convenience path.
+      [
+        ...developmentApiKeys(env),
+        ...parseJsonVar<ApiKeyRecord[]>(env.GATEWAY_NATIVE_API_KEYS, []),
+      ],
       parseJsonVar<ApiKeyRecord[]>(env.GATEWAY_STATIC_API_KEYS, []),
     );
   }

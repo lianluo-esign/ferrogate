@@ -226,6 +226,20 @@ export interface GatewayBindings {
   readonly TENANCY_LIFECYCLE?: string;
   /** JSON map of tenant id → granted RBAC actions. */
   readonly TENANT_RBAC_ACTIONS?: string;
+  /**
+   * Local-development key gate. `"true"` — and nothing else — opens the
+   * development credential path in `adapters.ts`; the value committed in
+   * `wrangler.toml` is `"false"`. See `developmentApiKeys`.
+   */
+  readonly GATEWAY_DEV_AUTH?: string;
+  /** Development key VALUE. A secret (`.dev.vars` / `wrangler secret put`). */
+  readonly GATEWAY_DEV_API_KEY?: string;
+  /** Tenant the development key is attributed to. Defaults `tenant_local_dev`. */
+  readonly GATEWAY_DEV_TENANT_ID?: string;
+  /** JSON array of provider connections — read by `inference/catalog.ts`. */
+  readonly GATEWAY_PROVIDERS?: string;
+  /** JSON array of logical model entries — read by `inference/catalog.ts`. */
+  readonly GATEWAY_MODELS?: string;
 }
 
 /** Per-request context values set by the middleware chain. */
