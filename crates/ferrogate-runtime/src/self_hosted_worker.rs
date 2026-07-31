@@ -1127,6 +1127,53 @@ impl InMemorySelfHostedRunQueue {
             .collect()
     }
 
+    /// The subset of [`Self::dispatch_ids_for_run`] whose holder can no longer
+    /// ack, as of `now_unix`.
+    ///
+    /// #549: the settling reclaim used the unfiltered list, and the worker that
+    /// reports a run terminal is BY CONSTRUCTION the holder of its `start_run`
+    /// lease -- so the row went away while its holder still owed the ack the
+    /// protocol accepts (`SelfHostedRunAckStatus::Completed` / `Failed` /
+    /// `Cancelled` all describe a run that is over). This projection keeps the
+    /// row exactly as long as [`Self::ack_run`] would still accept it, and no
+    /// longer: `retain_action` names the one action whose window is honoured,
+    /// because only a `start_run` has a reader (#551's settled-lease discard on
+    /// the poll path) that reclaims it once the window closes.
+    ///
+    /// `ack_window_ceiling_unix` is what keeps that bound the CALLER's and not
+    /// the worker's. [`Self::poll_run`] builds `lease_expires_at_unix` out of
+    /// the poll's own `now_unix` + `lease_duration_secs`, both client-supplied
+    /// and unbounded above, so a skewed or hostile worker could otherwise
+    /// declare a decade-long lease and pin its settled row -- and a row with a
+    /// far-future lease is not re-leasable either, so the poll-path reclaim
+    /// would never reach it. A window that closes after the ceiling is not
+    /// honoured at all: that row is reclaimed now, exactly as it was before.
+    pub fn reclaimable_dispatch_ids_for_run(
+        &self,
+        run_id: &str,
+        retain_action: SelfHostedRunAction,
+        now_unix: u64,
+        ack_window_ceiling_unix: u64,
+    ) -> Vec<String> {
+        self.runs
+            .values()
+            .filter(|queued| queued.dispatch.run_id == run_id)
+            .filter(|queued| {
+                queued.dispatch.action != retain_action
+                    || !ack_window_is_open(
+                        queued.assigned_worker_id.as_deref(),
+                        queued.acknowledged_status.is_some(),
+                        queued.lease_expires_at_unix,
+                        now_unix,
+                    )
+                    || queued
+                        .lease_expires_at_unix
+                        .is_none_or(|expires_at| expires_at > ack_window_ceiling_unix)
+            })
+            .map(|queued| queued.dispatch.dispatch_id.clone())
+            .collect()
+    }
+
     /// Drop `dispatch_id` from the queue, reporting whether an entry existed.
     ///
     /// The counterpart of [`Self::enqueue_run`], added by #502: a dispatch
@@ -1320,6 +1367,31 @@ impl InMemorySelfHostedRunQueue {
             trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
         })
     }
+}
+
+/// Whether the worker holding a dispatch could still ack it at `now_unix`.
+///
+/// #549: the single definition of "the holder still owes an ack", derived from
+/// the guards [`InMemorySelfHostedRunQueue::ack_run`] actually applies rather
+/// than restated near them -- a dispatch nobody leased has no holder, an
+/// already-acknowledged one is refused as `dispatch lease was already
+/// acknowledged`, and one whose lease has elapsed is refused as `ack lease has
+/// expired` (a missing expiry is treated as elapsed there, and so here). Any
+/// reclaim that runs while this holds destroys a row its holder is still
+/// entitled to ack, which is exactly the 400 `unknown dispatch` this closes.
+///
+/// Takes `acknowledged` as a plain bool so the durable projection
+/// (`acknowledged_status: Option<String>`) and the in-process queue
+/// (`Option<SelfHostedRunAckStatus>`) answer the question the same way.
+pub fn ack_window_is_open(
+    assigned_worker_id: Option<&str>,
+    acknowledged: bool,
+    lease_expires_at_unix: Option<u64>,
+    now_unix: u64,
+) -> bool {
+    assigned_worker_id.is_some()
+        && !acknowledged
+        && lease_expires_at_unix.is_some_and(|expires_at| now_unix <= expires_at)
 }
 
 impl QueuedSelfHostedRun {
@@ -2463,6 +2535,129 @@ mod tests {
         assert!(
             !held.withdraw_unleased_run("dispatch-1"),
             "an EXPIRED lease is still a lease; assignment, not expiry, is the test"
+        );
+    }
+
+    /// #549: the settling reclaim's projection. The worker that reports a run
+    /// terminal holds its `start_run` lease by construction, so reclaiming its
+    /// row unconditionally destroyed a lease its holder was still entitled to
+    /// ack -- `ack_run` answered the supported "report completed, THEN ack"
+    /// order with `unknown dispatch`.
+    ///
+    /// Every arm below is checked against what `ack_run` would actually do
+    /// with the same row, because "still ackable" is the only definition that
+    /// makes the deferral neither too short (the 400 returns) nor open-ended.
+    #[test]
+    fn a_settling_reclaim_spares_only_a_lease_its_holder_could_still_ack() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let leased = |now_unix: u64, lease_duration_secs: u64| {
+            let mut queue = InMemorySelfHostedRunQueue::default();
+            queue.enqueue_run(dispatch()).unwrap();
+            queue
+                .poll_run(
+                    &registry,
+                    SelfHostedRunPollRequest {
+                        protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                        identity: identity.clone(),
+                        supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                        now_unix,
+                        lease_duration_secs,
+                    },
+                )
+                .unwrap()
+                .expect("the worker leases the dispatch");
+            queue
+        };
+        let settle_at = 1_725_000_020;
+        let ceiling = settle_at + 900;
+        let reclaimable = |queue: &InMemorySelfHostedRunQueue| {
+            queue.reclaimable_dispatch_ids_for_run(
+                "run-1",
+                SelfHostedRunAction::StartRun,
+                settle_at,
+                ceiling,
+            )
+        };
+
+        // Never leased: nobody owes an ack, so nothing is deferred. This is the
+        // arm that keeps #502's retention close working unchanged.
+        let mut unleased = InMemorySelfHostedRunQueue::default();
+        unleased.enqueue_run(dispatch()).unwrap();
+        assert_eq!(
+            reclaimable(&unleased),
+            vec!["dispatch-1".to_string()],
+            "a dispatch no worker holds has no ack window to honour"
+        );
+
+        // Leased, unacked, lease still live: deferred -- and `ack_run` agrees,
+        // which is the whole point. The reclaim must not delete a row that is
+        // about to be acked successfully.
+        let mut live = leased(1_725_000_010, 30);
+        assert!(
+            reclaimable(&live).is_empty(),
+            "the reporting worker's own live lease must survive the settle that its report caused"
+        );
+        assert!(
+            live.ack_run(
+                &registry,
+                SelfHostedRunAckRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity: identity.clone(),
+                    dispatch_id: "dispatch-1".to_string(),
+                    action: SelfHostedRunAction::StartRun,
+                    lease_id: "dispatch-1:attempt-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    status: SelfHostedRunAckStatus::Completed,
+                    reported_at_unix: settle_at,
+                },
+            )
+            .is_ok(),
+            "the deferral is only correct if the ack it defers for actually succeeds"
+        );
+        // ...and the ack closes the window it was held open for, so the row is
+        // reclaimable immediately after. An acknowledged row is no longer
+        // leasable, so nothing else would ever come back for it.
+        assert_eq!(
+            reclaimable(&live),
+            vec!["dispatch-1".to_string()],
+            "an acknowledged lease has no reader left; the deferral must end with the ack"
+        );
+
+        // Leased but the lease has elapsed: `ack_run` refuses it, so retaining
+        // it would buy nothing and leak the row.
+        let expired = leased(1_724_999_000, 30);
+        assert_eq!(
+            reclaimable(&expired),
+            vec!["dispatch-1".to_string()],
+            "an elapsed lease cannot be acked, so it is not worth deferring for"
+        );
+
+        // Leased with a lease that outruns the ceiling. `lease_expires_at_unix`
+        // is built from the WORKER's own `now_unix` + `lease_duration_secs`,
+        // both unbounded above -- so honouring it verbatim would let a worker
+        // pin its settled row, and a far-future lease is not re-leasable, so
+        // no poll would ever take the row back either.
+        let overlong = leased(1_725_000_010, 86_400);
+        assert_eq!(
+            reclaimable(&overlong),
+            vec!["dispatch-1".to_string()],
+            "a worker-declared lease past the ceiling is not a deferral the server owes"
+        );
+
+        // A non-`start_run` row is never deferred, whatever its lease: #551
+        // exempts `cancel_run` from the settled-lease discard, so a retained
+        // cancel would be handed to a worker again rather than reclaimed.
+        let live_cancel = leased(1_725_000_010, 30);
+        assert_eq!(
+            live_cancel.reclaimable_dispatch_ids_for_run(
+                "run-1",
+                SelfHostedRunAction::CancelRun,
+                settle_at,
+                ceiling,
+            ),
+            vec!["dispatch-1".to_string()],
+            "only the named action's ack window is honoured"
         );
     }
 

@@ -197,7 +197,7 @@ pub use self_hosted_mtls::{
     SELF_HOSTED_WORKER_SPIFFE_PREFIX,
 };
 pub use self_hosted_worker::{
-    generate_transport_token_secret, production_mtls_transport_implemented,
+    ack_window_is_open, generate_transport_token_secret, production_mtls_transport_implemented,
     InMemorySelfHostedRunQueue, InMemorySelfHostedWorkerTransport, RegisteredSelfHostedWorker,
     SelfHostedArtifactUpload, SelfHostedArtifactUploadRequest, SelfHostedCheckpointFetchRequest,
     SelfHostedCheckpointReference, SelfHostedRunAck, SelfHostedRunAckRequest,

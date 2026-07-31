@@ -81,9 +81,9 @@ use ferrogate_providers::{
     SecretValue,
 };
 use ferrogate_runtime::{
-    AgentBudgetPolicy, InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest,
-    SelfHostedRunAckStatus, SelfHostedRunAction, SelfHostedRunDispatch, SelfHostedRunLease,
-    SelfHostedRunPollRequest, SelfHostedRunQueueRecord, SelfHostedWorkerError,
+    ack_window_is_open, AgentBudgetPolicy, InMemorySelfHostedRunQueue, SelfHostedRunAck,
+    SelfHostedRunAckRequest, SelfHostedRunAckStatus, SelfHostedRunAction, SelfHostedRunDispatch,
+    SelfHostedRunLease, SelfHostedRunPollRequest, SelfHostedRunQueueRecord, SelfHostedWorkerError,
     SelfHostedWorkerIdentity, SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{

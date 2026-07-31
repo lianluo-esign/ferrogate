@@ -765,11 +765,24 @@ impl AppState {
         // #502: an acknowledged `cancel_run` means the worker has accepted that
         // the run is over, so the run's rows -- the cancel AND the start
         // dispatch the cancel superseded -- have no reader left and are
-        // reclaimed. Nothing analogous happens on a `start_run` ack: #503's
-        // lease-ownership proof reads that row for the whole life of the run,
-        // so it is reclaimed only when the run itself settles.
+        // reclaimed. A `start_run` ack releases nothing on its own: #503's
+        // lease-ownership proof reads that row for the whole life of the run.
+        //
+        // #549: unless the run has ALREADY settled, in which case this ack is
+        // the row's last reader -- the settle deliberately left it behind for
+        // this call, and #503 has nothing left to prove for a terminal run.
+        // Reclaiming here is not merely an optimisation: `ack_run` has just
+        // written `acknowledged_status`, so the row is no longer leasable and
+        // the poll path that reclaims an unacked expired one would never see it
+        // again. The settled read is durable but runs at most once per
+        // dispatch (a second ack is refused as already acknowledged), on a path
+        // that already writes the row through.
         if let Ok(ack) = result.as_ref() {
-            if ack.action == SelfHostedRunAction::CancelRun {
+            if ack.action == SelfHostedRunAction::CancelRun
+                || !self
+                    .settled_agent_run_ids(std::slice::from_ref(&ack.run_id))
+                    .is_empty()
+            {
                 self.reclaim_settled_run_dispatches(&ack.run_id);
             }
         }
@@ -1832,6 +1845,94 @@ impl AppState {
             .count()
     }
 
+    /// Reclaim a settled run's dispatch rows, EXCEPT a `start_run` its holder
+    /// may still acknowledge at `now_unix` (#549).
+    ///
+    /// [`AppState::reclaim_settled_run_dispatches`] is right for every settle
+    /// driven by someone OTHER than the lease holder, but worker telemetry is
+    /// not: #503 has just proved that the reporting worker holds this run's
+    /// `start_run` lease, and the protocol lets that worker report
+    /// `{"state":"completed"}` and only THEN ack with
+    /// [`SelfHostedRunAckStatus::Completed`]. Reclaiming unconditionally turned
+    /// that supported order into a 400 `unknown dispatch`, and turned any
+    /// later telemetry for the run into #503's security-shaped "does not hold
+    /// the lease for" warning instead of the benign already-terminal skip.
+    ///
+    /// The deferral is BOUNDED BY THE LEASE, not open-ended, and the bound is
+    /// the same one [`InMemorySelfHostedRunQueue::ack_run`] enforces -- so the
+    /// row survives exactly as long as an ack for it could succeed. It is not
+    /// left for someone to remember, either: once the window closes the row is
+    /// unacknowledged, unsuperseded and past its lease, which is precisely
+    /// `can_lease_to`, so the next poll from any worker that could have run it
+    /// leases it, [`AppState::start_run_lease_is_settled`] sees the terminal
+    /// run row and #551's existing discard reclaims it. The worker that never
+    /// acks is by construction the healthy worker that just finished a job and
+    /// keeps polling, which is what makes that path reachable rather than
+    /// theoretical. The other exit is the holder's own ack, which
+    /// [`AppState::ack_self_hosted_worker_run`] follows with the unconditional
+    /// reclaim -- necessary, because an acknowledged row is no longer leasable
+    /// and the poll path would never see it again.
+    ///
+    /// Only `start_run` is deferred. A `cancel_run` is reclaimed immediately as
+    /// before: #551 deliberately exempts it from the settled-lease discard, so
+    /// a retained cancel row would be handed to a worker again rather than
+    /// reclaimed. A lease that runs past [`SETTLED_ACK_WINDOW_MAX_SECS`] is not
+    /// honoured either -- see `reclaimable_dispatch_ids_for_run`.
+    pub(crate) fn reclaim_settled_run_dispatches_outside_ack_window(
+        &self,
+        run_id: &str,
+        now_unix: u64,
+    ) -> usize {
+        let ceiling = now_unix.saturating_add(SETTLED_ACK_WINDOW_MAX_SECS);
+        // "Held locally" and "reclaimable" are read under ONE acquisition: they
+        // are two questions about the same queue state, and answering them
+        // across two locks would let a row arrive in between and turn "this
+        // node holds nothing" into a durable scan that contradicts the local
+        // answer.
+        let local = |runtime: &SelfHostedWorkerDispatchRuntime| {
+            (
+                runtime.queue.dispatch_ids_for_run(run_id).is_empty(),
+                runtime.queue.reclaimable_dispatch_ids_for_run(
+                    run_id,
+                    SelfHostedRunAction::StartRun,
+                    now_unix,
+                    ceiling,
+                ),
+            )
+        };
+        let (local_queue_is_empty, local_reclaimable) = match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => local(&runtime),
+            Err(poisoned) => local(&poisoned.into_inner()),
+        };
+        let dispatch_ids = if !local_queue_is_empty {
+            local_reclaimable
+        } else {
+            ferrogate_sync_bridge::block_on_sync_bridge(
+                self.repositories.self_hosted_run_dispatches(),
+            )
+            .into_iter()
+            .filter(|record| record.run_id == run_id)
+            .filter(|record| {
+                record.action != self_hosted_run_action_as_str(SelfHostedRunAction::StartRun)
+                    || !ack_window_is_open(
+                        record.assigned_worker_id.as_deref(),
+                        record.acknowledged_status.is_some(),
+                        record.lease_expires_at_unix,
+                        now_unix,
+                    )
+                    || record
+                        .lease_expires_at_unix
+                        .is_none_or(|expires_at| expires_at > ceiling)
+            })
+            .map(|record| record.dispatch_id)
+            .collect()
+        };
+        dispatch_ids
+            .iter()
+            .filter(|dispatch_id| self.discard_self_hosted_dispatch(dispatch_id))
+            .count()
+    }
+
     /// Reclaim `tenant_id`'s aged, never-leased, unacknowledged submit-surface
     /// start dispatches -- the dispatch-row TTL (#502; the retention gap
     /// recorded as a `Constraint:` in commit `928e82c`).
@@ -2071,20 +2172,24 @@ impl AppState {
         // worker had finished, and the dispatch row stayed in the table for the
         // lifetime of the deployment. Settlement returns both.
         //
-        // KNOWN GAP (#549), stated rather than hidden: the reporting worker is
-        // by construction the holder of this run's `start_run` lease (the check
-        // above proved it), and it may not have acked that lease yet. Deleting
-        // the row here means a worker that reports `{"state":"completed"}` and
-        // THEN acks with `SelfHostedRunAckStatus::Completed` gets
-        // `InvalidTransport("unknown dispatch")` where it previously got 200,
-        // and any later telemetry for the run trips #503's ownership check and
-        // logs the security-shaped "does not hold the lease for" warning
-        // instead of the benign already-terminal skip. Deferring the delete
-        // past the ack window is the fix; it is not taken here because the
-        // majority worker never acks at all, which is the retention leak this
+        // #549 closes the gap this used to record: the reporting worker is by
+        // construction the holder of this run's `start_run` lease (the check
+        // above proved it) and may not have acked it yet, so the reclaim is
+        // deferred for exactly as long as that ack could still succeed --
+        // never for the never-acking worker, whose row was already outside any
+        // window or is reclaimed by the next poll that leases it.
+        //
+        // The clock is the SERVER's, not `occurred_at_unix`: that value comes
+        // from the worker's own telemetry, and a worker that reported a far
+        // future time could otherwise pin its row past its real lease. A clock
+        // that predates the epoch degrades to the pre-#549 immediate reclaim,
+        // because a retained row nothing can date is the retention leak the
         // reclaim exists to close.
         if terminal {
-            self.reclaim_settled_run_dispatches(run_id);
+            self.reclaim_settled_run_dispatches_outside_ack_window(
+                run_id,
+                now_unix_seconds().unwrap_or(u64::MAX),
+            );
         }
         Some(report.status)
     }
@@ -2494,6 +2599,22 @@ pub(crate) const WORKER_REPORTED_OUTPUT_MAX_CHARS: usize = 64_000;
 /// is normally reclaimed the moment it settles, and this only catches the rows
 /// a PEER node's reclaim could not reach into this node's queue.
 const SETTLED_DISPATCH_SKIP_LIMIT: usize = 8;
+
+/// The furthest past settlement a `start_run` row is kept alive for its
+/// holder's ack (#549).
+///
+/// `lease_expires_at_unix` is NOT a server value: `poll_run` derives it from
+/// the poll's own `now_unix` plus `lease_duration_secs`, and both arrive from
+/// the worker with only a non-zero check on them. Honouring an arbitrary lease
+/// would hand a worker a retention lever -- and a far-future lease is not
+/// re-leasable, so #551's poll-path reclaim could never take the row back
+/// either. This is the ceiling the deferral is willing to wait; a lease that
+/// outlives it is not deferred at all.
+///
+/// Sized against the window it actually has to cover, which is one worker's
+/// "report terminal, then ack" round trip -- seconds in the normal case, and
+/// generous at 15 minutes for a worker that batches or retries its acks.
+const SETTLED_ACK_WINDOW_MAX_SECS: u64 = 15 * 60;
 
 /// A worker's report about a run, normalized onto the control plane's own
 /// vocabulary. Every field is optional evidence; nothing is invented.
