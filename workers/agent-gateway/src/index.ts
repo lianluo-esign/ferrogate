@@ -179,7 +179,12 @@ export type RunStatus =
   | "cleaned_up";
 
 /**
- * Transient per-run **init props** delivered to {@link AgentGateway.onStart}.
+ * Transient per-run **init props**, resolved by {@link AgentGateway.start} into
+ * the run's persistent state.
+ *
+ * NOT delivered through `onStart(props)`: the pinned Agents SDK rebinds
+ * `onStart` to a zero-argument wake hook, so `start()` parses them instead (see
+ * the note on {@link AgentGateway.start}).
  *
  * Cloudflare has NO deploy-time `model` field: the agent picks its model / tools
  * / system prompt IN CODE at start, reading them from these props. That makes the
@@ -320,7 +325,7 @@ interface StartRequest {
   workerTemplateId: string;
   frameworkAdapter: string;
   capabilityEnvelopeId: string;
-  /** Per-run init props handed to `onStart(props)`. Optional; defaults empty. */
+  /** Per-run init props, parsed by `start()` into state. Optional; defaults empty. */
   props?: RunProps;
 }
 

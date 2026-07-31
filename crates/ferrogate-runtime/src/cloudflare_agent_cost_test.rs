@@ -10,20 +10,22 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ferrogate_storage::{RuntimeStorageRepositories, StorageProviderKind};
 
 use super::{
     evaluate, should_dispatch, AgentBudgetPolicy, AgentBurnLedger, AgentBurnLedgerError,
     AgentCostAttribution, AgentCostGovernor, AgentCostReceipt, AgentRuntimeUsageSample,
-    AgentRuntimeUsageSource, BudgetDecision, CfRuntimeCostModel, CfRuntimePricing,
-    ContainerUsageSample, CostGovernorError, CostWindow, InMemoryAgentBurnLedger, KillMode,
-    ScriptedUsageSource, StorageAgentBurnLedger, DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND,
-    DEFAULT_CONTAINER_EGRESS_USD_PER_GB, DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND,
-    DEFAULT_CONTAINER_VCPU_USD_PER_SECOND, DEFAULT_DO_REQUEST_USD_PER_MILLION,
-    DEFAULT_DURATION_USD_PER_MILLION_GB_SECONDS, DEFAULT_SQLITE_ROWS_READ_USD_PER_MILLION,
-    DEFAULT_SQLITE_ROWS_WRITTEN_USD_PER_MILLION, DEFAULT_STORAGE_USD_PER_GB_MONTH,
-    DEFAULT_WARN_FRACTION, SECONDS_PER_BILLING_MONTH, WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
+    AgentRuntimeUsageSource, BudgetDecision, CancelSettleWindow, CfRuntimeCostModel,
+    CfRuntimePricing, ContainerUsageSample, CostGovernorError, CostWindow, InMemoryAgentBurnLedger,
+    KillMode, ScriptedUsageSource, StorageAgentBurnLedger,
+    DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND, DEFAULT_CONTAINER_EGRESS_USD_PER_GB,
+    DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND, DEFAULT_CONTAINER_VCPU_USD_PER_SECOND,
+    DEFAULT_DO_REQUEST_USD_PER_MILLION, DEFAULT_DURATION_USD_PER_MILLION_GB_SECONDS,
+    DEFAULT_SQLITE_ROWS_READ_USD_PER_MILLION, DEFAULT_SQLITE_ROWS_WRITTEN_USD_PER_MILLION,
+    DEFAULT_STORAGE_USD_PER_GB_MONTH, DEFAULT_WARN_FRACTION, SECONDS_PER_BILLING_MONTH,
+    WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
 };
 use crate::cloudflare_agent_memory::AgentInstanceIdentity;
 use crate::cloudflare_worker::{
@@ -31,9 +33,12 @@ use crate::cloudflare_worker::{
 };
 
 /// tokio's `macros`/test features are not enabled for this crate, so drive async
-/// entry points on a bare current-thread runtime (no IO/timer needed).
+/// entry points on a bare current-thread runtime. The timer IS enabled: a
+/// `KillMode::Cancel` settle window with a non-zero backoff awaits `sleep`, and
+/// without a time driver that is a panic rather than a wait.
 fn block_on<F: Future>(fut: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .build()
         .expect("build current-thread test runtime")
         .block_on(fut)
@@ -915,7 +920,10 @@ fn kill_in_cancel_mode_cancels_then_verifies_and_escalates_when_the_run_survives
         1.0,
         MockCloudflareControlSurface::new().reporting_status(CloudflareRunStatus::Running),
     )
-    .with_kill_mode(KillMode::Cancel);
+    .with_kill_mode(KillMode::Cancel)
+    // A run that NEVER settles exhausts the window whatever its size; pin it to
+    // one read so this case asserts the escalation, not the wait.
+    .with_cancel_settle_window(CancelSettleWindow::IMMEDIATE);
     let receipt = block_on(gov.enforce(&id, sample)).expect("enforce");
     assert!(matches!(receipt.decision, BudgetDecision::Kill { .. }));
 
@@ -962,6 +970,105 @@ fn kill_in_cancel_mode_does_not_destroy_a_run_the_cancel_actually_stopped() {
             ]
         ),
         "expected cancel -> status and NO cleanup, got {calls:?}"
+    );
+}
+
+#[test]
+fn kill_in_cancel_mode_waits_out_a_workload_that_is_still_unwinding() {
+    // ISSUE #414 REWORK. The escalation's input is a race, not a fact. The
+    // Worker writes `stopped` from the invoke path only after a signalled
+    // workload has actually unwound, and the dispatch contract is written for
+    // harnesses that thread `signal` through real I/O — so a workload that is
+    // OBEYING the cancel still reads `running` for the first read or two.
+    //
+    // Without a settle window, `KillMode::Cancel`'s documented "softer stop
+    // that tries to preserve the instance" is unreachable for any non-instant
+    // unwind: the single immediate read sees `running` and `cleanup_run` DROPs
+    // the run's state, chat history, schedules and credential records. Here the
+    // run settles on the third read, inside the window, so it must survive.
+    let id = identity("run-1");
+    let sample = AgentRuntimeUsageSample {
+        metered_egress_usd: 5.0,
+        ..AgentRuntimeUsageSample::zero()
+    };
+    let mut gov = governor_with_surface(
+        1.0,
+        MockCloudflareControlSurface::new().scripting_statuses([
+            CloudflareRunStatus::Running,
+            CloudflareRunStatus::Running,
+            CloudflareRunStatus::Stopped,
+        ]),
+    )
+    .with_kill_mode(KillMode::Cancel)
+    // Zero backoff: the window's SHAPE (re-read until settled) is what is under
+    // test, and a wall-clock delay would only make the suite slower.
+    .with_cancel_settle_window(CancelSettleWindow::new(3, Duration::ZERO));
+    block_on(gov.enforce(&id, sample)).expect("enforce");
+
+    let calls = gov.control().calls();
+    assert!(
+        matches!(
+            calls,
+            [
+                MockCloudflareCall::CancelRun { .. },
+                MockCloudflareCall::RunStatus { .. },
+                MockCloudflareCall::RunStatus { .. },
+                MockCloudflareCall::RunStatus { .. }
+            ]
+        ),
+        "a run that settles inside the window must NOT be destroyed, got {calls:?}"
+    );
+}
+
+#[test]
+fn cancel_settle_window_is_bounded_so_a_defiant_run_is_still_destroyed() {
+    // The other edge: the window is a grace period, not an unbounded wait. A
+    // workload that ignores the signal keeps spending, so the window must
+    // expire and escalate. Exactly `retries + 1` reads, then the destroy.
+    let id = identity("run-1");
+    let sample = AgentRuntimeUsageSample {
+        metered_egress_usd: 5.0,
+        ..AgentRuntimeUsageSample::zero()
+    };
+    let window = CancelSettleWindow::new(2, Duration::ZERO);
+    assert_eq!(window.max_wait(), Duration::ZERO);
+    let mut gov = governor_with_surface(
+        1.0,
+        MockCloudflareControlSurface::new().reporting_status(CloudflareRunStatus::Running),
+    )
+    .with_kill_mode(KillMode::Cancel)
+    .with_cancel_settle_window(window);
+    block_on(gov.enforce(&id, sample)).expect("enforce");
+
+    let calls = gov.control().calls();
+    assert!(
+        matches!(
+            calls,
+            [
+                MockCloudflareCall::CancelRun { .. },
+                MockCloudflareCall::RunStatus { .. },
+                MockCloudflareCall::RunStatus { .. },
+                MockCloudflareCall::RunStatus { .. },
+                MockCloudflareCall::CleanupRun { .. }
+            ]
+        ),
+        "the window must expire after retries+1 reads and destroy, got {calls:?}"
+    );
+}
+
+#[test]
+fn the_default_cancel_settle_window_actually_waits() {
+    // The default is what production runs with, and a zero-retry default would
+    // silently reinstate the destroy-on-first-read behaviour this rework
+    // removed while every zero-backoff test above still passed.
+    let window = CancelSettleWindow::default();
+    assert!(
+        window.max_wait() > Duration::ZERO,
+        "the default window must grant a real grace period"
+    );
+    assert!(
+        window.max_wait() <= Duration::from_secs(1),
+        "an over-budget run that ignores the signal keeps burning during the window"
     );
 }
 

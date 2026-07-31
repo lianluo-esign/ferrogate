@@ -415,6 +415,60 @@ fn operator_cancel_routes_to_the_cancel_primitive() {
 }
 
 #[test]
+fn operator_cancel_records_the_status_the_worker_reported_not_a_stop_it_did_not_see() {
+    // ISSUE #414. After the Worker fix, `cancel_run` answers `running` whenever
+    // it merely SIGNALLED an in-flight workload. Two things must follow that
+    // answer rather than the verb that was attempted:
+    //   1. the tracked run status, which reconciles onto persistence, and
+    //   2. the lifecycle evidence outcome.
+    // Stamping `stopped:{reason}` on a run the Worker just said is still
+    // running is the same defect this issue closed one call site over — a
+    // success envelope for something that did not happen.
+    let scheduler = scheduler();
+    let mut signalled = client(MockCloudflareControlSurface::new());
+    let session = block_on(scheduler.start_session(session_request(), &mut signalled)).unwrap();
+    let run_ref = session.instance_id.clone();
+
+    let outcome = signalled
+        .stop_managed_worker(
+            &run_ref,
+            ManagedWorkerStopKind::OperatorCancel,
+            "operator_cancelled",
+        )
+        .unwrap();
+
+    assert_eq!(
+        signalled.observed_status(&run_ref),
+        Some(CloudflareRunStatus::Running),
+        "the tracked status must be the one the Worker reported"
+    );
+    assert_eq!(
+        outcome.evidence.outcome, "cancel_signalled:operator_cancelled",
+        "a signalled-but-still-running cancel must not claim a stop"
+    );
+
+    // And the settled branch still records a stop: same call, a Worker that
+    // found nothing in flight and answered `stopped`.
+    let mut settled = client(
+        MockCloudflareControlSurface::new().reporting_cancel_status(CloudflareRunStatus::Stopped),
+    );
+    let session = block_on(scheduler.start_session(session_request(), &mut settled)).unwrap();
+    let run_ref = session.instance_id.clone();
+    let outcome = settled
+        .stop_managed_worker(
+            &run_ref,
+            ManagedWorkerStopKind::OperatorCancel,
+            "operator_cancelled",
+        )
+        .unwrap();
+    assert_eq!(
+        settled.observed_status(&run_ref),
+        Some(CloudflareRunStatus::Stopped)
+    );
+    assert_eq!(outcome.evidence.outcome, "stopped:operator_cancelled");
+}
+
+#[test]
 fn operator_cancel_whose_reason_reads_terminal_still_cancels() {
     // ISSUE #414 ITEM 6. `cancel_session` takes an ARBITRARY caller-supplied
     // reason, and the routing used to match on `reason ∈ {"completed","failed"}`.

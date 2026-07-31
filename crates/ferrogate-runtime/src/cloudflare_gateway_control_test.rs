@@ -152,6 +152,9 @@ fn stop_run_is_a_local_hibernation_no_op() {
 fn cancel_run_posts_to_control_cancel_with_reason() {
     // Active cancellation IS a route (unlike a terminal stop, which sends
     // nothing). It is the Worker's COOPERATIVE cancel, not a fiber cancel.
+    //
+    // This is the "nothing in flight to wait on" branch: with no workload to
+    // signal, the Worker answers `stopped` from the cancel itself.
     let mut s = surface(vec![ok(r#"{ "status": "stopped" }"#)]);
     let status = s.cancel_run("cf-run-r1", "operator-cancel").unwrap();
     assert_eq!(status, CloudflareRunStatus::Stopped);
@@ -164,6 +167,30 @@ fn cancel_run_posts_to_control_cancel_with_reason() {
     let body = body_json(&req);
     assert_eq!(body["runRef"], "cf-run-r1");
     assert_eq!(body["reason"], "operator-cancel");
+}
+
+#[test]
+fn cancel_run_reports_running_when_the_worker_only_signalled_the_workload() {
+    // ISSUE #414. The main branch of the post-fix contract: a cancel that found
+    // work in flight signals it and leaves the status alone — `stopped` is
+    // written later, by the invoke path, once the workload has actually
+    // unwound. The seam must pass that `running` through UNCHANGED, because it
+    // is the sole input to `KillMode::Cancel`'s escalation and to the lifecycle
+    // evidence `stop_managed_worker` records. Flattening it to `Stopped`
+    // anywhere on this path resurrects the defect the Worker fix closed: a
+    // cancel that cancelled nothing, reported as a stopped run.
+    let mut s = surface(vec![ok(r#"{ "status": "running" }"#)]);
+    let status = s.cancel_run("cf-run-r1", "budget-kill").unwrap();
+    assert_eq!(status, CloudflareRunStatus::Running);
+
+    let req = s.transport().last();
+    assert_eq!(
+        req.url,
+        "https://ferrogate-agent-gateway.example.workers.dev/control/cancel"
+    );
+    let body = body_json(&req);
+    assert_eq!(body["runRef"], "cf-run-r1");
+    assert_eq!(body["reason"], "budget-kill");
 }
 
 #[test]

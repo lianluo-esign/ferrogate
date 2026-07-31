@@ -39,7 +39,7 @@
 //! does elsewhere with a block-on bridge). [`MockCloudflareControlSurface`]
 //! provides a no-network implementation for tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::{error::Error, fmt};
 
@@ -123,6 +123,22 @@ impl CloudflareRunStatus {
             Self::Stopped => ManagedWorkerSessionStatus::Cancelled,
             Self::CleanedUp => ManagedWorkerSessionStatus::CleanedUp,
         }
+    }
+
+    /// Whether the run has stopped burning: it will not execute further work
+    /// without a new dispatch.
+    ///
+    /// `Queued`/`Running` are the live states — in particular, a `Running`
+    /// observed right after [`CloudflareControlSurface::cancel_run`] means the
+    /// cooperative cancel was SIGNALLED but the workload has not unwound yet
+    /// (the gateway Worker writes `stopped` from the invoke path, not from
+    /// `cancel`). Callers that must not claim more than they observed —
+    /// lifecycle evidence, budget-kill escalation — decide on this.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Stopped | Self::CleanedUp
+        )
     }
 
     /// The `status` string persisted on `ferrogate_storage::StoredAgentRun`.
@@ -644,12 +660,19 @@ impl<S: CloudflareControlSurface> AgentWorkerControlClient for CloudflareAgentCo
             context.status = status;
         }
         let capability_envelope_id = self.capability_envelope_id_for(instance_id);
-        let evidence = self.evidence(
-            instance_id,
-            &capability_envelope_id,
-            &format!("stopped:{reason}"),
-            None,
-        );
+        // Record what was OBSERVED, not the verb that was attempted. `cancel_run`
+        // is cooperative: after issue #414 the Worker leaves the status alone when
+        // it merely signalled an in-flight workload, so a non-terminal status here
+        // means the run is still going. Stamping `stopped:{reason}` on that would
+        // be the same defect this issue closed on the invoke path — evidence for
+        // something that did not happen. Hibernation (`stop_run`) always reports
+        // `Stopped`, so it keeps the `stopped:` outcome.
+        let outcome = if status.is_terminal() {
+            format!("stopped:{reason}")
+        } else {
+            format!("cancel_signalled:{reason}")
+        };
+        let evidence = self.evidence(instance_id, &capability_envelope_id, &outcome, None);
         Ok(IsolationStopOutcome {
             instance_id: instance_id.to_string(),
             evidence,
@@ -695,8 +718,15 @@ pub struct MockCloudflareControlSurface {
     fail_start: bool,
     fail_exec: bool,
     exec_exit_code: Option<i32>,
-    /// What [`CloudflareControlSurface::run_status`] reports. `None` = `Running`.
+    /// What [`CloudflareControlSurface::run_status`] reports once
+    /// `status_script` is exhausted. `None` = `Running`.
     reported_status: Option<CloudflareRunStatus>,
+    /// Statuses handed out by successive `run_status` calls before
+    /// `reported_status` takes over. Models a run that settles after N reads.
+    status_script: VecDeque<CloudflareRunStatus>,
+    /// What [`CloudflareControlSurface::cancel_run`] reports. `None` = `Running`
+    /// — the deployed Worker's answer when it SIGNALLED an in-flight workload.
+    reported_cancel_status: Option<CloudflareRunStatus>,
 }
 
 impl MockCloudflareControlSurface {
@@ -707,6 +737,8 @@ impl MockCloudflareControlSurface {
             fail_exec: false,
             exec_exit_code: Some(0),
             reported_status: None,
+            status_script: VecDeque::new(),
+            reported_cancel_status: None,
         }
     }
 
@@ -734,6 +766,32 @@ impl MockCloudflareControlSurface {
     /// `Cancel` behaves differently in each case.
     pub fn reporting_status(mut self, status: CloudflareRunStatus) -> Self {
         self.reported_status = Some(status);
+        self
+    }
+
+    /// Hand out `statuses` from successive `run_status` calls, then fall back to
+    /// [`Self::reporting_status`]'s value (default `Running`).
+    ///
+    /// Models the timing the cooperative cancel actually has: a workload that
+    /// honors the abort signal still reads `Running` until it has unwound, and
+    /// only then `Stopped`. A single fixed status cannot express that, so
+    /// without this a settle window is indistinguishable from no window at all.
+    pub fn scripting_statuses(
+        mut self,
+        statuses: impl IntoIterator<Item = CloudflareRunStatus>,
+    ) -> Self {
+        self.status_script = statuses.into_iter().collect();
+        self
+    }
+
+    /// Report `status` from `cancel_run` instead of the default `Running`.
+    ///
+    /// The default models the post-#414 Worker: `cancel` signals the in-flight
+    /// workload and answers with what it observed, which is `running` until the
+    /// invoke path writes `stopped` on unwind. Pass `Stopped` for the other
+    /// branch — a cancel that found nothing in flight to wait on.
+    pub fn reporting_cancel_status(mut self, status: CloudflareRunStatus) -> Self {
+        self.reported_cancel_status = Some(status);
         self
     }
 
@@ -805,11 +863,21 @@ impl CloudflareControlSurface for MockCloudflareControlSurface {
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
         // Models the cooperative cancel route (see `cancel_run`'s contract:
         // signal in-flight work + latch the run; NOT a fiber cancel).
+        //
+        // The default is `Running`, NOT `Stopped`: the deployed Worker reports
+        // `stopped` from `cancel` only when there was nothing in flight to wait
+        // on, and otherwise leaves the status alone until the signalled workload
+        // unwinds (issue #414). A doubles-wide `Stopped` would model a response
+        // the Worker can no longer produce, and every consumer tested against it
+        // would be tested against a state machine that no longer exists. Use
+        // `reporting_cancel_status(Stopped)` for the nothing-in-flight branch.
         self.calls.push(MockCloudflareCall::CancelRun {
             run_ref: run_ref.to_string(),
             reason: reason.to_string(),
         });
-        Ok(CloudflareRunStatus::Stopped)
+        Ok(self
+            .reported_cancel_status
+            .unwrap_or(CloudflareRunStatus::Running))
     }
 
     fn cleanup_run(
@@ -829,7 +897,11 @@ impl CloudflareControlSurface for MockCloudflareControlSurface {
         self.calls.push(MockCloudflareCall::RunStatus {
             run_ref: run_ref.to_string(),
         });
-        Ok(self.reported_status.unwrap_or(CloudflareRunStatus::Running))
+        Ok(self
+            .status_script
+            .pop_front()
+            .or(self.reported_status)
+            .unwrap_or(CloudflareRunStatus::Running))
     }
 }
 

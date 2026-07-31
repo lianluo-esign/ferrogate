@@ -272,8 +272,10 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         request: CloudflareRunStartRequest,
     ) -> Result<CloudflareRunHandle, CloudflareControlSurfaceError> {
         // `props` are the transient per-run init (model/tools/prompt + placement)
-        // the Worker delivers to `onStart(props)`. Serialize them into the start
-        // body so the agent can read its runtime-selectable model in code.
+        // the Worker's `start()` parses into the run's persistent state —
+        // `onStart` is a zero-argument wake hook in the pinned Agents SDK, so it
+        // is NOT the delivery path. Serialize them into the start body so the
+        // agent can read its runtime-selectable model in code.
         let props = serde_json::to_value(&request.props).map_err(|e| {
             CloudflareControlSurfaceError::Transport(format!("failed to encode run props: {e}"))
         })?;

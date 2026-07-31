@@ -74,11 +74,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{error::Error, fmt};
 
 use async_trait::async_trait;
 use ferrogate_storage::RuntimeStorageRepositories;
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 
 use crate::cloudflare_agent_memory::{AgentInstanceIdentity, AgentMemoryError};
 use crate::cloudflare_worker::{
@@ -1188,8 +1190,9 @@ pub enum KillMode {
     /// `this.destroy()` — the hard kill ([`CloudflareControlSurface::cleanup_run`]).
     #[default]
     Destroy,
-    /// Cancel first, **verify, and escalate to destroy if the run is still
-    /// alive** — a softer stop that tries to preserve the instance.
+    /// Cancel first, **wait a bounded settle window, verify, and escalate to
+    /// destroy if the run is still alive** — a softer stop that tries to
+    /// preserve the instance.
     ///
     /// [`CloudflareControlSurface::cancel_run`] is COOPERATIVE (the gateway
     /// Worker aborts a signal the workload observes; the pinned Agents SDK has
@@ -1200,7 +1203,65 @@ pub enum KillMode {
     /// re-reads [`CloudflareControlSurface::run_status`] and, unless the run has
     /// actually reached a stopped/terminal state, falls through to
     /// `cleanup_run`. The soft path is an optimization, never the guarantee.
+    ///
+    /// The re-read is bounded, not instantaneous — see [`CancelSettleWindow`]
+    /// for why a single immediate read would make this mode "always destroy".
     Cancel,
+}
+
+/// How long [`KillMode::Cancel`] gives a signalled run to unwind before it
+/// escalates to a destroy.
+///
+/// A cooperative cancel is not synchronous with the workload's exit: the gateway
+/// Worker aborts a signal, and `stopped` is written by the invoke path only once
+/// the workload has actually unwound. A workload that honors the signal but
+/// threads it through real I/O — the framework harness / tool loop the dispatch
+/// contract is written for — unwinds over one or more event-loop turns. Reading
+/// `run_status` once, immediately after the cancel returns, therefore observes
+/// `running` for a run that is in the middle of complying, and the escalation
+/// destroys the instance (`this.destroy()` DROPs the run's state, chat history,
+/// schedules and credential records). That would leave [`KillMode::Cancel`]'s
+/// documented "softer stop" unreachable for any non-instant unwind.
+///
+/// So the mode re-reads up to `retries` more times, waiting `backoff` before
+/// each. Any settled read wins; only an exhausted window escalates. Both bounds
+/// are fixed at construction — the window is a grace period, never an unbounded
+/// wait for a workload that is ignoring the signal and still spending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelSettleWindow {
+    /// Re-reads AFTER the first (immediate) one. `0` = decide on one read.
+    retries: u32,
+    /// Delay before each re-read. `Duration::ZERO` performs no await at all.
+    backoff: Duration,
+}
+
+impl CancelSettleWindow {
+    /// A window of `retries` extra reads spaced `backoff` apart.
+    pub const fn new(retries: u32, backoff: Duration) -> Self {
+        Self { retries, backoff }
+    }
+
+    /// Decide on the first read, with no waiting.
+    ///
+    /// Fail-closed and instant, at the cost of destroying instances whose
+    /// unwind is not synchronous. Tests use it to keep the escalation path
+    /// wall-clock free.
+    pub const IMMEDIATE: Self = Self::new(0, Duration::ZERO);
+
+    /// Total worst-case wait before escalating.
+    pub fn max_wait(&self) -> Duration {
+        self.backoff.saturating_mul(self.retries)
+    }
+}
+
+impl Default for CancelSettleWindow {
+    /// Three extra reads, 100ms apart: 300ms of grace. Long enough for an
+    /// unwind that crosses a few event-loop turns and a control round trip,
+    /// short enough that an over-budget run that is ignoring the signal keeps
+    /// burning for well under a second before it is destroyed.
+    fn default() -> Self {
+        Self::new(3, Duration::from_millis(100))
+    }
 }
 
 /// Whether an observed post-cancel status means the run has genuinely stopped
@@ -1222,13 +1283,7 @@ pub enum KillMode {
 /// the two must be read together;
 /// `workers/agent-gateway/test/lifecycle.test.ts` pins the Worker half.
 fn kill_is_settled(status: CloudflareRunStatus) -> bool {
-    matches!(
-        status,
-        CloudflareRunStatus::Stopped
-            | CloudflareRunStatus::Completed
-            | CloudflareRunStatus::Failed
-            | CloudflareRunStatus::CleanedUp
-    )
+    status.is_terminal()
 }
 
 /// Failure surfaced by the cost-governance engine.
@@ -1294,6 +1349,7 @@ pub struct AgentCostGovernor<C: CloudflareControlSurface, L: AgentBurnLedger> {
     ledger: L,
     control: C,
     kill_mode: KillMode,
+    cancel_settle_window: CancelSettleWindow,
 }
 
 impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
@@ -1310,6 +1366,7 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
             ledger,
             control,
             kill_mode: KillMode::Destroy,
+            cancel_settle_window: CancelSettleWindow::default(),
         }
     }
 
@@ -1318,6 +1375,15 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
     /// survives it. See [`KillMode`].
     pub fn with_kill_mode(mut self, kill_mode: KillMode) -> Self {
         self.kill_mode = kill_mode;
+        self
+    }
+
+    /// Override how long a [`KillMode::Cancel`] waits for a signalled run to
+    /// unwind before escalating to a destroy. See [`CancelSettleWindow`].
+    ///
+    /// No effect under [`KillMode::Destroy`], which never cancels.
+    pub fn with_cancel_settle_window(mut self, window: CancelSettleWindow) -> Self {
+        self.cancel_settle_window = window;
         self
     }
 
@@ -1352,6 +1418,26 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
         identity: &AgentInstanceIdentity,
     ) -> Result<bool, CostGovernorError> {
         should_dispatch(&self.ledger, &self.policy, identity).await
+    }
+
+    /// Whether a just-cancelled run reached a terminal state within the
+    /// configured [`CancelSettleWindow`].
+    ///
+    /// Reads `run_status` immediately, then up to `retries` more times with
+    /// `backoff` between reads, short-circuiting on the first settled read. A
+    /// `run_status` error propagates rather than being read as "settled" — the
+    /// caller must escalate or fail, never assume the run stopped burning.
+    async fn cancel_settled(&mut self, instance_name: &str) -> Result<bool, CostGovernorError> {
+        let window = self.cancel_settle_window;
+        for attempt in 0..=window.retries {
+            if attempt > 0 && !window.backoff.is_zero() {
+                sleep(window.backoff).await;
+            }
+            if kill_is_settled(self.control.run_status(instance_name)?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Enforce the budget for one usage window of `identity`.
@@ -1402,8 +1488,7 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
                     // "probably fine": it propagates, and the caller fails
                     // closed rather than recording a kill it cannot substantiate.
                     self.control.cancel_run(&instance_name, reason)?;
-                    let observed = self.control.run_status(&instance_name)?;
-                    if !kill_is_settled(observed) {
+                    if !self.cancel_settled(&instance_name).await? {
                         self.control.cleanup_run(&instance_name)?;
                     }
                 }
