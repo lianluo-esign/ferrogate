@@ -5363,13 +5363,39 @@ fn upsert_agent_schedule_routes_to_tenant_binding() {
     let sql = body["sql"].as_str().unwrap();
     assert!(sql.starts_with("INSERT INTO agent_schedules"));
     assert!(sql.contains("ON CONFLICT (schedule_id) DO UPDATE SET"));
+    // The WHOLE `VALUES` clause, not a bare `contains("NULLIF(?, '')")`: the
+    // four nullable positions (7 cron_expr, 9 interval_secs, 15 next_fire_at_unix,
+    // 16 last_fire_at_unix) each need their own `NULLIF`, and dropping the one on
+    // a timestamp column stores `''` — which stays `typeof=text` in an INTEGER
+    // column, so `IS NOT NULL` is TRUE while `'' <= now` is FALSE and the row is
+    // invisible to the due scan FOREVER. Pinning the clause makes any dropped or
+    // shifted `NULLIF` a compile-time-visible diff.
     assert!(
-        sql.contains("NULLIF(?, '')"),
-        "nullable cols map '' -> NULL"
+        sql.contains(
+            "VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, ?, ?, ?, \
+             NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)"
+        ),
+        "all four nullable positions must ride NULLIF(?, ''); got: {sql}"
     );
     assert!(
         !sql.contains("CAST"),
         "no bound param enters an arithmetic expression, so no CAST"
+    );
+    // Postgres refreshes `updated_at_unix`/`revision` on conflict and deliberately
+    // OMITS `created_at_unix`. Assert both halves: silently dropping the refresh
+    // (stale revision) or starting to clobber the creation stamp are both PG
+    // divergences the `DO UPDATE SET` prefix check cannot see.
+    assert!(
+        sql.contains("updated_at_unix = excluded.updated_at_unix"),
+        "conflict must refresh updated_at_unix; got: {sql}"
+    );
+    assert!(
+        sql.contains("revision = excluded.revision"),
+        "conflict must refresh revision; got: {sql}"
+    );
+    assert!(
+        !sql.contains("created_at_unix = excluded"),
+        "conflict must NOT clobber created_at_unix (Postgres omits it); got: {sql}"
     );
     let params = statement_params(&body);
     assert_eq!(params[0], "sched-1");
@@ -5381,6 +5407,30 @@ fn upsert_agent_schedule_routes_to_tenant_binding() {
     assert_eq!(params[9], "self_hosted_dispatch");
     assert_eq!(params[14], "2000", "next_fire_at_unix");
     assert_eq!(params[15], "", "last_fire_at_unix None -> ''");
+}
+
+/// A DISABLED schedule binds `enabled = 0`, so the due scan's `enabled = 1`
+/// predicate excludes it. Without this case nothing anywhere pins the boolean
+/// bind, and hard-coding it to `true` would make every disabled schedule fire.
+#[test]
+fn upsert_agent_schedule_disabled_binds_zero() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 1)],
+    );
+
+    let mut schedule = sample_agent_schedule("sched-off", "acme", "ws-1", "paused");
+    schedule.enabled = false;
+    runtime()
+        .block_on(store.upsert_agent_schedule(schedule))
+        .expect("upsert should route to the tenant DB");
+
+    let params = statement_params(&body_json(&proxy.recorded()[0]));
+    assert_eq!(
+        params[4], "0",
+        "a disabled schedule must bind 0, or the due scan will fire it"
+    );
 }
 
 /// A malformed `target_json` is rejected up front (like Postgres), before any
@@ -5550,7 +5600,13 @@ fn list_all_agent_schedules_fans_out_and_sorts() {
         vec![("acme", "alpha"), ("acme", "zeta"), ("bravo", "beta")],
         "union re-sorted by tenant, workspace, name"
     );
-    assert_eq!(proxy.recorded().len(), 2, "one read per provisioned tenant");
+    // Request COUNT alone cannot see the routing: sending both reads to the
+    // control DB keeps the count at 2 and silently returns an empty operator
+    // list. Assert the binding each read actually ran ON.
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "one read per provisioned tenant");
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_BRAVO");
 }
 
 /// `list_due_agent_schedules` fans out with a per-binding `LIMIT`, then re-sorts
@@ -5582,7 +5638,23 @@ fn list_due_agent_schedules_fans_out_and_truncates() {
     let fires: Vec<i64> = due.iter().map(|s| s.next_fire_at_unix.unwrap()).collect();
     assert_eq!(fires, vec![120, 130], "cheapest two across the union");
 
-    let sql = body_sql(&proxy.recorded()[0]);
+    // This is the scheduler's due scan: if it runs on the CONTROL database
+    // instead of the tenant bindings it reads zero rows and NOTHING EVER FIRES,
+    // while the mocked transport still replays the canned rows and every
+    // row-shape assertion above stays green. Assert the binding per request, and
+    // the cutoff actually bound — a hard-coded `0` also means nothing is ever due.
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "one due scan per provisioned tenant");
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_BRAVO");
+    assert_eq!(
+        body_params(&requests[0]),
+        vec!["200"],
+        "the caller's `now` is the only bound param of the due scan"
+    );
+    assert_eq!(body_params(&requests[1]), vec!["200"]);
+
+    let sql = body_sql(&requests[0]);
     assert!(sql.contains("WHERE enabled = 1 AND next_fire_at_unix IS NOT NULL"));
     assert!(sql.contains("next_fire_at_unix <= ? ORDER BY next_fire_at_unix ASC LIMIT 2"));
     assert!(
@@ -5635,6 +5707,35 @@ fn delete_agent_schedule_cascades_fires_over_located_binding() {
     let schedule_delete = statements[1]["sql"].as_str().unwrap();
     assert!(schedule_delete.starts_with("DELETE FROM agent_schedules WHERE schedule_id = ?"));
     assert!(schedule_delete.contains("RETURNING schedule_id"));
+}
+
+/// A `/d1/batch` that answers the two-statement cascade with FEWER results is a
+/// typed `Runtime` error, never an index panic: the arity guard is the only thing
+/// standing between a short proxy response and a panicking gateway thread.
+#[test]
+fn delete_agent_schedule_short_batch_is_typed_runtime_error() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            // Locate: acme holds the schedule.
+            proxy_query_ok(
+                serde_json::json!([schedule_row("sched-1", "acme", "ws-1", "nightly", 2000)]),
+                0,
+            ),
+            // Delete batch answered with ONE statement result instead of two.
+            proxy_batch_ok(vec![proxy_statement_result(serde_json::json!([]), 3)]),
+        ],
+    );
+
+    let error = runtime()
+        .block_on(store.delete_agent_schedule("sched-1"))
+        .expect_err("a short batch must be a typed error, not a panic");
+    assert!(matches!(error, StorageError::Runtime(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("fewer than 2"),
+        "the error must name the arity it expected; got: {error}"
+    );
 }
 
 /// `delete` for an id no tenant holds is `Ok(false)` (the fan-out found nothing).
@@ -5739,11 +5840,13 @@ fn list_agent_schedule_fires_fans_out_and_orders() {
         two_tenant_registry(),
         Vec::new(),
         vec![
-            // acme holds this schedule's fires; bravo has none.
+            // acme holds this schedule's fires; bravo has none. The fixture is
+            // deliberately OLDEST-FIRST so the DESC re-merge has real work to do:
+            // with an already-DESC fixture, dropping the re-sort changes nothing.
             proxy_query_ok(
                 serde_json::json!([
-                    fire_row("f2", "sched-1", 200),
                     fire_row("f1", "sched-1", 100),
+                    fire_row("f2", "sched-1", 200),
                 ]),
                 0,
             ),
@@ -5751,15 +5854,28 @@ fn list_agent_schedule_fires_fans_out_and_orders() {
         ],
     );
 
+    // `limit = 1` against a 2-row fixture, so the GLOBAL truncate is load-bearing
+    // too (with `limit = 10` it never fires).
     let fires = runtime()
-        .block_on(store.list_agent_schedule_fires("sched-1", 10))
+        .block_on(store.list_agent_schedule_fires("sched-1", 1))
         .expect("list fires should fan out");
     let slots: Vec<i64> = fires.iter().map(|f| f.scheduled_fire_at_unix).collect();
-    assert_eq!(slots, vec![200, 100], "newest slot first");
+    assert_eq!(
+        slots,
+        vec![200],
+        "newest slot first, truncated to the global limit"
+    );
     assert_eq!(fires[0].outcome, ScheduleFireOutcome::Dispatched);
 
-    let sql = body_sql(&proxy.recorded()[0]);
-    assert!(sql.contains("WHERE schedule_id = ? ORDER BY scheduled_fire_at_unix DESC LIMIT 10"));
+    // Same hazard as the due scan: the control DB holds no tenant's fire rows, so
+    // mis-routing silently empties the admin fire history.
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "one read per provisioned tenant");
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_BRAVO");
+
+    let sql = body_sql(&requests[0]);
+    assert!(sql.contains("WHERE schedule_id = ? ORDER BY scheduled_fire_at_unix DESC LIMIT 1"));
 }
 
 /// Without a bound proxy Worker the whole agent-schedule family fails closed with
@@ -5866,11 +5982,29 @@ fn touch_observed_agent_presence_coalesces_over_tenant_binding() {
     assert!(sql.contains(
         "request_count = observed_agent_presence.request_count + excluded.request_count"
     ));
+    // The FOURTH coalesced field. `updated_at_unix = excluded.updated_at_unix`
+    // (no max) compiles, keeps every other assertion green, and silently lets a
+    // delayed older touch REGRESS the row's updated stamp.
+    assert!(
+        sql.contains(
+            "updated_at_unix = max(observed_agent_presence.updated_at_unix, \
+             excluded.updated_at_unix)"
+        ),
+        "updated_at must coalesce with max like the other three fields; got: {sql}"
+    );
     assert!(!sql.contains("GREATEST"), "SQLite has no GREATEST");
     assert!(!sql.contains("LEAST"), "SQLite has no LEAST");
     assert!(
         !sql.contains("CAST"),
         "excluded columns already INTEGER-affinity"
+    );
+    // The `1` seeding `request_count` is INLINE SQL, not a bound param, so the
+    // `params` assertion below cannot see it. Seeding `0` instead leaves the
+    // conflict clause adding zero forever — the tally is permanently 0 while
+    // every other assertion here still passes. Pin the literal in the SQL.
+    assert!(
+        sql.contains("VALUES (?, ?, ?, ?, 1, ?)"),
+        "request_count must be seeded with the literal 1; got: {sql}"
     );
     // VALUES seeds first=last=updated=seen, request_count literal 1.
     let params = statement_params(&body);
@@ -6182,6 +6316,36 @@ mod portability {
             assert_eq!(
                 postgres_columns, d1_columns,
                 "column set of {table} diverged between the Postgres and D1 dialects"
+            );
+        }
+    }
+
+    /// The whole "no `CAST` is needed" argument for the presence upsert rests on
+    /// the D1 columns carrying INTEGER affinity: `excluded.*` inherits the target
+    /// column's affinity, so `max`/`min`/`+` compare numerically. Declaring those
+    /// columns `TEXT` instead would make the comparisons LEXICOGRAPHIC ("9" > "10")
+    /// while the column-name matrix above and the `!sql.contains("CAST")`
+    /// assertions all stay green — i.e. the conclusion is pinned but its premise
+    /// is not. Pin the premise.
+    #[test]
+    fn observed_presence_timestamps_are_integer_affinity_in_d1() {
+        let table = D1_SQL
+            .split("CREATE TABLE IF NOT EXISTS observed_agent_presence")
+            .nth(1)
+            .expect("d1 migration should define observed_agent_presence")
+            .split(");")
+            .next()
+            .unwrap();
+        for column in [
+            "first_seen_at_unix",
+            "last_seen_at_unix",
+            "updated_at_unix",
+            "request_count",
+        ] {
+            assert!(
+                table.contains(&format!("{column} INTEGER NOT NULL")),
+                "observed_agent_presence.{column} must be INTEGER NOT NULL — the \
+                 no-CAST coalescing upsert depends on its numeric affinity; got:{table}"
             );
         }
     }
