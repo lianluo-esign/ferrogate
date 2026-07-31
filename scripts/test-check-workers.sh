@@ -26,8 +26,17 @@ assert_words_equal() {
     || fail "$subject: expected '$expected', got '${actual:-<empty>}'"
 }
 
-EXPECTED_WORKERS="agent-gateway d1-proxy gateway-front mcp-server telemetry-collector"
-EXPECTED_E2E="agent-gateway gateway-front telemetry-collector"
+EXPECTED_WORKERS="agent-gateway d1-proxy ferrogate-poc gateway-front mcp-server telemetry-collector"
+EXPECTED_E2E="agent-gateway ferrogate-poc gateway-front telemetry-collector"
+
+# The #424 Containers PoC entrypoint shape the gate greps for. Two runtime
+# requirements tsc cannot see; both would turn the shim probe into a false
+# negative on the claim it exists to back (#484).
+POC_ENTRY_OK='import { Container, ContainerProxy, getContainer } from "@cloudflare/containers";
+export { ContainerProxy };
+export class FerroGateContainer extends Container {}
+FerroGateContainer.outboundByHost = {};
+'
 
 # Pin the current repository surface. The product gate derives this list from
 # manifests; the test keeps additions/removals intentional and reviewable.
@@ -114,6 +123,13 @@ for worker in $EXPECTED_E2E; do
   chmod +x "$worker_dir/node_modules/.bin/vitest"
 done
 
+# ferrogate-poc is the one Worker whose suite drives a real process, so the gate
+# also checks its entrypoint shape and locates a prebuilt gateway binary.
+mkdir -p "$fixture/workers/ferrogate-poc/src" "$fixture/target/debug"
+printf '%s' "$POC_ENTRY_OK" >"$fixture/workers/ferrogate-poc/src/index.ts"
+printf '#!/bin/sh\nexit 0\n' >"$fixture/target/debug/ferrogate"
+chmod +x "$fixture/target/debug/ferrogate"
+
 cat >"$tmp/toolchain/node" <<'SH'
 #!/bin/sh
 exit 0
@@ -150,6 +166,7 @@ run_gate() {
     PATH="$tmp/toolchain:/usr/bin:/bin" \
     FERROGATE_NODE_BIN="$tmp/toolchain" \
     FAKE_NPM_INSTALL_FAIL="${FAKE_NPM_INSTALL_FAIL:-0}" \
+    WORKERS_SKIP_POC_ORIGIN="${WORKERS_SKIP_POC_ORIGIN:-}" \
     NPM_LOG="$npm_log" \
     "$fixture/scripts/check-workers.sh" >"$gate_out" 2>"$gate_err"
 }
@@ -208,9 +225,61 @@ printf '{}\n' >"$future/package-lock.json"
 printf '#!/bin/sh\nexit 0\n' >"$future/node_modules/.bin/tsc"
 chmod +x "$future/node_modules/.bin/tsc"
 run_gate || fail "gate rejected a manifest-derived future Worker: $(cat "$gate_err")"
-assert_words_equal "agent-gateway d1-proxy future-worker gateway-front mcp-server telemetry-collector" \
+assert_words_equal "agent-gateway d1-proxy ferrogate-poc future-worker gateway-front mcp-server telemetry-collector" \
   "$(logged_workers_for 'run typecheck')" "new Worker auto-discovery"
 rm -rf "$future"
+
+# --- #424 ferrogate-poc contract -------------------------------------------
+#
+# Each assertion below is a real false-negative the gate is there to stop. Break
+# the corresponding line in check-workers.sh and exactly one of them goes red.
+
+# 1. A missing `export { ContainerProxy };` installs no outbound interception,
+#    so the shim probe fails for a reason unrelated to bindings.
+printf 'export class FerroGateContainer extends Container {}\nFerroGateContainer.outboundByHost = {};\n' \
+  >"$fixture/workers/ferrogate-poc/src/index.ts"
+if run_gate; then
+  fail "ferrogate-poc passed without 'export { ContainerProxy };'"
+fi
+grep -qF "missing 'export { ContainerProxy };'" "$gate_err" \
+  || fail "ContainerProxy failure did not name itself: $(cat "$gate_err")"
+
+# 2. A static class field shadows the SDK's inherited static setter, leaving the
+#    outbound registry empty while the file still type-checks.
+printf 'export { ContainerProxy };\nexport class FerroGateContainer extends Container {\n  static outboundByHost = {};\n}\nFerroGateContainer.outboundByHost = {};\n' \
+  >"$fixture/workers/ferrogate-poc/src/index.ts"
+if run_gate; then
+  fail "ferrogate-poc passed with a static outboundByHost class field"
+fi
+grep -qF "static outboundByHost class field" "$gate_err" \
+  || fail "static-field failure did not name itself: $(cat "$gate_err")"
+
+printf '%s' "$POC_ENTRY_OK" >"$fixture/workers/ferrogate-poc/src/index.ts"
+run_gate || fail "restored ferrogate-poc entrypoint was rejected: $(cat "$gate_err")"
+
+# 3. No gateway binary must FAIL, not skip. A PoC that never reached the real
+#    Pingora process is unproven, and unproven must not read as OK.
+mv "$fixture/target/debug/ferrogate" "$fixture/target/debug/ferrogate.hidden"
+if run_gate; then
+  fail "ferrogate-poc E2E passed with no ferrogate binary present"
+fi
+grep -qF "no ferrogate binary found" "$gate_err" \
+  || fail "missing-binary failure did not name itself: $(cat "$gate_err")"
+
+# 4. The cargo-free lane opts out explicitly, and says what went unproven. The
+#    rest of the gate still runs; only ferrogate-poc's suite is withheld.
+if ! WORKERS_SKIP_POC_ORIGIN=1 run_gate; then
+  fail "WORKERS_SKIP_POC_ORIGIN=1 did not let the rest of the gate pass: $(cat "$gate_err")"
+fi
+grep -qF "NOT PROVEN" "$gate_err" \
+  || fail "opt-out did not report the withheld proof: $(cat "$gate_err")"
+if awk -F '|' '$1 == "ferrogate-poc" && $2 ~ /^test( |$)/ { found = 1 } END { exit !found }' "$npm_log"; then
+  fail "WORKERS_SKIP_POC_ORIGIN=1 still ran the origin-backed suite"
+fi
+assert_words_equal "$EXPECTED_WORKERS" "$(logged_workers_for 'run typecheck')" \
+  "typecheck coverage survives the ferrogate-poc opt-out"
+mv "$fixture/target/debug/ferrogate.hidden" "$fixture/target/debug/ferrogate"
+run_gate || fail "restored ferrogate binary was not picked up: $(cat "$gate_err")"
 
 # The old file-presence opt-in silently skipped E2E when this file disappeared.
 # The expected-set guard must fail before reporting a green gate.

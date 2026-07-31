@@ -70,4 +70,14 @@ jobs:
       # to equal the committed vitest.config.ts files, so deleting a config is
       # red, not a silent skip. No Docker or live Cloudflare account is used.
       - name: Run workers gate
+        # This lane is Node/npm-only by contract (AGENTS.md "CI Workflow
+        # Structure"), so it has no `target/debug/ferrogate` and must not build
+        # one. workers/ferrogate-poc's suite proxies to that real binary (#424),
+        # so its origin-backed slice is withheld here and the gate says so out
+        # loud rather than narrowing itself silently. Everything else --
+        # including ferrogate-poc's typecheck and its #484 entrypoint guards --
+        # still runs. The full PoC slice is proven in the local release mirror
+        # (scripts/release-local.sh), which builds the binary first.
+        env:
+          WORKERS_SKIP_POC_ORIGIN: "1"
         run: ./scripts/check-workers.sh

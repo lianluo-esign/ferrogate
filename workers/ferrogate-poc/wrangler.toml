@@ -1,0 +1,45 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-31
+# description: Wrangler config for the #424 Cloudflare Containers feasibility
+#   PoC: a Worker + Durable Object fronting the real FerroGate/Pingora binary,
+#   with an outbound-Worker shim resolving a KV binding on the container's behalf.
+
+name = "ferrogate-container-poc"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+[[containers]]
+class_name = "FerroGateContainer"
+image = "./Dockerfile.poc"
+# One instance: this answers a feasibility question, not a scaling one. There is
+# no autoscaling primitive for Containers anyway (topology doc §3), so a larger
+# number would only spread the same question over more billed instances.
+max_instances = 1
+# Smallest tier that still fits a Pingora worker set plus a Postgres pool. The
+# always-on cost floor for this tier is modelled in topology doc §7.
+instance_type = "standard-1"
+
+[[durable_objects.bindings]]
+name = "FERROGATE"
+class_name = "FerroGateContainer"
+
+# REQUIRED by the shim probe (runbook step P7b). The outbound handler resolves
+# `env.POC_KV`; with no namespace declared the binding is undefined and the probe
+# reports 501 -- a config gap that must not be misread as a platform verdict.
+# Create it first and paste the id:
+#   npx wrangler kv namespace create POC_KV
+[[kv_namespaces]]
+binding = "POC_KV"
+id = "REPLACE_WITH_ID_FROM_wrangler_kv_namespace_create"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FerroGateContainer"]
+
+# Secrets are NOT vars: set them with `wrangler secret put` so they never enter
+# the repository or the image. src/index.ts forwards them into the container via
+# `envVars` and throws at start if either is missing.
+#   npx wrangler secret put FERROGATE_POC_PG_DSN
+#   npx wrangler secret put FERROGATE_POC_PROVIDER_KEY

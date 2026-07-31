@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true
+  },
+  "//": "src only, matching workers/gateway-front: test/ mixes Node (globalSetup) and workerd (suites) module graphs, which one tsconfig cannot express. Vitest transforms and runs those files.",
+  "include": ["src/**/*.ts"]
+}

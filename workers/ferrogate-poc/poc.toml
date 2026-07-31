@@ -1,0 +1,50 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-31
+# description: FerroGate config baked into the #424 Cloudflare Containers PoC
+#   image. Minimal on purpose: it exists to answer "does the Pingora binary run
+#   under CF Containers and still reach its DB and an upstream", nothing else.
+
+# Bind all interfaces. Cloudflare routes the fronting Worker's request to the
+# container's `defaultPort`; a 127.0.0.1 bind would be unreachable and would
+# read as a cold-start or platform failure instead of a config error.
+listen = "0.0.0.0:8080"
+
+# NO [tls] section, deliberately. Cloudflare terminates TLS at the edge and the
+# custom domain lives on the Worker, so an origin-side certificate is neither
+# needed nor obtainable inside an ephemeral container (ACME state would not
+# survive hibernation -- topology doc §3).
+
+# External Postgres control plane. This is the load-bearing part of the PoC:
+# `enableInternet` defaults to true for containers, but Cloudflare documents
+# only that outbound *handlers* never see traffic outside ports 80/443 -- it
+# never affirms that an arbitrary outbound TCP connection on 5432 holds. Runbook
+# step P6 is what settles it, and /readyz is the observable that reports it.
+[storage]
+provider = "postgres"
+required = true
+postgres_dsn_env = "FERROGATE_POC_PG_DSN"
+postgres_tls_mode = "require"
+# Small pool: every hibernation and every host restart destroys it (the disk is
+# ephemeral and only Durable Object SQLite persists), so a large pool would just
+# make reconnect storms worse. Hyperdrive cannot help here -- it is a Workers
+# binding and does not work from inside a container (cloudflare/containers#97).
+postgres_pool_size = 4
+postgres_connect_timeout_secs = 5
+
+# One upstream provider, key supplied by the fronting Worker through `envVars`
+# so it is never baked into the image.
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "FERROGATE_POC_PROVIDER_KEY"
+
+[[models]]
+name = "poc-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 0.15
+output_price_per_1m = 0.6

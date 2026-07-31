@@ -1,0 +1,28 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-31
+# description: Config overlay for the #424 Cloudflare Containers PoC image.
+#   Deliberately a thin layer over the unmodified repo-root Dockerfile: the PoC
+#   must prove the SHIPPED binary runs on Containers, so anything it changed
+#   about the build would weaken the result.
+
+# Build the base first, on the same machine and for the same platform:
+#   docker build --platform linux/amd64 -t ferrogate:poc .
+# `FROM ferrogate:poc` resolves against the LOCAL daemon, so `wrangler deploy`
+# must run on that same machine.
+#
+# Cloudflare Containers require linux/amd64 and reject the `latest` tag.
+FROM ferrogate:poc
+
+# `poc.toml` sits next to this file because Cloudflare resolves the image build
+# context to "the directory of `image`" unless `image_build_context` overrides
+# it -- a Dockerfile at the repository root would fail this COPY at deploy time.
+COPY poc.toml /etc/ferrogate/poc.toml
+
+# Overrides the base image's Caddyfile default. Also set redundantly in the
+# Worker's `envVars` (src/index.ts) so an operator reading either file sees it.
+ENV FERROGATE_CONFIG=/etc/ferrogate/poc.toml
+
+EXPOSE 8080
+CMD ["ferrogate", "run"]

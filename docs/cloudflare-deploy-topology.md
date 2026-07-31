@@ -54,7 +54,7 @@ documented by CF, this doc says so explicitly rather than guessing.
 - [6. Bindings vs REST: the container↔Worker shim decision](#6-bindings-vs-rest-the-containerworker-shim-decision)
 - [7. Cost model](#7-cost-model)
 - [8. Recommendation and phased adoption](#8-recommendation-and-phased-adoption)
-- [9. PoC runbook (pending execution)](#9-poc-runbook-pending-execution)
+- [9. PoC](#9-poc)
 - [10. Verified sources](#10-verified-sources)
 
 ---
@@ -312,10 +312,31 @@ reference page itself; both come from the changelogs cited in §10.)
 | Dimension | Public REST (off-CF or naive on-CF) | Bindings via shim (on-CF) |
 |---|---|---|
 | Rate limit | 1,200 req/5 min/user global (~4 req/s), 5-min 429 lockout | Not subject to the API rate limit; bounded only by per-product binding limits and billing |
-| Latency | Public-internet RTT to `api.cloudflare.com` per call, plus token auth | In-runtime handler → binding call; container→handler hop is local HTTP. CF does not publish a number — **PoC step P8 measures it**; expect order-of-magnitude better than public RTT |
+| Latency | Public-internet RTT to `api.cloudflare.com` per call, plus token auth | In-runtime handler → binding call; container→handler hop is local HTTP. **UNKNOWN — not quantified, and not counted as a win below.** See the note under this table |
 | Token management | Account API token(s): scope union, rotation, 50/user–500/account caps, secret distribution to every FerroGate node | None in the container ("no token is ever passed into the sandbox"); Worker-side secrets rotate live |
 | Failure modes | 429 storms block ALL API use for 5 min account-wide | Isolated per-binding errors |
 | Availability | Anywhere (incl. self-hosted) | Only when the runtime is deployed on CF Containers |
+
+**On the latency row — an explicit unknown, not a deferred estimate.** Neither
+side of that comparison has a number here. Cloudflare publishes no figure for
+the container→handler hop, and no public-REST RTT baseline was measured, so an
+earlier draft's "expect order-of-magnitude better than public RTT" was an
+expectation wearing the clothes of a measurement. It is withdrawn. **The
+bindings-vs-REST decision below therefore rests on exactly two quantified wins —
+the rate limit and token management — plus the qualitative failure-mode
+difference. Latency is not one of them.** Two caveats that survive regardless
+and are worth stating, because they are structural rather than empirical: every
+binding access from the container is an HTTP round trip to the Workers runtime
+(the container holds no binding object), so this is a per-access tax on the hot
+path and *not* an in-datacenter shortcut; and the public REST path additionally
+carries token auth per call. Which of the two is faster in practice is open.
+
+The instrument that would close this now ships rather than being described:
+`workers/ferrogate-poc/src/origin.ts` sets `x-ferrogate-poc-origin-ms` on every
+forwarded response, and the shim handlers are committed at
+`workers/ferrogate-poc/src/shim.ts`. Runbook step P8, run against a deployed
+instance, is what turns the row into a number; until then this row stays UNKNOWN
+and no recommendation may lean on it.
 
 **Decision.** Adopt the shim as the **standard CF-access path whenever the
 runtime runs on Cloudflare**: define a fixed set of FerroGate virtual hosts
@@ -433,12 +454,15 @@ account and so cannot be done in the development environment.
 
 1. *Edge Worker for hybrid topology* — thin auth/cache/guardrail pre-check
    Worker forwarding to the FerroGate origin; per-route rollout config.
-2. *Execute the #424 Containers PoC runbook* — run §9 on a live CF account;
-   record cold start, 5432 egress result, DO-duration billing on streams, shim
-   latency; update this doc's "pending verification" notes.
-3. *On-CF config profile* — a documented config preset: `listen = "0.0.0.0:8080"`,
-   TLS/ACME disabled, readiness tuned for `startAndWaitForPorts`, sweeper
-   behavior under restart documented.
+2. *Execute the #424 Containers PoC on a live account* — the artifact is
+   committed (`workers/ferrogate-poc/`) and its docker-free half is gated; §9
+   P4–P9 still need a Workers Paid account and Docker. Record cold start, the
+   5432 egress result, DO-duration billing on streams, and shim latency, then
+   replace §6's UNKNOWN latency row with the measurement.
+3. *On-CF config profile* — promote `workers/ferrogate-poc/poc.toml` from a PoC
+   overlay to a documented preset: `listen = "0.0.0.0:8080"`, TLS/ACME disabled,
+   readiness tuned for `startAndWaitForPorts`, sweeper behavior under restart
+   documented.
 4. *Rust binding-shim client* — small crate/module speaking plain HTTP to the
    `outboundByHost` virtual hosts; integrate with the `cf://` resolver seam
    (#423) and `AgentMemoryClient` (#427); REST fallback preserved off-CF.
@@ -448,12 +472,42 @@ account and so cannot be done in the development environment.
 6. *D1 control-plane backend spike* — `RuntimeControlPlaneBackend::D1` variant
    feasibility against the repository traits (depends on #419/#420).
 
-## 9. PoC runbook (pending execution)
+## 9. PoC
 
-**Status: NOT executed.** This sandbox has no Docker and no live CF account.
-The runbook below is written to be executed verbatim by an operator/test agent
-with a Workers Paid account and Docker. Until then the PoC acceptance box is
-**pending-execution**.
+**Status: the PoC is a committed, runnable artifact — `workers/ferrogate-poc/`.**
+An earlier revision of this section was prose: a `Dockerfile.poc`, a
+`wrangler.toml` and a `src/index.ts` quoted inside fenced blocks, written to
+disk nowhere. Prose cannot be typechecked, gated or run, and its correctness
+was therefore nobody's. Every one of those files now exists in the tree, is
+typechecked by `scripts/check-workers.sh`, and is guarded against the two
+runtime mistakes `tsc` cannot see (#484).
+
+The PoC splits cleanly along the line of what needs Cloudflare:
+
+| | Proven where | State |
+|---|---|---|
+| The Pingora binary serves `/healthz` (`runtime: pingora`), `/readyz`, and proxies one `/v1/chat/completions` **behind a Worker booted in workerd** | `workers/ferrogate-poc` — `npm test`, gated by `scripts/check-workers.sh`, no Docker and no CF account | **Executable now** |
+| `outboundByHost` handlers resolve a real KV binding and separate a miss from an empty value | same suite, real workerd KV binding | **Executable now** |
+| Container binding, outbound *interception*, 5432 egress, cold start, DO duration billing, shim latency | Cloudflare only | **P4–P9 below, operator work** |
+
+Be precise about the split. The local suite proves the binary runs and behaves
+like FerroGate under a Worker front, and that the shim handlers are correct. It
+does **not** prove the container binding (miniflare cannot back a Durable Object
+with a real container without Docker) and it does **not** prove that Cloudflare
+*routes* a container's request to `cf-kv.internal` into a handler at all. Those
+are platform behaviours with no local equivalent; P4–P9 remain the only things
+that can establish them, and this box being green must never be read as their
+being answered. `workers/ferrogate-poc/README.md` repeats this list at the
+artifact itself so it cannot be lost in transit.
+
+P1–P3 below now describe how to *build and deploy* the committed artifact rather
+than how to author it. Running the docker-free half first is cheap and rules out
+an entire class of red in P5:
+
+```sh
+cargo build -p ferrogate-cli          # target/debug/ferrogate
+cd workers/ferrogate-poc && npm ci && npm run typecheck && npm test
+```
 
 **P1 — build the image (operator machine).** CF requires `linux/amd64`.
 
@@ -465,34 +519,25 @@ Uses the repo-root `Dockerfile` unchanged (§1). Expect a release build of
 `ferrogate` + `ferrogate-auth`; final image is `debian:bookworm-slim`-based,
 comfortably under the 8 GB `standard-1` disk/image cap.
 
-**P2 — PoC config layer.** The stock image defaults to the Caddyfile config;
-the PoC overlays a minimal TOML (CF terminates TLS, so no `tls` section; bind
-all interfaces; one upstream provider; Postgres control plane pointing at an
-external DSN, e.g. Neon). Write both files into the **P3 directory**
-(`workers/ferrogate-poc/`) — P3's `wrangler.toml` resolves the image build
-context to the directory holding `Dockerfile.poc`:
+**P2 — PoC config layer (committed).** The stock image defaults to the
+Caddyfile config; the PoC overlays a minimal TOML. Both files are in the tree,
+next to the `wrangler.toml` that references them, because Cloudflare resolves
+the image build context to "the directory of `image`":
 
-```dockerfile
-# workers/ferrogate-poc/Dockerfile.poc
-FROM ferrogate:poc
-COPY poc.toml /etc/ferrogate/poc.toml
-ENV FERROGATE_CONFIG=/etc/ferrogate/poc.toml
-```
+- [`workers/ferrogate-poc/Dockerfile.poc`](../workers/ferrogate-poc/Dockerfile.poc)
+  — a thin `FROM ferrogate:poc` overlay. It resolves against the **local**
+  Docker daemon, so P1 must run on the machine that later runs `wrangler deploy`.
+- [`workers/ferrogate-poc/poc.toml`](../workers/ferrogate-poc/poc.toml) —
+  `listen = "0.0.0.0:8080"` (a loopback bind is unreachable from the fronting
+  Worker and would read as a platform failure), **no `[tls]` section** (CF
+  terminates TLS; ACME state would not survive hibernation), and `[storage]`
+  pointing at external Postgres via `postgres_dsn_env`.
 
-`FROM ferrogate:poc` resolves against the **local** Docker daemon, so P1 must
-have run on the same machine that later runs `wrangler deploy`.
-
-`poc.toml` (derive from `config/ferrogate.example.toml`; key lines):
-
-```toml
-listen = "0.0.0.0:8080"
-# [storage] postgres DSN with tls_mode = "require" -> external Postgres
-# one [providers.*] entry with an env-sourced API key
-```
-
-Secrets are **not** baked into `poc.toml` — reference env vars the P3
-`envVars` block supplies (`FERROGATE_POC_PG_DSN`, `FERROGATE_POC_PROVIDER_KEY`);
-otherwise the DSN and provider key ship inside the image.
+Secrets are **not** baked into either file: `poc.toml` names
+`FERROGATE_POC_PG_DSN` and `FERROGATE_POC_PROVIDER_KEY`, and the Worker supplies
+them through `envVars` from Wrangler secrets. `src/index.ts` throws at container
+start if either is missing, so a mis-provisioned instance fails by name instead
+of booting and returning a 401 or 502 that no probe explains.
 
 Build the config image, then smoke-test it:
 
@@ -506,137 +551,61 @@ curl -s localhost:8080/healthz
 ```
 
 → expect `{"status":"ok","service":"...","version":"...","runtime":"pingora"}`
-(shape grounded at `crates/ferrogate-gateway/src/server/local.rs:256-266`). Keep
+(shape grounded at `crates/ferrogate-gateway/src/server/local.rs:269-281`). Keep
 this container running: it is the **direct-origin baseline** P8 compares the
 Worker-fronted path against — CF states end-users cannot reach a deployed
 instance except through the Worker, so no baseline exists after P4.
 
-**P3 — Containers app.** New directory (suggested `workers/ferrogate-poc/`,
-created by the executing agent, not this spike). `Dockerfile.poc` and `poc.toml`
-from P2 live **in this directory**: CF resolves the image build context to "the
-directory of `image`" unless `image_build_context` overrides it, so a
-`Dockerfile.poc` at the repo root with `wrangler.toml` here would fail its
-`COPY poc.toml` at deploy time.
+**P3 — Containers app (committed).** [`workers/ferrogate-poc/`](../workers/ferrogate-poc/)
+is the Wrangler project. Read
+[its README](../workers/ferrogate-poc/README.md) for the file-by-file map; the
+parts that matter to this runbook:
 
-First create the namespace P7 reads, and keep the id it prints:
+- [`wrangler.toml`](../workers/ferrogate-poc/wrangler.toml) — `[[containers]]`
+  (`instance_type = "standard-1"`, `max_instances = 1`), the `FERROGATE` DO
+  binding, the `v1` SQLite migration, and the `POC_KV` namespace **P7b requires**.
+  Create the namespace and paste the id it prints:
 
-```sh
-npx wrangler kv namespace create POC_KV
-```
+  ```sh
+  npx wrangler kv namespace create POC_KV
+  ```
 
-`wrangler.toml`:
+  Then set the two secrets, which are deliberately not vars:
 
-```toml
-name = "ferrogate-container-poc"
-main = "src/index.ts"
-compatibility_date = "2025-06-01"
+  ```sh
+  npx wrangler secret put FERROGATE_POC_PG_DSN
+  npx wrangler secret put FERROGATE_POC_PROVIDER_KEY
+  ```
 
-[[containers]]
-class_name = "FerroGateContainer"
-image = "./Dockerfile.poc"
-max_instances = 1
-instance_type = "standard-1"
+- [`src/index.ts`](../workers/ferrogate-poc/src/index.ts) — the entrypoint. Two
+  lines in it are load-bearing and **invisible to `tsc`**, which is why
+  `scripts/check-workers.sh` greps for both (#484): `export { ContainerProxy };`
+  (without it, outbound interception never installs and the handler table is
+  dead code), and `FerroGateContainer.outboundByHost = OUTBOUND_BY_HOST;` as an
+  *assignment after the class* — the SDK implements `outboundByHost` as an
+  inherited static accessor, and an ES2022 static class field would define an
+  own property that shadows the setter, leaving the registry empty. Either
+  mistake makes P7 report a false negative on the §6 decision.
+- [`src/shim.ts`](../workers/ferrogate-poc/src/shim.ts) — the handler table P7
+  probes, with one distinct status per failure path so a red probe names its own
+  cause.
 
-[[durable_objects.bindings]]
-name = "FERROGATE"
-class_name = "FerroGateContainer"
+Pin `@cloudflare/containers` ≥ **0.3.0** (`package.json` pins 0.3.7). 0.2.0
+carries the base outbound-Worker feature only, without `interceptHttps` or
+credential injection — none of the zero-trust property §6 leans on. See the
+version-gate note in §6.
 
-# REQUIRED BY P7. The outbound handler resolves `env.POC_KV`; with no
-# [[kv_namespaces]] block the binding is undefined and P7 reports a failure
-# that has nothing to do with the shim — the same false-negative class as a
-# missing `export { ContainerProxy }`.
-[[kv_namespaces]]
-binding = "POC_KV"
-id = "<id printed by `wrangler kv namespace create POC_KV`>"
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["FerroGateContainer"]
-```
-
-`src/index.ts` (pin `@cloudflare/containers` ≥ 0.3.0 — see the version-gate note
-in §6: 0.2.0 carries the base outbound-Worker feature only, without
-`interceptHttps` or credential injection. Verify helper names against the
-pinned version, same caveat discipline as
-`workers/agent-gateway/wrangler.toml:26-32`. Run `npx wrangler types` to
-generate the `Env` interface referenced below. This block type-checks clean
-under `tsc --strict` against `@cloudflare/containers@0.3.7`, verified
-2026-07-25):
-
-```ts
-import { Container, ContainerProxy, getContainer } from "@cloudflare/containers";
-
-// REQUIRED — not optional, and not covered by any other line in this file.
-// CF: "Export `ContainerProxy` from your Worker entrypoint for outbound
-// interception to work." Mechanism: `ContainerProxy extends WorkerEntrypoint`
-// (`@cloudflare/containers@0.3.7` typings), and the runtime can only dispatch
-// to a WorkerEntrypoint that is a named export of the entry module. Omit this
-// line and `outboundByHost` below is dead code: the container's request to
-// cf-kv.internal is never seen by a handler, and P7 fails for a reason that
-// has nothing to do with bindings. Note this is a *runtime* requirement —
-// `tsc` will not catch its absence.
-// <https://developers.cloudflare.com/containers/platform-details/outbound-traffic/>
-export { ContainerProxy };
-
-export class FerroGateContainer extends Container {
-  defaultPort = 8080;
-  sleepAfter = "10m";
-  // Nothing else injects environment into the container: the image carries
-  // poc.toml (P2) but not its secrets. Without this block P5 has no provider
-  // key and P6 has no DSN, so both fail before they test what they claim to.
-  // `envVars` is the documented mechanism (container-package reference, §10).
-  envVars = {
-    FERROGATE_CONFIG: "/etc/ferrogate/poc.toml",
-    FERROGATE_POC_PG_DSN: "<external Postgres DSN, tls_mode=require>",
-    FERROGATE_POC_PROVIDER_KEY: "<upstream provider API key>",
-  };
-}
-
-// Use assignment, not a static class field. The package implements this as an
-// inherited static setter; an ES2022 class field shadows that setter and leaves
-// the runtime registry empty, so P7 false-negatives with a DNS or network error
-// even though the sample type-checks.
-FerroGateContainer.outboundByHost = {
-  // P7a — bindingless liveness probe. Touches no binding, so it can only
-  // ever answer one question: "is outbound interception installed?".
-  "cf-selftest.internal": async () =>
-    new Response("outbound-intercept-ok", { status: 200 }),
-  // P7b — the real binding probe. Every failure path returns a distinct
-  // status so a red P7 names its own cause instead of implying "the shim
-  // is broken".
-  "cf-kv.internal": async (request: Request, env: Env) => {
-    if (!env.POC_KV) {
-      // [[kv_namespaces]] missing from wrangler.toml — config gap, NOT a
-      // platform gap. Reaching this line already proves the shim works.
-      return new Response("POC_KV binding not declared", { status: 501 });
-    }
-    const key = new URL(request.url).pathname.slice(1);
-    const value = await env.POC_KV.get(key);
-    // Do not `new Response(value)` directly: KV returns null on a miss and
-    // `new Response(null)` is a 200 with an empty body, so a miss would be
-    // indistinguishable from a successful read of an empty value.
-    return value === null
-      ? new Response(`kv miss for key: ${key}`, { status: 404 })
-      : new Response(value, { status: 200 });
-  },
-};
-
-export default {
-  async fetch(request: Request, env: Env) {
-    return getContainer(env.FERROGATE, "poc").fetch(request);
-  },
-};
-```
-
-**Pre-deploy assertion** (cheap, and it is the whole content of #484):
+**Pre-deploy assertion (#484) — now automated, not a copy-paste snippet.** The
+three greps live in `scripts/check-workers.sh` (`ferrogate_poc_source_guards`)
+and run on every invocation of the Workers gate, so the entrypoint cannot
+regress into a shape that would false-negative P7. Their failure modes are
+pinned by `scripts/test-check-workers.sh`: delete the `ContainerProxy` re-export
+or turn `outboundByHost` into a static class field and the contract test goes
+red by name.
 
 ```sh
-grep -q 'export { ContainerProxy }' src/index.ts \
-  || { echo "P3 is missing the ContainerProxy re-export; P7 would false-negative"; exit 1; }
-grep -Eq '^FerroGateContainer[.]outboundByHost[[:space:]]*=' src/index.ts \
-  || { echo "P3 must assign FerroGateContainer.outboundByHost after the class; a static class field shadows the SDK setter"; exit 1; }
-! grep -Eq '^[[:space:]]*static[[:space:]]+outboundByHost' src/index.ts \
-  || { echo "P3 uses static outboundByHost; ES2022 class fields bypass the SDK registry setter"; exit 1; }
+scripts/check-workers.sh   # typecheck + #484 guards + the docker-free PoC suite
 ```
 
 **P4 — deploy.** `npx wrangler deploy` (Workers Paid). Expected: image pushed

@@ -61,7 +61,7 @@ echo "-- gating ${#WORKERS[@]} workers: ${WORKERS[*]}"
 # green. Keep the expected set explicit, then require it to equal the configs
 # in the tree before any Worker is checked. Adding or removing a workerd suite
 # is therefore an intentional gate change, never a silent coverage change.
-EXPECTED_WORKER_E2E=(agent-gateway gateway-front telemetry-collector)
+EXPECTED_WORKER_E2E=(agent-gateway ferrogate-poc gateway-front telemetry-collector)
 ACTUAL_WORKER_E2E=()
 for expected in "${EXPECTED_WORKER_E2E[@]}"; do
   if [ ! -f "$ROOT/workers/$expected/package.json" ]; then
@@ -87,6 +87,79 @@ worker_runs_e2e() {
     [ "$expected" = "$1" ] && return 0
   done
   return 1
+}
+
+# --- ferrogate-poc (#424) --------------------------------------------------
+#
+# The Cloudflare Containers PoC is the only Worker here whose suite proxies to a
+# real process: it boots the PoC Worker in workerd in front of an actual spawned
+# `ferrogate run`. That is the whole point -- a Worker talking to a mock proves
+# nothing about whether the Pingora binary runs under a Worker-fronted container.
+#
+# This gate must stay Node/npm-only (AGENTS.md "CI Workflow Structure";
+# .github/workflows/workers.yml is path-filtered and cargo-free), so it locates a
+# PREBUILT binary and never builds one. `cargo test --workspace` and
+# `cargo build -p ferrogate-cli` both produce target/debug/ferrogate, so the
+# local release mirror (scripts/release-local.sh) always has it by the time this
+# runs.
+#
+# Missing binary is a HARD FAILURE, not a skip -- unproven must not read as OK,
+# the same polarity as the admin-console gate refusing an unlaunchable chromium.
+# The Node-only CI lane opts out explicitly with WORKERS_SKIP_POC_ORIGIN=1, which
+# prints exactly what went unproven instead of quietly narrowing the gate.
+ferrogate_poc_locate_binary() {
+  local candidate
+  if [ -n "${FERROGATE_BIN:-}" ]; then
+    [ -x "$FERROGATE_BIN" ] && return 0
+    echo "ERROR: FERROGATE_BIN=$FERROGATE_BIN is not an executable file" >&2
+    return 1
+  fi
+  for candidate in "$ROOT/target/debug/ferrogate" "$ROOT/target/release/ferrogate"; do
+    if [ -x "$candidate" ]; then
+      FERROGATE_BIN="$candidate"
+      export FERROGATE_BIN
+      return 0
+    fi
+  done
+  return 1
+}
+
+ferrogate_poc_prepare() {
+  if ferrogate_poc_locate_binary; then
+    echo "-- ferrogate-poc origin: $FERROGATE_BIN"
+    return 0
+  fi
+  if [ "${WORKERS_SKIP_POC_ORIGIN:-}" = "1" ]; then
+    echo "NOTE: workers/ferrogate-poc: NOT PROVEN -- no ferrogate binary, and" >&2
+    echo "      WORKERS_SKIP_POC_ORIGIN=1 was set. The #424 Containers PoC slice" >&2
+    echo "      (health + readiness + one proxied /v1/chat/completions against the" >&2
+    echo "      real Pingora binary) did NOT run in this invocation." >&2
+    return 1
+  fi
+  echo "ERROR: workers/ferrogate-poc: no ferrogate binary found (#424)." >&2
+  echo "       looked at: \$FERROGATE_BIN, $ROOT/target/debug/ferrogate, $ROOT/target/release/ferrogate" >&2
+  echo "       build one with 'cargo build -p ferrogate-cli', or set FERROGATE_BIN=<path>." >&2
+  echo "       Set WORKERS_SKIP_POC_ORIGIN=1 to opt out on purpose in a cargo-free lane." >&2
+  exit 1
+}
+
+# Two runtime requirements `tsc` cannot see, both of which would turn the shim
+# probe into a FALSE NEGATIVE on the load-bearing claim of #424 §6 (issue #484):
+#   1. `export { ContainerProxy };` -- Cloudflare dispatches outbound
+#      interception to a WorkerEntrypoint that must be a named export of the
+#      entry module. Without it, outboundByHost is dead code.
+#   2. `outboundByHost` assigned AFTER the class, never as a static class field --
+#      the SDK implements it as an inherited static accessor, and an ES2022
+#      static field defines an own property that shadows the setter, leaving the
+#      registry empty.
+ferrogate_poc_source_guards() {
+  local entry="$ROOT/workers/ferrogate-poc/src/index.ts"
+  grep -q 'export { ContainerProxy }' "$entry" \
+    || { echo "ERROR: workers/ferrogate-poc/src/index.ts is missing 'export { ContainerProxy };' -- outbound interception would silently not install (#484)" >&2; exit 1; }
+  grep -Eq '^FerroGateContainer[.]outboundByHost[[:space:]]*=' "$entry" \
+    || { echo "ERROR: workers/ferrogate-poc/src/index.ts must assign FerroGateContainer.outboundByHost after the class (#484)" >&2; exit 1; }
+  ! grep -Eq '^[[:space:]]*static[[:space:]]+outboundByHost' "$entry" \
+    || { echo "ERROR: workers/ferrogate-poc/src/index.ts uses a static outboundByHost class field, which shadows the SDK setter (#484)" >&2; exit 1; }
 }
 
 echo "== workers gate =="
@@ -138,7 +211,16 @@ for worker in "${WORKERS[@]}"; do
   # workerd via @cloudflare/vitest-pool-workers (miniflare) — NO Docker, NO live
   # Cloudflare account. The exact set is checked above so deleting a config is a
   # hard failure rather than a silent downgrade to typecheck-only.
+  if [ "$worker" = "ferrogate-poc" ]; then
+    echo "-- ferrogate-poc source guards (#484)"
+    ferrogate_poc_source_guards
+  fi
+
   if worker_runs_e2e "$worker"; then
+    if [ "$worker" = "ferrogate-poc" ] && ! ferrogate_poc_prepare; then
+      echo "workers/$worker: typecheck OK, origin-backed E2E NOT RUN (see note above)"
+      continue
+    fi
     echo "-- worker E2E (vitest run, workerd/miniflare — no docker)"
     # WALL CLOCK, because the failure this gate met in #559 was not a red suite but
     # NO suite: a Durable Object aborted mid-request wedged vitest-pool-workers, and

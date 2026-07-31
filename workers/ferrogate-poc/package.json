@@ -1,0 +1,24 @@
+{
+  "name": "ferrogate-poc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FerroGate Cloudflare Containers PoC (issue #424): the deployable Containers entrypoint plus the docker-free workerd harness that boots it against a locally spawned `ferrogate run`.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --local",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.8",
+    "@cloudflare/workers-types": "^5.20260722.1",
+    "typescript": "5.5.4",
+    "vitest": "4.1.10",
+    "wrangler": "4.114.0"
+  }
+}
