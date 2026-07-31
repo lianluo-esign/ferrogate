@@ -7,12 +7,13 @@
  * a route that is not in the contract, and the router records what it mounted so
  * `test/contract.test.ts` can assert the two never drift.
  *
- * Ownership this wave (see the task split in ROUTE-MAP.md):
- *   - the 6 inference operations  → owned by the inference agent
- *   - the 18 `/v1/assets/**` ops  → owned by the assets agent
- * Both are in the contract table and both are guarded by `contractAuth`; they
- * are simply mounted by *their* agent's `RouteModule`, passed into
- * `createGatewayApp({ modules })`. Everything else is mounted here.
+ * Ownership (see the task split in ROUTE-MAP.md):
+ *   - the 6 inference operations  → `src/inference/route-module.ts`
+ *   - the 18 `/v1/assets/**` ops  → `src/assets/handlers.ts`
+ * Both are in the contract table and both are guarded by `contractAuth`; each
+ * is mounted by its own `RouteModule`, listed in `GATEWAY_ROUTE_MODULES` in
+ * `src/index.ts` and passed to `createGatewayApp({ modules })`. Everything else
+ * is mounted here.
  */
 import { Hono } from "hono";
 import type { Context } from "hono";
@@ -90,14 +91,14 @@ export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
 ];
 
 /**
- * Gateway-owned operations another agent mounts this wave. The anti-drift test
- * requires every gateway-owned id to be either registered or listed here, so
- * this list shrinks to empty as those modules land — it cannot be forgotten.
+ * Gateway-owned operations no module mounts yet. The anti-drift test requires
+ * every gateway-owned id to be either registered on the app the Worker exports
+ * or listed here, so this list cannot be forgotten.
+ *
+ * EMPTY as of the composition-root wiring: `src/index.ts` mounts
+ * `inferenceRouteModule()` + `assetRouteModule()`, so all 31 are live.
  */
-export const PENDING_MODULE_OPERATION_IDS: readonly string[] = [
-  ...INFERENCE_OPERATION_IDS,
-  ...ASSET_OPERATION_IDS,
-];
+export const PENDING_MODULE_OPERATION_IDS: readonly string[] = [];
 
 // ---------------------------------------------------------------------------
 // Router

@@ -7,7 +7,9 @@
  * visibility/method census, the matcher's specificity rules, and the guarantee
  * that every gateway-owned operation is actually mounted.
  */
+import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { GATEWAY_ROUTE_MODULES, gatewayRouter } from "../src/index.js";
 import {
   AUTH_KINDS,
   type AuthKind,
@@ -246,7 +248,11 @@ describe("scope semantics", () => {
 });
 
 describe("route registration", () => {
-  const { router } = createGatewayApp();
+  // The PRODUCTION router — the one `src/index.ts` hands to `export default`.
+  // Deliberately NOT a bespoke `createGatewayApp({ modules: [...] })` built
+  // here: a local module list is exactly how the deployed Worker came to mount
+  // 7 of its 31 operations while this suite stayed green.
+  const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
   it("owns exactly the 31 operations ROUTE-MAP assigns to apps/gateway", () => {
@@ -264,6 +270,32 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
+  it("mounts ALL 31 gateway-owned operations on the app the Worker exports", () => {
+    // THE gate. Nothing may be excused by a pending list: every operation
+    // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
+    const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
+      (operationId) => !registered.has(operationId),
+    );
+    expect(missing).toEqual([]);
+    // ...and the registry is exactly the 31 owned + the 2 shared health ops,
+    // so a stray registration is caught in the same breath.
+    expect(new Set(registered)).toEqual(
+      new Set([...SHARED_OPERATION_IDS, ...GATEWAY_OWNED_OPERATION_IDS]),
+    );
+  });
+
+  it("builds the production registry from the module list src/index.ts exports", () => {
+    // The modules are the ones the composition root uses, not a copy.
+    const fromModules = GATEWAY_ROUTE_MODULES.flatMap((module) => module.operationIds);
+    expect(new Set(fromModules)).toEqual(
+      new Set([...INFERENCE_OPERATION_IDS, ...ASSET_OPERATION_IDS]),
+    );
+    // Every id a module claims is actually registered by that module.
+    for (const operationId of fromModules) {
+      expect(registered.has(operationId), operationId).toBe(true);
+    }
+  });
+
   it("registers the shared health operations", () => {
     for (const operationId of SHARED_OPERATION_IDS) {
       expect(registered.has(operationId), operationId).toBe(true);
@@ -276,16 +308,16 @@ describe("route registration", () => {
     }
   });
 
-  it("keeps the pending list honest", () => {
+  it("keeps the pending list honest — and it is now EMPTY", () => {
     // Every pending id is gateway-owned...
     for (const operationId of PENDING_MODULE_OPERATION_IDS) {
       expect(GATEWAY_OWNED_OPERATION_IDS).toContain(operationId);
       // ...and is NOT already mounted (otherwise the list is stale).
       expect(registered.has(operationId), operationId).toBe(false);
     }
-    expect(new Set(PENDING_MODULE_OPERATION_IDS)).toEqual(
-      new Set([...INFERENCE_OPERATION_IDS, ...ASSET_OPERATION_IDS]),
-    );
+    // Nothing is outstanding: the inference and asset modules are both wired
+    // into `src/index.ts`, so no gateway-owned operation may be excused.
+    expect(PENDING_MODULE_OPERATION_IDS).toEqual([]);
   });
 
   it("refuses an operation id that is not in the contract", () => {
@@ -301,8 +333,116 @@ describe("route registration", () => {
   });
 });
 
-// The inference (6) and asset (18) modules are owned by other agents this wave.
-// When they land they are appended to `modules` in src/index.ts and removed from
-// PENDING_MODULE_OPERATION_IDS, which tightens the assertion above automatically.
-it.todo("mounts the 6 inference operations (inference agent)");
-it.todo("mounts the 18 /v1/assets/** operations (assets agent)");
+/**
+ * The registry assertions above prove `src/index.ts` REGISTERED the 24 module
+ * operations. These prove the deployed Worker actually SERVES them: every
+ * request below goes through `SELF.fetch`, i.e. the real `export default app`
+ * in real `workerd`, with a credential that clears the contract guard. A
+ * contract path that is guarded but not mounted answers `404 not_found` from
+ * `gatewayNotFoundHandler` — so "not 404" is the mount proof, and the exact
+ * status/code asserted alongside it proves the module's own pipeline ran.
+ */
+const BASE = "https://ferrogate.test";
+/** Operator-authored static key with no scope list => every scope. */
+const ROOT = { authorization: "Bearer fg_root" } as const;
+
+async function envelope(response: Response): Promise<{ code: string; message: string }> {
+  const body = (await response.json()) as { error: { code: string; message: string } };
+  return body.error;
+}
+
+describe("the deployed Worker serves the mounted modules", () => {
+  it("mounts the 6 inference operations", async () => {
+    // GET /v1/models reaches the inference handler: an empty catalog, not a 404.
+    const models = await SELF.fetch(`${BASE}/v1/models`, { headers: ROOT });
+    expect(models.status).toBe(200);
+    expect(await models.json()).toEqual({ object: "list", data: [] });
+
+    // Every POST reaches the inner body-reader + Zod chain: an empty object is
+    // the module's own `400 invalid_request`, which only that chain produces.
+    const posts = [
+      "/v1/chat/completions",
+      "/v1/responses",
+      "/v1/messages",
+      "/v1/embeddings",
+      "/v1/images/generations",
+    ];
+    for (const path of posts) {
+      const res = await SELF.fetch(`${BASE}${path}`, {
+        method: "POST",
+        headers: { ...ROOT, "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(res.status, path).toBe(400);
+      expect((await envelope(res)).code, path).toBe("invalid_request");
+    }
+
+    // ...and the reader's `invalid_json` stays distinct from `invalid_request`,
+    // which is the behavior a plain Zod validator would have lost.
+    const malformed = await SELF.fetch(`${BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { ...ROOT, "content-type": "application/json" },
+      body: "{not json",
+    });
+    expect(malformed.status).toBe(400);
+    expect((await envelope(malformed)).code).toBe("invalid_json");
+  });
+
+  it("mounts the 18 /v1/assets/** operations", async () => {
+    // Reach EVERY asset operation at its contract path with its contract
+    // method. `fg_root` has no tenant attribution, so the asset service — which
+    // only runs once the route is mounted — answers `403 tenant_required`.
+    const probes: readonly (readonly [string, string, string])[] = [
+      ["listAssets", "GET", "/v1/assets"],
+      ["getAssetStorageSummary", "GET", "/v1/assets/storage/summary"],
+      ["listWithheldAssets", "GET", "/v1/assets/withheld"],
+      ["listAssetsByType", "GET", "/v1/assets/skill"],
+      ["getAsset", "GET", "/v1/assets/skill/hello/1.0.0"],
+      ["putAsset", "PUT", "/v1/assets/skill/hello/1.0.0"],
+      ["deleteAsset", "DELETE", "/v1/assets/skill/hello/1.0.0"],
+      ["getAssetManifest", "GET", "/v1/assets/skill/hello/manifest"],
+      ["listAssetChannels", "GET", "/v1/assets/skill/hello/channels"],
+      ["putAssetChannel", "PUT", "/v1/assets/skill/hello/channels/stable?version=1.0.0"],
+      ["deleteAssetChannel", "DELETE", "/v1/assets/skill/hello/channels/stable"],
+      ["yankAssetVersion", "POST", "/v1/assets/skill/hello/1.0.0/yank"],
+      ["unyankAssetVersion", "DELETE", "/v1/assets/skill/hello/1.0.0/yank"],
+      ["promoteAssetVisibility", "POST", "/v1/assets/skill/hello/1.0.0/visibility"],
+      ["createAssetUploadIntent", "POST", "/v1/assets/presign/upload/skill/hello/1.0.0"],
+      ["commitAssetUpload", "POST", "/v1/assets/presign/commit/skill/hello/1.0.0"],
+      ["abortAssetUpload", "POST", "/v1/assets/presign/abort/skill/hello/1.0.0"],
+      ["getAssetDownloadUrl", "GET", "/v1/assets/presign/download/skill/hello/1.0.0"],
+    ];
+    // The probe table is the contract's asset set, so a renamed operation
+    // cannot quietly drop out of this test.
+    expect(new Set(probes.map(([operationId]) => operationId))).toEqual(
+      new Set(ASSET_OPERATION_IDS),
+    );
+
+    for (const [operationId, method, path] of probes) {
+      const operation = operationById(operationId);
+      expect(operation?.method, operationId).toBe(method);
+      const res = await SELF.fetch(`${BASE}${path}`, {
+        method,
+        headers: { ...ROOT, "content-type": "application/json" },
+        ...(method === "POST" || method === "PUT" ? { body: "{}" } : {}),
+      });
+      // The mount proof: never the app's "no route" answer.
+      expect(res.status, `${operationId} ${method} ${path}`).not.toBe(404);
+      const { code } = await envelope(res);
+      expect(code, `${operationId} ${method} ${path}`).not.toBe("not_found");
+    }
+  });
+
+  it("still answers 404 for a contract path this Worker does not own", async () => {
+    // The control for the two tests above: `not 404` is only a mount proof
+    // because a contracted-but-unmounted path, reached with a credential that
+    // clears the guard, really does answer 404 here.
+    const unowned = operationById("getAdminStatus");
+    expect(unowned?.path).toBe("/admin/v1/status");
+    expect(GATEWAY_OWNED_OPERATION_IDS).not.toContain("getAdminStatus");
+
+    const res = await SELF.fetch(`${BASE}/admin/v1/status`, { headers: ROOT });
+    expect(res.status).toBe(404);
+    expect((await envelope(res)).code).toBe("not_found");
+  });
+});

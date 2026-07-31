@@ -12,22 +12,34 @@
  * the 31 operations this Worker owns.
  *
  * The inference (6 ops) and asset (18 ops) handlers arrive as `RouteModule`s
- * from their own directories and are added to `modules` below; they need no
- * change to the router, the guard, or the contract table.
+ * from their own directories and are mounted in `GATEWAY_ROUTE_MODULES` below;
+ * they need no change to the router, the guard, or the contract table.
  */
 import { PUBLIC_API_MAJOR } from "@ferrogate/core";
+import { assetRouteModule } from "./assets/index.js";
+import { inferenceRouteModule } from "./inference/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 
 /**
- * PORT-TODO(ROUTE-MAP §apps/gateway): append the inference and asset route
- * modules here once `src/inference/` and `src/assets/` land (owned by other
- * agents this wave). `PENDING_MODULE_OPERATION_IDS` in `./routes/index.ts`
- * tracks exactly which operation ids are still outstanding, and
- * `test/contract.test.ts` fails if that list and the mounted routes disagree.
+ * The route modules THIS Worker mounts — the single source of truth for what
+ * the deployed data plane serves. `test/contract.test.ts` imports this exact
+ * array (never a bespoke copy) and asserts all 31 gateway-owned operation ids
+ * are registered, so a module dropped from this list fails the suite.
+ *
+ * Both take their offline in-memory defaults here: the inference ports resolve
+ * no models until routing is wired, and the asset ports presign nothing until a
+ * bucket binding exists. Neither default is a stub route — every one of the 24
+ * operations is matched, authenticated and scope-checked.
  */
-const modules: readonly RouteModule[] = [];
+export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
+  inferenceRouteModule(),
+  assetRouteModule(),
+];
 
-const { app } = createGatewayApp({ modules });
+const { app, router } = createGatewayApp({ modules: GATEWAY_ROUTE_MODULES });
+
+/** The registry of what the deployed Worker actually mounted (anti-drift test). */
+export const gatewayRouter = router;
 
 app.get("/version", (c) => c.json({ api: PUBLIC_API_MAJOR }));
 

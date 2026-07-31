@@ -4,11 +4,12 @@
  * uniform error envelope, with only the object store and the presigner
  * substituted (no bucket exists offline).
  *
- * `SELF.fetch` is not used here on purpose: `src/index.ts` does not yet mount
- * the asset module (another agent owns that file this wave), so the suite
- * assembles the same app the shell will assemble — `createGatewayApp({ modules:
- * [assetRouteModule(...)] })` — and drives it with `app.request`. When the
- * shell wires the module in, nothing below changes.
+ * `SELF.fetch` is not used here on purpose: these cases need a substituted
+ * object store, presigner and entitlement table, which the deployed Worker's
+ * bindings do not provide offline. The suite therefore assembles the same app
+ * the shell assembles — `createGatewayApp({ modules: [assetRouteModule(...)] })`
+ * — and drives it with `app.request`. That the SHELL really mounts this module
+ * is proved separately, over `SELF.fetch`, in `test/contract.test.ts`.
  */
 import { describe, expect, test } from "vitest";
 import { ORDERED_ASSET_OPERATION_IDS, assetRouteModule } from "../../src/assets/handlers.js";

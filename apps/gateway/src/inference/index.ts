@@ -5,12 +5,15 @@
  *   listModels · createChatCompletion · createResponse · createMessage ·
  *   createEmbedding · createImage
  *
- * Mount it from the app shell:
+ * Mount it from the app shell as a contract-driven `RouteModule`:
  *
  * ```ts
- * import { createInferenceRouter } from "./inference/index.js";
- * app.route("/", createInferenceRouter({ models, adapters, usage }));
+ * import { inferenceRouteModule } from "./inference/index.js";
+ * const { app } = createGatewayApp({ modules: [inferenceRouteModule({ models })] });
  * ```
+ *
+ * `createInferenceRouter` remains exported as the standalone `Hono` the module
+ * delegates into (and that the unit suites drive directly).
  *
  * With no arguments every port falls back to the in-memory default in
  * `defaults.ts`, which is enough to boot and to test but resolves no models
@@ -18,6 +21,7 @@
  */
 export { createInferenceRouter } from "./handlers.js";
 export type { InferenceEnv } from "./handlers.js";
+export { inferenceRouteModule } from "./route-module.js";
 
 export * from "./ports.js";
 export * from "./schemas.js";
