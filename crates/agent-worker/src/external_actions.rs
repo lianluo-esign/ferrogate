@@ -3803,6 +3803,19 @@ impl RestDispatchFailure {
         }
     }
 
+    /// Classify a failure that happened with the request already fully on the
+    /// wire, so the upstream may have acted on it. Pinned explicitly rather than
+    /// left to [`From`]'s default at call sites where the classification is a
+    /// deliberate claim about the wire — an x402 `402` refusal is one: the
+    /// merchant answered, so the request provably WAS sent, and the hold must be
+    /// retained even though nothing was paid (#353).
+    fn sent_or_unknown(error: FrameworkAdapterError) -> Self {
+        Self {
+            stage: RequestWireStage::SentOrUnknown,
+            error,
+        }
+    }
+
     /// Collapse back to the shared adapter error, carrying the wire stage into
     /// the operator-facing message.
     ///
@@ -4058,7 +4071,9 @@ fn run_authorized_rest_action(
     let response = String::from_utf8_lossy(&response);
     let status_code = parse_smoke_http_status(response.lines().next().unwrap_or_default())?;
     if status_code == STATUS_PAYMENT_REQUIRED {
-        return Err(payment_required_failure(action, &response).into());
+        return Err(RestDispatchFailure::sent_or_unknown(
+            payment_required_failure(action, &response),
+        ));
     }
     if !(200..300).contains(&status_code) {
         return Err(FrameworkAdapterError::CapabilityDenied(format!(
@@ -4087,11 +4102,26 @@ fn run_authorized_rest_action(
 /// failure mode — a missing header, an unparseable challenge, a redirected
 /// resource — is a refusal, never a payment.
 fn payment_required_failure(action: &ManagedRestAction, response: &str) -> FrameworkAdapterError {
-    let Some(header) = response_header_value(response, HEADER_PAYMENT_REQUIRED) else {
-        return FrameworkAdapterError::CapabilityDenied(format!(
-            "managed REST action returned status {STATUS_PAYMENT_REQUIRED} without a \
-             {HEADER_PAYMENT_REQUIRED} challenge header; nothing was paid"
-        ));
+    let header = match response_header_value(response, HEADER_PAYMENT_REQUIRED) {
+        HeaderLookup::Single(value) => value,
+        HeaderLookup::Absent => {
+            return FrameworkAdapterError::CapabilityDenied(format!(
+                "managed REST action returned status {STATUS_PAYMENT_REQUIRED} without a \
+                 {HEADER_PAYMENT_REQUIRED} challenge header; nothing was paid"
+            ));
+        }
+        HeaderLookup::Duplicated { count } => {
+            // The count is the only diagnostic an operator can act on here, and
+            // it is derived from the header block alone — it names no challenge
+            // hash, amount, payee or resource, so it cannot smuggle out either
+            // demand's evidence while still telling the operator how ambiguous
+            // the merchant was.
+            return FrameworkAdapterError::CapabilityDenied(format!(
+                "managed REST action returned status {STATUS_PAYMENT_REQUIRED} with more than one \
+                 {HEADER_PAYMENT_REQUIRED} challenge header ({count} present); the demand is \
+                 ambiguous and no single challenge can be reported, so nothing was paid"
+            ));
+        }
     };
     let request = AuthorizedRequest::new(action.method.clone(), action.url.clone());
     match detect_payment_required(header, request) {
@@ -4110,22 +4140,57 @@ fn payment_required_failure(action: &ManagedRestAction, response: &str) -> Frame
     }
 }
 
+/// What a single-header lookup found in a raw HTTP response.
+///
+/// `Duplicated` is a case of its own rather than a first-wins pick because the
+/// only caller reads `PAYMENT-REQUIRED`, and two of those headers are two
+/// different spend demands. Silently taking either one reports the gateway
+/// evidence for a challenge — hash, network, amount, recipient — that the
+/// merchant did not unambiguously make, and hides the other. The worker cannot
+/// choose between them without making a spend decision that is not its to make,
+/// so it refuses (#353).
+///
+/// `Duplicated` carries how many matching headers were seen so the refusal can
+/// say how ambiguous the merchant was without naming any of the demands.
+enum HeaderLookup<'a> {
+    Absent,
+    Single(&'a str),
+    Duplicated { count: usize },
+}
+
 /// Read a single header value out of a raw HTTP response, case-insensitively.
-/// Stops at the header/body separator so a body line can never be mistaken for
-/// a header.
-fn response_header_value<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+///
+/// The scan range is the header block only: it starts after the status line and
+/// `break`s at the first empty line, which is the header/body separator. That
+/// bound is what stops a merchant from forging a header — or an extra copy of
+/// one, which would turn an unambiguous challenge into a refusal — by putting
+/// the header name in the response body, and it keeps the duplicate count from
+/// running past the headers into attacker-chosen body bytes.
+fn response_header_value<'a>(response: &'a str, name: &str) -> HeaderLookup<'a> {
+    let mut found: Option<&'a str> = None;
+    let mut matches = 0_usize;
     for line in response.lines().skip(1) {
         if line.trim_end_matches('\r').is_empty() {
-            return None;
+            break;
         }
         let Some((header, value)) = line.split_once(':') else {
             continue;
         };
         if header.trim().eq_ignore_ascii_case(name) {
-            return Some(value.trim());
+            matches += 1;
+            if found.is_some() {
+                continue;
+            }
+            found = Some(value.trim());
         }
     }
-    None
+    if matches > 1 {
+        return HeaderLookup::Duplicated { count: matches };
+    }
+    match found {
+        Some(value) => HeaderLookup::Single(value),
+        None => HeaderLookup::Absent,
+    }
 }
 
 fn required_pinned_ip(values: &[String]) -> Result<std::net::IpAddr, FrameworkAdapterError> {
