@@ -1,0 +1,10 @@
+name = "ferrogate-telemetry"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# TODO(bindings): configure per this app's inventory before first deploy.
+# Do NOT commit real resource IDs — these are placeholders only.
+#   [[analytics_engine_datasets]] binding = "TELEMETRY" (writeDataPoint sink)
+#   [vars]                  COLLECTOR_TOKEN (bearer)
+#   route groups: /v1/metrics, /v1/traces, /v1/logs (OTLP/HTTP+JSON)

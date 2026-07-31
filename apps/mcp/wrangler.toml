@@ -1,0 +1,12 @@
+name = "ferrogate-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# TODO(bindings): configure per this app's inventory before first deploy.
+# Do NOT commit real resource IDs — these are placeholders only.
+#   [[durable_objects]]     bindings = ["FerroGateMcp"] (McpAgent, new_sqlite_classes)
+#   [[migrations]]          new_sqlite_classes = ["FerroGateMcp"]
+#   [[kv_namespaces]]       binding = "OAUTH_KV"  -> OAuth 2.1 grants
+#   [vars]                  MCP_BEARER_TOKEN automation bypass (secret)
+#   mounts: /mcp (Streamable HTTP), /sse (legacy SSE)

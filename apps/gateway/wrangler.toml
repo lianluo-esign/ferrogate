@@ -1,0 +1,15 @@
+name = "ferrogate-gateway"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# TODO(bindings): configure per this app's inventory before first deploy.
+# Do NOT commit real resource IDs — these are placeholders only.
+#   [[d1_databases]]        name = "DB"          -> control-plane store (per-tenant TENANT_DB_*)
+#   [[kv_namespaces]]       binding = "CACHE"    -> config / key cache
+#   [[r2_buckets]]          binding = "ASSETS"   -> asset hosting
+#   [[durable_objects]]     RATE_LIMIT, SESSION  -> rate-limit + streaming session state
+#   [[queues]]              billing usage/ledger fan-out
+#   [ai] / [[ai_gateway]]   Workers AI + AI Gateway (provider egress, guardrails)
+#   [[secrets_store]]       provider API keys (deploy-time binding)
+#   [[analytics_engine_datasets]] metrics/logs sink

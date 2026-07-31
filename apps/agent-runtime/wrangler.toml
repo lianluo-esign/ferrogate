@@ -1,0 +1,12 @@
+name = "ferrogate-agent-runtime"
+main = "src/index.ts"
+compatibility_date = "2025-11-17"
+compatibility_flags = ["nodejs_compat", "enable_ctx_exports"]
+
+# TODO(bindings): configure per this app's inventory before first deploy.
+# Do NOT commit real resource IDs — these are placeholders only.
+#   [[durable_objects]]     AgentGateway (Agent DO), AgentSandbox (Sandbox container)
+#   [[migrations]]          new_sqlite_classes = ["AgentGateway"]
+#   [[containers]]          image for AgentSandbox (enableInternet=false, interceptHttps=true)
+#   [vars]                  GATEWAY_CONTROL_TOKEN (bearer)
+#   route groups: /control/*, /memory/*, /schedule/*, /container/*, /git-credential/*

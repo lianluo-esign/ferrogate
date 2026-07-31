@@ -1,0 +1,12 @@
+{
+  "name": "@ferrogate/app-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": { "hono": "^4.6.0", "zod": "^3.25.76", "@ferrogate/core": "workspace:*", "@ferrogate/schemas": "workspace:*", "@modelcontextprotocol/sdk": "^1.29.0", "agents": "^0.0.109" }
+}

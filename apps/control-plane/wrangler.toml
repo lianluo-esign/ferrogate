@@ -1,0 +1,12 @@
+name = "ferrogate-control-plane"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# TODO(bindings): configure per this app's inventory before first deploy.
+# Do NOT commit real resource IDs — these are placeholders only.
+#   [[d1_databases]]        name = "DB"          -> control-plane store (D1 batch/RETURNING)
+#   [[kv_namespaces]]       binding = "SESSIONS" -> console/refresh tokens
+#   [[secrets_store]]       admin JWT + provider creds (deploy-time binding)
+#   [[analytics_engine_datasets]] audit/evidence sink
+#   route groups: /admin/v1/* (canonical), /control/v1/* (alias), /v1/admin/* (auth service)
