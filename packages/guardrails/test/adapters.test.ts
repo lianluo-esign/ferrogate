@@ -19,6 +19,7 @@ import {
   type DetectorInput,
   type WorkersAiBinding,
   type WorkersAiClient,
+  type WorkersAiLlamaGuardConfig,
 } from "../src/index.js";
 
 const DEADLINE = () => Date.now() + 5_000;
@@ -176,7 +177,7 @@ describe("WorkersAiLlamaGuard interpretation", () => {
 /** A probe payload distinctive enough that leaked evidence is unmistakable. */
 const PROBE = "sentinel-payload-9f3a";
 
-const LLAMA_CONFIG = {
+const LLAMA_CONFIG: WorkersAiLlamaGuardConfig = {
   id: "llama",
   model: WORKERS_AI_LLAMA_GUARD_DEFAULT_MODEL,
   timeoutMs: 2_000,
@@ -204,7 +205,7 @@ function fakeWorkersAi(outcome: { result?: unknown; error?: unknown }): WorkersA
 
 async function evaluateWith(
   outcome: { result?: unknown; error?: unknown },
-  config: Partial<typeof LLAMA_CONFIG> = {},
+  config: Partial<WorkersAiLlamaGuardConfig> = {},
 ) {
   const client = fakeWorkersAi(outcome);
   const detector = WorkersAiLlamaGuardDetector.withWorkersAi({ ...LLAMA_CONFIG, ...config }, client);

@@ -24,18 +24,41 @@
  *     allowlist. An EMPTY allowlist means SEALED: a forgotten configuration
  *     refuses egress rather than permitting it (#471).
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.2/§8.4): Firecracker
- * // microVM (KVM + AF_VSOCK guest agent), Docker (`--network none`), and
- * // local-process (`unshare -U -r -m -n -p -f`) isolation have NO CF
- * // equivalent — Workers cannot boot VMs or namespaces. The CF-native tier is
- * // `@cloudflare/sandbox` (`AgentSandbox`, see `wrangler.toml`), which is what
- * // {@link IsolationGrant} describes; the other three remain a self-hosted
- * // Rust/host binary reached through the `/v1/self-hosted-workers/*` lease
- * // protocol, which IS fully implemented here.
- * // PORT-TODO(inventory-edge-control §agent-worker §8.3): Rust also advertises
- * // snapshot support per backend; the CF backend advertises it OFF because
- * // there is no CF primitive. `snapshotSupported: false` records that
- * // honestly rather than silently omitting the capability.
+ * // PORT-TODO(inventory-edge-control §agent-worker §8.2/§8.4): PLATFORM LIMIT
+ * // — three of Rust's four isolation backends cannot exist on this platform,
+ * // and the reason in each case is a kernel facility workerd does not expose:
+ * //   * Firecracker microVM needs `/dev/kvm` and an AF_VSOCK channel to a
+ * //     guest agent. A Worker cannot open a device node or a vsock socket.
+ * //   * Docker (`--network none`) needs to execute the `docker` CLI. A Worker
+ * //     cannot spawn a process — there is no `fork`/`exec` in the sandbox.
+ * //   * local-process needs `unshare -U -r -m -n -p -f` to create user, mount,
+ * //     pid and network namespaces. Namespaces are a Linux syscall surface
+ * //     workerd does not expose at all.
+ * // No amount of effort closes these; they are not missing APIs, they are
+ * // facilities the sandbox exists to deny.
+ * //
+ * // IMPLEMENTED INSTEAD: the ONE backend that is CF-native. {@link
+ * // IsolationGrant} describes `@cloudflare/sandbox` (`AgentSandbox`, declared
+ * // but commented in `wrangler.toml` because Containers need a PAID account),
+ * // pinned with `enableInternet: false` and `interceptHttps: true` — the
+ * // load-bearing #471 posture. The other three backends remain a self-hosted
+ * // Rust/host binary, reached through the `/v1/self-hosted-workers/*` lease
+ * // protocol, which IS fully implemented here and is how those isolation
+ * // tiers stay reachable from a CF deployment at all.
+ * //
+ * // CONSEQUENCE: this Worker never executes a workload itself. It owns run
+ * // STATE and the governance DECISION; execution is always either the Sandbox
+ * // container or a leased self-hosted worker.
+ * //
+ * // Pinned by `test/isolation-grant.test.ts`.
+ * //
+ * // PORT-TODO(inventory-edge-control §agent-worker §8.3): PLATFORM LIMIT —
+ * // Rust advertises per-backend SNAPSHOT support (pause/restore of a running
+ * // microVM). Cloudflare has no primitive for it: neither Containers nor
+ * // Durable Objects can checkpoint and restore a live process image.
+ * // `snapshotSupported: false` on {@link IsolationGrant} records the absence
+ * // honestly instead of omitting the capability and letting a caller assume
+ * // it. Pinned by `test/isolation-grant.test.ts`.
  */
 import { HttpError } from "../middleware/errors.js";
 import {

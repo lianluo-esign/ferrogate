@@ -355,22 +355,78 @@ export const skillPackageCapabilitySchema = z.object({
 });
 export type SkillPackageCapability = z.infer<typeof skillPackageCapabilitySchema>;
 
-// PORT-TODO(inventory §5.3): McpServerConfig is owned by `@ferrogate/mcp` (wave 2);
-// the load-time guards read name/url/transport/auth_type/tools_to_execute, so the
-// rest is accepted via passthrough until that crate is ported.
+/**
+ * `ferrogate_mcp::McpOauthConfig`. Field names, `#[serde(default)]` behavior and
+ * the `default_oauth_scopes()` value are read verbatim from
+ * `crates/ferrogate-mcp/src/config.rs`.
+ */
+export const mcpOauthConfigSchema = z.object({
+  issuer: z.string(),
+  client_id: z.string(),
+  client_secret_ref: optString,
+  redirect_uri: optString,
+  scopes: z.array(z.string()).default(["openid", "profile", "email"]),
+  audience: optString,
+  allow_insecure_http: z.boolean().default(false),
+});
+export type McpOauthConfig = z.infer<typeof mcpOauthConfigSchema>;
+
+/** `ferrogate_mcp::McpHeaderConfig`. */
+export const mcpHeaderConfigSchema = z.object({
+  name: z.string(),
+  value: optString,
+  value_env: optString,
+});
+export type McpHeaderConfig = z.infer<typeof mcpHeaderConfigSchema>;
+
+/**
+ * `ferrogate_mcp::McpTlsConfig`. Retained for config parity; NEITHER field can be
+ * honored by a Worker (see `validateMcpTlsConfig` in `../validate/entities.ts`).
+ */
+export const mcpTlsConfigSchema = z.object({
+  insecure_skip_verify: z.boolean().default(false),
+  ca_cert_path: optString,
+});
+export type McpTlsConfig = z.infer<typeof mcpTlsConfigSchema>;
+
+/**
+ * `ferrogate_mcp::McpServerConfig` (owned by `@ferrogate/mcp` in wave 2; the
+ * shape is inlined here verbatim from `crates/ferrogate-mcp/src/config.rs` so
+ * `@ferrogate/config` can run the whole load-time gate standalone, following the
+ * `schema/enums.ts` precedent). `.passthrough()` is kept because the Rust struct
+ * is NOT `deny_unknown_fields`.
+ *
+ * Numeric defaults mirror `DEFAULT_HEALTH_PING_INTERVAL_SECS` (10),
+ * `DEFAULT_MAX_RECONNECT_ATTEMPTS` (5), `DEFAULT_MIN_RECONNECT_BACKOFF_SECS` (1),
+ * `DEFAULT_MAX_RECONNECT_BACKOFF_SECS` (30) and `default_timeout_ms()` (30_000).
+ */
 export const mcpServerConfigSchema = z
   .object({
     name: z.string(),
-    url: optString,
     transport: mcpTransportSchema,
+    url: optString,
+    command: optString,
+    args: z.array(z.string()).default([]),
     auth_type: mcpAuthTypeSchema,
+    headers: z.array(mcpHeaderConfigSchema).default([]),
+    oauth: mcpOauthConfigSchema.nullable().default(null),
+    signed_jwt_audience: optString,
     /**
      * `McpServerConfig::tools_to_execute` (`#[serde(default)]`). Execution is
      * deny-by-default, and this list is also what names a workflow `tool` node's
-     * target (`<server>-<tool>`) and the `mcp_tool:`/`mcp:` policy targets, so it
-     * is modeled here rather than left to the passthrough.
+     * target (`<server>-<tool>`) and the `mcp_tool:`/`mcp:` policy targets.
      */
     tools_to_execute: z.array(z.string()).default([]),
+    tools_to_auto_execute: z.array(z.string()).default([]),
+    approval_policy: approvalPolicySchema.default(DEFAULT_APPROVAL_POLICY),
+    tool_include: z.array(z.string()).default([]),
+    tool_regex: z.array(z.string()).default([]),
+    tls: sectionDefault(mcpTlsConfigSchema),
+    timeout_ms: z.number().int().default(30_000),
+    health_ping_interval_secs: z.number().int().default(10),
+    max_reconnect_attempts: z.number().int().default(5),
+    min_reconnect_backoff_secs: z.number().int().default(1),
+    max_reconnect_backoff_secs: z.number().int().default(30),
   })
   .passthrough();
 export type McpServerConfig = z.infer<typeof mcpServerConfigSchema>;
@@ -457,7 +513,7 @@ export const routeRuleSchema = z.object({
 });
 export type RouteRule = z.infer<typeof routeRuleSchema>;
 
-// PORT-TODO(inventory §5.3): CloudflareConfig is owned by `@ferrogate/cloudflare`
+// PORT-TODO(inventory §5.3) — PACKAGE RELOCATION ONLY. CloudflareConfig is owned by `@ferrogate/cloudflare`
 // (wave 2); the fields the load-time guards read (account_id/api_token/base URLs/
 // tenant_tokens/r2_s3_endpoint) are modeled, the rest passes through.
 export const cloudflareConfigSchema = z

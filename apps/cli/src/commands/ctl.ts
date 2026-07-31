@@ -11,7 +11,9 @@
  *   2. one action identity minted per invocation, shared by every page;
  *   3. confirmation before a guarded mutation leaves the process;
  *   4. the render gate — reads render bodies, mutations render receipts only;
- *   5. cursor/offset honesty — never print a continuation that does not exist.
+ *   5. the contract-version gate — refuse to render a document from a server
+ *      whose API contract predates the minimum this build understands;
+ *   6. cursor/offset honesty — never print a continuation that does not exist.
  */
 import type { JsonValue } from "@ferrogate/core";
 import { ClientActionIdentity, fingerprintEnvFrom } from "../action-identity.js";
@@ -43,6 +45,7 @@ import {
   secretFieldsFor,
 } from "../registry.js";
 import type { CliRuntime, CommandNode } from "../runtime.js";
+import { enforceContractVersion } from "../version.js";
 
 /** Per-verb flags every `ctl` command accepts. */
 export const RESOURCE_FLAGS: readonly FlagSpec[] = [
@@ -458,6 +461,9 @@ async function execute(
     if (response.requestId !== undefined) runtime.io.stderr(`request-id: ${response.requestId}\n`);
     if (response.traceId !== undefined) runtime.io.stderr(`trace-id: ${response.traceId}\n`);
     const body = redactResponse(group.name, spec, response.body);
+    // Fail closed on an unsupported server contract BEFORE rendering, rather
+    // than mis-mapping a document shaped by an older API version (#360).
+    enforceContractVersion(verb.operationId, body);
     const refusal = cursorOffsetRefusal(body, offset, spec.path);
     if (refusal !== undefined) throw CliError.usage(refusal);
     output = gate.renderer.render(body);

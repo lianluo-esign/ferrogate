@@ -18,6 +18,8 @@
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import { depsFromEnv } from "../adapters.js";
+import { agentDiscoveryHandler } from "./agent-discovery.js";
+import { readinessResponse } from "./readiness.js";
 import { type ApiOperation, type HttpMethod, operationById } from "../contract.js";
 import { type DepsResolver, contractAuth } from "../middleware/auth.js";
 import {
@@ -176,16 +178,10 @@ function healthzHandler(c: Context<GatewayEnv>): Response {
 }
 
 function readyzHandler(c: Context<GatewayEnv>): Response {
-  // PORT-TODO(inventory-request-path §readiness): Rust answers 503 `not_ready`
-  // while the upstream cluster has no healthy peer (`state.cluster_status()`).
-  // Cluster health moves to the routing snapshot in `@ferrogate/routing`; until
-  // that port lands a Worker isolate is ready as soon as it is running.
-  return c.json({
-    status: "ready",
-    service: SERVICE_NAME,
-    runtime: RUNTIME_NAME,
-    cluster: { ready: true },
-  });
+  // The readiness decision table (config revision loaded ∧ not draining →
+  // 200/503) lives in `./readiness.ts`, together with the marker naming the one
+  // input the platform constrains.
+  return readinessResponse(c, SERVICE_NAME, RUNTIME_NAME);
 }
 
 /**
@@ -218,10 +214,10 @@ function registerToolingRoutes(router: GatewayRouter): void {
     "renderPromptTemplate",
     "PORT-TODO(inventory-request-path §prompts): prompt template rendering",
   );
-  router.registerNotImplemented(
-    "getAgentDiscovery",
-    "PORT-TODO(inventory-edge-control §agent discovery): /.well-known/agent.json document",
-  );
+  // `/.well-known/agent.json` is a pure projection of the operator's
+  // `[[agent_upstreams]]` table, so it is ported rather than stubbed. See
+  // `./agent-discovery.ts`.
+  router.register("getAgentDiscovery", agentDiscoveryHandler);
 }
 
 // ---------------------------------------------------------------------------

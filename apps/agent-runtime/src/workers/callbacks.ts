@@ -108,14 +108,24 @@ function optionalStringList(
 }
 
 /**
- * The transport body, re-read after `middleware/auth.ts` consumed it.
+ * The PLAINTEXT transport document.
  *
- * Hono caches the parsed body on the request, so this does not re-read the
- * stream — the middleware and the handler see the same bytes.
+ * `middleware/auth.ts` already read, size-checked, and — for a sealed
+ * `symmetric_aead` frame — DECRYPTED the body, publishing the result as
+ * `workerEnvelope`. Reading that is not an optimisation: on the sealed path the
+ * raw request bytes are ciphertext, so re-parsing `c.req.text()` would hand
+ * every handler `{ sealed: … }` and fail every field check.
+ *
+ * The raw-body fallback stays for the (test-only) case of a handler reached
+ * without the middleware; Hono caches the parsed body, so it does not re-read
+ * the stream.
  */
 async function envelope(c: {
   req: { text(): Promise<string> };
+  get(key: "workerEnvelope"): Record<string, unknown> | undefined;
 }): Promise<Record<string, unknown>> {
+  const published = c.get("workerEnvelope");
+  if (published !== undefined) return published;
   const raw = await c.req.text();
   try {
     return JSON.parse(raw) as Record<string, unknown>;
@@ -335,10 +345,15 @@ workerRoutes.post("/v1/self-hosted-workers/artifacts", async (c) => {
 
   // The artifact rides the run timeline, which is where `/result` collects it
   // — a work product has no life outside its run, so it needs no parallel
-  // store. // PORT-TODO(inventory-edge-control §agent-worker §8.3): the
-  // artifact BYTES belong in R2 (`[[r2_buckets]] ARTIFACTS`); this records the
-  // reference the Rust transport records, which is all `SelfHostedArtifactUpload`
-  // carries too.
+  // store.
+  //
+  // This is AT PARITY with Rust and is not a deferral: the Rust transport type
+  // `SelfHostedArtifactUpload` (`ferrogate-runtime/src/self_hosted_worker.rs`)
+  // carries `artifact_id` / `name` / `media_type` / `byte_len` and NO bytes
+  // either — the callback registers an artifact, it does not upload one. If a
+  // future slice adds a byte-carrying upload verb, its home is R2
+  // (`[[r2_buckets]] ARTIFACTS`, noted in `wrangler.toml`); nothing about the
+  // reference recorded here changes when it does.
   await runStateStub(c.env, worker.tenant_id, runId).recordWorkerEvidence(worker.tenant_id, {
     kind: "artifact",
     body: artifact,

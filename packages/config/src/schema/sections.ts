@@ -21,6 +21,7 @@ import {
   storageProviderKindSchema,
   DEFAULT_DURABLE_PROVIDER_ORDER,
 } from "./enums.js";
+import { capabilityTargetSelectorSchema, classOnlyPolicyModeSchema } from "./capability-target.js";
 import { sectionDefault } from "./util.js";
 
 const optString = z.string().nullable().default(null);
@@ -183,9 +184,7 @@ export const managedWorkerCapabilityTargetGrantSchema = z.object({
   selector_id: z.string(),
   permission_key: z.string(),
   action: managedWorkerCapabilityActionSchema,
-  // PORT-TODO(inventory §5.3): `selector` is a `ferrogate_runtime::CapabilityTargetSelector`
-  // (wave 2); accepted as an opaque object until that crate is ported.
-  selector: z.unknown(),
+  selector: capabilityTargetSelectorSchema,
 });
 
 export const agentRuntimeExternalConfigSchema = z.object({
@@ -203,8 +202,7 @@ export const agentRuntimeManagedWorkerConfigSchema = z.object({
   approval_required_actions: z.array(managedWorkerCapabilityActionSchema).default([]),
   allow_direct_network_egress: z.boolean().default(false),
   target_grants: z.array(managedWorkerCapabilityTargetGrantSchema).default([]),
-  // PORT-TODO(inventory §5.3): `ferrogate_runtime::ClassOnlyPolicyMode` (wave 2). Default "deny".
-  class_only_policy_mode: z.string().default("deny"),
+  class_only_policy_mode: classOnlyPolicyModeSchema,
   policy_revision: z.string().default("config-v1"),
 });
 export type AgentRuntimeManagedWorkerConfig = z.infer<typeof agentRuntimeManagedWorkerConfigSchema>;
@@ -241,9 +239,31 @@ export const tlsAcmeConfigSchema = z.object({
 export type TlsAcmeConfig = z.infer<typeof tlsAcmeConfigSchema>;
 
 /**
- * PORT-TODO(inventory §5.8): the whole manual-TLS + ACME surface has no CF
- * analogue (Cloudflare terminates TLS); `TlsConfig`/`TlsAcmeConfig` are ported
- * for parity but are N/A on the CF edge.
+ * PORT-TODO(inventory §5.8) — PLATFORM LIMIT, NOT CLOSED. Deliberately
+ * SCHEMA-ONLY: these two sections are decoded, and NOTHING validates them.
+ *
+ * Cloudflare terminates TLS at the edge BEFORE the Worker is invoked. There is
+ * no listener socket to bind, no cert/private key for the runtime to load (the
+ * Rust pre-flight is pingora's `load_certs_and_key_files`), no `:80` listener a
+ * Worker can own for an ACME HTTP-01 challenge, no ACME storage directory (no
+ * filesystem), and no DNS-01 hook process to exec. So `validate_tls`,
+ * `validate_acme_tls`, `validate_acme_dns01_tls`, `validate_acme_http01_tls` and
+ * `validate_manual_tls_files` were REMOVED rather than half-ported — see the
+ * `src/validate.ts` header and the removal marker at their old call site.
+ *
+ * CLOSEST BEHAVIOR IMPLEMENTED: the SCHEMAS stay, with the Rust field names and
+ * defaults, purely so a legacy TOML or Caddyfile that still carries `[tls]` /
+ * `[tls.acme]` decodes and round-trips instead of failing to parse during
+ * migration. The consequence, pinned by `platform-limits.test.ts` > "tls/acme",
+ * is that a `[tls]` block Rust would REFUSE (e.g. `enabled` with no
+ * `cert_path`) is ACCEPTED here — it is inert config, not a promise.
+ *
+ * REVIEWER: this is the judgment call to second-guess. The alternative is the
+ * `validateMcpTlsConfig` precedent in `validate/entities.ts` — REJECT the block
+ * so the operator is never told TLS is configured when nothing reads it. It was
+ * not taken here only because it would break the Caddyfile migration path
+ * (`fromGatewayConfig` emits `tls` from a `tls`/`tls_acme` directive), where
+ * Rust accepts the same document.
  */
 export const tlsConfigSchema = z.object({
   enabled: z.boolean().default(false),

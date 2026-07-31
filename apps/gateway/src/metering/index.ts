@@ -9,82 +9,69 @@
  * rather than restating any of them.
  *
  * ============================================================================
- * WIRING — for the integrate step that owns `src/index.ts` + `wrangler.toml`
+ * WIRING — LIVE. `src/index.ts` builds the sink like this:
  * ============================================================================
  *
- * `MeteringUsageSink` implements `UsageSink` exactly, so the composition root
- * needs ONE new argument:
- *
  * ```ts
- * // apps/gateway/src/index.ts
- * import { createMeteringUsageSink } from "./metering/index.js";
- *
- * const usage = createMeteringUsageSink();          // in-memory ledger + outbox
+ * const usage = createMeteringUsageSink({ bindings: meteringBindingsFromEnv });
  *
  * export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  *   inferenceRouteModule({ models: modelsFromEnv, dispatcher: fetchDispatcher, usage }),
- *   //                                                                       ^^^^^
  *   assetRouteModule(),
  * ];
+ * export const GATEWAY_MIDDLEWARE = [meteringDrain(usage), rateLimit(), guardrails(...)];
  * ```
  *
- * That single line is the whole integration; nothing in `inference/` changes.
+ * and `wrangler.toml` declares the two bindings that resolver reads:
+ * `[[d1_databases]] binding = "BILLING_DB"` (the CONTROL database — the tenant
+ * migration explicitly excludes the billing tables) and
+ * `[[queues.producers]] binding = "BILLING"`.
  *
- * ### Backing it with real Cloudflare storage
+ * ### How the per-request `env` and `ExecutionContext` reach a module-scoped sink
  *
- * `MeteringDatabase` is `D1Database`-shaped and `MeteringQueue` is `Queue`-shaped,
- * so live bindings satisfy them with no adapter (the same structural trick
- * `src/assets/ports.ts` plays with `R2Bucket`). Because the sink is built once
- * at module scope and Worker bindings are per request, back it the way
- * `models: ModelResolverFactory` already handles that — or, simplest, build the
- * sink inside the module's `env`-aware factory:
+ * They are arguments, never ambient state. `UsageSink.record` was widened to
+ * `record(u: Usage, rc?: { env, ctx })` (`src/inference/ports.ts`), everything
+ * derived from `env` is memoized on the env object in a `WeakMap`
+ * (`runtime.ts`), and the drain itself runs from `meteringDrain()`
+ * (`middleware.ts`), which is the one place in the request path holding both
+ * `c.env` and `c.executionCtx`. A module-scoped "current ctx" slot was rejected
+ * outright: workerd refuses I/O started on behalf of a different request, so a
+ * last-write-wins slot is a billing corruption that only appears under load.
+ *
+ * ### Remaining call-site gap — ONE LINE, in a file this module does not own
+ *
+ * PORT-TODO(inventory-data-billing §2.5) — NOT a platform limit, a SCOPE
+ * boundary: the line below belongs to `src/inference/handlers.ts`, which this
+ * module does not own and must not edit.
+ *
+ * `recordUsage` still calls `deps.usage.record({...})` with no second argument,
+ * so the sink is driven entirely through `meteringDrain()`. That is CORRECT and
+ * durable — the middleware supplies `{ env, ctx }` to `flush()` and defers it
+ * until an SSE body ends or is abandoned, and every persistence test in
+ * `test/metering/durable.test.ts` runs through exactly that path. What it costs
+ * is that the drain is scheduled once per REQUEST rather than once per RECORDED
+ * USAGE, so a route that meters more than once per request (provider failover,
+ * #135's `provider_attempt_index > 0`) would settle every attempt on the same
+ * post-response drain instead of overlapping them. Closing it is:
  *
  * ```ts
- * const usage = createMeteringUsageSink({
- *   ledger: new D1LedgerStore(env.DB),                       // [[d1_databases]] binding = "DB"
- *   publisher: new QueueBillingReportPublisher(env.BILLING), // [[queues]] binding = "BILLING"
- *   priceBook: PriceBook.fromJson(env.GATEWAY_PRICE_BOOK ?? "[]"),
- * });
+ * // src/inference/handlers.ts — recordUsage()
+ * deps.usage.record({ ... }, { env: c.env, ctx: executionContextOf(c) });
  * ```
  *
- * and apply {@link METERING_SCHEMA_SQL} as the D1 migration first. Neither
- * binding is declared in `wrangler.toml` today (that file's "NOT DECLARED —
- * and why" block already names `[[queues]]` for "metering / ledger fan-out"
- * with this exact PORT-TODO), and declaring a binding nothing reads is the
- * mistake that block exists to prevent — so both land WITH this wiring, not
- * before it.
+ * `MeteringUsageSink.record` already accepts and prefers that argument, and
+ * `test/metering/durable.test.ts` ("both shapes of the widened seam") pins BOTH
+ * — `record(u, rc)` drains itself onto the request's own `waitUntil` and
+ * persists to D1; `record(u)` captures and waits for `meteringDrain()` — so the
+ * change is additive and already covered on the day it lands.
  *
- * ### `ctx.waitUntil`
+ * ### Durable outbox recovery — `[triggers] crons`
  *
- * `record()` never does I/O inline; it hands the durable half to a
- * {@link MeteringScheduler}. The default {@link TrackingScheduler} keeps the
- * promise alive within the isolate and is what the tests await, but the
- * PRODUCTION scheduler must be `ctx.waitUntil`, or workerd may tear down the
- * request's `IoContext` mid-write:
- *
- * ```ts
- * const usage = createMeteringUsageSink({ scheduler: executionContextScheduler(ctx) });
- * ```
- *
- * PORT-TODO(inventory-data-billing §2.5): `UsageSink.record(u: Usage): void`
- * carries no `ExecutionContext`, and the sink is constructed ONCE while `ctx` is
- * per request, so the scheduler cannot be bound at construction time in the
- * deployed Worker. Binding a module-scoped "current ctx" is NOT a fix —
- * workerd refuses I/O started on behalf of a different request, so a
- * last-write-wins slot would break under concurrency. The correct fix is a
- * one-line widening the integrate step owns, threading the context the inner
- * router already receives:
- *
- * ```ts
- * // src/inference/ports.ts
- * export interface UsageSink { record(u: Usage, ctx?: { waitUntil(p: Promise<unknown>): void }): void }
- * // src/inference/handlers.ts — recordUsage(): deps.usage.record({...}, c.executionCtx)
- * ```
- *
- * `MeteringUsageSink.record` already ignores extra arguments, and
- * {@link MeteringUsageSink.flush} is public and idempotent, so a Cron Trigger
- * (`scheduled()` → `sink.flush()`) covers the gap in the meantime: nothing is
- * lost, delivery is merely deferred to the next drain.
+ * The request-time drain cannot cover an isolate evicted between the D1 ledger
+ * commit and the Queue publish: the tenant is charged and nothing downstream was
+ * told. `wrangler.toml` therefore declares a one-minute Cron, `src/worker.ts`
+ * exposes `scheduled`, and `MeteringUsageSink.sweep` re-publishes stranded
+ * `billing_report_outbox` rows older than `OUTBOX_SWEEP_GRACE_SECONDS`.
  *
  * ============================================================================
  * Ported semantics (see each module for the Rust citation)
@@ -134,10 +121,26 @@ export {
 export {
   BILLING_EVENT_INSERT_SQL,
   BILLING_LEDGER_INSERT_SQL,
+  BILLING_OUTBOX_DEAD_LETTER_SQL,
+  BILLING_OUTBOX_DELETE_SQL,
   BILLING_OUTBOX_INSERT_SQL,
+  BILLING_OUTBOX_LIST_DUE_SQL,
+  BILLING_OUTBOX_RESCHEDULE_SQL,
+  CREDITS_EXACT_FIELD,
   D1LedgerStore,
   METERING_SCHEMA_SQL,
+  ledgerDocument,
 } from "./d1.js";
+
+export { meteringDrain } from "./middleware.js";
+
+export {
+  executionContextOf,
+  meteringBindingsFromEnv,
+  meteringDatabaseFrom,
+  meteringQueueFrom,
+} from "./runtime.js";
+export type { MeteringBindingResolver, MeteringBindings } from "./runtime.js";
 
 export {
   ManualClock,
@@ -149,6 +152,7 @@ export {
 export type {
   BillingReportPublisher,
   CostDivergence,
+  DurableOutboxStore,
   LedgerStore,
   LedgerWriteOutcome,
   MeteredCharge,
@@ -166,7 +170,11 @@ export type {
   OutboxRecord,
 } from "./ports.js";
 
-export { MeteringUsageSink, createMeteringUsageSink } from "./sink.js";
+export {
+  OUTBOX_SWEEP_GRACE_SECONDS,
+  MeteringUsageSink,
+  createMeteringUsageSink,
+} from "./sink.js";
 export type { MeteringSinkOptions, UnpricedUsage } from "./sink.js";
 
 export {

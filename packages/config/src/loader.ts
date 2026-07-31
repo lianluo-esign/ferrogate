@@ -3,12 +3,25 @@
  * config-load precedence, the `[control_api]`/`[admin_api]` alias migration, and
  * the Caddyfile intermediate -> `Config` bridge.
  *
- * PORT-TODO(inventory §5.8): the Rust loader read TOML/YAML/Caddyfile off the
- * filesystem. A Worker has no filesystem: config is sourced from wrangler vars /
- * KV / D1 / a bundled JSON asset, so the entry point here is
- * `loadConfigFromObject(rawObject)`. TOML/YAML *string* parsing (`from_toml_str`
- * / `from_yaml_str`) and `resolve_paths_relative_to` (cert/key/ACME paths, N/A
- * on the CF edge) are left as parse-at-build/deploy steps.
+ * PORT-TODO(inventory §5.8) — PLATFORM LIMIT, NOT CLOSED (plus one scope note).
+ *
+ * PLATFORM LIMIT: workerd has NO FILESYSTEM. `Config::from_file` /
+ * `from_toml_file` / `from_yaml_file` and `resolve_paths_relative_to` (which
+ * rebases cert/key/ACME paths against the config file's directory) have no
+ * expressible form — there is no path, no cwd, and no `std::fs`. Config on this
+ * platform is sourced from wrangler vars, KV, D1 or a bundled asset, so the
+ * entry point is `loadConfigFromObject(rawObject)` over an ALREADY-DECODED
+ * object. `resolve_paths_relative_to` is additionally moot: it only ever
+ * rebased manual-TLS/ACME paths, which are N/A behind Cloudflare's TLS
+ * termination (see `schema/sections.ts`).
+ *
+ * SCOPE NOTE, NOT A PLATFORM LIMIT: `from_toml_str`/`from_yaml_str` decode a
+ * STRING, which a Worker can perfectly well do — they are absent only because
+ * this package carries no TOML/YAML parser dependency. Whoever adds one should
+ * decode to an object and hand it to `loadConfigFromObject`; do NOT re-derive
+ * the alias migration or validation, which are the parts that carry semantics.
+ * The Caddyfile bridge does not need a dependency and IS ported
+ * (`fromCaddyfileStr`). Pinned by `platform-limits.test.ts` > "loader".
  */
 import { parseCaddyfile } from "./caddyfile/parser.js";
 import type { GatewayConfig } from "./caddyfile/types.js";

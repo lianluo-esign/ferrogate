@@ -570,10 +570,24 @@ export interface AssetScreeningRequest {
  * PORT-TODO(inventory-request-path.md §1.6 "Clamd/HTTP malware scanner"): the
  * full Rust gate also ran detached minisign/Ed25519 signature verification, a
  * cross-tenant publish-approval check, and an out-of-process ClamAV/HTTP
- * scanner. Those belong to `@ferrogate/guardrails` + `@ferrogate/policy`, which
- * are still stubs; this port keeps the *decision shape* (and the fail-closed
- * default) so the read-path withholding of #366 is real today, and the richer
- * detectors drop in behind this same interface.
+ * scanner. This port keeps the *decision shape* (and the fail-closed default)
+ * so the read-path withholding of #366 is real today, and the richer detectors
+ * drop in behind this same interface.
+ *
+ * Only ONE of the three is platform-constrained, and it is not the one it looks
+ * like:
+ *  - Ed25519 verification is `crypto.subtle.verify("Ed25519", …)`, supported in
+ *    workerd. The minisign CONTAINER format (its own base64 envelope + trusted
+ *    comment + global-key store) is what is unwritten, not the primitive.
+ *  - the HTTP scanner is a plain `fetch` to an operator-configured endpoint and
+ *    is implementable today; `@ferrogate/guardrails` already has the
+ *    `custom_http` detector shape to model it on.
+ *  - the `clamd` DAEMON is the constrained one: a Worker cannot fork or exec, so
+ *    the in-process/sidecar `clamscan` the Rust could use has no analogue. The
+ *    closest reachable form is an INSTREAM client over `connect()` from
+ *    `cloudflare:sockets` against a clamd the operator hosts — which is a
+ *    different deployment contract (an exposed clamd, not a local socket) and
+ *    must be its own slice, not a silent substitution here.
  */
 export interface AssetScreener {
   screen(request: AssetScreeningRequest): Promise<AssetScreeningVerdict | AssetScreeningRejection>;

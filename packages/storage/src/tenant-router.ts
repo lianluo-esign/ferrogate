@@ -150,16 +150,195 @@ export interface TenantDatabaseRegistration {
 
 /**
  * The `control_plane_resources` kind/id under which the Rust backend persisted
- * the same mapping as a JSON document (`D1_TENANT_DATABASE_REGISTRY_KIND` /
- * `_ID`). Retained so a Rust-era control database can be read by this port and
- * migrated into the `tenant_databases` table.
+ * the same mapping as a JSON document.
  *
- * PORT-TODO(inventory-data-billing §1.7): the document→table migration itself
- * is an `apps/control-plane` provisioning slice; this package only names the
- * key so neither side invents a different one.
+ * These are `D1_TENANT_DATABASE_REGISTRY_KIND` / `_ID` from
+ * `crates/ferrogate-storage/src/control_plane_store_d1/mod.rs` VERBATIM. They
+ * are the primary key of a row in a real, already-deployed control database, so
+ * inventing a different pair here would silently make
+ * {@link migrateTenantDatabaseRegistryDocument} find nothing and report an
+ * empty, successful migration.
  */
-export const TENANT_DATABASE_REGISTRY_KIND = "d1_tenant_database_registry";
-export const TENANT_DATABASE_REGISTRY_ID = "default";
+export const TENANT_DATABASE_REGISTRY_KIND = "d1_tenant_database";
+export const TENANT_DATABASE_REGISTRY_ID = "registry";
+
+/**
+ * The Rust-era registry document (`D1TenantDatabaseRegistry`), as persisted.
+ *
+ * `tenantDatabases` is `tenant_id -> D1 database uuid`. There is NO binding
+ * name and NO database name in it: the Rust backend reached D1 over the HTTP
+ * API by uuid, so neither existed. That absence is the whole shape of the
+ * migration — see {@link migrateTenantDatabaseRegistryDocument}.
+ */
+export interface TenantDatabaseRegistryDocument {
+  /** The uuid of the database holding tenants + config documents + this doc. */
+  controlDatabaseId: string;
+  /** `tenant_id -> database_uuid`, deterministic (Rust `BTreeMap`). */
+  tenantDatabases: Record<string, string>;
+}
+
+/** Wire (serde) form of {@link TenantDatabaseRegistryDocument}: snake_case. */
+interface TenantDatabaseRegistryDocumentWire {
+  control_database_id?: string;
+  tenant_databases?: Record<string, string>;
+}
+
+/** Decode the persisted registry document (ports `from_document_json`). */
+export function parseTenantDatabaseRegistryDocument(
+  documentJson: string,
+): TenantDatabaseRegistryDocument {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(documentJson);
+  } catch (error) {
+    throw StorageError.runtime(
+      `tenant database registry document is not valid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw StorageError.runtime("tenant database registry document must be a JSON object");
+  }
+  const wire = parsed as TenantDatabaseRegistryDocumentWire;
+  const map = wire.tenant_databases ?? {};
+  if (map === null || typeof map !== "object" || Array.isArray(map)) {
+    throw StorageError.runtime(
+      "tenant database registry document field tenant_databases must be an object",
+    );
+  }
+  const tenantDatabases: Record<string, string> = {};
+  for (const [tenantId, uuid] of Object.entries(map)) {
+    if (typeof uuid !== "string" || uuid.trim() === "") {
+      throw StorageError.runtime(
+        `tenant database registry document maps tenant ${tenantId} to a non-string ` +
+          "or empty database uuid",
+      );
+    }
+    tenantDatabases[tenantId] = uuid;
+  }
+  // `#[serde(default)]` on both fields: an absent key decodes to the empty value.
+  return { controlDatabaseId: wire.control_database_id ?? "", tenantDatabases };
+}
+
+/** What {@link migrateTenantDatabaseRegistryDocument} did. */
+export interface TenantDatabaseRegistryMigration {
+  /** `false` when no Rust-era document exists — nothing to migrate, not an error. */
+  documentFound: boolean;
+  /** Rows inserted for a tenant that had no `tenant_databases` row. */
+  inserted: readonly string[];
+  /**
+   * Tenants already in the table. Their rows are left ALONE — the table is the
+   * newer, richer record (it carries `binding_name`, which the document cannot),
+   * so the document must never overwrite it.
+   */
+  skipped: readonly string[];
+  /** `control_database_id` from the document, for the operator to verify. */
+  controlDatabaseId: string;
+}
+
+/** Options for {@link migrateTenantDatabaseRegistryDocument}. */
+export interface TenantDatabaseRegistryMigrationOptions {
+  /**
+   * The `database_name` to record for a migrated tenant. The document has none
+   * (see {@link TenantDatabaseRegistryDocument}), and the column is NOT NULL.
+   * Default: `ferrogate-tenant-<tenantId>`.
+   */
+  databaseName?: (tenantId: string, databaseUuid: string) => string;
+  /** `schema_version` for migrated rows. Default `1`. */
+  schemaVersion?: number;
+}
+
+/**
+ * Migrate a Rust-era `control_plane_resources` registry DOCUMENT into the
+ * `tenant_databases` TABLE (inventory-data-billing §1.7).
+ *
+ * ## Why this is a migration and not a read path
+ *
+ * The document maps `tenant_id -> database_uuid` and nothing else, because the
+ * Rust backend addressed D1 over the HTTP API by uuid. This port runs INSIDE a
+ * Worker, where a database handle is a deploy-time BINDING NAME
+ * (`env[bindingName]`), and a uuid buys you nothing at runtime. So a migrated
+ * row necessarily lands with `binding_name = NULL`, and
+ * {@link EnvBindingTenantDatabaseRouter} FAILS CLOSED on it until a redeploy
+ * adds the `[[d1_databases]]` stanza and
+ * {@link ControlDatabaseTenantRegistry.upsert} records the name.
+ *
+ * That is the correct outcome, not a shortcoming: a migrated tenant is
+ * "provisioned but not yet routable", and inventing a plausible binding name
+ * here would produce a router that resolves to `undefined` at request time — or,
+ * far worse, to some OTHER tenant's binding if the guess collided.
+ *
+ * ## Idempotent, and never destructive
+ *
+ * Existing `tenant_databases` rows are left untouched (reported in `skipped`),
+ * because the table is strictly richer than the document. Re-running after a
+ * redeploy therefore cannot erase the `binding_name` that redeploy assigned.
+ *
+ * @throws {@link StorageError} `runtime` if the document is malformed, or if
+ *   two tenants claim one `database_uuid` (the table's `UNIQUE (database_uuid)`
+ *   refuses it — two tenants sharing a database is precisely the cross-tenant
+ *   leak the DB-per-tenant topology exists to prevent).
+ */
+export async function migrateTenantDatabaseRegistryDocument(
+  controlDb: D1Database,
+  nowUnix: number,
+  options: TenantDatabaseRegistryMigrationOptions = {},
+): Promise<TenantDatabaseRegistryMigration> {
+  const nameFor = options.databaseName ?? ((tenantId: string) => `ferrogate-tenant-${tenantId}`);
+  const schemaVersion = options.schemaVersion ?? 1;
+
+  const row = await controlDb
+    .prepare(
+      "SELECT document_json FROM control_plane_resources " +
+        "WHERE resource_kind = ? AND resource_id = ?",
+    )
+    .bind(TENANT_DATABASE_REGISTRY_KIND, TENANT_DATABASE_REGISTRY_ID)
+    .first<{ document_json: string }>();
+  if (row === null) {
+    return { documentFound: false, inserted: [], skipped: [], controlDatabaseId: "" };
+  }
+
+  const document = parseTenantDatabaseRegistryDocument(row.document_json);
+  const registry = new ControlDatabaseTenantRegistry(controlDb);
+  const existing = new Set((await registry.list()).map((r) => r.tenantId));
+
+  const inserted: string[] = [];
+  const skipped: string[] = [];
+  // Sorted so the migration is deterministic and its report is stable, matching
+  // the Rust `BTreeMap` iteration order.
+  for (const tenantId of Object.keys(document.tenantDatabases).sort()) {
+    if (existing.has(tenantId)) {
+      skipped.push(tenantId);
+      continue;
+    }
+    const databaseUuid = document.tenantDatabases[tenantId] as string;
+    try {
+      await controlDb
+        .prepare(
+          "INSERT INTO tenant_databases " +
+            "(tenant_id, database_uuid, database_name, binding_name, schema_version, " +
+            " provisioned_at_unix, updated_at_unix) " +
+            "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+        )
+        .bind(tenantId, databaseUuid, nameFor(tenantId, databaseUuid), schemaVersion, nowUnix, nowUnix)
+        .run();
+    } catch (error) {
+      throw StorageError.runtime(
+        `migrating tenant ${tenantId} (database ${databaseUuid}) into tenant_databases ` +
+          `failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    inserted.push(tenantId);
+  }
+
+  return {
+    documentFound: true,
+    inserted,
+    skipped,
+    controlDatabaseId: document.controlDatabaseId,
+  };
+}
 
 /** Reads the tenant→database registry from the CONTROL database. */
 export class ControlDatabaseTenantRegistry {

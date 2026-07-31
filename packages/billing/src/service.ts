@@ -2,15 +2,27 @@
  * Billing microservice HTTP boundary — clean-room port of
  * `ferrogate-billing`'s `service.rs`.
  *
- * PORT-TODO(§2.4 / §2.5): the Rust service is a hand-rolled blocking HTTP/1.1
- * server (`TcpListener` + thread-per-connection, slowloris/load-shed guards).
- * Per the inventory CF/TS mapping (§2.5), that transport is DROPPED — in the
- * Workers world routing/limits/timeouts are the platform's job. This module
- * instead exposes a framework-agnostic **Web Fetch handler**
- * ({@link createBillingService}) implementing the exact same routes, auth, and
- * error taxonomy, ready to mount as a Hono route group inside the gateway
- * Worker. `serve(listen, ...)` (bind a socket) has no in-Worker equivalent and
- * is intentionally not ported.
+ * PORT-TODO(§2.4 / §2.5) — PLATFORM LIMIT, NOT CLOSED (routes/auth/errors ARE).
+ *
+ * The exact limitation: **a Worker cannot bind a listening socket.** The Rust
+ * service is a hand-rolled blocking HTTP/1.1 server — `TcpListener::bind`,
+ * thread-per-connection, its own slowloris and load-shed guards. workerd has no
+ * `listen()`: `cloudflare:sockets`' `connect()` is OUTBOUND only, there is no
+ * thread to dedicate to a connection, and the request lifecycle starts at a
+ * `fetch` handler the runtime calls. So `serve(listen, ...)` and its
+ * accept-loop guards have no equivalent and are deliberately NOT ported —
+ * a fake `serve()` that ignored its bind address would be worse than its
+ * absence.
+ *
+ * Per the inventory CF/TS mapping (§2.5) that transport is DROPPED on purpose,
+ * not merely blocked: on Workers, connection limits, read timeouts and load
+ * shedding are the PLATFORM's job, and reimplementing them in the isolate would
+ * duplicate them badly.
+ *
+ * What IS fully ported: every route, the constant-time bearer auth, the
+ * pagination/filter semantics, and the error→status taxonomy, exposed as a
+ * framework-agnostic **Web Fetch handler** ({@link createBillingService}) ready
+ * to mount as a Hono route group. `test/service.test.ts` drives it end to end.
  *
  * Routes (unchanged semantics):
  *  - `GET  /healthz` | `/v1/healthz`   — open readiness probe.

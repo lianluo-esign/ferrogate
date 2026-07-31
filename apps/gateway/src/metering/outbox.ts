@@ -61,14 +61,25 @@ function frozen(record: MutableRecord): OutboxRecord {
  * properties the SQL relies on: `ON CONFLICT (id) DO NOTHING` (the key) and
  * `ORDER BY next_attempt_unix ASC` (the sort in {@link listDue}).
  *
- * PORT-TODO(inventory-data-billing §2.5 "billing_report_outbox"): this survives
- * an isolate, not an isolate EVICTION. The durable row is written by
- * {@link D1LedgerStore} in the same batch as the metering insert (exactly as
- * `append_billing_event_with_outbox_enqueue` does), so once the `[[d1_databases]]`
- * binding is declared a charge that outlives this buffer is still recoverable
- * by a Cron-triggered sweep of `billing_report_outbox`. Until then this buffer
- * is the only retry state, which is why {@link MeteringOutbox.enqueue} is
- * synchronous — see the port doc.
+ * ## This buffer survives an isolate, not an isolate EVICTION — and that is fine
+ *
+ * It is deliberately only HALF the outbox, and no longer the half that carries
+ * the durability guarantee. The DURABLE row is written by `D1LedgerStore.record`
+ * into `billing_report_outbox` in the same `batch()` as the metering insert
+ * (exactly as `append_billing_event_with_outbox_enqueue` does), and its whole
+ * lifecycle now lives on the storage binding: `DurableOutboxStore.reap` on a
+ * successful publish, `reschedule` on a failed one, `deadLetter` past
+ * `MAX_BILLING_OUTBOX_ATTEMPTS`, and `listDue` for recovery. A charge whose
+ * isolate was evicted between the ledger commit and the Queue publish is
+ * re-published by `MeteringUsageSink.sweep`, which the `[triggers] crons` entry
+ * in `wrangler.toml` calls once a minute through `scheduled` on
+ * `src/worker.ts`'s default export.
+ *
+ * So this class is the FAST path — a per-isolate buffer that lets `enqueue` be
+ * synchronous, which it has to be: `UsageSink.record` is a `void` method called
+ * from a stream tap that may already be running after the response was flushed,
+ * and an `async` capture would drop the charge on an isolate teardown between
+ * `await` points. The durable row is what makes losing this buffer survivable.
  */
 export class InMemoryMeteringOutbox implements MeteringOutbox {
   readonly #rows = new Map<string, MutableRecord>();

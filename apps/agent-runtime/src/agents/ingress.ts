@@ -16,26 +16,33 @@
  *  3. declared correlation identity (#305 `x-ferrogate-agent-run-id`, #307
  *     `x-ferrogate-parent-action-fingerprint`) — malformed is 400, absent stays
  *     NULL, never fabricated;
- *  4. the capability/egress gate — the upstream host must be inside the
+ *  4. the REQUEST-stage guardrail over the flattened A2A text
+ *     (Rust `a2a_input_envelope`), before any forward;
+ *  5. the capability/egress gate — the upstream host must be inside the
  *     governed allowlist, so an A2A forward cannot become an unsupervised
  *     egress channel;
- *  5. forward, preserving SSE framing byte for byte on `message:stream`;
- *  6. record the exchange on the declared run's timeline when there is one.
+ *  6. forward, preserving SSE framing byte for byte on `message:stream`;
+ *  7. the RESPONSE-stage guardrail over the reply (Rust `a2a_output_envelope`);
+ *  8. record the exchange on the declared run's timeline when there is one.
  *
- * // PORT-TODO(inventory-edge-control §agent-worker): the request- and
- * // response-stage GUARDRAIL evaluation (`a2a_input_envelope` /
- * // `a2a_output_envelope`, which flatten every A2A text part and hand it to
- * // the detector stack) belongs to `@ferrogate/guardrails`, a wave-2 package
- * // still being written. The text-flattening walk this Worker needs is
- * // implemented below as {@link collectA2aText} so the envelope is ready to
- * // hand over; only the detector call is deferred, and the metering unit
- * // (`a2a_message_count`) already rides on it.
+ * ## The response stage on a STREAMED reply
+ *
+ * Rust buffers the whole A2A reply and evaluates the response-stage envelope
+ * before writing a byte, so a match can still BLOCK. That is not available
+ * here, and the reason is a project requirement rather than a platform one:
+ * `docs/rewrite/ROUTE-MAP.md` requires `message:stream` to preserve upstream
+ * SSE framing byte for byte AND incrementally, which buffering the reply
+ * destroys. So the streamed leg `tee()`s the body — one branch goes to the
+ * client untouched, the other is buffered and evaluated — and a match on a
+ * streamed reply is DETECT-ONLY: it is recorded as evidence and cannot retract
+ * bytes already flushed. The unary leg has no such conflict and DOES block
+ * (403), identically to Rust.
  */
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { depsOrThrow, requireAuth, tenantIdOf } from "../middleware/auth.js";
 import { HttpError } from "../middleware/errors.js";
-import type { AgentRuntimeEnv, AgentUpstream, AuthContext } from "../ports.js";
+import type { AgentRuntimeDeps, AgentRuntimeEnv, AgentUpstream, AuthContext } from "../ports.js";
 import { runStateStub } from "../runs/addressing.js";
 import { SSE_HEADERS } from "../runs/events.js";
 import { declaredAgentRunId, declaredParentActionFingerprint } from "../runs/governance.js";
@@ -78,6 +85,109 @@ export function collectA2aText(value: unknown, out: string[] = []): string[] {
  */
 export function a2aMessageCount(body: unknown): number {
   return Math.max(collectA2aText(body).length, 1);
+}
+
+/**
+ * Rust `sse_data_values`: the JSON value carried by each `data:` frame of an
+ * SSE reply. Unparseable frames are skipped rather than aborting the walk, so
+ * one malformed frame cannot blind the detector to the rest of the stream.
+ */
+export function sseDataValues(body: string): unknown[] {
+  const values: unknown[] = [];
+  for (const line of body.split("\n")) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith("data:")) continue;
+    const payload = trimmed.slice("data:".length).trim();
+    if (payload === "" || payload === "[DONE]") continue;
+    try {
+      values.push(JSON.parse(payload));
+    } catch {
+      // Not JSON: nothing to walk, but the raw text is still covered by the
+      // fail-safe fallback in `a2aReplyText`.
+    }
+  }
+  return values;
+}
+
+/**
+ * Rust `a2a_output_envelope`'s text extraction, for both reply shapes.
+ *
+ * The FALLBACK matters as much as the parse: a reply whose shape the parser
+ * does not recognise falls back to the raw bytes so it is still scanned rather
+ * than silently skipped. A detector that quietly sees an empty string on an
+ * unfamiliar payload is worse than no detector, because it looks like a pass.
+ */
+export function a2aReplyText(body: string, stream = false): string {
+  const collected: string[] = [];
+  if (stream) {
+    for (const value of sseDataValues(body)) collectA2aText(value, collected);
+  } else {
+    try {
+      collectA2aText(JSON.parse(body), collected);
+    } catch {
+      // Fall through to the raw-body fallback below.
+    }
+  }
+  return collected.length === 0 ? body : collected.join("\n");
+}
+
+/**
+ * Drain the teed branch of a streamed reply and evaluate the response stage.
+ *
+ * Runs under `waitUntil`, so it never delays the client's first byte. A match
+ * here is DETECT-ONLY (see the module docs): the evidence is recorded on the
+ * run timeline, which is where an investigator looks, but the bytes are gone.
+ *
+ * Errors are swallowed deliberately — this runs after the response has been
+ * committed, so throwing could only produce an unhandled rejection, never a
+ * refusal the caller would see.
+ */
+async function evaluateStreamedReply(
+  deps: AgentRuntimeDeps,
+  branch: ReadableStream<Uint8Array>,
+  context: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly runStateStub: ReturnType<typeof runStateStub> | null;
+    readonly agentRunId: string | null;
+    readonly parentActionFingerprint: string | null;
+    readonly requestId: string;
+    readonly nowUnix: number;
+  },
+): Promise<void> {
+  try {
+    const body = await new Response(branch).text();
+    const verdict = await deps.guardrails.evaluate({
+      stage: "response",
+      tenantId: context.tenantId,
+      agentId: context.agentId,
+      streaming: true,
+      text: a2aReplyText(body, true),
+    });
+    if (verdict.outcome === "allow") return;
+    if (context.runStateStub === null || context.agentRunId === null) return;
+    await context.runStateStub.appendEvent(context.tenantId, {
+      kind: "guardrail_match",
+      body: {
+        route: A2A_ROUTE,
+        agent_id: context.agentId,
+        stage: verdict.denial.stage,
+        detector: verdict.denial.detector,
+        // DETECT-ONLY, and said so on the record: the reply was already
+        // streamed, so this evidence is not a block.
+        enforced: false,
+        message: verdict.denial.message,
+      },
+      nowUnix: context.nowUnix,
+      source: "control_plane",
+      requestId: context.requestId,
+      traceId: null,
+      agentRunId: context.agentRunId,
+      parentActionFingerprint: context.parentActionFingerprint,
+    });
+  } catch {
+    // See the doc comment: nothing useful can be surfaced from here.
+  }
 }
 
 /** Rust `agent_upstream_visible_to_auth`. */
@@ -146,6 +256,20 @@ async function handleAgentIngress(
   const requestId = c.get("requestId") ?? "";
   const stream = mode === "stream";
 
+  // #278: the REQUEST-stage guardrail, over every text part the body carries,
+  // BEFORE the forward — a body that must not leave the gateway must not reach
+  // the upstream either, so this cannot be moved after the dispatch.
+  const requestVerdict = await deps.guardrails.evaluate({
+    stage: "request",
+    tenantId,
+    agentId,
+    streaming: stream,
+    text: collectA2aText(payload).join("\n"),
+  });
+  if (requestVerdict.outcome === "deny") {
+    throw new HttpError(403, "guardrail_blocked", requestVerdict.denial.message);
+  }
+
   // The egress gate: an A2A forward must not become an unsupervised egress
   // channel, so the upstream host is checked against the SAME governed
   // allowlist a sandbox workload is held to (#471, sealed by default).
@@ -207,14 +331,43 @@ async function handleAgentIngress(
       throw new HttpError(502, "upstream_error", "agent upstream returned no stream");
     }
     // Byte-for-byte passthrough: the body is never re-encoded, so the upstream
-    // SSE framing survives exactly as `ROUTE-MAP.md` requires.
-    return new Response(forwarded.body, {
+    // SSE framing survives exactly as `ROUTE-MAP.md` requires. `tee()` is what
+    // lets the response-stage detector see the same bytes WITHOUT buffering
+    // them out of the client's path.
+    const [toClient, toDetector] = forwarded.body.tee();
+    c.executionCtx.waitUntil(
+      evaluateStreamedReply(deps, toDetector, {
+        tenantId,
+        agentId,
+        runStateStub: agentRunId === null ? null : runStateStub(c.env, tenantId, agentRunId),
+        agentRunId,
+        parentActionFingerprint,
+        requestId,
+        nowUnix: deps.clock.nowUnix(),
+      }),
+    );
+    return new Response(toClient, {
       status: forwarded.status,
       headers: { ...SSE_HEADERS },
     });
   }
 
   const body = await forwarded.text();
+
+  // #278: the RESPONSE-stage guardrail. The unary reply is already fully in
+  // hand, so a match BLOCKS here exactly as it does in Rust — the upstream's
+  // bytes are never handed to the caller.
+  const responseVerdict = await deps.guardrails.evaluate({
+    stage: "response",
+    tenantId,
+    agentId,
+    streaming: false,
+    text: a2aReplyText(body),
+  });
+  if (responseVerdict.outcome === "deny") {
+    throw new HttpError(403, "guardrail_blocked", responseVerdict.denial.message);
+  }
+
   return new Response(body, {
     status: forwarded.status,
     headers: {

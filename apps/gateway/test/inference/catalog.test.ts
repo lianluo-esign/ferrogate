@@ -267,11 +267,20 @@ describe("the deployed Worker resolves logical models to physical routes", () =>
     }
     // Client disconnect must reach the upstream: without a live signal here the
     // provider keeps generating (and billing) for a client that has hung up.
-    // Identity — not merely "some signal" — is what proves it is the CLIENT's,
-    // and in particular that the body reader's `c.req.raw` replacement (which
-    // mints a fresh, never-aborted signal) did not shadow it.
+    //
+    // This used to assert `seen === controller.signal`. It cannot any more:
+    // `dispatchUpstream` now composes the client signal with the
+    // `limits.dispatchTimeoutMs` deadline (`AbortSignal.any`), so the signal the
+    // provider fetch receives is a DERIVED one. Identity was only ever a proxy
+    // for the real invariant — that aborting the CLIENT aborts the upstream —
+    // so the invariant is asserted directly instead, which still catches the
+    // regression identity was guarding: the body reader's `c.req.raw`
+    // replacement mints a fresh, never-aborted signal, and a derived signal
+    // built from THAT would stay unaborted below.
     expect(seen).toBeInstanceOf(AbortSignal);
-    expect(seen).toBe(controller.signal);
+    expect(seen?.aborted).toBe(false);
+    controller.abort(new Error("client hung up"));
+    expect(seen?.aborted).toBe(true);
   });
 });
 

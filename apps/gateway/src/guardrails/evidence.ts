@@ -270,6 +270,14 @@ export function buildCheckEvidence(
  * RLS scoping is replaced by per-tenant database separation. This sink is the
  * offline/local implementation and the one the suite asserts non-persistence
  * against.
+ *
+ * Blocked on the SCHEMA, not on the platform: both tables exist only in the
+ * legacy Postgres DDL (`sql/001_init_postgres.sql:454`) and have NOT been
+ * translated into either D1 migration yet (`sql/d1-ts/{tenant,control}` carry
+ * the guardrail POLICY tables but no evaluation tables). Adding them is a
+ * `sql/d1-ts` + `packages/storage` slice — and the choice of database is a real
+ * decision, not a copy: evidence is per-tenant append-only, so it belongs in the
+ * TENANT database (split rule (a)), unlike the policy tables above.
  */
 export class InMemoryGuardrailEvidenceSink implements GuardrailEvidenceSink {
   readonly #evaluations: GuardrailEvidence[] = [];

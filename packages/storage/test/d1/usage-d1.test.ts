@@ -152,3 +152,38 @@ describe("D1UsageLedger — capture", () => {
     expect(await ledger.getUsageMonthlyRollup(PERIOD, "project", "nope")).toBeUndefined();
   });
 });
+
+/**
+ * PLATFORM LIMIT PIN — kept as a PORT-TODO in `src/d1/usage-d1.ts`.
+ *
+ * The Rust/Postgres shape put the `billing_events` exactly-once claim and this
+ * usage accumulate in ONE transaction. On D1 they live in two different
+ * databases (control vs tenant) and there is no cross-database transaction, no
+ * two-phase commit, and no distributed-transaction API. These tests pin BOTH
+ * halves of the honest approximation so it cannot silently be described as
+ * exactly-once.
+ */
+describe("D1UsageLedger — the cross-database platform limit", () => {
+  test("a batch may not mix statements from two databases", async () => {
+    // If workerd ever grew a cross-database batch, this expectation flips and
+    // the PORT-TODO in src/d1/usage-d1.ts becomes closable.
+    await expect(
+      env.TENANT_DB_A.batch([
+        env.TENANT_DB_A.prepare("DELETE FROM usage_monthly_rollups WHERE id = 'x'"),
+        env.CONTROL_DB.prepare("DELETE FROM billing_events WHERE billing_event_id = 'x'"),
+      ]),
+    ).rejects.toThrow();
+  });
+
+  test("the accumulate is ADDITIVE, so replaying one settled call double-counts it", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    // Byte-identical write, twice — exactly what an at-least-once delivery does.
+    await ledger.persistUsageAggregate(call());
+    await ledger.persistUsageAggregate(call());
+    const rollup = await ledger.getUsageMonthlyRollup(PERIOD, "tenant", TENANT_A);
+    // NOT 140. This is the documented non-idempotence: de-duplication is the
+    // caller's job via D1BillingEventLedger's control-database claim.
+    expect(rollup?.totalTokens).toBe(280);
+    expect(rollup?.requestCount).toBe(2);
+  });
+});

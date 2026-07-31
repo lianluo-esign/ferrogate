@@ -24,32 +24,36 @@ import {
   inferenceRouteModule,
   modelsFromEnv,
 } from "./inference/index.js";
-import { createMeteringUsageSink } from "./metering/index.js";
+import {
+  createMeteringUsageSink,
+  meteringBindingsFromEnv,
+  meteringDrain,
+} from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 
 /**
- * The durable metering sink behind `UsageSink` (wave 5).
+ * The durable metering sink behind `UsageSink`.
  *
- * Until now the inference module took its `InMemoryUsageSink` default, i.e.
- * captured usage went nowhere. `MeteringUsageSink` prices the usage through
- * `@ferrogate/billing`, writes an idempotent ledger entry keyed on the
- * `ledger_entry_id`, and commits a durable outbox record in the same batch.
+ * `MeteringUsageSink` prices captured usage through `@ferrogate/billing`,
+ * writes an idempotent ledger entry keyed on the `ledger_entry_id`, and commits
+ * the billing-report outbox row in the SAME D1 `batch()` as the metering row
+ * (issue #150), then publishes onto Cloudflare Queues.
  *
  * It is built ONCE, at module scope, because `UsageSink` is a construction-time
- * dependency of the route module while Worker bindings are per request — so it
- * takes the in-memory ledger/outbox and the isolate-lifetime scheduler.
+ * dependency of the route module while Worker bindings are per request. That is
+ * why it takes a `bindings` RESOLVER rather than bindings: `meteringBindingsFromEnv`
+ * reads `env.BILLING_DB` (the CONTROL D1 holding `billing_events` /
+ * `billing_ledger` / `billing_report_outbox` — NOT the tenant `DB`, whose
+ * migration excludes those tables) and `env.BILLING` (the Queue producer) from
+ * whichever request is being served, and memoizes the wrappers on the env
+ * object itself. Nothing is ambient, so nothing can leak between concurrent
+ * requests.
  *
- * PORT-TODO(inventory-data-billing §2.5): backing it with `D1LedgerStore(env.DB)`
- * + `QueueBillingReportPublisher(env.BILLING)` and `executionContextScheduler(ctx)`
- * needs `UsageSink.record` widened to carry the `ExecutionContext`
- * (`src/metering/index.ts` states the one-line signature change). Binding a
- * module-scoped "current ctx" is NOT a substitute — workerd refuses I/O started
- * on behalf of a different request. Until then no `[[queues]]` binding is
- * declared, because declaring one nothing reads is the drift `wrangler.toml`
- * forbids.
+ * With a resolver configured the sink does not drain itself — see
+ * `GATEWAY_MIDDLEWARE` below.
  */
-const usage = createMeteringUsageSink();
+const usage = createMeteringUsageSink({ bindings: meteringBindingsFromEnv });
 
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
@@ -85,7 +89,17 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * ingress order (`docs/legacy/inventory-request-path.md` §"Cross-crate
  * architecture", steps 5/11 + `auth::finalize_auth` → `server/chat.rs`):
  *
- *   contractAuth  →  rateLimit  →  guardrails  →  validate  →  dispatch
+ *   contractAuth  →  meteringDrain  →  rateLimit  →  guardrails  →  validate  →  dispatch
+ *
+ * `meteringDrain` is FIRST because it is the only one that does its work on the
+ * way OUT: it wraps `await next()`, so being outermost is what lets it see the
+ * final `Response`. It is where the request's `env` and `ExecutionContext` are
+ * both in scope, which is the whole reason durable metering can exist at all on
+ * a module-scoped sink — and for an SSE response it defers the drain until the
+ * body has finished OR the client has hung up, because the usage frame arrives
+ * near the end of the stream and a disconnect must still bill what was
+ * consumed. Being ahead of `rateLimit` costs nothing: a request refused with
+ * 429 records no usage, so its drain finds an empty outbox and returns.
  *
  * Admission comes FIRST because the Rust charges the RPM/quota windows inside
  * `finalize_auth`, before the body is ever examined; screening comes second
@@ -97,6 +111,8 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * so all 31 gateway operations are covered (see `CreateGatewayAppOptions`).
  */
 export const GATEWAY_MIDDLEWARE = [
+  // Durable metering, on `ctx.waitUntil`, after the response is flushed.
+  meteringDrain(usage),
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
   rateLimit(),
@@ -123,6 +139,31 @@ export const gatewayRouter = router;
 app.get("/version", (c) => c.json({ api: PUBLIC_API_MAJOR }));
 
 export default app;
+
+/**
+ * The `[triggers] crons` handler — recovery for charges the request path could
+ * not finish reporting.
+ *
+ * A Worker has no background thread, so the Rust `sweep_billing_outbox_once`
+ * loop has no direct equivalent: the request-time drain (`meteringDrain`) is the
+ * primary path, and it retries from the in-isolate outbox. What that CANNOT
+ * cover is an isolate that is evicted between the D1 ledger commit and the Queue
+ * publish — the charge is on the tenant's ledger, nothing downstream was told,
+ * and the only surviving record is the `billing_report_outbox` row written in
+ * the same batch (#150). A Cron trigger is the platform's answer: it is the one
+ * thing that runs with the bindings in hand and no request to serve.
+ *
+ * `MeteringUsageSink.sweep` skips rows younger than `OUTBOX_SWEEP_GRACE_SECONDS`
+ * — those are still owned by their own request's `waitUntil` — and never
+ * rejects, so a metering outage cannot fail the scheduled event either.
+ */
+export async function gatewayScheduled(
+  _controller: unknown,
+  env: unknown,
+  ctx: { waitUntil(work: Promise<unknown>): void },
+): Promise<void> {
+  await usage.sweep({ env, ctx });
+}
 
 export { createGatewayApp, GatewayRouter } from "./routes/index.js";
 export type { RouteModule, OperationHandler, GatewayApp } from "./routes/index.js";

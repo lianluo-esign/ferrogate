@@ -84,13 +84,25 @@ export type { GatewayErrorData, GatewayResult } from "@ferrogate/core";
 /**
  * Registry keyed by operationId / type name, resolving a wire schema by name.
  * Seeded with the cross-plane envelopes and the shared `ferrogate-core`
- * primitives; the per-operation request/response bodies are added incrementally.
+ * primitives.
  *
- * PORT-TODO(inventory §1.3/§1.4): the remaining per-operation request/response
- * shapes of the committed 251-operation runtime contract
- * (`docs/openapi/runtime-api-contract.json`) are ported by the request-path
- * cluster (gateway/routing/providers/runtime) and registered here. Only the
- * shared cross-plane + `ferrogate-core` primitives are populated so far.
+ * PORT-TODO(inventory §1.3/§1.4) — CROSS-SCOPE REGISTRATION, NOT A PLATFORM
+ * LIMIT, NOT CLOSED HERE AND NOT CLOSABLE HERE.
+ *
+ * The remaining per-operation request/response shapes of the committed
+ * 251-operation runtime contract (`docs/openapi/runtime-api-contract.json`) are
+ * OWNED by the surfaces that serve them — `apps/gateway`, `apps/control-plane`,
+ * `apps/mcp`. Defining them in this package would invert the dependency (a
+ * shared leaf package would have to know every route's body) and would
+ * guarantee drift: the schema and the handler it validates would live in
+ * different packages with nothing forcing them to move together.
+ *
+ * So what this package owes is the REGISTRATION MECHANISM, and that is now
+ * closed: {@link registerWireSchema} lets an app register its operations at
+ * composition time, and it REFUSES a duplicate name rather than overwriting —
+ * a silent overwrite would swap the validator for a route and be invisible.
+ * Direct mutation of {@link wireSchemas} still works for reads; prefer the
+ * function so collisions are caught.
  */
 export const wireSchemas: Record<string, z.ZodTypeAny> = {
   // cross-plane envelopes (owned here)
@@ -106,3 +118,42 @@ export const wireSchemas: Record<string, z.ZodTypeAny> = {
   toolResult: toolResultSchema,
   gatewayError: gatewayErrorSchema,
 };
+
+/**
+ * Register one operation's wire schema under `name`.
+ *
+ * @throws if `name` is already registered with a DIFFERENT schema. Re-registering
+ *   the identical schema object is a no-op, so a module imported twice (two
+ *   entry points, a test importing a composition root) is not an error, while
+ *   two different bodies claiming one operationId — the drift that silently
+ *   swaps a route's validator — is.
+ */
+export function registerWireSchema(name: string, schema: z.ZodTypeAny): void {
+  if (name.trim() === "") {
+    throw new Error("wire schema name must not be empty");
+  }
+  const existing = wireSchemas[name];
+  if (existing !== undefined && existing !== schema) {
+    throw new Error(
+      `wire schema ${JSON.stringify(name)} is already registered with a different schema; ` +
+        "an operationId must map to exactly one body, or a route silently validates " +
+        "against the wrong one",
+    );
+  }
+  wireSchemas[name] = schema;
+}
+
+/** Register many at once (an app's whole surface). Fails on the first collision. */
+export function registerWireSchemas(schemas: Record<string, z.ZodTypeAny>): void {
+  for (const [name, schema] of Object.entries(schemas)) registerWireSchema(name, schema);
+}
+
+/** Resolve a registered schema by name, or `undefined`. */
+export function resolveWireSchema(name: string): z.ZodTypeAny | undefined {
+  return wireSchemas[name];
+}
+
+/** Every registered name, sorted — the introspection an app's status route uses. */
+export function registeredWireSchemaNames(): string[] {
+  return Object.keys(wireSchemas).sort();
+}

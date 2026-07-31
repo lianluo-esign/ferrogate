@@ -6,9 +6,13 @@
  * inventory (§3.8) suggests Web Crypto (`crypto.subtle`), but `crypto.subtle`
  * is asynchronous — adopting it would force the entire adapter trait surface to
  * become `async`, a behavioral divergence from the Rust pure-synchronous
- * contract. To preserve that contract byte-for-byte we re-implement SHA-256 and
- * HMAC-SHA256 directly in synchronous TypeScript here (the same primitives the
- * Rust crate delegates to `sha2`/`hmac` for). See PORT-TODO in `sigv4.ts`.
+ * contract. To preserve that contract we re-implement SHA-256 and HMAC-SHA256
+ * directly in synchronous TypeScript here (the same primitives the Rust crate
+ * delegates to `sha2`/`hmac` for).
+ *
+ * `test/crypto-sigv4.test.ts` proves these agree with `crypto.subtle` byte for
+ * byte, so the mechanism swap is invisible. See the mechanism note in
+ * `sigv4.ts`.
  */
 
 const K = new Uint32Array([

@@ -36,6 +36,7 @@ import {
   type ListPage,
   type ListQuery,
   StoreConflictError,
+  type StoreMutation,
   type StoreRecord,
 } from "../ports.js";
 import { pageOf, visibleTo } from "./query.js";
@@ -137,5 +138,54 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     const existing = await this.get(collection, scope, id);
     if (existing === null) return false;
     return this.#bucket(collection).delete(id);
+  }
+
+  /**
+   * {@link ControlPlaneStore.atomic}, the reference semantics.
+   *
+   * Every reason the unit can fail — a merge target that is absent or invisible,
+   * a `create` id that is taken — is decided BEFORE the first `Map.set`, so
+   * "nothing was written" holds here for the same reason it holds on D1, and
+   * the conformance suite can hold both stores to one contract. The writes
+   * themselves are then a synchronous loop with no `await` between them, which
+   * on a single-threaded isolate no other request can interleave with.
+   */
+  async atomic(
+    scope: CallerScope,
+    mutations: readonly StoreMutation[],
+  ): Promise<readonly StoreRecord[] | null> {
+    const planned: { collection: string; record: StoreRecord }[] = [];
+    for (const mutation of mutations) {
+      if (mutation.kind === "create") {
+        if (this.#bucket(mutation.collection).has(mutation.record.id)) {
+          throw new StoreConflictError(mutation.collection, mutation.record.id);
+        }
+        planned.push({
+          collection: mutation.collection,
+          record: {
+            ...mutation.record,
+            tenant_id:
+              scope.kind === "tenant" ? scope.tenantId : (mutation.record.tenant_id ?? null),
+          },
+        });
+        continue;
+      }
+      const existing = await this.get(mutation.collection, scope, mutation.id);
+      if (existing === null) return null;
+      const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = mutation.patch;
+      planned.push({
+        collection: mutation.collection,
+        record: {
+          ...existing,
+          ...fields,
+          id: mutation.id,
+          tenant_id: existing.tenant_id ?? null,
+        },
+      });
+    }
+    for (const { collection, record } of planned) {
+      this.#bucket(collection).set(record.id, record);
+    }
+    return planned.map((entry) => entry.record);
   }
 }

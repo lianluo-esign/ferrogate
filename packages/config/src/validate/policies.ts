@@ -26,6 +26,7 @@ import {
   validatePromptMessageRole,
   validatePromptPlaceholders,
   validateSecretRef,
+  usesRegexCrateUnsupportedSyntax,
 } from "./helpers.js";
 import { pluginRegistrationsForValidation } from "./plugins.js";
 
@@ -491,12 +492,14 @@ export function validateGuardrails(
     for (let regexIndex = 0; regexIndex < guardrail.regex.length; regexIndex += 1) {
       const pattern = guardrail.regex[regexIndex]!;
       if (isBlank(pattern)) fail(at(`regex[${regexIndex}]`), "cannot be empty");
+      // Rust: `regex::Regex::new(pattern).with_context(|| "... invalid regex")`.
+      // anyhow's `Display` renders only the outermost context, so the observable
+      // Rust message is exactly `invalid regex` for EVERY rejection reason —
+      // including the two constructs the `regex` crate refuses but JS accepts.
+      if (usesRegexCrateUnsupportedSyntax(pattern)) {
+        fail(at(`regex[${regexIndex}]`), "invalid regex");
+      }
       try {
-        // PORT-TODO(inventory §5.4): Rust compiles with the `regex` crate, which
-        // REJECTS backreferences and lookaround that JS accepts (and has no
-        // catastrophic-backtracking class). A pattern legal here can therefore
-        // still be rejected by a Rust peer; re-check against the detector engine
-        // the Worker actually runs once the guardrails matcher lands.
         new RegExp(pattern);
       } catch {
         fail(at(`regex[${regexIndex}]`), "invalid regex");

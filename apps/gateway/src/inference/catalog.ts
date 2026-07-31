@@ -39,6 +39,7 @@
  */
 import { z } from "zod";
 import { canonicalProviderKind, defaultAuthScheme } from "./adapters.js";
+import type { OpenRouterRoute } from "./adapters.js";
 import { InMemoryModelResolver, emptyModelResolver } from "./defaults.js";
 import type {
   InferenceBindings,
@@ -81,6 +82,10 @@ export const providerRecordSchema = z
     api_key_var: z.string().trim().min(1).optional(),
     /** Credential scheme override; defaults to the family's Rust hard-coding. */
     auth_scheme: z.enum(["bearer", "x-api-key"]).optional(),
+    /** `ProviderConfig.openrouter_http_referer` — OpenRouter attribution only. */
+    openrouter_http_referer: z.string().trim().min(1).optional(),
+    /** `ProviderConfig.openrouter_x_title` — OpenRouter attribution only. */
+    openrouter_x_title: z.string().trim().min(1).optional(),
   })
   .strict();
 
@@ -174,7 +179,11 @@ export function buildModelCatalog(
     byName.set(provider.name, provider);
   }
 
-  const routes: PhysicalRoute[] = [];
+  // `OpenRouterRoute` is `PhysicalRoute` plus the two optional OpenRouter
+  // attribution fields, which `ports.ts` has no home for yet (see
+  // `OpenRouterProviderExtras`). Every other consumer sees a plain
+  // `PhysicalRoute`.
+  const routes: OpenRouterRoute[] = [];
   const seen = new Set<string>();
   for (const model of models) {
     // `ModelRegistryError::DuplicateModel` — Rust refuses the registry outright.
@@ -219,6 +228,12 @@ export function buildModelCatalog(
       enabled: model.enabled ?? true,
       ...(model.tenant_id !== undefined ? { tenantId: model.tenant_id } : {}),
       ...(model.project_id !== undefined ? { projectId: model.project_id } : {}),
+      ...(provider.openrouter_http_referer !== undefined
+        ? { openrouterHttpReferer: provider.openrouter_http_referer }
+        : {}),
+      ...(provider.openrouter_x_title !== undefined
+        ? { openrouterXTitle: provider.openrouter_x_title }
+        : {}),
     });
   }
 

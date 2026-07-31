@@ -112,8 +112,12 @@ load-bearing tables. Four deliberate divergences:
    Running inside a Worker with R2 available, inventory §1.7 is explicit that
    inline BYTEA moves to R2, so only `content_hash` / `size_bytes` /
    `storage_uri` remain — which is everything the quota-admission guard reads.
-   `PORT-TODO`: the asset handlers must write the R2 object **before** this row
-   and delete-on-rollback, since no transaction spans R2 and D1.
+   That ordering is now implemented: `commitAssetWithBlob`
+   (`src/d1/assets-r2.ts`) writes the R2 object **before** the row and
+   compensates (deletes) on a failed or refused insert, because **no
+   transaction spans R2 and D1**. A crash between the two leaves an orphan
+   object that no read path can name; `R2AssetBlobStore.deleteOrphans` reclaims
+   it.
 
 3. **The model/provider registry becomes tables.** In Rust this is *configuration*
    (`[[providers]]` / `[[models]]` TOML, today the `GATEWAY_PROVIDERS` /
@@ -364,12 +368,18 @@ pass `--local` plus an explicit path; the D1 suite loads both sets through
   lacking the Postgres `NOT EXISTS (payment_attempts …)` guard that protects a
   hold owned by an in-flight payment (#396/#352). Callers must keep enforcing
   hold protection at the application layer until the table lands.
-* `PORT-TODO(inventory-data-billing §1.5.8)` — `D1UsageLedger` accumulation is
-  additive and therefore **not** idempotent under at-least-once delivery.
-  Exactly-once comes from claiming `billing_events.billing_event_id` first, and
-  that table is in the CONTROL database while the rollup batch is on a TENANT
-  database — no transaction spans two D1 databases. Until the claim is wired,
-  the caller owns de-duplication.
+* `PORT-TODO(inventory-data-billing §1.5.8)` — **PLATFORM LIMIT, partially
+  closed.** The claim itself is now ported: `D1BillingEventLedger`
+  (`src/d1/billing-d1.ts`) claims `billing_events.billing_event_id` and enqueues
+  the `billing_report_outbox` row in ONE atomic `controlDb.batch()`, which is
+  the whole of Rust's `append_billing_event_with_outbox_enqueue` — both tables
+  are in the control database, so the atomicity is real. What CANNOT be closed:
+  `D1UsageLedger`'s rollup batch is on a TENANT database, and **D1 has no
+  transaction spanning two databases** (no cross-database `BEGIN`, no two-phase
+  commit), so the claim and the accumulate cannot be one commit. The
+  approximation is claim-then-accumulate, whose residual window UNDER-counts
+  rather than double-bills. The caller owns the ordering: run the claim first,
+  accumulate only on `recorded: true`.
 * `PORT-TODO(inventory-request-path §1.6)` — the model/provider registry tables
   exist but the gateway still reads `GATEWAY_PROVIDERS` / `GATEWAY_MODELS` vars;
   swapping in a D1-backed `ModelResolver` is a `packages/routing` slice.

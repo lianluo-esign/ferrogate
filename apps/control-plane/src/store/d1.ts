@@ -78,6 +78,7 @@ import {
   type ListPage,
   type ListQuery,
   StoreConflictError,
+  type StoreMutation,
   type StoreRecord,
 } from "../ports.js";
 import { isUnfilteredQuery, pageOf } from "./query.js";
@@ -224,11 +225,30 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     // meaning (`json_extract` yields `1` for a JSON `true`, where the reference
     // compares against the string `"true"`).
     //
-    // PORT-TODO(inventory-edge-control §9.3): this reads the collection's
-    // tenant-visible rows into the isolate before filtering. That is the
-    // admin/low-volume path Rust's own D1 backend documents, but the
-    // high-cardinality collections (`request-logs`, `agent-run-events`) want
-    // their own projection columns and a SQL predicate before they grow.
+    // PORT-TODO(inventory-edge-control §9.3) — KEPT, sharpened. This reads the
+    // collection's tenant-visible rows into the isolate before filtering, and
+    // that is NOT a shortcut that a cleverer predicate closes: pushing either
+    // half into SQL over `document_json` CHANGES ITS MEANING, in both
+    // directions, and `test/store-conformance.test.ts` pins both cases against
+    // both stores:
+    //
+    //   * `?search=` folds case with JS `toLowerCase()`, i.e. full Unicode.
+    //     SQLite's `LIKE` folds ASCII ONLY, so a `document_json LIKE ?`
+    //     pre-filter DROPS a row that matches (`search=ärzte` vs `"ÄRZTE"`) —
+    //     it is not even a safe superset. It would also match on field NAMES and
+    //     on fields outside `SEARCH_FIELDS`, i.e. over-match at the same time.
+    //   * `?k=v` compares `String(value) === expected`, so a JSON `true` matches
+    //     the string `"true"`. `json_extract(document_json, '$.k')` yields the
+    //     INTEGER `1` for that row, so the SQL predicate matches nothing.
+    //
+    // The real close is therefore a SCHEMA change, not a query change: typed
+    // projection columns (plus a `tenant_id` generated column, see the schema
+    // notes at the bottom of this file) for the high-cardinality collections
+    // — `request-logs`, `agent-run-events`, `metering-events` — with a
+    // collation that matches the reference. `sql/d1-ts/` belongs to the
+    // migrations slice, so this is reported rather than a column invented here.
+    // Until then the admin/low-volume path is what Rust's own D1 backend
+    // documents for these surfaces, and correctness is preferred to the seek.
     const rows = await this.#db
       .prepare(`SELECT resource_id, document_json FROM ${RESOURCE_TABLE} ${where} ${LIST_ORDER}`)
       .bind(...whereParams)
@@ -345,6 +365,177 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     return true;
   }
 
+  // -------------------------------------------------------------------------
+  // Atomic multi-row units
+  // -------------------------------------------------------------------------
+
+  /**
+   * {@link ControlPlaneStore.atomic} on a real SQLite transaction.
+   *
+   * `D1Database.batch()` runs its statements in ONE implicit transaction, so
+   * either every statement below commits or none of them does. That alone is
+   * not enough, though: a `DO NOTHING` insert and a revision-guarded update
+   * both "succeed" while matching zero rows, so a half-applied unit would look
+   * like a committed one. Two things close that:
+   *
+   *  1. EVERY statement in the batch — the inserts included — carries the SAME
+   *     `EXISTS (… AND revision = ?)` guard, one per merge target, at the
+   *     revision this call read. A concurrent writer moves the revision, so
+   *     either all the guards hold or none do; there is no interleaving in
+   *     which the ledger entry lands and the balance does not.
+   *  2. The per-statement `meta.changes` are checked afterwards. All-zero means
+   *     the guards lost the race → re-read and retry. Mixed would mean the
+   *     invariant above is broken, and is refused loudly rather than papered
+   *     over.
+   */
+  async atomic(
+    scope: CallerScope,
+    mutations: readonly StoreMutation[],
+  ): Promise<readonly StoreRecord[] | null> {
+    if (mutations.length === 0) return [];
+    const tenant = tenantScopeSql(scope);
+
+    for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
+      // Resolve every merge target first, so the guard revisions are the ones
+      // the computed documents were derived from.
+      const loaded = new Map<number, LoadedRecord>();
+      for (const [index, mutation] of mutations.entries()) {
+        if (mutation.kind !== "merge") continue;
+        const existing = await this.#load(mutation.collection, scope, mutation.id);
+        // A missing/invisible merge target aborts the WHOLE unit before a
+        // single statement runs — "nothing was written" has to be true on this
+        // path too, not just on the transaction's.
+        if (existing === null) return null;
+        loaded.set(index, existing);
+      }
+
+      // The shared guard: one `EXISTS` per merge target, at its read revision.
+      const guardClauses: string[] = [];
+      const guardParams: unknown[] = [];
+      for (const [index, mutation] of mutations.entries()) {
+        if (mutation.kind !== "merge") continue;
+        const existing = loaded.get(index);
+        if (existing === undefined) continue;
+        guardClauses.push(
+          `EXISTS (SELECT 1 FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ? AND revision = ?)`,
+        );
+        guardParams.push(mutation.collection, mutation.id, existing.revision);
+      }
+      const guardSql = guardClauses.length === 0 ? "" : ` WHERE ${guardClauses.join(" AND ")}`;
+
+      const now = this.#now();
+      const statements: D1PreparedStatement[] = [];
+      const next: StoreRecord[] = [];
+      const audits: {
+        action: AuditAction;
+        collection: string;
+        record: StoreRecord;
+        revision: number;
+      }[] = [];
+
+      for (const [index, mutation] of mutations.entries()) {
+        if (mutation.kind === "create") {
+          const stored: StoreRecord = {
+            ...mutation.record,
+            tenant_id:
+              scope.kind === "tenant" ? scope.tenantId : (mutation.record.tenant_id ?? null),
+          };
+          next.push(stored);
+          audits.push({
+            action: "create",
+            collection: mutation.collection,
+            record: stored,
+            revision: 1,
+          });
+          statements.push(
+            this.#db
+              .prepare(
+                `INSERT INTO ${RESOURCE_TABLE}
+                   (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+                 SELECT ?, ?, ?, 1, ?, ?${guardSql}
+                 ON CONFLICT (resource_kind, resource_id) DO NOTHING`,
+              )
+              .bind(
+                mutation.collection,
+                stored.id,
+                JSON.stringify(stored),
+                now,
+                now,
+                ...guardParams,
+              ),
+          );
+          continue;
+        }
+
+        const existing = loaded.get(index);
+        // Unreachable: every `merge` was loaded above or the unit returned.
+        if (existing === undefined) throw new Error("atomic: unresolved merge target");
+        const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = mutation.patch;
+        const merged: StoreRecord = {
+          ...existing.record,
+          ...fields,
+          id: mutation.id,
+          tenant_id: existing.record.tenant_id ?? null,
+        };
+        next.push(merged);
+        audits.push({
+          action: "merge",
+          collection: mutation.collection,
+          record: merged,
+          revision: existing.revision + 1,
+        });
+        statements.push(
+          this.#db
+            .prepare(
+              `UPDATE ${RESOURCE_TABLE}
+                 SET document_json = ?, revision = revision + 1, updated_at_unix = ?
+               WHERE resource_kind = ? AND resource_id = ? AND revision = ?${tenant.sql}`,
+            )
+            .bind(
+              JSON.stringify(merged),
+              now,
+              mutation.collection,
+              mutation.id,
+              existing.revision,
+              ...tenant.params,
+            ),
+        );
+      }
+
+      const results = await this.#db.batch(statements);
+      const changes = results.map((result) => result.meta.changes ?? 0);
+      if (changes.every((count) => count > 0)) {
+        for (const entry of audits) {
+          await this.#audit(entry.action, entry.collection, entry.record, entry.revision, scope);
+        }
+        return next;
+      }
+      if (changes.some((count) => count > 0)) {
+        // Cannot happen while every statement shares one guard; if it ever
+        // does, the unit is no longer all-or-nothing and saying so beats
+        // returning a half-written result as a success.
+        throw new Error(
+          `control_plane_resources atomic unit applied ${changes.filter((c) => c > 0).length} of ${changes.length} statements`,
+        );
+      }
+      // Zero rows everywhere: either the guards lost a race (retry against the
+      // new state) or a `create` id is taken. Only the latter is terminal.
+      for (const mutation of mutations) {
+        if (mutation.kind !== "create") continue;
+        const taken = await this.#db
+          .prepare(
+            `SELECT 1 AS present FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?`,
+          )
+          .bind(mutation.collection, mutation.record.id)
+          .first<{ present: number }>();
+        if (taken !== null) throw new StoreConflictError(mutation.collection, mutation.record.id);
+      }
+    }
+    throw new Error(
+      `control_plane_resources atomic unit lost ${UPDATE_ATTEMPTS} write races; retry`,
+    );
+  }
+
   /**
    * Read-compute-write with an optimistic revision guard.
    *
@@ -446,9 +637,19 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 // Schema notes (reported rather than invented — see the slice report)
 // ---------------------------------------------------------------------------
 //
-// PORT-TODO(inventory-edge-control §9.3): two gaps between this port and
-// `sql/d1-ts/control/0001_init_control.sql`, both of which want a decision from
-// the migrations slice rather than a column invented here.
+// PORT-TODO(inventory-edge-control §9.3) — KEPT, sharpened: two gaps between
+// this port and `sql/d1-ts/control/0001_init_control.sql`.
+//
+// **Why these stay open rather than being fixed here:** both are DDL, and
+// `sql/d1-ts/` is the migrations slice's, not this app's — `wrangler.toml`
+// points `migrations_dir` at it and `vitest.config.ts` reads the same directory,
+// so a column added here without a migration would make the tests and the
+// deployment disagree about the schema, which is the exact failure the shared
+// directory exists to prevent. Both are also PERFORMANCE/ergonomics, not
+// correctness: every statement above is correct against the schema as shipped.
+// The one credential-facing consequence of (2) — that this Worker cannot
+// authorize a durable virtual key — is a genuine platform limit and is stated
+// where it bites, in `src/store/api_keys.ts`.
 //
 //  1. `control_plane_resources` has no `tenant_id` column. Tenant isolation
 //     therefore runs through `json_extract(document_json, '$.tenant_id')`,

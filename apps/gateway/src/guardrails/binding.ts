@@ -93,6 +93,18 @@ export interface GuardrailPolicyStore {
  * {@link conflict}. The algorithm below is byte-for-byte the same decision
  * table so the swap is mechanical; a Worker isolate is not a durability
  * boundary, so this variant is for config-driven policies and tests.
+ *
+ * NOT a platform limit, and no longer blocked on a schema. As of this wave the
+ * two tables EXIST (`guardrail_policy_revisions` / `guardrail_policy_bindings`,
+ * `sql/d1-ts/control/0001_init_control.sql` — the CONTROL database, which this
+ * Worker already binds as `BILLING_DB`), and `@ferrogate/storage` already ships
+ * the shared pure transition builders + the CAS conflict predicate
+ * (`nextGuardrailActivationBinding`, `nextGuardrailArchiveBinding`,
+ * `isGuardrailPolicyBindingCasConflict`). What is missing is exactly one class,
+ * `D1GuardrailPolicyStore implements GuardrailPolicyStore`, and the composition
+ * line that passes the binding — and the binding is named for metering today, so
+ * landing this should introduce a purpose-named `CONTROL_DB` alias in
+ * `wrangler.toml` rather than reading guardrail policy out of `BILLING_DB`.
  */
 export class InMemoryGuardrailPolicyStore implements GuardrailPolicyStore {
   readonly #revisions = new Map<string, PolicyRevision>();

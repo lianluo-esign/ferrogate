@@ -459,6 +459,18 @@ describe("validate_agent_runtime", () => {
   const managed = (worker: Record<string, unknown>) => ({
     agent_runtime: { enabled: true, managed_worker: worker },
   });
+  /**
+   * A minimal VALID `CapabilityTargetSelector` (`secret` variant) paired with the
+   * one action it supports. `selector` is a tagged enum in Rust, so an untagged
+   * `{}` never deserialized — the grant fixtures carry a real selector.
+   */
+  const secretSelector = {
+    kind: "secret",
+    reference_namespace: "provider-keys",
+    reference_name: "openai",
+    destination_adapter: "http",
+    destination_action: "authorize",
+  };
   const cases: [string, Record<string, unknown>, string][] = [
     [
       "zero max turns",
@@ -503,16 +515,27 @@ describe("validate_agent_runtime", () => {
     [
       "a target grant with no selector id",
       managed({
-        target_grants: [{ selector_id: "", permission_key: "p", action: "tool", selector: {} }],
+        target_grants: [
+          { selector_id: "", permission_key: "p", action: "secret", selector: secretSelector },
+        ],
       }),
       "field agent_runtime.managed_worker.target_grants.selector_id: must not be empty",
+    ],
+    [
+      "a target grant with no permission key",
+      managed({
+        target_grants: [
+          { selector_id: "s1", permission_key: " ", action: "secret", selector: secretSelector },
+        ],
+      }),
+      "field agent_runtime.managed_worker.target_grants.permission_key: must not be empty",
     ],
     [
       "a duplicated target-grant selector id",
       managed({
         target_grants: [
-          { selector_id: "s1", permission_key: "p", action: "tool", selector: {} },
-          { selector_id: "s1", permission_key: "q", action: "tool", selector: {} },
+          { selector_id: "s1", permission_key: "p", action: "secret", selector: secretSelector },
+          { selector_id: "s1", permission_key: "q", action: "secret", selector: secretSelector },
         ],
       }),
       "field agent_runtime.managed_worker.target_grants: duplicate selector_id s1",
@@ -536,6 +559,271 @@ describe("validate_agent_runtime", () => {
     expectAccepted(
       managed({ class_only_policy_mode: "legacy_class_wide", allowed_actions: ["tool", "cli"] }),
     );
+  });
+});
+
+/**
+ * `CapabilityTargetSelector::supports_action` + `::validate()` over
+ * `agent_runtime.managed_worker.target_grants` — the leg a previous wave left as
+ * a PORT-TODO because the selector was an opaque value. Both Rust field paths are
+ * pinned: the incompatibility uses `...target_grants`, the shape error uses
+ * `...target_grants selector <id>` (a SPACE, not a dot — that is the Rust format
+ * string).
+ */
+describe("target_grants: CapabilityTargetSelector (ported from @ferrogate/runtime)", () => {
+  const grant = (action: string, selector: Record<string, unknown>) => ({
+    agent_runtime: {
+      enabled: true,
+      managed_worker: {
+        target_grants: [{ selector_id: "s1", permission_key: "p", action, selector }],
+      },
+    },
+  });
+  const mcpSelector = {
+    kind: "mcp",
+    server: "srv",
+    tool: "echo",
+    risk: "read",
+    argument_schema: { kind: "object", fields: { text: { kind: "string" } } },
+  };
+  const networkSelector = {
+    kind: "network",
+    scheme: "https",
+    host: "api.example.com",
+    port: 443,
+    allowed_ips: ["203.0.113.10"],
+  };
+  const cliSelector = {
+    kind: "cli",
+    executable: "/usr/bin/jq",
+    argv: ["-r", "."],
+    cwd_glob: "/workspace/**",
+    max_timeout_millis: 5000,
+    max_stdout_bytes: 65536,
+    max_stderr_bytes: 65536,
+  };
+  const filesystemSelector = {
+    kind: "filesystem",
+    workspace_root: "/workspace",
+    path_glob: "**/*.md",
+    operations: ["read"],
+  };
+  const secretSelector = {
+    kind: "secret",
+    reference_namespace: "provider-keys",
+    reference_name: "openai",
+    destination_adapter: "http",
+    destination_action: "authorize",
+  };
+
+  const incompatible: [string, Record<string, unknown>, string][] = [
+    [
+      "an mcp selector under the filesystem action",
+      grant("filesystem", mcpSelector),
+      "field agent_runtime.managed_worker.target_grants: selector s1 is incompatible with action filesystem",
+    ],
+    [
+      "a network selector under the mcp_tool action (dotted action slug)",
+      grant("mcp_tool", networkSelector),
+      "field agent_runtime.managed_worker.target_grants: selector s1 is incompatible with action mcp.tool",
+    ],
+    [
+      "a secret selector under the class-only tool action (no selector backs it)",
+      grant("tool", secretSelector),
+      "field agent_runtime.managed_worker.target_grants: selector s1 is incompatible with action tool",
+    ],
+    [
+      "a cli selector under the network_egress action (dotted action slug)",
+      grant("network_egress", cliSelector),
+      "field agent_runtime.managed_worker.target_grants: selector s1 is incompatible with action network.egress",
+    ],
+  ];
+  test.each(incompatible)("rejects %s", (_name, raw, expected) => {
+    expect(firstError(raw)).toBe(expected);
+  });
+
+  const shapes: [string, Record<string, unknown>, string][] = [
+    [
+      "an mcp selector whose server is not a canonical identifier",
+      grant("mcp_tool", { ...mcpSelector, server: "srv/1" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: MCP server is not a canonical identifier",
+    ],
+    [
+      "an mcp selector whose tool is blank",
+      grant("mcp_tool", { ...mcpSelector, tool: "  " }),
+      "field agent_runtime.managed_worker.target_grants selector s1: MCP tool is not a canonical identifier",
+    ],
+    [
+      "an mcp argument schema whose root is not an object",
+      grant("mcp_tool", { ...mcpSelector, argument_schema: { kind: "string" } }),
+      "field agent_runtime.managed_worker.target_grants selector s1: MCP argument schema root must be an object",
+    ],
+    [
+      "an mcp argument schema with an empty nested field name",
+      grant("mcp_tool", {
+        ...mcpSelector,
+        argument_schema: {
+          kind: "object",
+          fields: { outer: { kind: "array", items: { kind: "object", fields: { "": { kind: "number" } } } } },
+        },
+      }),
+      "field agent_runtime.managed_worker.target_grants selector s1: MCP argument object field names must not be empty",
+    ],
+    [
+      "a network selector on an unsupported scheme",
+      grant("rest", { ...networkSelector, scheme: "ftp" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: network selector scheme must be http, https, tcp, or tls",
+    ],
+    [
+      "a network selector on port zero",
+      grant("rest", { ...networkSelector, port: 0 }),
+      "field agent_runtime.managed_worker.target_grants selector s1: network selector port must be greater than zero",
+    ],
+    [
+      "a network selector with a blank method",
+      grant("rest", { ...networkSelector, method: " " }),
+      "field agent_runtime.managed_worker.target_grants selector s1: network selector method must not be empty",
+    ],
+    [
+      "a network selector with a blank path_glob",
+      grant("rest", { ...networkSelector, path_glob: " " }),
+      "field agent_runtime.managed_worker.target_grants selector s1: network selector path_glob must not be empty",
+    ],
+    [
+      "a network selector whose host carries a zone id",
+      grant("rest", { ...networkSelector, host: "fe80::1%eth0" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: host notation is ambiguous",
+    ],
+    [
+      "a network selector in hex host notation",
+      grant("rest", { ...networkSelector, host: "0x7f000001" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: alternate numeric host notation is not authorized",
+    ],
+    [
+      "a network selector in decimal host notation",
+      grant("rest", { ...networkSelector, host: "2130706433" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: alternate numeric host notation is not authorized",
+    ],
+    [
+      "a hostname network selector with no allowed_ips allowlist",
+      grant("rest", { ...networkSelector, allowed_ips: [] }),
+      "field agent_runtime.managed_worker.target_grants selector s1: hostname target selector requires a non-empty operator allowed_ips allowlist",
+    ],
+    [
+      "a network selector that authorizes redirects",
+      grant("rest", { ...networkSelector, allow_redirects: true }),
+      "field agent_runtime.managed_worker.target_grants selector s1: redirect authorization is unsupported until execution-derived hops are enforced",
+    ],
+    [
+      "a secret selector whose namespace is not canonical",
+      grant("secret", { ...secretSelector, reference_namespace: "a:b" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: secret reference namespace is not a canonical identifier",
+    ],
+    [
+      "a secret selector naming resolved credential material",
+      grant("secret", { ...secretSelector, reference_name: "sk-live" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: secret target resembles resolved credential material",
+    ],
+    [
+      "a secret selector whose destination adapter is not canonical",
+      grant("secret", { ...secretSelector, destination_adapter: "http adapter" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: secret destination adapter is not a canonical identifier",
+    ],
+    [
+      "a filesystem selector with a blank path_glob",
+      grant("filesystem", { ...filesystemSelector, path_glob: " " }),
+      "field agent_runtime.managed_worker.target_grants selector s1: filesystem path_glob must not be empty",
+    ],
+    [
+      "a filesystem selector with no operations",
+      grant("filesystem", { ...filesystemSelector, operations: [] }),
+      "field agent_runtime.managed_worker.target_grants selector s1: filesystem selector requires at least one operation",
+    ],
+    [
+      "a cli selector with a relative executable",
+      grant("cli", { ...cliSelector, executable: "jq" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: CLI executable must be an absolute normalized path",
+    ],
+    [
+      "a cli selector with a traversal in the executable path",
+      grant("cli", { ...cliSelector, executable: "/usr/bin/../bin/jq" }),
+      "field agent_runtime.managed_worker.target_grants selector s1: CLI executable must be an absolute normalized path",
+    ],
+    [
+      "a cli selector whose argv carries a NUL byte",
+      grant("cli", { ...cliSelector, argv: [`-r${String.fromCharCode(0)}`] }),
+      "field agent_runtime.managed_worker.target_grants selector s1: CLI argv contains a NUL byte",
+    ],
+    [
+      "a cli selector with a custom environment",
+      grant("cli", { ...cliSelector, environment: { PATH: "/bin" } }),
+      "field agent_runtime.managed_worker.target_grants selector s1: CLI custom environment is unsupported; managed execution is empty-env",
+    ],
+    [
+      "a cli selector with a blank cwd_glob",
+      grant("cli", { ...cliSelector, cwd_glob: " " }),
+      "field agent_runtime.managed_worker.target_grants selector s1: CLI cwd_glob must not be empty",
+    ],
+    [
+      "a cli selector with a zero stdout bound",
+      grant("cli", { ...cliSelector, max_stdout_bytes: 0 }),
+      "field agent_runtime.managed_worker.target_grants selector s1: CLI resource bounds must be greater than zero",
+    ],
+  ];
+  test.each(shapes)("rejects %s", (_name, raw, expected) => {
+    expect(firstError(raw)).toBe(expected);
+  });
+
+  test("accepts every selector variant paired with a supported action", () => {
+    expectAccepted({
+      agent_runtime: {
+        enabled: true,
+        managed_worker: {
+          target_grants: [
+            { selector_id: "s1", permission_key: "p1", action: "mcp_tool", selector: mcpSelector },
+            { selector_id: "s2", permission_key: "p2", action: "rest", selector: networkSelector },
+            {
+              selector_id: "s3",
+              permission_key: "p3",
+              action: "network_egress",
+              selector: { ...networkSelector, host: "198.51.100.7", allowed_ips: [] },
+            },
+            { selector_id: "s4", permission_key: "p4", action: "secret", selector: secretSelector },
+            { selector_id: "s5", permission_key: "p5", action: "cli", selector: cliSelector },
+            {
+              selector_id: "s6",
+              permission_key: "p6",
+              action: "filesystem",
+              selector: filesystemSelector,
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  /**
+   * PLATFORM LIMIT (kept as a PORT-TODO in src/validate/capability-target.ts):
+   * workerd has NO filesystem, so `std::fs::canonicalize` on
+   * `filesystem.workspace_root` / `cli.executable` cannot run. This pins the
+   * approximation: the lexical half of `canonical_cli_executable` IS enforced,
+   * and a workspace_root / executable that does not exist on any disk is
+   * ACCEPTED here where Rust would reject it.
+   */
+  describe("filesystem/cli selectors: the lexical half", () => {
+    test("a non-existent absolute executable is accepted (Rust canonicalizes; a Worker cannot)", () => {
+      expectAccepted(grant("cli", { ...cliSelector, executable: "/nonexistent/no/such/binary" }));
+    });
+    test("a non-existent workspace_root is accepted (Rust canonicalizes; a Worker cannot)", () => {
+      expectAccepted(
+        grant("filesystem", { ...filesystemSelector, workspace_root: "/nonexistent/workspace" }),
+      );
+    });
+    test("the lexical absolute-path rule still bites", () => {
+      expect(firstError(grant("cli", { ...cliSelector, executable: "./jq" }))).toBe(
+        "field agent_runtime.managed_worker.target_grants selector s1: CLI executable must be an absolute normalized path",
+      );
+    });
   });
 });
 
@@ -625,7 +913,7 @@ describe("validate_cluster", () => {
 
   test("validateConfigAsync additionally parses the snapshot key material", async () => {
     // 32 raw bytes, base64 — the Ed25519 seed shape `parseSigningKey` requires.
-    const seed = Buffer.alloc(32, 7).toString("base64");
+    const seed = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
     const raw = {
       cluster: {
         enabled: true,

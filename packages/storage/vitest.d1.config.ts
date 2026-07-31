@@ -56,6 +56,11 @@ export default defineConfig({
         compatibilityDate: "2025-06-01",
         compatibilityFlags: ["nodejs_compat"],
         d1Databases: ["CONTROL_DB", "TENANT_DB_A", "TENANT_DB_B", "TENANT_DB_C"],
+        // Real R2, for the same reason as real D1: the asset commit protocol's
+        // whole content is that R2 and D1 are two services with no shared
+        // transaction, and a fake bucket would be "atomic" with the row because
+        // the fake was written to agree.
+        r2Buckets: ["ASSETS_BUCKET"],
         bindings: {
           CONTROL_MIGRATIONS: controlMigrations,
           TENANT_MIGRATIONS: tenantMigrations,

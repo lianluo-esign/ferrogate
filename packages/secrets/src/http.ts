@@ -8,11 +8,28 @@
  * re-implementation is a thin wrapper over the platform `fetch`, which is the
  * idiomatic — and only — outbound HTTP primitive.
  *
- * PORT-TODO(4.8): the Rust client supports an explicit `ca_cert_path` for
- * custom/self-signed CA trust. `workerd` cannot install ad-hoc roots, so
- * `caCertPath` is accepted for signature fidelity but ignored under `fetch`
- * (honour it only on a Node/Bun host that wires it into an Agent). Callers on a
- * self-hosted gateway that truly need a private CA must run outside a Worker.
+ * PORT-TODO(4.8) — PLATFORM LIMIT, NOT CLOSED.
+ *
+ * The exact limitation: **workerd exposes no TLS trust-store hook.** The Rust
+ * client hand-rolls a blocking rustls TCP client precisely so it can install a
+ * caller-supplied root (`ca_cert_path`) for a self-signed Vault/Cloudflare
+ * endpoint. On Workers, `fetch()` is the only outbound HTTP primitive, raw TCP
+ * with a custom `ClientConfig` is unavailable, and there is no API — no
+ * `fetch` option, no binding, no compatibility flag — to add a root to the
+ * runtime trust store. `connect()` (the `cloudflare:sockets` TCP API) does not
+ * change this: its `secureTransport` uses the same fixed roots.
+ *
+ * The closest behavior implemented instead: {@link HttpOptions.caCertPath} is
+ * ACCEPTED for signature fidelity and IGNORED under `fetch`, so the same config
+ * struct round-trips between the CLI (Node/Bun, where a host could wire it into
+ * an Agent) and the Worker. It is deliberately not an error: rejecting a config
+ * that is valid for the CLI would split the two deployments' config schemas.
+ *
+ * The consequence is stated rather than papered over: a self-hosted gateway
+ * that genuinely needs a private CA must run OUTSIDE a Worker. Reaching a
+ * self-signed endpoint from the Worker will fail the TLS handshake, which is
+ * the correct failure — a silently-trusted unknown root would be worse.
+ * `test/platform-limits.test.ts` pins the ignore.
  */
 
 /** A single request header as a `[name, value]` pair (mirrors the Rust slice). */
@@ -23,8 +40,8 @@ export interface HttpOptions {
   /** Request timeout in milliseconds (Rust used a `Duration`). */
   readonly timeoutMs?: number;
   /**
-   * Custom CA cert path. Accepted for parity; ignored under `fetch`.
-   * PORT-TODO(4.8): unsupported on Workers.
+   * Custom CA cert path. Accepted for parity; IGNORED under `fetch` — workerd
+   * exposes no trust-store hook. See the module PORT-TODO(4.8).
    */
   readonly caCertPath?: string | null;
   /** Injectable `fetch` (test seam). Defaults to the platform `fetch`. */

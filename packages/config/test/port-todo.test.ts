@@ -1,36 +1,74 @@
 import { describe, test } from "vitest";
 
-// Not-yet-ported behaviors, flagged so they stay visible (docs/rewrite/TESTING.md).
-// The `validate.rs` long-tail helpers that used to be listed here (provider/model
-// uniqueness + cross-references, header validity, plugin/skill-package manifest +
-// permissions, prompt placeholders, managed-worker action lists, storage identifier
-// checks, skill-package materialization) are now ported and held by
-// validate-entities/sections/plugins-policies.test.ts. What remains is what depends
-// on a wave-2 sibling package, plus the one engine difference worth re-checking.
-describe("validate.rs legs owned by sibling packages (PORT-TODO inventory §5.4)", () => {
-  test.todo(
-    "ferrogate_mcp::validate_mcp_server_config: reconnect backoff bounds, static-header/auth-mode " +
-      "pairing, OAuth config, per-server TLS and stdio `command` — needs @ferrogate/mcp's full " +
-      "McpServerConfig (the modeled legs — name shape, deny-by-default tools_to_execute, and the " +
-      "network-transport url requirement — are ported)",
-  );
-  test.todo(
-    "agent_runtime.managed_worker.target_grants: selector.supports_action(action) + " +
-      "selector.validate() — needs @ferrogate/runtime's CapabilityTargetSelector",
-  );
-  test.todo(
-    "guardrails[].regex: Rust compiles with the `regex` crate, which rejects backreferences and " +
-      "lookaround that JS RegExp accepts — re-check against the detector engine the Worker runs",
-  );
-});
-
+/**
+ * The visible registry of `@ferrogate/config` behaviors that are still NOT
+ * ported (docs/rewrite/TESTING.md). A behavior may sit here only while nothing
+ * enforces it; once it is implemented — or once it is established as
+ * unimplementable and pinned as an approximation — it leaves this file.
+ *
+ * CLOSED (moved out of this file, now held by real assertions):
+ *   - `validate.rs`'s long tail: provider/model uniqueness + cross-references,
+ *     header validity, plugin/skill-package manifests + permissions, prompt
+ *     placeholders, managed-worker action lists, storage identifier checks,
+ *     skill-package materialization
+ *     → validate-entities/sections/plugins-policies.test.ts
+ *   - `ferrogate_mcp::validate_mcp_server_config` in full — reconnect bounds,
+ *     auth-mode/static-header pairing, the whole OAuth config leg, and the stdio
+ *     `command` requirement (the per-server TLS leg is a PLATFORM LIMIT, kept and
+ *     pinned in validate-entities.test.ts)
+ *     → validate-entities.test.ts > "validate_mcp_server_config"
+ *   - `CapabilityTargetSelector::supports_action` + `::validate()` over
+ *     `agent_runtime.managed_worker.target_grants` (the two filesystem
+ *     pre-flights are a PLATFORM LIMIT, kept and pinned)
+ *     → validate-sections.test.ts > "target_grants: CapabilityTargetSelector"
+ *   - `guardrails[].regex` engine parity: the Rust `regex` crate refuses the
+ *     backreferences and lookaround JS `RegExp` accepts, so a config Rust
+ *     REFUSES no longer slips through with different match semantics
+ *     → validate-plugins-policies.test.ts > "regex-crate accept-set parity"
+ *   - `ed25519-dalek::verify_strict`'s small-order / non-canonical `A` and `R`
+ *     rejection, which `crypto.subtle.verify` does not make
+ *     → signed-snapshot.test.ts > "verify_strict parity"
+ *
+ * KEPT AS PLATFORM LIMITS (never `test.todo`, because they are not pending work
+ * — they are pinned approximations with the limitation written at the source):
+ *   - MCP per-server TLS (`tls.ca_cert_path` / `insecure_skip_verify`): no
+ *     filesystem, and `fetch()` has no hook to add a CA root or skip
+ *     verification → src/validate/entities.ts, pinned in validate-entities.test.ts
+ *   - `CapabilityTargetSelector` filesystem/CLI pre-flights (`canonicalize`,
+ *     `is_dir`/`is_file`): a Worker isolate has no filesystem
+ *     → src/validate/capability-target.ts, pinned in validate-sections.test.ts
+ *   - no `std::env`, no socket peer address, no cross-isolate shared state, no
+ *     filesystem for the loader, and CF-terminated TLS making `[tls]`/`[tls.acme]`
+ *     inert → src/{secrets,network-access,loader,schema/sections}.ts, all pinned
+ *     in platform-limits.test.ts
+ *   - WebCrypto has no synchronous Ed25519, so the signed-snapshot surface is
+ *     async where Rust was sync → src/signed-snapshot.ts
+ *
+ * REMOVED AS N/A ON CLOUDFLARE (never to be ported, so deliberately NOT
+ * `test.todo`): `validate_tls`, `validate_acme_tls`, `validate_acme_dns01_tls`,
+ * `validate_acme_http01_tls`, `validate_manual_tls_files`. Cloudflare terminates
+ * TLS in front of the Worker: there is no cert/key file to load (the Rust
+ * pre-flight is pingora's `load_certs_and_key_files`), no `:80` HTTP-01
+ * challenge listener a Worker can own, and no ACME storage directory. See
+ * src/validate.ts and the pins in platform-limits.test.ts.
+ */
 describe("x402 policy-invariant validation (PORT-TODO inventory §5.2)", () => {
+  // DELIBERATE PRODUCT DECISION, not a platform gap: x402/Solana payments are
+  // deprioritized, so `@ferrogate/policy`'s x402 surface is unported and
+  // `x402_spend_policies[].policy` is carried opaquely. The scope-shape half
+  // (blank / duplicate `(scope_type, scope_id)`) IS enforced — see
+  // src/validate/sections.ts > validateX402SpendPolicies and src/x402-scope.ts.
   test.todo("delegate X402SpendPolicy.validate() to @ferrogate/policy once ported");
   test.todo("resolve_effective_x402_spend_policy inheritance resolution");
 });
 
-// REMOVED AS N/A ON CLOUDFLARE (never to be ported, so deliberately NOT test.todo):
-// validate_tls, validate_acme_tls, validate_acme_dns01_tls, validate_acme_http01_tls and
-// validate_manual_tls_files. Cloudflare terminates TLS in front of the Worker: there is no
-// cert/key file to load (the Rust pre-flight is pingora's load_certs_and_key_files), no :80
-// HTTP-01 challenge listener a Worker can own, and no ACME storage directory. See src/validate.ts.
+describe("wave-2 package relocations (PORT-TODO inventory §5.3)", () => {
+  // BEHAVIOR IS CLOSED in every case below — these are inlined here (read from
+  // the crates, verbatim) so `@ferrogate/config` type-checks and validates
+  // standalone. The open item is the IMPORT EDGE: re-export from the owning
+  // package once it lands, and do not re-derive the logic.
+  test.todo("re-export the sibling-owned enums from @ferrogate/{providers,storage,guardrails,mcp}");
+  test.todo("re-export is_cloudflare_managed_mcp_url from @ferrogate/mcp");
+  test.todo("re-export CloudflareConfig from @ferrogate/cloudflare");
+  test.todo("relocate build_target_uri/normalize_host to apps/gateway (#560)");
+});

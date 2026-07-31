@@ -16,7 +16,20 @@
  *  - `crates/agent-worker/src/external_actions.rs`     → the capability envelope
  *  - `workers/agent-gateway/src/container.ts`          → the sealed-egress posture
  */
+import {
+  type ContentSource,
+  DeterministicDetector,
+  type SecretPattern,
+  envelopeFromText,
+  flattenedText,
+} from "@ferrogate/guardrails";
+
 import { timingSafeEqualStrings } from "./crypto.js";
+import {
+  type FrameOpenResult,
+  type SealedWorkerFrame,
+  openWorkerFrame,
+} from "./workers/frame.js";
 
 // ---------------------------------------------------------------------------
 // Worker environment
@@ -46,6 +59,13 @@ export interface AgentRuntimeBindings {
   readonly FG_DEV_API_KEYS?: string;
   /** DEV/TEST ONLY: JSON array of `AgentUpstream` rows. */
   readonly FG_DEV_AGENT_UPSTREAMS?: string;
+  /**
+   * DEV/TEST ONLY: JSON `{ keywords?, regex?, secretPatterns? }` configuring
+   * the A2A deterministic guardrail. ABSENT ⇒ no detector is configured ⇒
+   * nothing matches, which is the Rust behavior when no guardrail is set up.
+   * The real detector policy lives in the control plane, not in a var.
+   */
+  readonly FG_DEV_A2A_GUARDRAILS?: string;
 }
 
 /** Hono `Env` for this Worker: bindings + the per-request variables we set. */
@@ -58,6 +78,15 @@ export interface AgentRuntimeEnv {
     auth?: AuthContext;
     /** Set by the internal leg. Never set for tenant-bearer ops. */
     worker?: RegisteredSelfHostedWorker;
+    /**
+     * The PLAINTEXT worker transport document, published by the internal leg.
+     *
+     * For a cleartext body this is just the parsed body; for a sealed AEAD
+     * frame it is the UNSEALED payload, which the raw request bytes no longer
+     * contain. The six callbacks read this rather than re-parsing `c.req.text()`
+     * so a sealed request is not silently seen as `{ sealed: … }`.
+     */
+    workerEnvelope?: Record<string, unknown>;
     /** The matched contract operation. */
     operationId?: string;
     deps?: AgentRuntimeDeps;
@@ -167,6 +196,17 @@ export type WorkerIdentityResolution =
  */
 export interface WorkerIdentityPort {
   validate(identity: SelfHostedWorkerIdentity): Promise<WorkerIdentityResolution>;
+  /**
+   * Open a sealed `symmetric_aead` transport frame.
+   *
+   * This lives on the REGISTRY, not on the middleware, for the same reason
+   * `token_secret` does: the frame key is derived from that secret, and the
+   * secret must never leave this module. The caller gets back the plaintext
+   * envelope and nothing else — it still has to hand the identity inside it to
+   * {@link validate} to be admitted, so opening a frame is never by itself an
+   * authorization.
+   */
+  unseal(frame: SealedWorkerFrame): Promise<FrameOpenResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,14 +278,81 @@ export type GovernanceDecision =
  * but the DECISION logic (capability envelope evaluation, fingerprint binding,
  * sealed-by-default egress) is preserved here rather than dropped.
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.3): the SO_PEERCRED
- * // kernel-authenticated authorizer has no CF equivalent. The trust model
- * // changes from "the kernel proved the peer PID" to "the caller presented a
- * // registered worker identity / service binding". Recorded, not silently
- * // dropped — see §8.4 "flag the hardest items" (b).
+ * // PORT-TODO(inventory-edge-control §agent-worker §8.3): PLATFORM LIMIT —
+ * // workerd has no Unix domain sockets and therefore no `SO_PEERCRED`, so
+ * // there is no way for this Worker to learn the OS identity of its caller.
+ * // The Rust authorizer's root of trust is a KERNEL fact ("the peer process
+ * // is PID N, running as UID U"); a Worker's is a CRYPTOGRAPHIC one. That
+ * // substitution cannot be coded away at any effort — it is a property of the
+ * // sandbox, not a missing API.
+ * //
+ * // IMPLEMENTED INSTEAD, and fully: the caller proves a registered worker
+ * // identity. `internalAuth` in `middleware/auth.ts` admits the six
+ * // `/v1/self-hosted-workers/*` callbacks only via
+ * // {@link WorkerIdentityPort.validate}, which requires a `token_id` +
+ * // constant-time-compared `token_secret` from the registry, optionally inside
+ * // an AEAD-sealed frame keyed by that same secret. There is NO code path from
+ * // a tenant bearer key to a `RegisteredSelfHostedWorker`.
+ * //
+ * // CONSEQUENCES that follow from the substitution and cannot be removed:
+ * //  1. the credential is BEARER-shaped, so possession is authorization —
+ * //     unlike SO_PEERCRED, a leaked `token_secret` is a full impersonation,
+ * //     which is why `identity_expires_at_unix` and `active` exist;
+ * //  2. the gateway can no longer distinguish two processes running as the
+ * //     same registered worker, because there is no PID to distinguish them by.
+ * //
+ * // Pinned by `test/internal-auth.test.ts` (all six callbacks refuse a valid,
+ * // fully-scoped tenant key) and `test/transport-frame.test.ts`.
  */
 export interface GovernancePort {
   authorize(request: CapabilityRequest): Promise<GovernanceDecision>;
+}
+
+// ---------------------------------------------------------------------------
+// Guardrails (A2A ingress, issue #278)
+// ---------------------------------------------------------------------------
+
+/** Rust `GuardrailStage`. */
+export type GuardrailStage = "request" | "response";
+
+/** A guardrail that matched, rendered by the route as a refusal. */
+export interface GuardrailDenial {
+  /** The detector that matched — evidence, never the matched text itself. */
+  readonly detector: string;
+  readonly stage: GuardrailStage;
+  readonly message: string;
+}
+
+export type GuardrailDecision =
+  | { readonly outcome: "allow" }
+  | { readonly outcome: "deny"; readonly denial: GuardrailDenial };
+
+/** One envelope to evaluate. Mirrors Rust `GuardrailEvaluationContext`. */
+export interface GuardrailEvaluation {
+  readonly stage: GuardrailStage;
+  readonly tenantId: string;
+  /** The upstream, recorded as Rust records `provider`. */
+  readonly agentId: string;
+  readonly streaming: boolean;
+  /**
+   * The FLATTENED text of every A2A part, already collected by the caller.
+   *
+   * The walk lives in `agents/ingress.ts` (Rust `collect_a2a_text`) because it
+   * is A2A-protocol knowledge; this port only sees text, exactly as the Rust
+   * detector stack only sees a `GuardrailEnvelope`.
+   */
+  readonly text: string;
+}
+
+/**
+ * The detector chokepoint, at the API boundary.
+ *
+ * Rust calls `state.match_guardrail(stage, ctx)` and gets back an optional
+ * matched guardrail; a `None` means nothing matched and the request proceeds.
+ * `{ outcome: "allow" }` is that `None`.
+ */
+export interface GuardrailPort {
+  evaluate(input: GuardrailEvaluation): Promise<GuardrailDecision>;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +418,7 @@ export interface AgentRuntimeDeps {
   readonly workerIdentities: WorkerIdentityPort;
   readonly governance: GovernancePort;
   readonly upstreams: AgentUpstreamPort;
+  readonly guardrails: GuardrailPort;
   readonly config: ConfigPort;
   readonly clock: ClockPort;
 }
@@ -496,6 +604,25 @@ export function inMemoryWorkerIdentityPort(
       const { token_secret: _secret, ...worker } = row;
       return { outcome: "resolved", worker };
     },
+
+    async unseal(frame: SealedWorkerFrame): Promise<FrameOpenResult> {
+      const row = rows.get(
+        workerKey(frame.header.tenant_id, frame.header.workspace_id, frame.header.worker_id),
+      );
+      // An unknown worker, an inactive one, and a wrong `token_id` all produce
+      // the SAME opaque refusal an undecryptable frame produces. The frame
+      // header is attacker-controlled, so answering it differently would turn
+      // the sealed path into an enumeration oracle for the registry — exactly
+      // the disclosure the 401-vs-403 invariant exists to prevent on the bearer
+      // leg.
+      if (row === undefined || !row.active || row.token_id !== frame.header.token_id) {
+        return {
+          outcome: "rejected",
+          failure: { reason: "unopenable", detail: "sealed worker transport frame did not open" },
+        };
+      }
+      return openWorkerFrame(frame, row.token_secret);
+    },
   };
 }
 
@@ -581,6 +708,122 @@ export function inMemoryGovernancePort(options: {
     },
   };
 }
+
+/**
+ * The A2A guardrail chokepoint, backed by the REAL detector stack in
+ * `@ferrogate/guardrails` — the clean-room port of the Rust
+ * `ferrogate-guardrails` crate.
+ *
+ * This is not a stub with a detector-shaped hole: `DeterministicDetector` is
+ * the same in-repo keyword/regex/secret detector Rust runs, and the envelope
+ * is built with `envelopeFromText("a2a", …)`, which is precisely what Rust's
+ * `a2a_input_envelope` / `a2a_output_envelope` construct — same protocol, same
+ * stage, same `ContentSource`, same `a2a:{agent}/…` protocol location.
+ *
+ * An EMPTY configuration matches nothing and therefore allows everything. That
+ * mirrors Rust `match_guardrail` returning `None` when no guardrail is
+ * configured, and it is the reason wiring this port cannot change the behavior
+ * of a deployment that has configured no detectors.
+ *
+ * Findings are reported by DETECTOR ID and severity only. `matched_text` is
+ * deliberately never propagated into the denial message — the Rust crate's
+ * standing invariant is that matched text is never persisted or echoed, and a
+ * refusal that quoted the secret it caught would defeat the detector.
+ */
+export function deterministicGuardrailPort(config: {
+  readonly keywords?: readonly string[];
+  readonly regex?: readonly string[];
+  readonly secretPatterns?: readonly SecretPattern[];
+}): GuardrailPort {
+  const keywords = [...(config.keywords ?? [])];
+  const regex = [...(config.regex ?? [])];
+  const secretPatterns = [...(config.secretPatterns ?? [])];
+  const configured = keywords.length > 0 || regex.length > 0 || secretPatterns.length > 0;
+
+  const detector = configured
+    ? DeterministicDetector.new({
+        id: "a2a.deterministic",
+        // A2A flattens user text on the request leg and assistant text on the
+        // response leg; both sources must be in scope or one direction would
+        // silently skip evaluation.
+        supported_sources: ["user", "assistant"],
+        keywords,
+        regex,
+        secret_patterns: secretPatterns,
+      })
+    : undefined;
+
+  return {
+    async evaluate(input: GuardrailEvaluation): Promise<GuardrailDecision> {
+      if (detector === undefined) return { outcome: "allow" };
+      const source: ContentSource = input.stage === "request" ? "user" : "assistant";
+      const location =
+        input.stage === "request"
+          ? `a2a:${input.agentId}/message`
+          : `a2a:${input.agentId}/response`;
+      let result: Awaited<ReturnType<typeof detector.evaluate>>;
+      try {
+        // Envelope construction is INSIDE the guard on purpose: flattening the
+        // content is part of the scan, and a failure there has cleared exactly
+        // as little as a failure inside the detector.
+        const envelope = envelopeFromText("a2a", input.stage, source, location, input.text);
+        result = await detector.evaluate(
+          {
+            protocol: "a2a",
+            stage: input.stage,
+            // `DetectorTenant` has no tenant field of its own — Rust attributes
+            // a guardrail evaluation by ORGANIZATION, and this Worker's
+            // `tenantId` is that organization.
+            tenant: { organization_id: input.tenantId },
+            provider: input.agentId,
+            text: flattenedText(envelope),
+            segments: envelope.segments,
+          },
+          // An ABSOLUTE deadline, not a duration — `evaluate` compares it
+          // against `Date.now()`.
+          Date.now() + GUARDRAIL_BUDGET_MS,
+        );
+      } catch (error) {
+        // FAIL CLOSED. The Rust crate's standing posture on truncation,
+        // disablement and detector error is to refuse, not to pass: a detector
+        // that could not run has not cleared the content, and treating "the
+        // scan broke" as "the scan passed" is how a guardrail silently stops
+        // being one.
+        return {
+          outcome: "deny",
+          denial: {
+            detector: "a2a.deterministic",
+            stage: input.stage,
+            message: `a2a ${input.stage}-stage guardrail could not be evaluated: ${
+              error instanceof Error ? error.message : "detector error"
+            }`,
+          },
+        };
+      }
+      if (result.verdict === "pass") return { outcome: "allow" };
+      const severities = result.findings.map((finding) => finding.severity).join(", ");
+      return {
+        outcome: "deny",
+        denial: {
+          detector: "a2a.deterministic",
+          stage: input.stage,
+          message:
+            `a2a ${input.stage}-stage guardrail matched ` +
+            `${result.findings.length} finding(s) [${severities}]`,
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Time budget handed to the detector, mirroring Rust's per-detector deadline.
+ *
+ * The deterministic detector is in-process and does not block on I/O, so this
+ * is a ceiling rather than an expected cost; it exists so a pathological regex
+ * cannot hold the request path open indefinitely.
+ */
+export const GUARDRAIL_BUDGET_MS = 250;
 
 /** Rust `ACTION_FINGERPRINT_CONTRACT`: `sha256:` + 64 lowercase hex chars. */
 export function isCanonicalActionFingerprint(value: string): boolean {
@@ -680,6 +923,13 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
     }),
     upstreams: inMemoryAgentUpstreamPort(
       parseJsonVar<AgentUpstream[]>(env.FG_DEV_AGENT_UPSTREAMS, []),
+    ),
+    guardrails: deterministicGuardrailPort(
+      parseJsonVar<{
+        keywords?: string[];
+        regex?: string[];
+        secretPatterns?: SecretPattern[];
+      }>(env.FG_DEV_A2A_GUARDRAILS, {}),
     ),
     config: inMemoryConfigPort(configFromEnv(env)),
     clock: systemClock,

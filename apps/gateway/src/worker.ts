@@ -26,7 +26,29 @@
  * to this file instead of the composition root would be the drift the gate
  * exists to catch.
  */
-export { default } from "./index.js";
+import app, { gatewayScheduled } from "./index.js";
+
+/**
+ * The deployed handler.
+ *
+ * `fetch` is the Hono app `index.ts` built — nothing is re-assembled here, and
+ * delegating through an arrow keeps the app's own `this` regardless of how Hono
+ * binds it.
+ *
+ * `scheduled` is the `[triggers] crons` entry point. workerd only dispatches a
+ * scheduled event to a handler found on the ENTRY module's default export, so a
+ * named `export { gatewayScheduled }` here would be ignored (and, being a
+ * function, silently accepted as a service entrypoint instead) — the Cron would
+ * fire against a Worker with no handler and the billing-outbox recovery would
+ * never run. That is why this file grew from a bare `export { default }` into an
+ * explicit `ExportedHandler`.
+ */
+const handler: ExportedHandler<Record<string, unknown>> = {
+  fetch: (request, env, ctx) => app.fetch(request, env, ctx),
+  scheduled: (controller, env, ctx) => gatewayScheduled(controller, env, ctx),
+};
+
+export default handler;
 
 /**
  * The `RATE_LIMIT` Durable Object class.

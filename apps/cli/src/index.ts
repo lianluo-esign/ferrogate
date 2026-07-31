@@ -20,11 +20,11 @@ import { reportError } from "./diagnostics.js";
 import { asCliError, exitCode } from "./errors.js";
 import { renderCommandHelp, renderRootHelp, versionLine } from "./help.js";
 import {
+  createFerrogateConfigValidator,
   createFetchControlPlaneClient,
   createFetchGatewayClient,
   createNodeIo,
   createNodeKeyHasher,
-  createStructuralConfigValidator,
 } from "./ports.js";
 import type { CliRuntime, CommandNode } from "./runtime.js";
 import { findChild } from "./runtime.js";
@@ -36,12 +36,16 @@ export type { CliRuntime } from "./runtime.js";
 /** Build the runtime the shipped binary uses. */
 export function createDefaultRuntime(): CliRuntime {
   const io = createNodeIo();
+  // Both transports read `--ca-bundle` through the same `Io` seam the rest of
+  // the CLI uses, so the TLS policy is honoured on the `ctl` and the legacy
+  // `assets`/`plans` paths alike.
+  const transport = { readFile: (path: string) => io.readFile(path) };
   return {
     io,
-    client: createFetchControlPlaneClient(),
-    gatewayClient: createFetchGatewayClient(),
+    client: createFetchControlPlaneClient(fetch, transport),
+    gatewayClient: createFetchGatewayClient(fetch, transport),
     contextStorage: createFileContextStorage(io),
-    configValidator: createStructuralConfigValidator(),
+    configValidator: createFerrogateConfigValidator(),
     keyHasher: createNodeKeyHasher(),
   };
 }

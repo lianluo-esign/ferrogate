@@ -34,6 +34,14 @@ import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import type { z } from "zod";
 import { resolveDeps } from "./defaults.js";
+import {
+  ProviderBodyTooLargeError,
+  ProviderEndpointError,
+  dispatchDeadline,
+  parseProviderEndpoint,
+  providerTransportMessage,
+  readBoundedProviderBody,
+} from "./dispatch.js";
 import { errorResponse, jsonResponse, rawUpstreamResponse, reject } from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
 import {
@@ -325,6 +333,14 @@ function planUpstream(
  * nobody will read. In Rust this was implicit — dropping the `reqwest::Response`
  * closed the provider connection — and `src/streaming/abort.ts` documents why
  * Workers has to wire it explicitly.
+ *
+ * Two of `dispatch.rs`'s guards run HERE rather than inside the injected
+ * `UpstreamDispatcher`, and that placement is deliberate. `UpstreamDispatcher`
+ * is the platform seam (`fetch` today, an AI-Gateway binding later); the
+ * endpoint scheme check and the `limits.dispatchTimeoutMs` deadline are
+ * *gateway policy*, so putting them here means every dispatcher — including one
+ * a test injects — is held to them, and `limits` stays the single source of
+ * truth instead of a value baked into whichever dispatcher was wired.
  */
 async function dispatchUpstream(
   deps: ResolvedInferenceDeps,
@@ -332,9 +348,58 @@ async function dispatchUpstream(
   signal?: AbortSignal,
 ): Promise<Response | InferenceRejection> {
   try {
-    return await deps.dispatcher.dispatch(upstream, signal);
+    // `build_provider_request` parses the endpoint BEFORE opening a socket, so
+    // a `file:`/`ws:` `base_url` is refused with its own message rather than
+    // whatever the runtime says about an unsupported scheme.
+    parseProviderEndpoint(upstream.endpoint);
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = error instanceof ProviderEndpointError ? error.message : String(error);
+    return reject(502, "provider_dispatch_error", `provider dispatch failed: ${detail}`);
+  }
+
+  const deadline = dispatchDeadline(deps.limits.dispatchTimeoutMs, signal);
+  try {
+    return await deps.dispatcher.dispatch(upstream, deadline.signal);
+  } catch (error) {
+    return reject(
+      502,
+      "provider_dispatch_error",
+      `provider dispatch failed: ${providerTransportMessage(
+        upstream.stream,
+        error,
+        deadline.expired(),
+      )}`,
+    );
+  }
+}
+
+/**
+ * `read_bounded_response_body` at the four buffered call sites.
+ *
+ * The cap lives on the NON-streaming path only, exactly as in Rust:
+ * `dispatch_provider_streaming_request` takes no `max_body_bytes` because a
+ * stream is relayed frame-by-frame and never accumulated.
+ *
+ * A refusal is the same 502 `provider_dispatch_error` a transport failure gets,
+ * because in Rust it is the same `bail!` out of the same `dispatch_provider_*`
+ * function and every AI surface renders that as
+ * `format!("provider dispatch failed: {error}")`. Note the ORDER: the cap is
+ * enforced before the status is inspected, so an oversized provider ERROR body
+ * is refused too rather than being relayed.
+ */
+async function readUpstreamBody(
+  deps: ResolvedInferenceDeps,
+  response: Response,
+): Promise<string | InferenceRejection> {
+  try {
+    return await readBoundedProviderBody(response, deps.limits.providerResponseMaxBytes);
+  } catch (error) {
+    const detail =
+      error instanceof ProviderBodyTooLargeError
+        ? error.message
+        : `failed to read provider response body: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
     return reject(502, "provider_dispatch_error", `provider dispatch failed: ${detail}`);
   }
 }
@@ -653,7 +718,10 @@ async function handleOpenAiInference(
     );
   }
 
-  const text = await upstreamResponse.text();
+  const text = await readUpstreamBody(deps, upstreamResponse);
+  if (isRejection(text)) {
+    return errorResponse(text, requestId);
+  }
   if (!upstreamResponse.ok) {
     recordUsage(deps, meterBase, undefined);
     return rawUpstreamResponse(
@@ -754,7 +822,10 @@ async function handleMessages(
     );
   }
 
-  const text = await upstreamResponse.text();
+  const text = await readUpstreamBody(deps, upstreamResponse);
+  if (isRejection(text)) {
+    return errorResponse(text, requestId);
+  }
   if (!upstreamResponse.ok) {
     recordUsage(deps, meterBase, undefined);
     return rawUpstreamResponse(
@@ -806,7 +877,10 @@ async function handleEmbeddings(
     return errorResponse(upstreamResponse, requestId);
   }
 
-  const text = await upstreamResponse.text();
+  const text = await readUpstreamBody(deps, upstreamResponse);
+  if (isRejection(text)) {
+    return errorResponse(text, requestId);
+  }
   const meterBase = {
     requestId,
     route: ROUTE_LABELS.embeddings,
@@ -872,7 +946,10 @@ async function handleImages(
     return errorResponse(upstreamResponse, requestId);
   }
 
-  const text = await upstreamResponse.text();
+  const text = await readUpstreamBody(deps, upstreamResponse);
+  if (isRejection(text)) {
+    return errorResponse(text, requestId);
+  }
   const parsed = upstreamResponse.ok ? safeJson(text) : undefined;
   // Images settle on the number of images the provider actually returned — the
   // AUTHORITATIVE count is always taken from the response, never from the

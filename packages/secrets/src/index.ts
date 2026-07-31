@@ -67,7 +67,9 @@ export {
   DEFAULT_CF_SECRETS_WARN_AT,
 } from "./cloudflare-caps.js";
 
-// Minimal Cloudflare REST client seam (PORT-TODO: replace with @ferrogate/cloudflare).
+// Minimal Cloudflare REST client seam. PORT-TODO(4.6/4.7): a package relocation
+// (to a not-yet-existing `@ferrogate/cloudflare`), NOT a platform limit — see
+// the module header in `./cloudflare-client.ts`.
 export type {
   HttpMethod,
   HttpRequest,

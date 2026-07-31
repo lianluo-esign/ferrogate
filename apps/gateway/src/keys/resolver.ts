@@ -140,6 +140,16 @@ function last4Matches(row: StoredApiKey, presentedKey: string): boolean {
  * to edit, so they are resolved and returned by
  * {@link D1ApiKeyResolver.resolveStoredKey} but not yet enforced. Add the three
  * fields to `AuthContext` and read them here — the values are already loaded.
+ *
+ * Cross-file, not cross-platform. The exact change is three optional members on
+ * `AuthContext` (`src/ports.ts`) — `allowedModels?: readonly string[]`,
+ * `allowedProviders?: readonly string[]`, `requestLimitPerMinute?: number` —
+ * plus the three lines below that copy them off the row. Two consumers are
+ * already waiting for them: `RateLimitDeps.perKeyRequestLimit`
+ * (`src/ratelimit/middleware.ts`) exists ONLY because the field is missing, and
+ * the model allow/deny gate in `src/inference/` reads its lists off `Caller`
+ * instead. Until then a durable key's per-key RPM cap and model/provider
+ * allowlists are NOT enforced for D1-resolved credentials.
  */
 function toAuthContext(row: StoredApiKey): AuthContext {
   return {

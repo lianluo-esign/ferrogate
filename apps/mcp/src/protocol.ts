@@ -84,8 +84,16 @@ export type McpProtocolDowngradeReason =
   | "http_400_unrecognized_response"
   | "http_404_unrecognized_response"
   | "http_405_unrecognized_response"
-  // PORT-TODO(inventory-edge-control §MCP): the `stdio_*` downgrade reasons are
-  // unreachable on Workers — see `ports.ts` for the stdio transport note.
+  // PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — the four `stdio_*`
+  // downgrade reasons are UNREACHABLE on Workers, because reaching them means
+  // having probed a child process (workerd cannot spawn one; see the stdio note
+  // in `src/transport.ts`). `stdio_probe_process_exit` in particular names an
+  // event that has no analogue here at all.
+  //
+  // They are KEPT in the union deliberately rather than deleted: this type is
+  // the wire contract for a downgrade reason, and a FerroGate deployment that
+  // runs stdio upstreams off-CF still emits them. Narrowing the type would make
+  // this Worker unable to even parse that evidence.
   | "stdio_method_not_found"
   | "stdio_unrecognized_error"
   | "stdio_probe_timeout"

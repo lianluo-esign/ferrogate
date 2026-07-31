@@ -16,11 +16,11 @@
  * JSON blob. See `credits.ts` and the `MeteringQueueMessage` doc.
  */
 import {
+  type BillingEvent,
+  type LedgerEntry,
   billingEventWireSchema,
   ledgerEntryToWire,
   ledgerEntryWireSchema,
-  type BillingEvent,
-  type LedgerEntry,
 } from "@ferrogate/billing";
 
 /** serde's `skip_serializing_if = "Option::is_none"`: absent, not `null`. */

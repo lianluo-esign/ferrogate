@@ -4,14 +4,29 @@
  * Caddyfile compatibility subset, producing a `GatewayConfig` or throwing a
  * `CaddyfileDiagnostic` (inventory §5.6).
  *
- * PORT-TODO(inventory §5.8): the Caddyfile bridge is a legacy migration path,
- * deprioritizable for a CF-native deployment. The parser is ported 1:1 so a
- * migrating operator's `Caddyfile` still compiles to the intermediate model;
- * env resolution for `organization_id` takes an explicit env source (a Worker
- * has no `std::env`).
+ * PORT-TODO(inventory §5.8) — PLATFORM LIMIT (API SHAPE), NOT CLOSED.
+ *
+ * The grammar itself is ported 1:1: every directive the Rust parser matches has
+ * a case here, and a migrating operator's `Caddyfile` compiles to the same
+ * intermediate model with the same `CaddyfileDiagnostic` on failure.
+ *
+ * The ONE divergence is the same platform limit as `../secrets.ts`: the Rust
+ * parser resolved an `organization_id` env reference through `std::env::var`,
+ * which workerd does not have (a Worker's environment is the per-invocation
+ * `env` object, not ambient process state). CLOSEST BEHAVIOR IMPLEMENTED:
+ * `parseCaddyfile(raw, file, env?)` takes the environment as an explicit
+ * argument that the caller threads down from the Worker `env` binding.
+ *
+ * NOTE (not a port gap): the Caddyfile bridge is a legacy migration path. It is
+ * kept at parity so migration works, but a CF-native deployment configures via
+ * wrangler vars / KV / D1 and never enters this module.
  */
 import { CaddyfileDiagnostic } from "../diagnostic.js";
+import { modelCapabilitySchema, type ModelCapability } from "../schema/enums.js";
 import type { EnvSource } from "../secrets.js";
+
+/** `ModelCapability::from_str`'s accept set, in the Rust match-arm order. */
+const MODEL_CAPABILITIES: readonly ModelCapability[] = modelCapabilitySchema.options;
 import { lex, type Token } from "./lexer.js";
 import {
   defaultGatewayConfig,
@@ -640,9 +655,20 @@ class Parser {
         const inner = this.consumeLineArgs();
         switch (directive) {
           case "capabilities":
-            // PORT-TODO(inventory §5.6): validate against the `ModelCapability`
-            // enum once `@ferrogate/providers` is ported; retained as slug list.
-            model.capabilities = inner;
+            // Rust: `value.parse::<ModelCapability>()`, whose `FromStr::Err` is
+            // fed to `self.unsupported(&token, directive, reason)` — so an
+            // unknown slug is a diagnostic whose `directive` is `capabilities`
+            // and whose suggestion is the `FromStr` message.
+            model.capabilities = inner.map((value) => {
+              if (!MODEL_CAPABILITIES.includes(value as ModelCapability)) {
+                throw this.unsupported(
+                  dirToken,
+                  directive,
+                  `unknown model capability "${value}"; expected one of ${MODEL_CAPABILITIES.join(", ")}`,
+                );
+              }
+              return value as ModelCapability;
+            });
             break;
           case "context_window":
             model.context_window = inner[0] !== undefined ? intOrNull(inner[0]) : null;

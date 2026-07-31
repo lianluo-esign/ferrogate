@@ -9,8 +9,17 @@
  *                to Rust: exact FNV constants and `salt\0key` framing).
  *  - `rollout` — `canarySelected` / `shadowSampled` / `ShadowBudgetLedger`.
  *  - `route`   — `RouteMatch` / `RouteMatcher` (the dynamic-route abstraction).
+ *
+ * `ShadowBudgetDurableObject` / `DurableObjectShadowBudgetLedger` — the
+ * cross-isolate shadow budget — are NOT re-exported here. They `import
+ * "cloudflare:workers"`, which only resolves inside `workerd`, and this barrel
+ * is imported from plain-node contexts (the CLI, plain vitest suites). They are
+ * reachable at the `@ferrogate/routing/durable-objects` subpath instead; only
+ * the ledger INTERFACE, whose import is type-only and therefore erased, is
+ * re-exported below.
  */
 
 export { fnv1a64, rolloutBucket } from "./fnv.js";
 export { canarySelected, shadowSampled, ShadowBudgetLedger } from "./rollout.js";
 export type { RouteMatch, RouteMatcher } from "./route.js";
+export type { AsyncShadowBudgetLedger } from "./shadow-budget-do.js";

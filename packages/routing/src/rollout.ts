@@ -50,13 +50,23 @@ export function shadowSampled(stickyKey: string, samplePercent: number): boolean
  * further requests are refused until the process restarts. `limit === 0` means
  * uncapped.
  *
- * PORT-TODO(inventory §2.8): the Rust type is a `Mutex<HashMap>` counter scoped
- * to one process. On Workers there is no single long-lived process, so a
- * cross-isolate cap must be backed by a **Durable Object** counter (or KV, with
- * the same non-atomic caveat as the gateway rate-limit counters). This class
- * preserves the exact per-isolate semantics; the DO/KV binding wiring belongs in
- * apps/gateway. JS is single-threaded so the mutex/poison-recovery logic
- * collapses to a plain Map with no locking.
+ * The Rust type is a `Mutex<HashMap>` counter scoped to one process; on Workers
+ * there is no single long-lived process, so N live isolates would give N
+ * independent counters and a cap of `limit` would silently become `limit`·N.
+ * The cross-isolate cap is therefore ported as a **Durable Object** —
+ * `ShadowBudgetDurableObject` / `DurableObjectShadowBudgetLedger` in
+ * `./shadow-budget-do.ts`, reachable at `@ferrogate/routing/durable-objects`
+ * and exercised against a real DO in `test/do/shadow-budget.test.ts`.
+ *
+ * THIS class stays, and is not deprecated by it: it is the executable
+ * specification of the Rust semantics (the DO suite asserts the two produce the
+ * identical admission sequence), and it is the right choice for a single-isolate
+ * dev run. JS is single-threaded, so the mutex/poison-recovery logic collapses
+ * to a plain Map with no locking.
+ *
+ * The one unavoidable difference at the DO seam is that `tryConsume` becomes
+ * `async`: a cross-isolate atomic is a network hop, and the platform offers no
+ * synchronous equivalent.
  */
 export class ShadowBudgetLedger {
   readonly #used = new Map<string, number>();

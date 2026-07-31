@@ -4,11 +4,21 @@
  * Byte-exact reimplementation of AWS's published SigV4 algorithm using the
  * synchronous {@link ./crypto} SHA-256 / HMAC-SHA256 primitives.
  *
- * PORT-TODO(inventory §3.8): the inventory suggests `crypto.subtle` HMAC-SHA256,
- * but `crypto.subtle` is async and the Rust `sign` is synchronous (called inline
- * from `BedrockAdapter.prepareChatCompletions`). To preserve the pure-synchronous
- * adapter contract we sign with a synchronous in-package SHA-256/HMAC-SHA256
- * (`crypto.ts`) instead; behavior and output are byte-identical.
+ * MECHANISM NOTE (inventory §3.8) — the port is COMPLETE; only the primitive
+ * differs, and the difference is PROVEN to be invisible.
+ *
+ * The inventory suggests `crypto.subtle` HMAC-SHA256. `crypto.subtle` is ASYNC,
+ * and the Rust `sign` is synchronous — it is called inline from
+ * `BedrockAdapter.prepareChatCompletions`, so adopting it would force the whole
+ * `ProviderAdapter` surface to become `async`: a behavioral divergence from the
+ * crate, in a request path where an extra microtask boundary changes ordering.
+ * So signing uses a synchronous in-package SHA-256/HMAC-SHA256 (`./crypto.ts`).
+ *
+ * This is NOT a deferral, so it is not a PORT-TODO. `test/crypto-sigv4.test.ts`
+ * asserts the sync primitives agree with `crypto.subtle` BYTE FOR BYTE across
+ * block boundaries, over-long keys and multi-byte input, in addition to the
+ * NIST/RFC 4231 vectors — so a drift fails the suite rather than producing a
+ * silently-invalid Authorization header.
  */
 import { hexHmac, hexSha256, hmacSha256, utf8 } from "./crypto.js";
 

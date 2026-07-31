@@ -3,10 +3,20 @@ main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Bootstrap vars for the ports in `src/adapters.ts`. These are DEV/TEST defaults
-# only: the credential material moves to Secrets Store as soon as
-# `@ferrogate/secrets` lands, at which point every `*_API_KEYS` var below
-# disappears (see PORT-TODOs in `src/adapters.ts`).
+# FALLBACK vars for the ports in `src/adapters.ts`.
+#
+# These are no longer the credential path: `resolveApiKeys` resolves operator
+# keys from the control database's HASHED `static_api_keys` table and consults
+# `CONTROL_PLANE_STATIC_API_KEYS` only when the database has no matching row
+# (`src/store/api_keys.ts`); `resolveRbac` does the same over
+# `tenant_role_bindings` for `TENANT_RBAC_ACTIONS`. Provisioning rows is
+# therefore how a real deployment states its credentials, and a stale var can
+# never re-enable a key the database disabled.
+#
+# `CONTROL_PLANE_NATIVE_API_KEYS` is the one that CANNOT move: a durable virtual
+# key's scopes live in the per-tenant database and Workers resolve D1 bindings at
+# deploy time, so this Worker cannot read them — see the kept platform-limit
+# PORT-TODO in `src/store/api_keys.ts`.
 #
 # `CONTROL_PLANE_SEED` now seeds ONLY the in-memory fallback store. With the
 # `DB` binding below present the Worker uses the D1 store and ignores it; it is

@@ -1,17 +1,26 @@
 /**
  * Minimal Cloudflare `client/v4` REST client with an injectable transport seam.
  *
- * PORT-TODO(4.6/4.7): the Rust crate depends on the shared
- * `ferrogate_cloudflare::CloudflareClient` (issue #405 — auth, retries,
- * envelope decode + error mapping written once). That sibling crate maps to a
- * future `@ferrogate/cloudflare` TS package which has NOT been ported yet
- * (wave 2 orders `secrets` alongside it). To keep this package self-contained
- * and behaviourally faithful, this file re-implements the slice of the client
- * that the Secrets Store backend actually uses — envelope decode, the
- * `{account_id}` path template, the `env://`-referenced bearer token, and the
- * `HttpTransport` seam the tests script — and should be REPLACED by an import
- * from `@ferrogate/cloudflare` once that package exists. Retry/backoff and
- * pagination are not reproduced here (the manage plane needs neither).
+ * PORT-TODO(4.6/4.7) — PACKAGE RELOCATION, NOT A PLATFORM LIMIT, NOT CLOSED.
+ *
+ * The Rust crate depends on the shared `ferrogate_cloudflare::CloudflareClient`
+ * (issue #405 — auth, retries, envelope decode + error mapping written once).
+ * That sibling crate maps to a `@ferrogate/cloudflare` TS package which DOES
+ * NOT EXIST YET; creating it is outside this package's scope, and inventing a
+ * second partial copy of it here would be worse than the one that already
+ * exists.
+ *
+ * So this file keeps a self-contained re-implementation of exactly the slice
+ * the Secrets Store backend uses — envelope decode, the `{account_id}` path
+ * template, the `env://`-referenced bearer token, and the `HttpTransport` seam
+ * the tests script. Retry/backoff and pagination are deliberately NOT
+ * reproduced: the manage plane needs neither, and a half-implemented retry is a
+ * duplicated-write hazard on a write-only API.
+ *
+ * This is a nothing-lost deferral, not a behavior gap: the surface below is
+ * complete and tested for every call the backend makes. When
+ * `@ferrogate/cloudflare` lands, this file becomes a re-export and the marker
+ * is deleted.
  */
 import { z } from "zod";
 

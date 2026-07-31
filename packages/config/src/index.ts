@@ -9,9 +9,22 @@
  * and Ed25519-signed cluster config snapshots.
  *
  * Public surface is a curated re-export list (mirroring the Rust `lib.rs` `pub
- * use` contract). See each module for the per-behavior PORT-TODO markers where
- * a Rust behavior has no clean CF/TS equivalent or depends on a sibling package
- * still being ported in wave 2.
+ * use` contract).
+ *
+ * Every remaining PORT-TODO marker in this package is tagged with WHY it is
+ * still there, so a reader never has to guess whether it is pending work:
+ *   - `PLATFORM LIMIT, NOT CLOSED` — workerd genuinely cannot express the Rust
+ *     behavior (no filesystem, no `std::env`, no socket peer address, no
+ *     cross-isolate shared state, no synchronous Ed25519, CF-terminated TLS).
+ *     The closest behavior is implemented and PINNED by a test; see
+ *     `test/platform-limits.test.ts` and the per-module marker.
+ *   - `PACKAGE RELOCATION ONLY, BEHAVIOR IS CLOSED` — logic ported verbatim and
+ *     inlined here so this package validates standalone; only the import edge
+ *     to a wave-2 sibling is outstanding.
+ *   - `DELIBERATE PRODUCT DECISION` — x402/Solana payments are deprioritized.
+ *
+ * The TLS/ACME validators are not marked at all: they were REMOVED as N/A on
+ * Cloudflare, with the reason recorded at their old call site in `./validate.ts`.
  */
 
 // The Config model (Zod schema tree + inferred types + defaults + accessors).

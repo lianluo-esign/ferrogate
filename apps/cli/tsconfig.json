@@ -1,7 +1,13 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"]
+    // The CLI is a Bun/Node binary, not a Worker, so `@cloudflare/workers-types`
+    // (the base config's default) is wrong here. `DOM` is added for the Web
+    // platform types `@ferrogate/config` uses in its Ed25519 snapshot code
+    // (`CryptoKey`, `ReadableStreamReadResult`) — @types/node does not declare
+    // those, and the CLI links that package for `validate`/`reload`.
+    "types": ["node"],
+    "lib": ["ES2022", "DOM"]
   },
   "include": ["src", "test", "vitest.config.ts"]
 }

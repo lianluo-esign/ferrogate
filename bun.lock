@@ -25,6 +25,7 @@
       "dependencies": {
         "@cloudflare/sandbox": "^0.12.4",
         "@ferrogate/core": "workspace:*",
+        "@ferrogate/guardrails": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
         "agents": "^0.0.109",
         "hono": "^4.6.0",
@@ -37,6 +38,7 @@
         "ferrogate": "./src/index.ts",
       },
       "dependencies": {
+        "@ferrogate/config": "workspace:*",
         "@ferrogate/core": "workspace:*",
       },
       "devDependencies": {
@@ -48,7 +50,9 @@
       "dependencies": {
         "@ferrogate/config": "workspace:*",
         "@ferrogate/core": "workspace:*",
+        "@ferrogate/guardrails": "workspace:*",
         "@ferrogate/observability": "workspace:*",
+        "@ferrogate/policy": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
         "@ferrogate/secrets": "workspace:*",
         "@ferrogate/storage": "workspace:*",
@@ -159,6 +163,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@ferrogate/core": "workspace:*",
+        "@ferrogate/storage": "workspace:*",
         "zod": "^3.25.76",
       },
     },

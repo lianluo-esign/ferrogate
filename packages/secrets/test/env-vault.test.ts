@@ -49,8 +49,11 @@ describe("VaultSecretResolver", () => {
     // GET {addr}/v1/{mount}/data/{path}: KV v2 inserts /data/ between mount and
     // path, so mount=secret + path=data/openai → /v1/secret/data/data/openai.
     const call = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(call[0]).toBe("https://vault.test/v1/secret/data/data/openai");
-    expect((call[1] as RequestInit).headers).toMatchObject({
+    // Assert the call happened before indexing it: a `?.` here would turn a
+    // "never called" bug into two silently-skipped assertions.
+    expect(call).toBeDefined();
+    expect(call![0]).toBe("https://vault.test/v1/secret/data/data/openai");
+    expect((call![1] as RequestInit).headers).toMatchObject({
       "X-Vault-Token": "test-token",
     });
   });

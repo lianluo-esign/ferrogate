@@ -132,8 +132,13 @@ export type ChannelMoveOutcome =
  * The quota-admission and yank/channel-move guards run under one serialization
  * point here, mirroring the durable backends' single-statement/locked guards.
  *
- * PORT-TODO(§1.7): inline `content` bytes ≤10 MiB and bucket-backed `storageUri`
- * objects move to R2 in the Worker; this reference store keeps bytes inline.
+ * The R2 move IS ported — see `./d1/assets-r2.js`: `R2AssetBlobStore` holds the
+ * artifact bytes and `commitAssetWithBlob` runs the object-then-row commit
+ * protocol that the absence of an R2↔D1 transaction forces. This reference
+ * store keeps `content` inline ON PURPOSE, because it is the synchronous
+ * in-memory twin of the durable pair and holding bytes is how it stays a
+ * single-serialization-point specification of the admission guard. It is not
+ * the deployed path.
  */
 export class MemoryAssetStore {
   private readonly assets = new Map<string, StoredAsset>();

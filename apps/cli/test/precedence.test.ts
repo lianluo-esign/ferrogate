@@ -72,6 +72,30 @@ describe("precedence: flag > env > context > default", () => {
     expect(resolve(STORE, envOverrides({}), overridesFrom([])).tenant).toBe("tenant-from-context");
   });
 
+  test("the same chain governs the per-request timeout", () => {
+    // A mutation-test hole until now: nothing pinned the FLAG-over-ENV leg for
+    // --timeout-millis, so swapping the two arms of that `??` chain left the
+    // whole suite green. A pipeline that raises the timeout on the command
+    // line to survive a slow control plane must not be silently overridden by
+    // a lower value exported in the shell.
+    expect(
+      resolve(
+        STORE,
+        envOverrides({ FERROGATE_TIMEOUT_MILLIS: "1000" }),
+        overridesFrom(["--timeout-millis", "45000"]),
+      ).timeoutMillis,
+    ).toBe(45_000);
+    expect(
+      resolve(STORE, envOverrides({ FERROGATE_TIMEOUT_MILLIS: "1000" }), overridesFrom([]))
+        .timeoutMillis,
+    ).toBe(1000);
+    // There is deliberately no context layer for the timeout (no Rust
+    // `Context` field holds one), so the chain falls straight to the default.
+    expect(resolve(STORE, envOverrides({}), overridesFrom([])).timeoutMillis).toBe(
+      DEFAULT_TIMEOUT_MILLIS,
+    );
+  });
+
   test("the same chain governs which context is selected", () => {
     const store: ContextStore = {
       contexts: [CONTEXT, { ...CONTEXT, name: "staging", endpoint: "https://staging.example" }],

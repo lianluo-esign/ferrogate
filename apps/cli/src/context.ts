@@ -15,6 +15,7 @@
  */
 import { CliError } from "./errors.js";
 import type { Io } from "./ports.js";
+import { type TomlTable, parseToml, stringifyToml } from "./toml.js";
 
 /** Default endpoint when nothing else supplies one. */
 export const DEFAULT_ENDPOINT = "http://127.0.0.1:8080";
@@ -31,15 +32,21 @@ export const DEFAULT_TOKEN_VAR = "FERROGATE_TOKEN";
 /** Where the context file lives when the operator overrides the location. */
 export const CONFIG_HOME_VAR = "FERROGATE_CLI_HOME";
 /**
- * The context store file name.
- *
- * PORT-TODO(inventory-edge-control.md §1.1): the Rust CLI persisted
- * `contexts.toml`. Bun/Node have no dependency-free TOML writer, and adding a
- * dependency is out of scope for this slice, so the port persists the same
- * document shape as `contexts.json`. Reading a legacy `contexts.toml` is not
- * attempted — it would be a silent half-migration.
+ * The context store file name — `contexts.toml`, byte-compatible with the Rust
+ * CLI's `ctl/store.rs` (same field names, same `current`-before-`contexts`
+ * ordering). Neither Bun nor Node ships a TOML writer, so `./toml.ts`
+ * implements exactly the closed subset this document can contain.
  */
-export const CONTEXTS_FILE = "contexts.json";
+export const CONTEXTS_FILE = "contexts.toml";
+
+/**
+ * The file the first TypeScript wave wrote before `contexts.toml` landed.
+ *
+ * Read (once) when no `contexts.toml` exists so an operator's contexts do not
+ * silently vanish across the format change; the next `save` writes TOML. Never
+ * written.
+ */
+export const LEGACY_JSON_CONTEXTS_FILE = "contexts.json";
 
 // ---------------------------------------------------------------------------
 // Credential sources
@@ -184,45 +191,112 @@ export interface ContextStorage {
   path(): string;
 }
 
-/** Resolve the context file path: `$FERROGATE_CLI_HOME` > XDG > `$HOME`. */
-export function contextsPath(env: Readonly<Record<string, string | undefined>>): string {
+/** Resolve the config directory holding the store: `$FERROGATE_CLI_HOME` > XDG > `$HOME`. */
+export function contextsDirectory(env: Readonly<Record<string, string | undefined>>): string {
   const home = env[CONFIG_HOME_VAR];
-  if (home !== undefined && home !== "") return `${home}/${CONTEXTS_FILE}`;
+  if (home !== undefined && home !== "") return home;
   const xdg = env.XDG_CONFIG_HOME;
-  if (xdg !== undefined && xdg !== "") return `${xdg}/ferrogate/${CONTEXTS_FILE}`;
+  if (xdg !== undefined && xdg !== "") return `${xdg}/ferrogate`;
   const userHome = env.HOME;
-  if (userHome !== undefined && userHome !== "") {
-    return `${userHome}/.config/ferrogate/${CONTEXTS_FILE}`;
-  }
+  if (userHome !== undefined && userHome !== "") return `${userHome}/.config/ferrogate`;
   throw CliError.usage(
     `cannot locate a config directory for contexts: set ${CONFIG_HOME_VAR}, XDG_CONFIG_HOME, or HOME`,
   );
 }
 
-/** A `ContextStorage` backed by the injected `Io` (0600 on write). */
+/** Resolve the context file path: `<config dir>/contexts.toml`. */
+export function contextsPath(env: Readonly<Record<string, string | undefined>>): string {
+  return `${contextsDirectory(env)}/${CONTEXTS_FILE}`;
+}
+
+/** Resolve the pre-TOML file the first TS wave wrote, read once for migration. */
+export function legacyJsonContextsPath(env: Readonly<Record<string, string | undefined>>): string {
+  return `${contextsDirectory(env)}/${LEGACY_JSON_CONTEXTS_FILE}`;
+}
+
+/**
+ * A `ContextStorage` backed by the injected `Io` (0600 on write).
+ *
+ * Reads `contexts.toml`; when that file is absent but the pre-TOML
+ * `contexts.json` is present, it loads that instead so the operator's contexts
+ * survive the format change. Only TOML is ever written.
+ */
 export function createFileContextStorage(io: Io): ContextStorage {
   const path = (): string => contextsPath(io.env);
+  const parseAt = (file: string, text: string, decode: (raw: string) => unknown): ContextStore => {
+    if (text.trim() === "") return EMPTY_STORE;
+    try {
+      return parseContextStore(decode(text));
+    } catch (error) {
+      throw CliError.usage(
+        `failed to parse the context store at ${file}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  };
   return {
     path,
     async load() {
       const file = path();
-      if (!(await io.fileExists(file))) return EMPTY_STORE;
-      const text = await io.readFile(file);
-      if (text.trim() === "") return EMPTY_STORE;
-      try {
-        return parseContextStore(JSON.parse(text));
-      } catch (error) {
-        throw CliError.usage(
-          `failed to parse the context store at ${file}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+      if (await io.fileExists(file)) {
+        return parseAt(file, await io.readFile(file), parseToml);
       }
+      const legacy = legacyJsonContextsPath(io.env);
+      if (await io.fileExists(legacy)) {
+        return parseAt(legacy, await io.readFile(legacy), (raw) => JSON.parse(raw));
+      }
+      return EMPTY_STORE;
     },
     async save(store) {
-      await io.writeFile(path(), `${JSON.stringify(store, null, 2)}\n`);
+      await io.writeFile(path(), serializeContextStore(store));
     },
   };
+}
+
+/**
+ * Render a store as `contexts.toml`, in the Rust `PersistedStore` shape:
+ * snake_case field names, `current` emitted before the `[[contexts]]` array (a
+ * scalar after an array-of-tables would belong to that context, not the root),
+ * and optional fields omitted rather than written as empty strings.
+ */
+export function serializeContextStore(store: ContextStore): string {
+  const document: TomlTable = {};
+  if (store.current !== undefined) document.current = store.current;
+  document.contexts = store.contexts.map((context) => {
+    const entry: TomlTable = { name: context.name, endpoint: context.endpoint };
+    if (context.tenant !== undefined) entry.tenant = context.tenant;
+    if (context.project !== undefined) entry.project = context.project;
+    if (context.workspace !== undefined) entry.workspace = context.workspace;
+    if (context.caBundlePath !== undefined) entry.ca_bundle_path = context.caBundlePath;
+    entry.tls_insecure_skip_verify = context.tlsInsecureSkipVerify;
+    entry.auth = serializeAuthSource(context.auth);
+    return entry;
+  });
+  return stringifyToml(document);
+}
+
+/**
+ * The on-disk form of an `AuthSource` — the `#[serde(tag = "kind")]` shape.
+ *
+ * `inline` is unreachable by construction: `context create` only ever stores a
+ * source (`--token-env` / `--token-stdin`), and this refuses rather than
+ * writing a bearer token to disk if a future caller passes one.
+ */
+function serializeAuthSource(auth: AuthSource): TomlTable {
+  switch (auth.kind) {
+    case "none":
+      return { kind: "none" };
+    case "env":
+      return { kind: "env", var: auth.var };
+    case "stdin":
+      return { kind: "stdin" };
+    case "inline":
+      throw CliError.usage(
+        "refusing to persist an inline token to the context store; store a token SOURCE " +
+          "(--token-env or --token-stdin) instead",
+      );
+  }
 }
 
 /** An entirely in-memory `ContextStorage` for tests and dry runs. */
@@ -239,10 +313,17 @@ export function createMemoryContextStorage(initial: ContextStore = EMPTY_STORE):
   };
 }
 
-/** Validate a parsed document into a `ContextStore`, rejecting junk. */
+/**
+ * Validate a parsed document into a `ContextStore`, rejecting junk.
+ *
+ * Field names are the Rust `Context` serde names (`ca_bundle_path`,
+ * `tls_insecure_skip_verify`), so a `contexts.toml` written by either binary
+ * loads in the other. The pre-TOML camelCase spellings are still accepted so
+ * the one-way `contexts.json` migration does not lose those two fields.
+ */
 export function parseContextStore(raw: unknown): ContextStore {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("context store must be a JSON object");
+    throw new Error("context store must be a table");
   }
   const document = raw as Record<string, unknown>;
   const rawContexts = document.contexts ?? [];
@@ -258,22 +339,26 @@ export function parseContextStore(raw: unknown): ContextStore {
     if (typeof value.endpoint !== "string" || value.endpoint.trim() === "") {
       throw new Error(`context '${value.name}' is missing an endpoint`);
     }
-    const optional = (key: string): string | undefined =>
-      typeof value[key] === "string" && (value[key] as string) !== ""
-        ? (value[key] as string)
-        : undefined;
+    const optional = (...keys: readonly string[]): string | undefined => {
+      for (const key of keys) {
+        const found = value[key];
+        if (typeof found === "string" && found !== "") return found;
+      }
+      return undefined;
+    };
+    const caBundlePath = optional("ca_bundle_path", "caBundlePath");
+    const tenant = optional("tenant");
+    const project = optional("project");
+    const workspace = optional("workspace");
     const context: Context = {
       name: value.name,
       endpoint: value.endpoint,
-      ...(optional("tenant") === undefined ? {} : { tenant: optional("tenant") as string }),
-      ...(optional("project") === undefined ? {} : { project: optional("project") as string }),
-      ...(optional("workspace") === undefined
-        ? {}
-        : { workspace: optional("workspace") as string }),
-      ...(optional("caBundlePath") === undefined
-        ? {}
-        : { caBundlePath: optional("caBundlePath") as string }),
-      tlsInsecureSkipVerify: value.tlsInsecureSkipVerify === true,
+      ...(tenant === undefined ? {} : { tenant }),
+      ...(project === undefined ? {} : { project }),
+      ...(workspace === undefined ? {} : { workspace }),
+      ...(caBundlePath === undefined ? {} : { caBundlePath }),
+      tlsInsecureSkipVerify:
+        value.tls_insecure_skip_verify === true || value.tlsInsecureSkipVerify === true,
       auth: parseAuthSource(value.auth),
     };
     return context;

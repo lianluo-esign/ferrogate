@@ -19,16 +19,11 @@
  *    stops counting whole credits. {@link MeteredTotals.credits} cannot.
  */
 import {
+  type LedgerListFilter,
   ledgerFilterMatches,
   sameProviderAttemptSettlement,
-  type LedgerListFilter,
 } from "@ferrogate/billing";
-import type {
-  LedgerStore,
-  LedgerWriteOutcome,
-  MeteredCharge,
-  MeteredTotals,
-} from "./ports.js";
+import type { LedgerStore, LedgerWriteOutcome, MeteredCharge, MeteredTotals } from "./ports.js";
 
 /**
  * Whether two charges for the same id are the SAME settlement.
@@ -40,9 +35,7 @@ import type {
  * charge even when the `f64` fields happen to agree.
  */
 export function sameSettlement(left: MeteredCharge, right: MeteredCharge): boolean {
-  return (
-    left.credits === right.credits && sameProviderAttemptSettlement(left.entry, right.entry)
-  );
+  return left.credits === right.credits && sameProviderAttemptSettlement(left.entry, right.entry);
 }
 
 /** Aggregate charges in the integer domain. */
@@ -82,11 +75,7 @@ export class InMemoryLedgerStore implements LedgerStore {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await -- see `record`.
-  async list(
-    filter: LedgerListFilter,
-    offset: number,
-    limit: number,
-  ): Promise<MeteredCharge[]> {
+  async list(filter: LedgerListFilter, offset: number, limit: number): Promise<MeteredCharge[]> {
     return this.#matching(filter).slice(offset, offset + limit);
   }
 

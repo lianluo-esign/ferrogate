@@ -10,6 +10,7 @@
     "start": "bun run ./src/index.ts"
   },
   "dependencies": {
+    "@ferrogate/config": "workspace:*",
     "@ferrogate/core": "workspace:*"
   },
   "devDependencies": {

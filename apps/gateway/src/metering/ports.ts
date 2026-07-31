@@ -22,8 +22,9 @@
  * Every port is deliberately shaped so a REAL Cloudflare binding satisfies it
  * structurally, the same trick `src/assets/ports.ts` plays with `R2Bucket`:
  * a live `D1Database` is a {@link MeteringDatabase} and a live `Queue` is a
- * {@link MeteringQueue}, with no adapter and no `as` cast. `test/metering/
- * bindings.test.ts` holds that with a compile-time assignment.
+ * {@link MeteringQueue}, with no adapter and no `as` cast.
+ * `test/metering/d1.test.ts` holds that with a compile-time assignment
+ * (`_bindingsSatisfyThePorts`) and exercises both bindings for real.
  */
 import type { BillingEvent, LedgerEntry, LedgerListFilter } from "@ferrogate/billing";
 
@@ -208,6 +209,50 @@ export interface LedgerStore {
   get(id: string): Promise<MeteredCharge | undefined>;
   list(filter: LedgerListFilter, offset: number, limit: number): Promise<MeteredCharge[]>;
   totals(filter?: LedgerListFilter): Promise<MeteredTotals>;
+  /**
+   * The DURABLE half of the outbox, when this store has one.
+   *
+   * `record` commits a `billing_report_outbox` row in the SAME batch as the
+   * charge (#150), so that row's whole lifecycle belongs to the same store —
+   * which is why these live here and not on {@link MeteringOutbox} (that port is
+   * the in-isolate buffer, and it has no `env` to write through).
+   *
+   * Every member is OPTIONAL because {@link LedgerStore} also has an in-memory
+   * implementation that writes no such row; a caller must treat absence as "this
+   * store keeps no durable intent", never as an error.
+   */
+  readonly outbox?: DurableOutboxStore | undefined;
+}
+
+/**
+ * The durable `billing_report_outbox` row's lifecycle — the state moves
+ * `sweep_billing_outbox_once` makes, expressed against the storage binding
+ * rather than against an in-isolate `Map`.
+ *
+ * Why it exists at all, given {@link MeteringOutbox} already implements the same
+ * moves: the in-isolate buffer dies with the isolate. A charge whose ledger row
+ * committed but whose Queue publish had not yet succeeded when the isolate was
+ * evicted is billed and never reported — real money, silently un-invoiced — and
+ * the durable row is the ONLY record that it happened. {@link listDue} is what
+ * a Cron-triggered sweep reads to recover it.
+ */
+export interface DurableOutboxStore {
+  /** Drop the intent — the report was delivered. `delete_billing_report`. */
+  reap(id: string): Promise<void>;
+  /**
+   * Stranded intents a sweep should re-deliver: due, not dead-lettered, oldest
+   * deadline first, and only those whose ledger row exists (an intent with no
+   * charge behind it cannot be rehydrated).
+   *
+   * Every record comes back `settled: true` — the ledger row is what the join
+   * matched on, so by construction the charge has already committed and the
+   * sweep's only remaining job is delivery.
+   */
+  listDue(nowUnix: number, limit: number): Promise<OutboxRecord[]>;
+  /** `reschedule_billing_report` — `attempts += 1`, push the deadline out. */
+  reschedule(id: string, attempts: number, nextAttemptUnix: number, nowUnix: number): Promise<void>;
+  /** `dead_letter_billing_report` — stop retrying, keep for inspection (#143). */
+  deadLetter(id: string, nowUnix: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,9 +387,9 @@ export interface MeteringQueryResult {
 }
 
 /**
- * `D1Database`-shaped. A live `env.DB` satisfies this with no adapter; the
- * binding itself is declared by the composition root (see the wiring note in
- * `index.ts`) because `wrangler.toml` is not this module's to edit.
+ * `D1Database`-shaped. A live `env.BILLING_DB` satisfies this with no adapter —
+ * `wrangler.toml` declares that binding (the CONTROL database), and
+ * `meteringBindingsFromEnv` resolves it per request.
  */
 export interface MeteringDatabase {
   prepare(sql: string): MeteringStatement;
@@ -372,8 +417,29 @@ export interface CostDivergence {
  * so an observability bug can never become a billing bug.
  *
  * PORT-TODO(inventory-data-billing §"Observability/worker/audit analytics
- * families"): these become Analytics Engine `writeDataPoint` calls once the
- * `[[analytics_engine_datasets]]` binding lands with `apps/telemetry`.
+ * families"): these become Analytics Engine `writeDataPoint` calls.
+ *
+ * NOT a platform limit — the opposite, and it was checked rather than assumed:
+ * `[[analytics_engine_datasets]]` is emulated by miniflare and a
+ * `writeDataPoint({ blobs, doubles, indexes })` call is accepted for real under
+ * `@cloudflare/vitest-pool-workers`. What is missing is a local READ-BACK: the
+ * only query interface is the account-scoped SQL API over HTTP, so a test can
+ * prove the call was made (through a recording decorator over the live binding)
+ * but not that the row is queryable — the same shape as the `BILLING` Queue
+ * producer, which this module already handles that way.
+ *
+ * The reason it is deferred is OWNERSHIP, not capability. `TELEMETRY` is ONE
+ * dataset binding, and `apps/gateway/wrangler.toml`'s "NOT DECLARED" block
+ * reserves it jointly for the asset audit sink (`src/assets`, a different
+ * owner) and `apps/telemetry`, whose `AnalyticsEngineSink` already defines the
+ * blob/double/index column contract. Declaring it from the metering slice alone
+ * would fork that contract on a dataset whose schema is positional and cannot be
+ * migrated. Closing it is: declare
+ * `[[analytics_engine_datasets]] binding = "TELEMETRY"`, add a
+ * `analyticsEngineDiagnostics(env): MeteringDiagnostics` beside
+ * `meteringBindingsFromEnv` in `runtime.ts` mapping each hook below to one data
+ * point (index = tenant, blobs = request/provider/model, doubles = credits), and
+ * pass it as `MeteringSinkOptions.diagnostics` from `src/index.ts`.
  */
 export interface MeteringDiagnostics {
   /** A gateway-settled cost drifted >5% from the rate card. Signal only (#152). */
@@ -382,11 +448,20 @@ export interface MeteringDiagnostics {
    * No settled cost AND no matching rate-card rule. The charge was REFUSED —
    * nothing was billed, and nothing was billed at zero either (#129).
    */
-  onPriceNotFound?(info: { readonly requestId: string; readonly provider: string; readonly providerModel: string; readonly message: string }): void;
+  onPriceNotFound?(info: {
+    readonly requestId: string;
+    readonly provider: string;
+    readonly providerModel: string;
+    readonly message: string;
+  }): void;
   /** An id was replayed with different settlement data (#213) — HTTP 409 class. */
   onIdempotencyConflict?(info: { readonly id: string; readonly requestId: string }): void;
   /** One delivery attempt failed; the outbox will retry. */
-  onDeliveryFailure?(info: { readonly id: string; readonly attempts: number; readonly error: unknown }): void;
+  onDeliveryFailure?(info: {
+    readonly id: string;
+    readonly attempts: number;
+    readonly error: unknown;
+  }): void;
   /** Retries exhausted (#143) — kept for operator inspection, never retried again. */
   onDeadLetter?(info: { readonly id: string; readonly attempts: number }): void;
   /** The narrow window where a charge could be lost (#151). Alert on this. */

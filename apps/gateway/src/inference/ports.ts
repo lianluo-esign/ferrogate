@@ -281,9 +281,37 @@ export interface Usage {
   readonly projectId?: string | undefined;
 }
 
-/** Metering sink. `record` is fire-and-forget — it must never throw. */
+/**
+ * The per-request half of the metering seam: the Worker bindings the durable
+ * sink writes through, and the `ExecutionContext` that keeps those writes alive
+ * past the flushed response.
+ *
+ * Both are PER REQUEST while a `UsageSink` is built ONCE at module scope, which
+ * is why they travel as an argument rather than as construction state. A
+ * module-scoped "current env / current ctx" slot is NOT an equivalent: workerd
+ * refuses I/O started on behalf of a different request, so a last-write-wins
+ * slot corrupts under concurrency exactly when the gateway is busiest.
+ *
+ * `env` is `unknown` on purpose — this module owns no binding vocabulary, and
+ * the sink narrows it (see `src/metering/runtime.ts`). `ctx` is optional
+ * because `app.request(...)` in a unit test creates no `ExecutionContext`.
+ */
+export interface UsageRecordContext {
+  /** The Worker bindings for THIS request (`c.env`). */
+  readonly env: unknown;
+  /** `c.executionCtx`, when the runtime created one. */
+  readonly ctx?: { waitUntil(work: Promise<unknown>): void } | undefined;
+}
+
+/**
+ * Metering sink. `record` is fire-and-forget — it must never throw.
+ *
+ * `rc` is optional so a caller with no bindings in hand (a unit test, an
+ * in-memory harness) still compiles; a sink that needs durable storage treats
+ * its absence as "capture now, let whoever owns the request context drain".
+ */
 export interface UsageSink {
-  record(u: Usage): void;
+  record(u: Usage, rc?: UsageRecordContext): void;
 }
 
 // ---------------------------------------------------------------------------

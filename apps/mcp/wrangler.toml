@@ -47,20 +47,47 @@ FG_DEV_IN_MEMORY_PORTS = "1"
 # KV's native per-key `expirationTtl` enforces the time bound, and `delete()`
 # after a successful exchange enforces single use.
 #
-# WIRING STATE — read this before assuming the binding is live. Nothing in
-# `src/**` dereferences `env.MCP_OAUTH_KV` yet: `resolvePorts` still returns
-# `InMemoryCredentialStore`, whose flow records die with the isolate, so a
-# browser redirected back to a DIFFERENT isolate than the one that started the
-# flow is refused. The binding is declared here because it is the deploy-time
-# half of that wiring and must exist in the account before the composition root
-# can pass it.
+# WIRING STATE — LIVE. `src/durable.ts`'s `KvOauthFlowStore` reads and writes
+# this namespace, and `resolvePorts` binds it whenever `durableIdentityBound`
+# holds (D1 + this KV + the identity key). A browser redirected back to a
+# DIFFERENT isolate than the one that started the flow now completes.
 #
-# PORT-TODO(inventory-edge-control §MCP): implement `McpCredentialStorePort`'s
-# flow half over this namespace and bind it in `resolvePorts`.
+# The ONE property KV cannot give is the atomic single-use claim: Workers KV
+# has no compare-and-swap and no conditional write, so `get` + `delete` is not
+# the one indivisible operation the Rust store's `UPDATE mcp_oauth_flows SET
+# consumed_at = now WHERE consumed_at IS NULL RETURNING *` is. That is why the
+# claim now runs through the MCP_OAUTH_FLOWS Durable Object declared below and
+# KV is the documented fallback. Pinned by `test/durable-identity.test.ts` and
+# `test/oauth-flow-claim.test.ts`.
 # ---------------------------------------------------------------------------
 [[kv_namespaces]]
 binding = "MCP_OAUTH_KV"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
+# DURABLE OBJECTS — the atomic single-use claim on an in-flight OAuth flow
+#
+# Read as `env.MCP_OAUTH_FLOWS`. One instance per sha256(state) digest
+# (`idFromName`), so two callbacks racing on the same `state` are serialized
+# through one single-threaded actor and the read+delete inside
+# `blockConcurrencyWhile` is indivisible. This is what closes the gap KV leaves
+# on the ANONYMOUS `GET /v1/mcp/identity/callback`, whose entire authorization
+# is that record being single-use and time-bounded.
+#
+# `class_name` resolves against the ENTRY module, so `McpOauthFlowClaim` is
+# re-exported from `src/worker.ts`. Dropping that re-export fails the Worker at
+# startup — including under `@cloudflare/vitest-pool-workers`.
+#
+# DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`,
+# NOT `new_classes`).
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "MCP_OAUTH_FLOWS"
+class_name = "McpOauthFlowClaim"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["McpOauthFlowClaim"]
 
 # ---------------------------------------------------------------------------
 # D1 — per-user MCP identity grants + the upstream server catalog
@@ -78,11 +105,19 @@ id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 #                          allowlists (`McpServerConfig`), today reachable only
 #                          through `InMemoryUpstreams.register`.
 #
-# Same WIRING STATE caveat as the KV namespace above: declared, not yet
-# dereferenced. `database_id` is a documented placeholder.
+# WIRING STATE — LIVE. `src/durable.ts` owns the schema (`MCP_IDENTITY_SCHEMA`,
+# applied idempotently by `ensureMcpIdentitySchema`), `D1CredentialGrants`
+# implements the grant half, and `loadServerCatalog` reads `mcp_servers` for one
+# tenant. `resolvePorts` binds them. `database_id` remains a documented
+# placeholder — the real id comes from whoever provisions the database.
 #
-# PORT-TODO(inventory-edge-control §MCP): D1-backed `McpCredentialStorePort` +
-# server catalog, bound in `resolvePorts`.
+# Two guards worth not losing in a refactor, both pinned by
+# `test/durable-identity.test.ts`:
+#   * `commit` runs the authorization-generation check INSIDE the INSERT
+#     (`INSERT ... SELECT ... WHERE (SELECT generation ...) = ?`), so a
+#     revocation landing mid-flow cannot be overwritten by a read-then-write.
+#   * `revoke` carries `AND revoked_at_unix IS NULL` in the UPDATE's own WHERE,
+#     so a second revoke returns nothing instead of rewriting the timestamp.
 # ---------------------------------------------------------------------------
 [[d1_databases]]
 binding = "DB"
@@ -92,39 +127,62 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 # ===========================================================================
 # NOT DECLARED — and why
 #
-# * DURABLE OBJECTS. `[[durable_objects.bindings]]` REFERENCES AN EXPORTED
-#   CLASS, and `apps/mcp/src/**` exports none — `src/index.ts` exports the Hono
-#   app and nothing else. Declaring `FerroGateMcpSession` (or an Agents-SDK
-#   `McpAgent`) now would fail the Worker at startup, INCLUDING under
-#   `@cloudflare/vitest-pool-workers`, turning a green suite red for a class
-#   that does not exist. It arrives with the code that exports it:
+# * `FerroGateMcpSession` — the UPSTREAM-session Durable Object. The OAuth-flow
+#   DO above is declared and live; this second one is not, and it is a
+#   deliberate deferral rather than a platform limit. `[[durable_objects.
+#   bindings]]` REFERENCES AN EXPORTED CLASS, and no such class exists yet, so
+#   declaring it now would fail the Worker at startup — including under
+#   `@cloudflare/vitest-pool-workers` — for a class that is not there. It
+#   arrives with the code that exports it:
 #
 #     [[durable_objects.bindings]] name = "MCP_SESSION",
 #                                  class_name = "FerroGateMcpSession"
-#     [[migrations]]               tag = "v1",
+#     [[migrations]]               tag = "v2",
 #                                  new_sqlite_classes = ["FerroGateMcpSession"]
 #
 #   One DO per long-lived upstream MCP session, replacing the Rust
 #   `McpManager` HashMap plus its health-check/reconnect loop, and giving the
 #   SSE transport in `src/transport.ts` (see its module docs) somewhere durable
-#   to hold a session. PORT-TODO(inventory-edge-control §MCP "session manager").
+#   to hold a session. PORT-TODO(inventory-edge-control §MCP "session manager"):
+#   NOT a CF limitation — the primitive exists and the OAuth-flow DO above
+#   proves the pattern in this very Worker. What is implemented today is a
+#   per-isolate session map with re-negotiation on every cold isolate, which is
+#   correct but re-handshakes more often than Rust's shared map did.
 #
 # * SECRETS STORE — `FERROGATE_MCP_IDENTITY_KEY`, the 32-byte AEAD key
 #   `webCryptoIdentityCipher` seals stored grants under, and the OAuth client
 #   secrets `SecretResolverPort.resolve` dereferences. Secret VALUES never
-#   belong in this file. Until the store binding lands they are seeded
-#   out-of-band per environment (`wrangler secret put`), and the ephemeral
-#   fallback in `src/ports.ts` deliberately loses every stored grant when the
-#   isolate recycles rather than persisting a weak key.
-#   PORT-TODO(inventory-edge-control §MCP): bind via Secrets Store at deploy
-#   time and pass the material into `webCryptoIdentityCipher(rawKey)`.
+#   belong in this file, so there is nothing to declare here; the name is read
+#   off `env` and seeded per environment with `wrangler secret put` (or a
+#   Secrets Store binding of the same name — identical from the code's side).
+#
+#   The consuming half IS implemented: `decodeIdentityKey` in `src/durable.ts`
+#   accepts base64 or hex, REFUSES anything that is not exactly 32 bytes, and
+#   `identityCipherFrom` returns undefined on refusal so `durableIdentityBound`
+#   is false and `/readyz` answers 503 — instead of the Worker quietly sealing
+#   grants under the ephemeral per-isolate key that only the dev bundle should
+#   ever use.
+#
+#   // PORT-TODO(inventory-edge-control §MCP): what remains is a platform
+#   // constraint, not missing code — CF bindings (Secrets Store included)
+#   // resolve at DEPLOY time. There is no runtime "open secret by name/uuid"
+#   // API, so this Worker cannot fetch its own key, cannot hold two key
+#   // versions at once, and cannot rotate without a redeploy. That is why
+#   // `StoredMcpOauthCredential.keyVersion` is carried but never used to select
+#   // a key here: honest field, no runtime resolver to feed it.
 #
 # * ANALYTICS ENGINE. `InMemoryAuditSink` keeps the `tool.execute` /
 #   `mcp.identity.*` rows — including the `agent_run_id` correlation column
 #   (#522) — only for the life of the isolate, so audit evidence does not
 #   survive eviction. The durable sink is `apps/telemetry`, reached by a
 #   service binding or an Analytics Engine dataset.
-#   PORT-TODO(inventory-edge-control §MCP "audit").
+#   PORT-TODO(inventory-edge-control §MCP "audit"): NOT a platform limit — CF
+#   has the primitive (Analytics Engine is binding-only, which is exactly what
+#   a Worker can use). It is a cross-app deferral on `apps/telemetry`.
+#   CONSEQUENCE while it stands: the `agent_run_id` correlation rows this
+#   Worker threads correctly (#522, pinned by `test/agent-run-id.test.ts`) are
+#   still WRITTEN to an isolate-local sink, so the threading is proven but the
+#   evidence is not yet durable.
 #
 # * SERVICE BINDINGS. `[[services]]` names another deployed Worker; an
 #   unimplemented target turns every call into a runtime error instead of a

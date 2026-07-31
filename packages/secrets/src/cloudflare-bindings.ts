@@ -1,11 +1,32 @@
 /**
  * Worker-binding value resolution for `cf://` references (decision #423).
  *
- * Port of the Rust `cloudflare_bindings.rs`. Cloudflare Secrets Store values
- * are write-only over REST — the only read path is a Workers binding at
- * runtime. This is the binding context consulted by the registry BEFORE any
- * REST call: an injected name→value map, then the `FERROGATE_CF_SECRET_<NAME>`
- * environment convention.
+ * Port of the Rust `cloudflare_bindings.rs`. This is the binding context the
+ * registry consults BEFORE any REST call: an injected name→value map, then the
+ * `FERROGATE_CF_SECRET_<NAME>` environment convention.
+ *
+ * PORT-TODO(4.6/4.7) — PLATFORM LIMIT, NOT CLOSED.
+ *
+ * The exact limitation: **Cloudflare Secrets Store values are WRITE-ONLY over
+ * the REST API, and the only read path is a `[[secrets_store_secrets]]` binding
+ * declared at DEPLOY time.** So a `cf://<name>` whose name is only known at
+ * RUNTIME — from a tenant's stored config, from a request — cannot be resolved:
+ * there is no `env.SECRETS.get(name)` over the account's store, and the REST
+ * `GET` returns metadata, never the value. `env` is an ordinary object, so a
+ * PRE-BOUND name can be selected at runtime by string
+ * (`env[cfBindingEnvVar(name)]`), but a name with no stanza in `wrangler.toml`
+ * is unresolvable, full stop.
+ *
+ * The closest behavior implemented instead is exactly that runtime-select-over-
+ * a-deploy-time-declared-set: {@link CfSecretBindings} looks the name up in an
+ * injected map and then in the env convention, and returns `null` — "not
+ * configured" — when neither has it. It NEVER falls back to a REST read of the
+ * value, because no such read exists; a resolver that appeared to work for
+ * unbound names would be a fake.
+ *
+ * The operational consequence, stated plainly: onboarding a new `cf://` secret
+ * requires a DEPLOY, the same coupling `EnvBindingTenantDatabaseRouter` has for
+ * per-tenant D1. `test/platform-limits.test.ts` pins the refusal.
  */
 import { type EnvLike, INSPECT, defaultEnv } from "./env.js";
 import type { SecretResolver } from "./resolver.js";

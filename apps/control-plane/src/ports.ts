@@ -15,6 +15,7 @@
  * handler family in `crates/ferrogate-gateway/src/server/*.rs`.
  */
 import type { ApiOperation } from "./contract.js";
+import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -239,7 +240,44 @@ export interface ControlPlaneStore {
   ): Promise<StoreRecord | null>;
   /** `true` when a row was removed, `false` when it did not exist / is not visible. */
   remove(collection: string, scope: CallerScope, id: string): Promise<boolean>;
+  /**
+   * Apply several mutations as ONE all-or-nothing unit. See {@link StoreMutation}.
+   *
+   * Exists because two of this app's writes are a PAIR that must not half-land:
+   * a wallet movement is a ledger entry plus the balance it explains
+   * (`routes/wallets.ts`). Sequencing two `create`/`merge` calls is atomic only
+   * by accident of the isolate being single-threaded; this is atomic by
+   * construction, because the D1 implementation is one `batch()` — a real
+   * SQLite transaction — with every statement guarded on the revision the read
+   * saw.
+   *
+   * Returns the resulting records positionally, or `null` when a `merge`
+   * target does not exist / is not visible to `scope` (in which case NOTHING
+   * was written). Rejects with {@link StoreConflictError} when a `create`
+   * collides, again having written nothing.
+   */
+  atomic(
+    scope: CallerScope,
+    mutations: readonly StoreMutation[],
+  ): Promise<readonly StoreRecord[] | null>;
 }
+
+/**
+ * One leg of an {@link ControlPlaneStore.atomic} unit.
+ *
+ * Deliberately only `create` and `merge`: those are the two halves of the
+ * ledger-plus-balance write. `replace`/`remove` are not part of any atomic pair
+ * in this app, and an operation nobody needs is an operation whose concurrency
+ * semantics nobody tests.
+ */
+export type StoreMutation =
+  | { readonly kind: "create"; readonly collection: string; readonly record: StoreRecord }
+  | {
+      readonly kind: "merge";
+      readonly collection: string;
+      readonly id: string;
+      readonly patch: Readonly<Record<string, unknown>>;
+    };
 
 /** Thrown by {@link ControlPlaneStore.create} on a duplicate id. */
 export class StoreConflictError extends Error {
@@ -295,6 +333,13 @@ export interface ControlPlaneDeps {
   readonly store: ControlPlaneStore;
   readonly runtime: RuntimeStatusPort;
   /**
+   * The DNS seam `POST /admin/v1/site-domains/{hostname}/verify` resolves the
+   * ownership challenge through (`src/site_domain_txt.ts`). A port because the
+   * lookup is I/O and because the DEFAULT must be the one that verifies nothing
+   * — see {@link UnboundTxtResolver}.
+   */
+  readonly txtResolver: SiteDomainTxtResolver;
+  /**
    * Admin-console origin allowed to drive this API from a browser
    * (Rust `config.admin.cors_allowed_origin`). `null` = no console configured,
    * and then the `OPTIONS /admin/{*rest}` preflight surface DOES NOT EXIST.
@@ -310,19 +355,33 @@ export interface ControlPlaneDeps {
 // ---------------------------------------------------------------------------
 
 /**
- * Worker bindings this app reads. Deliberately tiny: the real bindings (D1, KV,
- * Secrets Store, Analytics Engine) arrive with the adapters that back the ports
- * above.
+ * Worker bindings this app reads.
  *
- * PORT-TODO(inventory-edge-control §5.2, §6): the `*_API_KEYS` vars are the
- * bootstrap/config-key path only. The durable virtual-key store moves to D1 via
- * `@ferrogate/storage`, and the admin JWT secret to Secrets Store, as soon as
- * those packages land.
+ * The credential vars below are now the FALLBACK, not the path: `resolveApiKeys`
+ * resolves operator keys from the control database's hashed `static_api_keys`
+ * table and consults these only when the database has no matching row (see
+ * `src/store/api_keys.ts`).
+ *
+ * PORT-TODO(inventory-edge-control §6) — PLATFORM LIMIT, sharpened: the admin
+ * JWT signing secret cannot follow them into Secrets Store from inside this
+ * app. A `[[secrets_store_secrets]]` binding is resolved at DEPLOY time and
+ * `@ferrogate/secrets`' Cloudflare client needs an account-scoped token, so
+ * there is no runtime "fetch this secret by name" call a Worker can make
+ * offline; the local test runtime (`wrangler dev --local` / vitest-pool-workers)
+ * has no Secrets Store emulation at all. What IS implemented is the half that
+ * does not need it: no credential is stored in plaintext any more — the durable
+ * table holds `"sha256:"`-tagged digests and a bare/plaintext value in that
+ * column can only ever deny.
  */
 export interface ControlPlaneBindings {
-  /** JSON array of durable/native virtual keys (see `adapters.ts`). */
+  /**
+   * JSON array of durable/native virtual keys, the DECLARATIVE fallback for the
+   * one leg the control database cannot answer — see the platform-limit
+   * PORT-TODO in `src/store/api_keys.ts` (a virtual key's scopes live in the
+   * per-tenant database, and D1 bindings resolve at deploy time).
+   */
   readonly CONTROL_PLANE_NATIVE_API_KEYS?: string;
-  /** JSON array of operator-authored static config keys. */
+  /** JSON array of operator-authored static config keys; fallback for `static_api_keys`. */
   readonly CONTROL_PLANE_STATIC_API_KEYS?: string;
   /** JSON map of tenant id → lifecycle status (`active`/`suspended`/`deleted`). */
   readonly TENANCY_LIFECYCLE?: string;
@@ -346,21 +405,40 @@ export interface ControlPlaneBindings {
   readonly ADMIN_LIST_DEFAULT_LIMIT?: string;
   readonly ADMIN_LIST_MAX_LIMIT?: string;
   /**
+   * Which site-domain TXT resolver to build (`src/site_domain_txt.ts`):
+   * `"doh"`, `"static"`, or — absent, the DEFAULT — unbound, which verifies
+   * nothing. Rust `FERROGATE_SITE_DOMAIN_RESOLVER`.
+   */
+  readonly SITE_DOMAIN_RESOLVER?: string;
+  /** DoH endpoint (`FERROGATE_SITE_DOMAIN_RESOLVER_ENDPOINT`). */
+  readonly SITE_DOMAIN_RESOLVER_ENDPOINT?: string;
+  /** DoH request timeout in ms (`FERROGATE_SITE_DOMAIN_RESOLVER_TIMEOUT_SECS`). */
+  readonly SITE_DOMAIN_RESOLVER_TIMEOUT_MS?: string;
+  /**
+   * The curated `<name> <value>` answer document for the `"static"` resolver —
+   * the Workers stand-in for Rust's zone FILE, since a Worker has no filesystem.
+   */
+  readonly SITE_DOMAIN_TXT_ANSWERS?: string;
+  /**
    * The control database (`[[d1_databases]] binding = "DB"` in
    * `wrangler.toml`) — the native replacement for BOTH the D1 REST client and
    * the `workers/d1-proxy` batch/`RETURNING` hot path.
    *
-   * When bound, `resolveDeps` builds {@link ControlPlaneStore} on it
-   * (`src/store/d1.ts`) unless {@link ControlPlaneBindings.CONTROL_PLANE_STORE}
-   * asks for `"memory"`. Still optional so the Worker boots — with the
-   * in-memory reference store and a warning — in a local/dev config that has no
-   * database provisioned yet.
+   * `resolveDeps` builds {@link ControlPlaneStore} on it (`src/store/d1.ts`)
+   * unless {@link ControlPlaneBindings.CONTROL_PLANE_STORE} explicitly asks for
+   * `"memory"`.
    *
-   * PORT-TODO(inventory-edge-control §5.2): make this required once the
-   * TS-era migrations (`sql/d1-ts/`) ship, so a deployment cannot start with a
-   * store whose writes vanish on isolate eviction.
+   * REQUIRED. The TS-era migrations shipped (`sql/d1-ts/control/`, which
+   * `wrangler.toml` names as `migrations_dir`), so there is no longer a
+   * "database not provisioned yet" state to accommodate, and `resolveStore`
+   * REFUSES a deployment that binds no database instead of silently serving the
+   * in-memory store — writes that a 201 acknowledged and the next isolate
+   * eviction discards are the worst failure this app has, because nothing about
+   * it is visible until the data is already gone. Running without a database is
+   * still possible and is now something an operator has to ASK for, by name:
+   * `CONTROL_PLANE_STORE = "memory"`.
    */
-  readonly DB?: D1Database;
+  readonly DB: D1Database;
 }
 
 /** Per-request context values set by the middleware chain. */

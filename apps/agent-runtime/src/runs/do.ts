@@ -27,13 +27,19 @@
  *                       `storage.list()`'s lexicographic order IS sequence
  *                       order, which is what makes the cursor feed cheap.
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.2): the isolation tier
- * // itself (Firecracker microVM / Docker / `unshare` local-process) has no CF
- * // equivalent. This DO owns run STATE and governance decisions; actually
- * // executing the workload is the `@cloudflare/sandbox` Container path
- * // (`AgentSandbox`, commented in `wrangler.toml` because it needs a paid
- * // account) or a self-hosted worker leasing the dispatch through
- * // `/v1/self-hosted-workers/runs/poll`. The latter is fully implemented.
+ * // PORT-TODO(inventory-edge-control §agent-worker §8.2): PLATFORM LIMIT —
+ * // this Durable Object owns run STATE, and it can never own run EXECUTION,
+ * // because three of Rust's four isolation backends need kernel facilities
+ * // workerd does not expose (KVM/vsock, process spawn, namespaces). The full
+ * // reasoning is on `src/runs/governance.ts`; the consequence HERE is the
+ * // architectural one: a DO records what happened, it does not run it.
+ * //
+ * // IMPLEMENTED INSTEAD: execution is delegated, two ways, and both are real.
+ * // Either the `@cloudflare/sandbox` Container path (`AgentSandbox`, declared
+ * // but commented in `wrangler.toml` because Containers need a PAID account,
+ * // so it is not in the offline harness), or a self-hosted worker leasing the
+ * // dispatch through `/v1/self-hosted-workers/runs/poll` — which IS fully
+ * // implemented, and is the path this DO's dispatch queue exists to serve.
  */
 import { DurableObject } from "cloudflare:workers";
 import type { AgentRuntimeBindings } from "../ports.js";

@@ -155,7 +155,12 @@ describe("ConversionRule.convert", () => {
   });
   test("is monotone non-decreasing in the atomic amount", () => {
     const rule = { numerator: 3n, denominator: 7n, rounding: "up" as const, version: "p" };
-    for (const [a, b] of [[10n, 999n], [0n, 1n], [500n, 500n]]) {
+    const pairs: [bigint, bigint][] = [
+      [10n, 999n],
+      [0n, 1n],
+      [500n, 500n],
+    ];
+    for (const [a, b] of pairs) {
       expect(convert(rule, a)! <= convert(rule, b)!).toBe(true);
     }
   });
@@ -431,10 +436,11 @@ describe("config validation", () => {
   });
 
   test("resource rules identical after canonicalisation are duplicates", () => {
-    for (const [first, second] of [
+    const pairs: [string, string][] = [
       ["https://api.example.com", "https://API.example.com"],
       ["https://api.example.com", "https://api.example.com:443"],
-    ]) {
+    ];
+    for (const [first, second] of pairs) {
       const p = basePolicy();
       p.allowedResources = [
         { origin: first, pathPrefix: "/paid" },

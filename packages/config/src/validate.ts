@@ -338,8 +338,16 @@ export function validateCloudflareMcpServers(config: Config): void {
 }
 
 /**
- * PORT-TODO(inventory §5.3): mirror of `ferrogate_mcp::is_cloudflare_managed_mcp_url`
- * (wave 2). Matches `*.mcp.cloudflare.com` and tenant `*.workers.dev/mcp`.
+ * `ferrogate_mcp::is_cloudflare_managed_mcp_url` (issue #408), ported 1:1:
+ * anything on `*.mcp.cloudflare.com`, plus a tenant Worker whose path is the
+ * conventional `/mcp` (Streamable HTTP) or `/sse` on `*.workers.dev` — so an
+ * ordinary Worker on `workers.dev` is NOT flagged as an MCP upstream.
+ *
+ * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION ONLY, BEHAVIOR IS CLOSED. The
+ * function is owned by `@ferrogate/mcp` (wave 2) and is inlined here (like the
+ * sibling-owned enums in `schema/enums.ts`) so `Config::validate()` can run the
+ * #408 guardrails standalone. Re-export from that package once it lands; do not
+ * re-derive the matcher.
  */
 function isCloudflareManagedMcpUrl(url: string): boolean {
   let host: string;
@@ -352,10 +360,9 @@ function isCloudflareManagedMcpUrl(url: string): boolean {
     return false;
   }
   if (host === "mcp.cloudflare.com" || host.endsWith(".mcp.cloudflare.com")) return true;
-  if ((host === "workers.dev" || host.endsWith(".workers.dev")) && path.replace(/\/+$/, "").endsWith("/mcp")) {
-    return true;
-  }
-  return false;
+  if (host !== "workers.dev" && !host.endsWith(".workers.dev")) return false;
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.endsWith("/mcp") || trimmed.endsWith("/sse");
 }
 
 // --- entry point ------------------------------------------------------------

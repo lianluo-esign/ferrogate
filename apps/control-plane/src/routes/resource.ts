@@ -172,9 +172,25 @@ export function raw(
  * fields instead of silently dropping operator data, which would be a real
  * behaviour regression.
  *
- * PORT-TODO(inventory-edge-control §4): tighten each collection's schema to the
- * per-resource Rust mutation struct (e.g. `AdminAgentScheduleMutation`) once
- * `@ferrogate/schemas` exposes them.
+ * PORT-TODO(inventory-edge-control §4) — KEPT, sharpened. Tightening each
+ * collection to its per-resource Rust mutation struct (e.g.
+ * `AdminAgentScheduleMutation`) is still the target, and it is blocked on a
+ * DEPENDENCY, not on the platform: `@ferrogate/schemas` today exports only the
+ * WIRE schemas (`./wire.ts` plus re-exports of `@ferrogate/core`'s tenancy,
+ * tool and error types) — there is no per-admin-resource mutation schema to
+ * point a collection at. Hand-writing ~60 of them here would put the authority
+ * in the wrong package and guarantee two copies that drift.
+ *
+ * The collections that DO have an authoritative schema already use it rather
+ * than this base: `routes/guardrail_policy.ts` validates stored revisions with
+ * `@ferrogate/guardrails`' `checkBindingSchema` / `policyScopeSelectorSchema`,
+ * and `routes/admin_config_ops.ts` validates candidate configs with
+ * `@ferrogate/config`'s real loader. That is the shape the rest takes when the
+ * schemas land: swap `body`/`patch` on the `CollectionSpec`, nothing else.
+ *
+ * Meanwhile `passthrough()` is the SAFE approximation, not the lazy one — the
+ * alternative, `strict()` against a guessed shape, would reject operator fields
+ * the Rust surface accepts, and `strip()` would silently discard them.
  */
 export const adminRecordSchema = z
   .object({

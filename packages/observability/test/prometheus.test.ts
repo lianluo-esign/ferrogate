@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  defaultGatewayMetricsSnapshot,
   renderPrometheusText,
   renderUnjoinableActionsText,
   type GatewayMetricsSnapshot,
@@ -193,5 +194,35 @@ describe("renderUnjoinableActionsText", () => {
     const text = renderUnjoinableActionsText([]);
     expect(text).toContain("# TYPE ferrogate_unjoinable_actions_total counter");
     expect(text.trim().endsWith("counter")).toBe(true);
+  });
+});
+
+/**
+ * PLATFORM LIMIT PIN — kept as a PORT-TODO in `src/prometheus.ts`.
+ *
+ * A Worker has no long-lived process to accumulate counters in, so this module
+ * deliberately holds NO state: it is a pure snapshot→text function and the
+ * accumulation is the composition root's problem (a Durable Object, or an
+ * Analytics Engine read). These assertions are what stops someone "closing" the
+ * marker by adding a module-scope counter bag, which would look like a port and
+ * silently under-report — each isolate would render only its own slice.
+ */
+describe("PLATFORM LIMIT — the renderer accumulates nothing", () => {
+  test("rendering is pure: the same snapshot renders identically, forever", () => {
+    const snapshot = { ...defaultGatewayMetricsSnapshot(), requestLogTotal: 5 };
+    const first = renderPrometheusText(snapshot);
+    const second = renderPrometheusText(snapshot);
+    const third = renderPrometheusText(snapshot);
+    expect(second).toBe(first);
+    expect(third).toBe(first);
+  });
+
+  test("a second render does not accumulate the first snapshot's totals", () => {
+    // If this module ever grew internal counters, `requestLogTotal` would climb
+    // across calls and this would fail — which is exactly the intent.
+    const a = renderPrometheusText({ ...defaultGatewayMetricsSnapshot(), requestLogTotal: 3 });
+    const b = renderPrometheusText({ ...defaultGatewayMetricsSnapshot(), requestLogTotal: 3 });
+    expect(a).toContain("ferrogate_request_logs_total 3\n");
+    expect(b).toContain("ferrogate_request_logs_total 3\n");
   });
 });

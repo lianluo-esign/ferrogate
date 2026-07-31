@@ -59,9 +59,27 @@ export type PostgresTlsMode = "disable" | "prefer" | "require" | "verify_ca" | "
 /**
  * Postgres/Supabase connection config (ports `PostgresStorageConfig`).
  *
- * PORT-TODO(§1.6): no CF equivalent — a Worker cannot hold a warm connection
- * pool. `poolSize` / `poolAcquireTimeoutMillis` are inert on the D1 backend and
- * kept only so a Supabase→D1 migration tool can read the source config.
+ * PORT-TODO(§1.6) — PLATFORM LIMIT, NOT CLOSED.
+ *
+ * The exact limitation: **a Worker isolate cannot hold a warm TCP connection
+ * pool.** `deadpool-postgres`'s whole value is a set of long-lived, recycled
+ * `Verified` connections owned by a process that outlives a request; a Worker
+ * isolate has no such lifetime, is evicted between requests, and its outbound
+ * sockets (`connect()`) do not survive the request that opened them. There is
+ * no `max_size`, no acquire queue, and therefore no `acquire_wait_micros_total`
+ * to record — the metric has no referent. `PostgresTlsMode::verify_ca` /
+ * `verify_full` with a `tlsCaCertPath` are separately unreachable: workerd
+ * installs no ad-hoc CA roots.
+ *
+ * The closest behavior implemented instead: **D1 is the durable backend**
+ * (`./d1/*`), where a "connection" is a deploy-time binding with no pool to
+ * exhaust and no Supavisor ~16-connection deployment cap to divide between
+ * instances — which is the single biggest reason the port moves off Postgres at
+ * all. This type is retained as an INERT config-shape so a Supabase→D1
+ * migration tool can read a Rust-era config; every field below is read by that
+ * tool and by nothing on the request path.
+ *
+ * `test/misc.test.ts` pins the defaults and the inertness.
  */
 export interface PostgresStorageConfig {
   dsn: string;

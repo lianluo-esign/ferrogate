@@ -8,9 +8,26 @@
  * when it exists, e.g. under Node/Bun/CLI), and callers inside a Worker pass
  * `c.env`.
  *
- * PORT-TODO(4.8): the Rust crate reads the ambient process environment; on
- * Workers there is none, so `EnvLike` is injected. `defaultEnv()` falls back to
- * `process.env` for the CLI/Node parity path and to an empty map otherwise.
+ * PORT-TODO(4.8) — PLATFORM LIMIT, NOT CLOSED.
+ *
+ * The exact limitation: **workerd has no process environment.** There is no
+ * `process.env`, no `getenv`, and no ambient global a module can read a
+ * variable off — configuration and secret bindings arrive on the per-request
+ * `env` object, which is a function ARGUMENT, not ambient state. So the Rust
+ * `std::env::var(...)` call, which any function could make from anywhere, has
+ * no equivalent: a Worker cannot read a variable it was not handed.
+ *
+ * The closest behavior implemented instead: every config type threads an
+ * injected {@link EnvLike}. `defaultEnv()` returns `process.env` when it exists
+ * (the CLI / Node parity path, where the Rust semantics ARE reproducible) and
+ * an EMPTY map otherwise. Empty rather than a throw, because the Rust
+ * `non_empty_env` treats an unset variable as `None`, and inside a Worker every
+ * caller is expected to pass `c.env` explicitly.
+ *
+ * The residual gap is REAL: in a Worker, a call site that forgets to thread
+ * `c.env` silently sees an empty environment instead of failing. Nothing in
+ * this package can detect that — it is indistinguishable from a genuinely unset
+ * variable. `test/platform-limits.test.ts` pins the fallback.
  */
 
 /** A read-only environment source: variable name → value (or unset). */

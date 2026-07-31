@@ -10,7 +10,8 @@
  *  - `policy-engine`   — `BasicPolicyEngine`, `PolicyRule`, `PolicySubject`, `PolicyDecision`.
  *  - `quota`           — `resolveEffectiveQuota`, `EffectiveQuota`, `QuotaScopeSelector`.
  *  - `workflow-budget` — envelope composition, budget pre-flight, node dispatch.
- *  - `stored-types`    — storage records the layer reads (PORT-TODO: `@ferrogate/storage`).
+ *  - `stored-types`    — storage records the layer reads, re-exported from
+ *                        `@ferrogate/storage` (the authoritative home, as in Rust).
  *  - `x402/*`          — x402 spend policy + payment-authorization decision
  *                        (PORT-TODO: `@ferrogate/payments` wire contract, deprioritized).
  *  - `schemas`         — Zod wire schemas for the value types.

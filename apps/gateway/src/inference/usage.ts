@@ -29,6 +29,7 @@
  * one tap correct for all three ingresses. The merge semantics in
  * {@link mergeUsage} are the Rust ones and must not drift.
  */
+import { canonicalProviderKind } from "./adapters.js";
 import type { ProviderUsageWire } from "./schemas.js";
 
 /** `ferrogate_providers::ProviderUsage`. */
@@ -94,12 +95,38 @@ export function extractAnthropicUsage(payload: unknown): ProviderUsage | undefin
   });
 }
 
+/**
+ * `GeminiAdapter::extract_usage` — `usageMetadata.{promptTokenCount,
+ * candidatesTokenCount, totalTokenCount}`.
+ *
+ * Gemini reports a `totalTokenCount` of its own; unlike the Anthropic
+ * extractor, nothing is derived here, because `gemini.rs` derives nothing.
+ */
+export function extractGeminiUsage(payload: unknown): ProviderUsage | undefined {
+  const usage = member(payload, "usageMetadata");
+  if (usage === undefined) {
+    return undefined;
+  }
+  return nonEmpty({
+    promptTokens: asUint(member(usage, "promptTokenCount")),
+    completionTokens: asUint(member(usage, "candidatesTokenCount")),
+    totalTokens: asUint(member(usage, "totalTokenCount")),
+  });
+}
+
 /** Extractor selection by the dialect the payload is written in. */
-export type UsageDialect = "openai" | "anthropic";
+export type UsageDialect = "openai" | "anthropic" | "gemini";
 
 /** `state.extract_provider_usage(kind, payload)`. */
 export function extractUsage(dialect: UsageDialect, payload: unknown): ProviderUsage | undefined {
-  return dialect === "anthropic" ? extractAnthropicUsage(payload) : extractOpenAiUsage(payload);
+  switch (dialect) {
+    case "anthropic":
+      return extractAnthropicUsage(payload);
+    case "gemini":
+      return extractGeminiUsage(payload);
+    case "openai":
+      return extractOpenAiUsage(payload);
+  }
 }
 
 /**
@@ -123,7 +150,19 @@ export function usageProviderKindFor(
     // metering sees at this point carry Anthropic-shaped usage.
     return "anthropic";
   }
-  return providerKind === "anthropic" ? "anthropic" : "openai";
+  // Rust reads `provider.kind` and dispatches to THAT adapter's `extract_usage`
+  // (`chat.rs:1026` → `AppState::extract_provider_usage`), so every family with
+  // its own usage envelope needs its own arm here. A family that fell through to
+  // the OpenAI extractor would scrape nothing and meter the call at the fallback
+  // estimate — the token-budget/TPM/wallet bypass this function's doc names.
+  switch (canonicalProviderKind(providerKind)) {
+    case "anthropic":
+      return "anthropic";
+    case "gemini":
+      return "gemini";
+    default:
+      return "openai";
+  }
 }
 
 /**

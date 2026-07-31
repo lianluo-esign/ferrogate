@@ -4,13 +4,27 @@
  * snapshot, the config-driven crypto builder, and the offline last-known-good
  * store.
  *
- * PORT-TODO(inventory §5.8): Rust used `ed25519-dalek` synchronously; this port
- * uses WebCrypto (`crypto.subtle`, Ed25519 is supported in workerd and Node 20+),
- * which is async — so `signSnapshot`/`verifySnapshot`/`buildSnapshotCrypto` and
- * the store's `ingest` return Promises. WebCrypto's verify enforces RFC 8032
- * canonicality; dalek's `verify_strict` additionally rejects small-order keys —
- * the residual gap is noted rather than re-implemented. The snapshot store maps
- * to KV/D1 at the call site; this is the pure decision core.
+ * PORT-TODO(inventory §5.8) — PLATFORM LIMIT (API SHAPE ONLY), CRYPTO IS CLOSED.
+ *
+ * Rust used `ed25519-dalek` SYNCHRONOUSLY. workerd exposes Ed25519 only through
+ * WebCrypto (`crypto.subtle`), which has no synchronous form and no synchronous
+ * escape hatch — a Worker cannot block. So `signSnapshot`/`verifySnapshot`/
+ * `buildSnapshotCrypto` and the store's `ingest` return Promises where Rust
+ * returned values, and `Config::validate()` splits into `validateConfig` (sync,
+ * structural) + `validateConfigAsync` (adds the key parse). That colour change
+ * is the ONLY remaining divergence and it is not closable on this platform.
+ *
+ * CLOSED (this wave): the `verify_strict` gap. WebCrypto's `verify`
+ * is the RFC 8032 baseline, while dalek's `verify_strict` also rejects
+ * non-canonical encodings and small-order `A`/`R`; that is re-implemented here in
+ * BigInt field arithmetic (`isSmallOrderOrNonCanonicalPoint`) and applied inside
+ * `verifySnapshot`, exactly where Rust applies it and with the same
+ * `bad_signature` outcome. The `A` half needs the key bytes back, so
+ * `parseVerifyingKey` imports EXTRACTABLE (public material); a trust map built
+ * by hand from a non-extractable `CryptoKey` gets the `R` half only.
+ *
+ * The snapshot store maps to KV/D1 at the call site; this is the pure decision
+ * core.
  */
 import type { ApiKey, PolicyRule } from "./schema/index.js";
 import type { ClusterConfig } from "./schema/index.js";
@@ -152,17 +166,136 @@ export async function parseSigningKey(b64Seed: string, field: string): Promise<C
   }
 }
 
-/** Parse a base64 32-byte Ed25519 public key into a verifying `CryptoKey`. */
+/**
+ * Parse a base64 32-byte Ed25519 public key into a verifying `CryptoKey`.
+ *
+ * Imported EXTRACTABLE — the material is a public key, so nothing secret is
+ * exposed, and {@link verifySnapshot} needs the raw bytes back to run dalek's
+ * `verify_strict` small-order rejection (see {@link isSmallOrderOrNonCanonicalPoint}).
+ */
 export async function parseVerifyingKey(b64Public: string, field: string): Promise<CryptoKey> {
   const bytes = decodeEd25519Bytes(b64Public, field);
   try {
-    return await crypto.subtle.importKey("raw", bytes, { name: "Ed25519" }, false, ["verify"]);
+    return await crypto.subtle.importKey("raw", bytes, { name: "Ed25519" }, true, ["verify"]);
   } catch {
     throw new SnapshotConfigError(
       "wrong_key_length",
       `field ${field}: expected a 32-byte ed25519 key, got ${ED25519_KEY_LEN} bytes`,
       field,
     );
+  }
+}
+
+// --- ed25519 verify_strict parity (small-order / non-canonical points) -------
+//
+// `ed25519-dalek`'s `verify_strict` (which the Rust source calls) differs from
+// plain `verify` on exactly two points: it rejects NON-CANONICAL encodings of
+// the public key `A` and the signature's `R`, and it rejects `A` or `R` being of
+// SMALL ORDER. WebCrypto's `crypto.subtle.verify` implements only the RFC 8032
+// baseline, so without this the port would accept envelopes the Rust data plane
+// refuses. That is not cosmetic: the all-zero 32-byte public key is the order-4
+// point, and workerd/BoringSSL happily reports `verify(A=0, sig=0…0) === true`
+// for ARBITRARY content — i.e. a trust entry set to that key would authenticate
+// any snapshot. The arithmetic below is plain BigInt field math (no dependency,
+// no platform hook needed), so this leg is ported rather than deferred.
+
+const ED_P = (1n << 255n) - 19n;
+
+function edMod(value: bigint): bigint {
+  return ((value % ED_P) + ED_P) % ED_P;
+}
+
+function edPow(base: bigint, exponent: bigint): bigint {
+  let result = 1n;
+  let acc = edMod(base);
+  let e = exponent;
+  while (e > 0n) {
+    if (e & 1n) result = edMod(result * acc);
+    acc = edMod(acc * acc);
+    e >>= 1n;
+  }
+  return result;
+}
+
+/** `d = -121665/121666 (mod p)` — the Edwards curve constant. */
+const ED_D = edMod(-121665n * edPow(121666n, ED_P - 2n));
+/** `sqrt(-1) (mod p)`, used to pick the other square root. */
+const ED_SQRT_M1 = edPow(2n, (ED_P - 1n) / 4n);
+
+/**
+ * Decompress a 32-byte little-endian Ed25519 point encoding, or `null` when the
+ * encoding is NON-CANONICAL (`y >= p`, or `x == 0` with the sign bit set) or the
+ * point is not on the curve — all of which `verify_strict` rejects.
+ */
+function decompressEdPoint(bytes: Uint8Array): { x: bigint; y: bigint } | null {
+  if (bytes.length !== ED25519_KEY_LEN) return null;
+  let value = 0n;
+  for (let index = ED25519_KEY_LEN - 1; index >= 0; index -= 1) {
+    value = (value << 8n) | BigInt(bytes[index]!);
+  }
+  const sign = (value >> 255n) & 1n;
+  const y = value & ((1n << 255n) - 1n);
+  if (y >= ED_P) return null; // non-canonical y
+
+  const yy = edMod(y * y);
+  const u = edMod(yy - 1n);
+  const v = edMod(ED_D * yy + 1n);
+  const v3 = edMod(v * edMod(v * v));
+  const v7 = edMod(v3 * edMod(v3 * v));
+  let x = edMod(edMod(u * v3) * edPow(edMod(u * v7), (ED_P - 5n) / 8n));
+
+  const vxx = edMod(v * edMod(x * x));
+  if (vxx !== u) {
+    if (vxx === edMod(-u)) x = edMod(x * ED_SQRT_M1);
+    else return null; // not a curve point
+  }
+  if (x === 0n && sign === 1n) return null; // non-canonical sign of a zero x
+  if ((x & 1n) !== sign) x = edMod(-x);
+  return { x, y };
+}
+
+/**
+ * `verify_strict`'s rejection predicate for a public key `A` or a signature's
+ * `R`: `true` when the encoding is non-canonical, off-curve, or the point lies
+ * in the order-8 torsion subgroup (i.e. `[8]P` is the identity).
+ *
+ * Order is decided by three doublings in extended coordinates (`dbl-2008-hwcd`
+ * with `a = -1`); the identity is `(0 : 1 : 1)`, so `[8]P` is the identity iff
+ * `X == 0 && Y == Z`. Cross-checked against libsodium's published small-order
+ * blocklist (both order-8 representatives, `y = 0`, `y = 1`, `y = p-1`, `y = p`)
+ * in `signed-snapshot.test.ts`.
+ */
+export function isSmallOrderOrNonCanonicalPoint(bytes: Uint8Array): boolean {
+  const point = decompressEdPoint(bytes);
+  if (point === null) return true;
+  let x = point.x;
+  let y = point.y;
+  let z = 1n;
+  for (let round = 0; round < 3; round += 1) {
+    const a = edMod(x * x);
+    const b = edMod(y * y);
+    const c = edMod(2n * z * z);
+    const d = edMod(-a);
+    const e = edMod(edMod((x + y) * (x + y)) - a - b);
+    const g = edMod(d + b);
+    const f = edMod(g - c);
+    const h = edMod(d - b);
+    x = edMod(e * f);
+    y = edMod(g * h);
+    z = edMod(f * g);
+  }
+  return x === 0n && y === z && z !== 0n;
+}
+
+/** The raw 32 bytes behind a verifying key, or `null` if it was imported non-extractable. */
+async function verifyingKeyBytes(key: CryptoKey): Promise<Uint8Array | null> {
+  if (!key.extractable) return null;
+  try {
+    // `@cloudflare/workers-types` types `exportKey` as the union over every
+    // format; `"raw"` always yields an ArrayBuffer.
+    return new Uint8Array((await crypto.subtle.exportKey("raw", key)) as ArrayBuffer);
+  } catch {
+    return null;
   }
 }
 
@@ -278,6 +411,19 @@ export async function verifySnapshot(
   if (signatureBytes === null || signatureBytes.length !== 64) {
     return { ok: false, reason: "malformed_field" };
   }
+
+  // `verify_strict`'s two extra rejections, which WebCrypto does not make. Rust
+  // surfaces them as `BadSignature`, so they map to `bad_signature` here, and
+  // they run BEFORE the crypto call — a small-order `A` makes `subtle.verify`
+  // return `true` for arbitrary content.
+  if (isSmallOrderOrNonCanonicalPoint(signatureBytes.subarray(0, ED25519_KEY_LEN))) {
+    return { ok: false, reason: "bad_signature" };
+  }
+  const publicKeyBytes = await verifyingKeyBytes(verifyingKey);
+  if (publicKeyBytes !== null && isSmallOrderOrNonCanonicalPoint(publicKeyBytes)) {
+    return { ok: false, reason: "bad_signature" };
+  }
+
   let valid: boolean;
   try {
     valid = await crypto.subtle.verify("Ed25519", verifyingKey, signatureBytes, canonical);

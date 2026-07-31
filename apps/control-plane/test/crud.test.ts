@@ -307,14 +307,35 @@ describe("guardrail policy revisions are immutable and monotonic", () => {
     );
     const response = await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies/gp3/dry-run`,
-      jsonRequest(KEY, "POST", { stage: "input", text: "hello" }),
+      jsonRequest(KEY, "POST", { stage: "request", text: "hello" }),
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      object: "guardrail_dry_run",
+      // The contract's `GuardrailPolicyDryRunResponse` constants
+      // (`docs/openapi/admin-api.openapi.json`): the object name and the
+      // `"planned"` result are `const` in the schema, so a port that renames
+      // either is off-contract even though the request still answers 200.
+      object: "guardrail_policy_dry_run",
+      result: "planned",
       provider_dispatched: false,
       external_action_dispatched: false,
     });
+  });
+
+  it("rejects a stage outside Rust's DetectorStage (`request` | `response`)", async () => {
+    await SELF.fetch(
+      `${BASE}/admin/v1/guardrail-policies`,
+      jsonRequest(KEY, "POST", { policy_id: "gp4" }),
+    );
+    await SELF.fetch(
+      `${BASE}/admin/v1/guardrail-policies/gp4/activate`,
+      jsonRequest(KEY, "POST", { revision: 1 }),
+    );
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/guardrail-policies/gp4/dry-run`,
+      jsonRequest(KEY, "POST", { stage: "input", text: "hello" }),
+    );
+    expect(response.status).toBe(400);
   });
 });
 

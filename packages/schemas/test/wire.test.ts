@@ -1,9 +1,14 @@
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
   OPENAPI_OPERATION_COUNT,
   assertScopeParity,
   errorEnvelopeSchema,
   jsonValueSchema,
+  registerWireSchema,
+  registerWireSchemas,
+  registeredWireSchemaNames,
+  resolveWireSchema,
   scopeSchema,
   wireSchemas,
 } from "@ferrogate/schemas";
@@ -81,7 +86,64 @@ describe("wireSchemas registry", () => {
     expect(wireSchemas.gatewayError?.safeParse({ code: "c", message: "m" }).success).toBe(true);
   });
 
-  // The 249 remaining per-operation bodies of the 251-op contract are ported by
-  // the request-path cluster and registered here — see inventory §1.3/§1.4.
-  test.todo("registers all 251 OpenAPI operation request/response bodies");
+});
+
+/**
+ * The registration MECHANISM, which is this package's half of inventory
+ * §1.3/§1.4. The 249 remaining per-operation bodies are owned by the surfaces
+ * that serve them (`apps/gateway`, `apps/control-plane`, `apps/mcp`) — defining
+ * them here would invert the dependency and guarantee drift. What this package
+ * owes is a registry that cannot silently swap a route's validator, and that is
+ * what these tests hold.
+ */
+describe("registerWireSchema", () => {
+  const unique = () => `op_${Math.random().toString(36).slice(2)}`;
+
+  test("registers and resolves a schema by operationId", () => {
+    const name = unique();
+    const schema = z.object({ model: z.string() });
+    registerWireSchema(name, schema);
+    expect(resolveWireSchema(name)).toBe(schema);
+    expect(resolveWireSchema(name)?.safeParse({ model: "gpt" }).success).toBe(true);
+    expect(resolveWireSchema(name)?.safeParse({}).success).toBe(false);
+  });
+
+  test("a DIFFERENT schema on an existing name is REFUSED, not overwritten", () => {
+    const name = unique();
+    const first = z.object({ a: z.string() });
+    registerWireSchema(name, first);
+    expect(() => registerWireSchema(name, z.object({ b: z.number() }))).toThrow(
+      /already registered/,
+    );
+    // The original validator is still in place — the whole point. A silent
+    // overwrite would make a route validate against another route's body.
+    expect(resolveWireSchema(name)).toBe(first);
+  });
+
+  test("re-registering the IDENTICAL schema is a no-op", () => {
+    // A composition root imported twice must not be an error.
+    const name = unique();
+    const schema = z.string();
+    registerWireSchema(name, schema);
+    expect(() => registerWireSchema(name, schema)).not.toThrow();
+  });
+
+  test("an empty name is refused", () => {
+    expect(() => registerWireSchema("", z.string())).toThrow(/must not be empty/);
+    expect(() => registerWireSchema("   ", z.string())).toThrow(/must not be empty/);
+  });
+
+  test("registerWireSchemas fails on the first collision", () => {
+    const keep = unique();
+    registerWireSchema(keep, z.string());
+    expect(() => registerWireSchemas({ [keep]: z.number() })).toThrow(/already registered/);
+  });
+
+  test("the seeded cross-plane names are discoverable", () => {
+    const names = registeredWireSchemaNames();
+    expect(names).toEqual([...names].sort());
+    for (const seeded of ["scope", "errorEnvelope", "tenantContext", "gatewayError"]) {
+      expect(names).toContain(seeded);
+    }
+  });
 });

@@ -252,6 +252,65 @@ export function validatePromptPlaceholders(
   }
 }
 
+// --- guardrail regex engine parity ------------------------------------------
+
+/**
+ * `regex::Regex::new(pattern)` accept-set parity for the two constructs where
+ * the Rust `regex` crate is STRICTLY stricter than JS `RegExp`.
+ *
+ * The Rust crate is a finite-automaton engine with linear-time guarantees, so it
+ * REFUSES the two backtracking-only constructs that JS accepts:
+ *
+ *   - backreferences — `\1`..`\9` and `\k<name>`
+ *   - lookaround — `(?=`, `(?!`, `(?<=`, `(?<!`
+ *
+ * Without this check a `[[guardrails]]` block that Rust refuses at load would be
+ * accepted here and then run with entirely different match semantics, i.e. a
+ * detector that silently stops detecting. Rust's message is
+ * `regex::Regex::new(..).with_context(|| "... invalid regex")` and anyhow's
+ * `Display` renders only the OUTERMOST context, so every rejection reason —
+ * these two included — is observable as exactly `invalid regex`.
+ *
+ * Scanned rather than pattern-matched because the constructs are only special in
+ * some positions: `\\1` is an escaped backslash then a literal `1`, `[(?=]` is a
+ * character class of literals, and `(?<name>` is a NAMED GROUP the `regex` crate
+ * does support (only `(?<=` / `(?<!` are lookbehind).
+ *
+ * RESIDUAL GAP (deliberately not papered over): the other direction — patterns
+ * the `regex` crate accepts but JS `RegExp` rejects (`\p{Greek}` without the `u`
+ * flag, `(?P<name>...)`) — fails CLOSED here as `invalid regex`, so it can never
+ * admit a rule the Rust engine would have matched differently.
+ */
+export function usesRegexCrateUnsupportedSyntax(pattern: string): boolean {
+  let inClass = false;
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index]!;
+    if (char === "\\") {
+      const next = pattern[index + 1];
+      if (next === undefined) return false; // trailing `\` — `new RegExp` rejects it anyway
+      if (!inClass && next >= "1" && next <= "9") return true; // \1..\9 backreference
+      if (!inClass && next === "k" && pattern[index + 2] === "<") return true; // \k<name>
+      index += 1; // consume the escaped character
+      continue;
+    }
+    if (inClass) {
+      if (char === "]") inClass = false;
+      continue;
+    }
+    if (char === "[") {
+      inClass = true;
+      continue;
+    }
+    if (char === "(" && pattern[index + 1] === "?") {
+      const third = pattern[index + 2];
+      if (third === "=" || third === "!") return true; // (?= (?!
+      const fourth = pattern[index + 3];
+      if (third === "<" && (fourth === "=" || fourth === "!")) return true; // (?<= (?<!
+    }
+  }
+  return false;
+}
+
 // --- listen addresses -------------------------------------------------------
 
 /**

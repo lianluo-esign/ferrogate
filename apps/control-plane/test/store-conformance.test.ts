@@ -286,6 +286,40 @@ describe.each(BACKENDS)("ControlPlaneStore contract: $name", (backend) => {
     ).toBe(0);
   });
 
+  /**
+   * The two semantics that BLOCK pushing `search`/`filters` into SQL, pinned so
+   * a later "just add a LIKE / json_extract predicate" optimization cannot
+   * change list results silently. See the kept PORT-TODO in `src/store/d1.ts`.
+   */
+  it("folds case with UNICODE rules, which SQLite's ASCII-only LIKE does not", async () => {
+    await seed("plans", [
+      { id: "u1", name: "ÄRZTE" },
+      { id: "u2", name: "STRASSE" },
+    ]);
+    // JS `toLowerCase()` folds `Ä`→`ä`; SQLite `LIKE` folds ASCII only, so a
+    // `document_json LIKE '%ärzte%'` pre-filter would DROP this row.
+    const page = await store.list("plans", OPERATOR, bareQuery({ search: "ärzte" }));
+    expect(page.items.map((record) => record.id)).toEqual(["u1"]);
+  });
+
+  it('compares a BOOLEAN field against its JS string form (`"true"`), not SQL 1/0', async () => {
+    await seed("plans", [
+      { id: "b1", enabled: true },
+      { id: "b2", enabled: false },
+    ]);
+    // `String(true) === "true"`. `json_extract(document_json, '$.enabled')`
+    // yields the integer `1` for the same row, so a SQL predicate comparing
+    // against `'true'` would match nothing.
+    expect(
+      (await store.list("plans", OPERATOR, bareQuery({ filters: { enabled: "true" } }))).items.map(
+        (record) => record.id,
+      ),
+    ).toEqual(["b1"]);
+    expect(
+      (await store.list("plans", OPERATOR, bareQuery({ filters: { enabled: "1" } }))).items.length,
+    ).toBe(0);
+  });
+
   it("combines search, filters, tenant scope and pagination", async () => {
     await store.create("plans", TENANT_A, { id: "a1", name: "nightly one", status: "active" });
     await store.create("plans", TENANT_A, { id: "a2", name: "nightly two", status: "active" });

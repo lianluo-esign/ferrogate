@@ -16,6 +16,8 @@
     "@ferrogate/config": "workspace:*",
     "@ferrogate/storage": "workspace:*",
     "@ferrogate/secrets": "workspace:*",
-    "@ferrogate/observability": "workspace:*"
+    "@ferrogate/observability": "workspace:*",
+    "@ferrogate/policy": "workspace:*",
+    "@ferrogate/guardrails": "workspace:*"
   }
 }

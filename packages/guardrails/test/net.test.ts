@@ -317,8 +317,22 @@ describe("CustomHttpDetector.new refuses hostile endpoints (production path)", (
   });
 });
 
+/**
+ * `URL.canParse` is newer than this workspace's `lib: ES2022` target, so the
+ * same predicate is spelled with the constructor. Keeping it typed (rather than
+ * casting `URL` to `any`) means a future lib bump does not hide a drift here.
+ */
+function urlParses(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe("HttpJsonTransport.build refuses hostile endpoints (adapter path)", () => {
-  test.each(HOSTILE_ENDPOINTS.filter(([e]) => URL.canParse(e)))("refuses %s", (endpoint) => {
+  test.each(HOSTILE_ENDPOINTS.filter(([e]) => urlParses(e)))("refuses %s", (endpoint) => {
     expect(() =>
       HttpJsonTransport.build(new URL(endpoint), 2_000, false, undefined, 256_000),
     ).toThrow(DetectorError);
@@ -348,5 +362,66 @@ describe("validateCustomHttpEndpoint messages stay ported", () => {
     expect(() => validateCustomHttpEndpoint("not-a-url", false)).toThrow(
       "guardrail detector endpoint is not a valid URL",
     );
+  });
+});
+
+/**
+ * PLATFORM LIMIT PIN — kept as a PORT-TODO in `src/net.ts`.
+ *
+ * workerd exposes no DNS resolver hook, so a hostname that RESOLVES to a
+ * private IP cannot be blocked pre-connect. These assertions state the shape of
+ * the gap precisely, so nobody later mistakes the literal-surface defense for a
+ * complete SSRF defense — and so that if workerd ever grows a resolver hook,
+ * the compensating tightenings can be re-derived from what is written here.
+ */
+describe("PLATFORM LIMIT — no DNS resolver hook (guardrails/net)", () => {
+  test("a public hostname is ACCEPTED regardless of what it resolves to", () => {
+    // This is the gap itself, asserted rather than described. A name whose A
+    // record is 127.0.0.1 is indistinguishable from any other public name at
+    // this layer, because nothing in the runtime will tell us the address.
+    expect(detectorEndpointRejection("https://evil.example.com/analyze", false)).toBeUndefined();
+    expect(isDisallowedDetectorHost("evil.example.com")).toBe(false);
+  });
+
+  test("…while the IP LITERAL it would resolve to is refused, in every spelling", () => {
+    // The compensation: the Rust `Ipv4Addr::from_str` rejected the inet_aton
+    // forms and the RESOLVER then filtered the resulting 127.0.0.1. With the
+    // resolver gone, parsing them here is what preserves that behavior.
+    for (const host of ["127.0.0.1", "0177.0.0.1", "0x7f.0.0.1", "2130706433", "127.1"]) {
+      expect(isDisallowedDetectorHost(host)).toBe(true);
+    }
+    expect(isDisallowedDetectorHost("::ffff:127.0.0.1")).toBe(true);
+  });
+
+  test("the resolved-address filter is ported but has NOTHING to filter", () => {
+    // `filterResolvedDetectorAddresses` is a faithful port of the resolver's
+    // predicate, kept for parity and for a future host that CAN supply a
+    // resolved set. It is not wired into the request path, because there is no
+    // resolved set on Workers — nothing calls it with real data.
+    expect(
+      filterResolvedDetectorAddresses(
+        [
+          { ip: "127.0.0.1", port: 443 },
+          { ip: "93.184.216.34", port: 443 },
+        ],
+        false,
+      ),
+    ).toEqual([{ ip: "93.184.216.34", port: 443 }]);
+  });
+
+  test("the two compensating tightenings over the Rust are still in force", () => {
+    // RFC 6761 reserves the whole `localhost` zone to loopback; the Rust
+    // matched only the bare name and let its resolver catch the rest.
+    expect(isDisallowedDetectorHost("localhost")).toBe(true);
+    expect(isDisallowedDetectorHost("localhost.")).toBe(true);
+    expect(isDisallowedDetectorHost("api.localhost")).toBe(true);
+  });
+
+  test("NON-tightening: the port is still unrestricted, exactly as in Rust", () => {
+    // Called out because it is easy to "harden" by mistake. Adding a
+    // standard-ports-only rule would be a behavior change, not a port.
+    expect(
+      detectorEndpointRejection("https://guard.example.com:8443/analyze", false),
+    ).toBeUndefined();
   });
 });

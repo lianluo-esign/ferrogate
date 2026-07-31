@@ -21,20 +21,20 @@ import type { RequestIdFactory } from "../../src/inference/index.js";
 import {
   InMemoryLedgerStore,
   InMemoryMeteringOutbox,
-  MeteringUsageSink,
-  TrackingScheduler,
   type LedgerStore,
   type LedgerWriteOutcome,
   type MeteredCharge,
+  MeteringUsageSink,
+  TrackingScheduler,
 } from "../../src/metering/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import {
+  type ProviderInterceptor,
   interceptProviderFetch,
   providerJson,
   providerSse,
   readBody,
-  type ProviderInterceptor,
 } from "../inference/provider-mock.js";
 import { FIXTURE_CREDITS, pricedBook } from "./fixtures.js";
 
@@ -301,9 +301,7 @@ describe("metering through the composed gateway — streaming", () => {
     let seen = "";
     while (!seen.includes('"completion_tokens":2')) {
       const chunk = await reader.read();
-      expect(chunk.done, "the early usage frame must arrive before the stream ends").toBe(
-        false,
-      );
+      expect(chunk.done, "the early usage frame must arrive before the stream ends").toBe(false);
       seen += decoder.decode(chunk.value, { stream: true });
     }
     // The trailing 40-token usage frame has NOT been delivered yet.

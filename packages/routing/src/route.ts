@@ -19,10 +19,12 @@ export interface RouteMatch {
  * plus request `path` to a {@link RouteMatch}, or `undefined` when no runtime
  * route matches (Rust `Option<RouteMatch>` → `RouteMatch | undefined`).
  *
- * PORT-TODO(inventory §2.8): the concrete implementation is a Hono / `matchit`
- * equivalent over the runtime route table and lives in apps/gateway; this
- * package ships only the interface the data plane implements, matching the Rust
- * crate which likewise ships only the trait.
+ * The port is COMPLETE at this layer and deliberately stops here: the Rust
+ * crate `ferrogate-routing` itself ships only the trait — the concrete matcher
+ * lives in the gateway, over `AppState`'s hot-reloadable runtime route table.
+ * Shipping a matcher here would be a divergence from the crate, not a closure.
+ * The TS concrete implementation is correspondingly a Hono/`matchit` matcher in
+ * `apps/gateway`.
  */
 export interface RouteMatcher {
   matchRoute(host: string | undefined, path: string): RouteMatch | undefined;

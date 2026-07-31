@@ -1,3 +1,9 @@
+import type {
+  BillingReportPublisher,
+  MeteredCharge,
+  MeteringQueue,
+  MeteringQueueMessage,
+} from "./ports.js";
 /**
  * Downstream delivery of a settled charge — port of
  * `ferrogate-gateway/src/billing_client.rs`'s `BillingReporter::deliver_once`,
@@ -10,13 +16,7 @@
  * retry ladder the Rust HTTP POST did, and a Queue consumer with a dead-letter
  * queue replaces the sweeper loop.
  */
-import { creditsToWire, billingEventToWire, ledgerEntryToWireDocument } from "./wire.js";
-import type {
-  BillingReportPublisher,
-  MeteredCharge,
-  MeteringQueue,
-  MeteringQueueMessage,
-} from "./ports.js";
+import { billingEventToWire, creditsToWire, ledgerEntryToWireDocument } from "./wire.js";
 
 /** The Queue body for one settled charge. */
 export function meteringQueueMessage(charge: MeteredCharge): MeteringQueueMessage {

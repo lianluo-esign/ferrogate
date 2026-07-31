@@ -25,6 +25,11 @@ import { z } from "zod";
 import type { Config, StorageProviderKind } from "../schema/index.js";
 import { IpCidr } from "../network-access.js";
 import {
+  capabilityActionAsStr,
+  selectorSupportsAction,
+  validateCapabilityTargetSelector,
+} from "./capability-target.js";
+import {
   describeX402ScopedPolicyError,
   validateScopedX402SpendPolicies,
   x402PolicyScopeKindSchema,
@@ -572,11 +577,16 @@ export function validateAgentRuntime(config: Config): void {
         );
       }
       selectorIds.add(grant.selector_id);
-      // PORT-TODO(inventory §5.3): `selector.supports_action(action)` and
-      // `selector.validate()` are `ferrogate_runtime::CapabilityTargetSelector`
-      // methods (wave 2); the selector is still an opaque value in this schema,
-      // so the action-compatibility and selector-shape legs cannot be decided
-      // here yet. Port with `@ferrogate/runtime`'s selector model.
+      if (!selectorSupportsAction(grant.selector, grant.action)) {
+        fail(
+          "agent_runtime.managed_worker.target_grants",
+          `selector ${grant.selector_id} is incompatible with action ${capabilityActionAsStr(grant.action)}`,
+        );
+      }
+      const reason = validateCapabilityTargetSelector(grant.selector);
+      if (reason !== null) {
+        fail(`agent_runtime.managed_worker.target_grants selector ${grant.selector_id}`, reason);
+      }
     }
   } else {
     if (isBlank(runtime.external.command)) {
@@ -744,7 +754,8 @@ export function validateCloudflareAiGatewayProviders(config: Config): void {
  * `validate_x402_spend_policies` (issue #351): money config fails at load, never
  * at the first payment.
  *
- * PORT-TODO(inventory §5.2): the per-policy `X402SpendPolicy::validate()` leg is
+ * PORT-TODO(inventory §5.2) — DELIBERATE PRODUCT DECISION, not a platform gap:
+ * x402/Solana is deprioritized. The per-policy `X402SpendPolicy::validate()` leg is
  * owned by `@ferrogate/policy` (wave 2; x402 is deprioritized) — see
  * `../x402-scope.ts`. The scope-shape half (blank / duplicate `(scope_type,
  * scope_id)`) is enforced here.

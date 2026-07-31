@@ -4,12 +4,31 @@
  * client-IP resolution (anti-spoof `X-Forwarded-For`-from-the-right), and the
  * per-source-IP flood limiter.
  *
- * PORT-TODO(inventory §5.8): on Cloudflare the trustworthy client IP is
- * `CF-Connecting-IP` (Cloudflare sets it), which largely supersedes the
- * XFF-from-the-right anti-spoof logic; and `UnauthenticatedIpRateLimiter`'s
- * in-process Map is per-isolate and won't share state across the fleet — it
- * should become a Durable Object / KV rate-limit binding. Behavior is ported
- * verbatim so the CIDR matcher and the resolution semantics stay identical.
+ * PORT-TODO(inventory §5.8) — PLATFORM LIMIT, NOT CLOSED (two distinct ones).
+ *
+ * 1. NO PEER ADDRESS. The Rust gate started from the TCP peer address it read
+ *    off the pingora socket. A Worker never sees a socket: workerd hands the
+ *    handler a `Request` and nothing else, so there is no `peer_addr` to read.
+ *    CLOSEST BEHAVIOR IMPLEMENTED: `resolveClientIp` keeps the Rust signature
+ *    and semantics exactly (including the anti-spoof XFF-from-the-RIGHT hop
+ *    selection and the fail-closed short-chain path); the CALLER substitutes
+ *    Cloudflare's `CF-Connecting-IP` header — which the edge sets and strips
+ *    from client input — for `peerAddr`. That header is the only value on this
+ *    platform with the same trust property as the Rust peer address.
+ *
+ * 2. NO SHARED MUTABLE STATE. `UnauthenticatedIpRateLimiter`'s Map is
+ *    ISOLATE-LOCAL and always will be: Workers isolates share no memory, are
+ *    created/evicted per colo without coordination, and the only cross-isolate
+ *    counters (Durable Objects, the Rate Limiting binding) are ASYNC, so they
+ *    cannot be hidden behind this synchronous `allow()`.
+ *    CLOSEST BEHAVIOR IMPLEMENTED: the Rust fixed-window arithmetic and the
+ *    {@link MAX_TRACKED_SOURCE_IPS} memory-exhaustion guard are ported verbatim
+ *    and kept synchronous, so a Durable Object can host ONE instance of this
+ *    class and get the exact Rust decision; used directly in a Worker it
+ *    throttles per isolate, which is a weaker bound, not a different rule.
+ *
+ * The CIDR matcher itself (`IpCidr`, v4/v6, no cross-family match) is a pure
+ * port with no platform caveat. Pinned by `platform-limits.test.ts`.
  */
 
 /** A parsed IPv4/IPv6 CIDR. A bare IP (no `/n`) is an exact match (/32 or /128). */
@@ -62,6 +81,11 @@ export class IpCidr {
     const mask = shift >= BigInt(bits) ? 0n : (full << shift) & full;
     return (this.network & mask) === (parsed.value & mask);
   }
+}
+
+/** `str::parse::<IpAddr>()` — is this string a bare IPv4/IPv6 literal? */
+export function isIpAddress(raw: string): boolean {
+  return parseIp(raw) !== null;
 }
 
 /** Parse a v4 or v6 address into a numeric value, or `null` if malformed. */

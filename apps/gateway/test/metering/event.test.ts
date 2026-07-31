@@ -55,12 +55,9 @@ describe("billingEventFromUsage", () => {
   });
 
   it("carries a settled cost only when one was supplied", () => {
+    expect(billingEventFromUsage(usageFixture(), { nowUnixSeconds: 1 }).cost_usd).toBeUndefined();
     expect(
-      billingEventFromUsage(usageFixture(), { nowUnixSeconds: 1 }).cost_usd,
-    ).toBeUndefined();
-    expect(
-      billingEventFromUsage(usageFixture(), { nowUnixSeconds: 1, settledCostUsd: 0.5 })
-        .cost_usd,
+      billingEventFromUsage(usageFixture(), { nowUnixSeconds: 1, settledCostUsd: 0.5 }).cost_usd,
     ).toBe(0.5);
   });
 
@@ -161,6 +158,11 @@ describe("storage documents", () => {
   it("refuses a credit value that cannot be read back losslessly", () => {
     // Better to fail the read than to charge a rounded number.
     expect(() => creditsFromWire(1.5)).toThrow(TypeError);
+    // The precision loss below IS the subject: 2^53+1 is not representable as a
+    // double, so that literal really is 2^53 at runtime — and `creditsFromWire`
+    // must REFUSE it rather than silently charge the rounded value. Writing a
+    // representable number instead would make the assertion unreachable.
+    // biome-ignore lint/correctness/noPrecisionLoss: see above
     expect(() => creditsFromWire(9_007_199_254_740_993)).toThrow(TypeError);
     expect(() => creditsFromWire("not-a-number")).toThrow(TypeError);
     expect(() => creditsFromWire(null)).toThrow(TypeError);

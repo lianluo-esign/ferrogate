@@ -287,6 +287,84 @@ database_id = "replace-at-deploy"
 migrations_dir = "../../sql/d1-ts/tenant"
 
 # ---------------------------------------------------------------------------
+# D1 — the CONTROL database holding the billing ledger / metering events /
+# report outbox
+#
+# Read as `env.BILLING_DB` by `meteringBindingsFromEnv` (src/metering/
+# runtime.ts), which `src/index.ts` hands to `MeteringUsageSink`; the store is
+# `D1LedgerStore` (src/metering/d1.ts) and it writes `billing_events`,
+# `billing_ledger` and `billing_report_outbox` in ONE `batch()`.
+#
+# WHY A SECOND DATABASE, not `DB`. The three metering tables are defined in
+# `sql/d1-ts/control/0001_init_control.sql`, NOT in the tenant migration —
+# `sql/d1-ts/tenant/0001_init_tenant.sql`'s "WHAT IS *NOT* HERE" block says so
+# explicitly ("billing ledger/outbox/events -> CONTROL, split rule (d):
+# whole-table cross-tenant analytics reads"). Pointing this binding at the
+# tenant database would put the writes where the tables do not exist, and the
+# atomic `batch()` the outbox depends on only holds because all three tables
+# live in the SAME database. It is the same database `apps/control-plane`
+# binds as its `DB`.
+#
+# What breaks without it: `MeteringUsageSink` falls back to its in-isolate
+# `InMemoryLedgerStore`, i.e. a settled charge is priced, deduplicated and
+# queued but never persisted, and dies with the isolate. Nothing else fails —
+# metering never touches the request path — which is exactly why the loss would
+# be silent, and why this binding is declared rather than optional in practice.
+#
+# THE MIGRATION MUST BE APPLIED FIRST (`wrangler d1 migrations apply
+# ferrogate-control [--local]`, `migrations_dir` below). With the binding
+# present but the tables absent every `batch()` rejects; the sink catches it,
+# counts a delivery failure and retries from the outbox with backoff, so the
+# symptom is a stalled outbox and `onDeliveryFailure` diagnostics, never a
+# failed client request.
+#
+# `database_name` / `database_id` are DOCUMENTED PLACEHOLDERS, exactly as the
+# tenant block above. `wrangler dev --local` and `vitest-pool-workers` ignore
+# the id and provision a local SQLite file per binding.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "BILLING_DB"
+database_name = "ferrogate-control"
+database_id = "replace-at-deploy"
+migrations_dir = "../../sql/d1-ts/control"
+
+# ---------------------------------------------------------------------------
+# Queues — the billing report fan-out
+#
+# Read as `env.BILLING` by `meteringBindingsFromEnv` (src/metering/runtime.ts),
+# wrapped by `QueueBillingReportPublisher` (src/metering/publisher.ts). It is
+# the port of the Rust `BillingReporter::deliver_once` HTTP POST, and
+# `docs/legacy/inventory-data-billing.md` §2.5 names it directly: "**Cloudflare
+# Queues** is the natural fit (replace the DB-polled sweeper with a Queue
+# consumer + dead-letter queue)".
+#
+# PRODUCER ONLY. This Worker never consumes the queue — `[[queues.consumers]]`
+# belongs to whichever Worker settles wallets/invoices downstream, together
+# with its `dead_letter_queue`. Declaring a consumer here would make this
+# Worker deliver messages to itself.
+#
+# The body is `MeteringQueueMessage` (src/metering/ports.ts): `credits` travels
+# as a DECIMAL STRING because a Queue body is JSON/structured-clone encoded and
+# a `bigint` past 2^53 would round-trip as a wrong `Number`. `id` is the ledger
+# entry id, so a consumer that has already applied a message can drop the
+# redelivery — which is what makes Queues' at-least-once semantics safe for
+# money.
+#
+# What breaks without it: the publisher falls back to
+# `InMemoryBillingReportPublisher`, so a charge is still priced and still
+# persisted to `BILLING_DB`, but nothing downstream is ever told about it. The
+# outbox row is deleted on that in-isolate "delivery", so the report is lost —
+# hence this binding lands together with the D1 one, not after it.
+#
+# `queue` is a DOCUMENTED PLACEHOLDER; the deploy step substitutes the real
+# queue (`wrangler queues create …`). Queue names are lowercase alphanumerics
+# and hyphens.
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "BILLING"
+queue = "replace-at-deploy-ferrogate-billing-reports"
+
+# ---------------------------------------------------------------------------
 # Durable Objects — the rate-limit / quota counters
 #
 # One DO instance per counter key replaces the Rust `ClusterCounterBackend`
@@ -312,12 +390,40 @@ class_name = "RateLimiterDurableObject"
 tag = "v1"
 new_sqlite_classes = ["RateLimiterDurableObject"]
 
+# ---------------------------------------------------------------------------
+# Cron — the billing-outbox recovery sweep
+#
+# Handled by `scheduled` on the default export of `src/worker.ts`, which calls
+# `MeteringUsageSink.sweep` (src/metering/sink.ts).
+#
+# WHY A CRON EXISTS AT ALL. A Worker has no background thread, so the Rust
+# `sweep_billing_outbox_once` loop has no direct equivalent. The request path's
+# `meteringDrain` + `ctx.waitUntil` is the primary delivery path and it retries
+# from the in-isolate outbox — but an isolate EVICTED between the D1 ledger
+# commit and the Queue publish takes that buffer with it. The charge is on the
+# tenant's ledger, nothing downstream was ever told, and the only surviving
+# record is the `billing_report_outbox` row committed in the same `batch()`
+# (#150). This trigger is what reads that row back.
+#
+# Every minute is deliberate: `OUTBOX_SWEEP_GRACE_SECONDS` (60s) means the sweep
+# ignores rows still owned by their own request's `waitUntil`, so the effective
+# recovery latency is 1-2 minutes and a healthy gateway's sweep finds an empty
+# due set and does one indexed `SELECT` (`idx_billing_report_outbox_due`).
+#
+# NOT a placeholder — unlike `database_id` / `queue`, a cron expression is not
+# account-specific and deploys as written.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["* * * * *"]
+
 # ===========================================================================
 # NOT DECLARED — and why
 #
 # Wave 5 introduced `[[d1_databases]] DB` and the `RATE_LIMIT` Durable Object
-# above, each together with the code that reads it. The rule is unchanged: a
-# binding lands in the same commit as its first reader, never before.
+# above; the metering slice added `[[d1_databases]] BILLING_DB` and
+# `[[queues.producers]] BILLING`, each together with the code that reads it. The
+# rule is unchanged: a binding lands in the same commit as its first reader,
+# never before.
 #
 # `[[services]]` stays undeclared for the reason it always has: it names another
 # deployed Worker, and an unimplemented target turns every call into a runtime
@@ -333,16 +439,6 @@ new_sqlite_classes = ["RateLimiterDurableObject"]
 #   [[durable_objects.bindings]]  SESSION
 #       streaming-session state. `RATE_LIMIT` landed in wave 5; `SESSION` has no
 #       reader yet. PORT-TODO(inventory-request-path §1.7).
-#   [[queues]]  binding = "BILLING"
-#       metering / ledger fan-out (Rust `metering_events`, `evidence_writer`).
-#       `src/metering/` HAS the reader — `QueueBillingReportPublisher` and
-#       `D1LedgerStore` — but neither can be constructed from the composition
-#       root yet: `UsageSink` is built once at module scope while bindings are
-#       per request, and `UsageSink.record()` carries no `ExecutionContext`, so
-#       durable writes cannot be handed to `ctx.waitUntil`. The sink therefore
-#       runs on its in-memory ledger + outbox until that signature is widened.
-#       Declaring the queue now would be a binding nothing reads.
-#       PORT-TODO(inventory-data-billing §2.5).
 #   [ai] / AI Gateway
 #       Workers AI Llama Guard guardrail detector + governed provider egress.
 #       PORT-TODO(inventory-request-path §1.6 "Workers AI Llama Guard").

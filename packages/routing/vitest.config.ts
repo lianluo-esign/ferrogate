@@ -6,5 +6,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
+    // `test/do/**` needs a real Durable Object; it runs under vitest.do.config.ts.
+    exclude: ["test/do/**"],
   },
 });

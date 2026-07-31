@@ -10,16 +10,16 @@
 import { PriceBook, modelPriceUsd, priceEntry } from "@ferrogate/billing";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  type CostDivergence,
   InMemoryBillingReportPublisher,
   InMemoryLedgerStore,
   InMemoryMeteringOutbox,
   MAX_BILLING_OUTBOX_ATTEMPTS,
   ManualClock,
-  MeteringUsageSink,
+  type MeteringDiagnostics,
+  type MeteringUsageSink,
   TrackingScheduler,
   createMeteringUsageSink,
-  type CostDivergence,
-  type MeteringDiagnostics,
 } from "../../src/metering/index.js";
 import {
   FIXTURE_CREDITS,
@@ -40,10 +40,12 @@ interface Harness {
   readonly unpricedReports: { requestId: string; providerModel: string }[];
 }
 
-function harness(options: {
-  priceBook?: PriceBook;
-  settledCostUsd?: (usage: ReturnType<typeof usageFixture>) => number | undefined;
-} = {}): Harness {
+function harness(
+  options: {
+    priceBook?: PriceBook;
+    settledCostUsd?: (usage: ReturnType<typeof usageFixture>) => number | undefined;
+  } = {},
+): Harness {
   const ledger = new InMemoryLedgerStore();
   const outbox = new InMemoryMeteringOutbox();
   const publisher = new InMemoryBillingReportPublisher();
@@ -64,9 +66,7 @@ function harness(options: {
     scheduler,
     clock,
     diagnostics,
-    ...(options.settledCostUsd === undefined
-      ? {}
-      : { settledCostUsd: options.settledCostUsd }),
+    ...(options.settledCostUsd === undefined ? {} : { settledCostUsd: options.settledCostUsd }),
   });
   return { sink, ledger, outbox, publisher, scheduler, clock, divergences, unpricedReports };
 }
@@ -93,9 +93,7 @@ describe("MeteringUsageSink — pricing", () => {
   it("reconciles a provider-omitted split before pricing (issue #140)", async () => {
     // Gemini-shaped: prompt + total reported, completion omitted. Billing the
     // omitted side at $0 is the defect `reconcile_split` exists to prevent.
-    h.sink.record(
-      usageFixture({ promptTokens: 11, completionTokens: undefined, totalTokens: 15 }),
-    );
+    h.sink.record(usageFixture({ promptTokens: 11, completionTokens: undefined, totalTokens: 15 }));
     await h.scheduler.idle();
 
     const [charge] = h.ledger.charges;
@@ -326,9 +324,7 @@ describe("MeteringUsageSink — the outbox survives a downstream outage (#137/#1
     expect(h.ledger.size).toBe(1);
     expect(h.outbox.size).toBe(1);
     expect(h.outbox.get(h.ledger.charges[0]?.id ?? "")?.attempts).toBe(1);
-    expect(h.outbox.get(h.ledger.charges[0]?.id ?? "")?.nextAttemptUnix).toBe(
-      1_700_000_000 + 1,
-    );
+    expect(h.outbox.get(h.ledger.charges[0]?.id ?? "")?.nextAttemptUnix).toBe(1_700_000_000 + 1);
     expect(h.sink.stats.deliveryFailures).toBe(1);
     expect(h.publisher.delivered).toHaveLength(0);
   });
@@ -429,8 +425,7 @@ describe("MeteringUsageSink — post-response scheduling", () => {
       record: (): Promise<never> => Promise.reject(new Error("d1 is down")),
       get: (): Promise<undefined> => Promise.resolve(undefined),
       list: (): Promise<never[]> => Promise.resolve([]),
-      totals: () =>
-        Promise.resolve({ entries: 0, credits: 0n, totalTokens: 0n, costUsd: 0 }),
+      totals: () => Promise.resolve({ entries: 0, credits: 0n, totalTokens: 0n, costUsd: 0 }),
     };
     const scheduler = new TrackingScheduler();
     const outbox = new InMemoryMeteringOutbox();

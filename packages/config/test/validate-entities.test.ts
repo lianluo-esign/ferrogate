@@ -47,12 +47,19 @@ const apiKey = (extra: Record<string, unknown> = {}) => ({
   platform_operator: true,
   ...extra,
 });
+// `command` is required for the stdio transport (`validate_mcp_server_config`),
+// so the baseline fixture carries one and every network-transport case overrides
+// `transport`/`url`.
 const mcpServer = (extra: Record<string, unknown> = {}) => ({
   name: "srv",
   transport: "stdio",
+  command: "/usr/bin/srv",
   tools_to_execute: ["echo"],
   ...extra,
 });
+
+/** A `shared_headers` server: the auth mode requires at least one static header. */
+const sharedHeader = [{ name: "Authorization", value: "Bearer token" }];
 
 describe("validate_providers", () => {
   const cases: [string, Record<string, unknown>, string][] = [
@@ -271,6 +278,7 @@ describe("validate_mcp_servers", () => {
             transport: "streamable_http",
             url: "http://acme.mcp.cloudflare.com/sse",
             auth_type: "shared_headers",
+            headers: sharedHeader,
           }),
         ],
       },
@@ -285,9 +293,34 @@ describe("validate_mcp_servers", () => {
       },
       "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication",
     ],
+    [
+      // `is_cloudflare_managed_mcp_url` matches a tenant Worker on BOTH the
+      // conventional `/mcp` and `/sse` paths, not just `/mcp`.
+      "an unauthenticated tenant workers.dev MCP endpoint on /mcp (issue #408)",
+      {
+        mcp_servers: [
+          mcpServer({ transport: "streamable_http", url: "https://tenant.workers.dev/mcp/" }),
+        ],
+      },
+      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication",
+    ],
+    [
+      "an unauthenticated tenant workers.dev MCP endpoint on /sse (issue #408)",
+      { mcp_servers: [mcpServer({ transport: "sse", url: "https://tenant.workers.dev/agent/sse" })] },
+      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication",
+    ],
   ];
   test.each(cases)("rejects %s", (_name, raw, expected) => {
     expect(firstError(raw)).toBe(expected);
+  });
+
+  test("an ordinary workers.dev Worker is NOT treated as a managed MCP upstream", () => {
+    // Neither `/mcp` nor `/sse`: the #408 https+auth guardrails must not apply.
+    expectAccepted({
+      mcp_servers: [
+        mcpServer({ transport: "streamable_http", url: "http://tenant.workers.dev/api/rpc" }),
+      ],
+    });
   });
 
   test("accepts an authenticated https Cloudflare managed server", () => {
@@ -297,8 +330,309 @@ describe("validate_mcp_servers", () => {
           transport: "streamable_http",
           url: "https://acme.mcp.cloudflare.com/sse",
           auth_type: "shared_headers",
+          headers: sharedHeader,
         }),
       ],
+    });
+  });
+});
+
+/**
+ * `ferrogate_mcp::validate_mcp_server_config` — the legs a previous wave left as
+ * a PORT-TODO (reconnect bounds, auth-mode/static-header pairing, OAuth config
+ * and the stdio `command` requirement), now ported. Every case pins the exact
+ * `field mcp_servers[0]: <Rust reason>`.
+ */
+describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
+  const oauth = {
+    issuer: "https://idp.example",
+    client_id: "cid",
+    client_secret_ref: "env://MCP_OAUTH_SECRET",
+    redirect_uri: "https://gw.example/callback",
+  };
+  const httpServer = (extra: Record<string, unknown> = {}) =>
+    mcpServer({ transport: "streamable_http", url: "https://srv.example/rpc", ...extra });
+
+  const cases: [string, Record<string, unknown>, string][] = [
+    // --- reconnect bounds ---
+    [
+      "max_reconnect_attempts of zero",
+      { mcp_servers: [mcpServer({ max_reconnect_attempts: 0 })] },
+      "field mcp_servers[0]: MCP server srv max_reconnect_attempts must be greater than 0",
+    ],
+    [
+      "a zero min reconnect backoff",
+      { mcp_servers: [mcpServer({ min_reconnect_backoff_secs: 0 })] },
+      "field mcp_servers[0]: MCP server srv reconnect backoff values must be greater than 0",
+    ],
+    [
+      "a zero max reconnect backoff",
+      { mcp_servers: [mcpServer({ max_reconnect_backoff_secs: 0 })] },
+      "field mcp_servers[0]: MCP server srv reconnect backoff values must be greater than 0",
+    ],
+    [
+      "a min reconnect backoff above the max",
+      { mcp_servers: [mcpServer({ min_reconnect_backoff_secs: 31 })] },
+      "field mcp_servers[0]: MCP server srv min reconnect backoff cannot exceed max",
+    ],
+    // --- auth modes ---
+    [
+      "the unimplemented oauth auth mode",
+      { mcp_servers: [mcpServer({ auth_type: "oauth" })] },
+      "field mcp_servers[0]: MCP auth_type oauth is not implemented; use per_user_oauth for " +
+        "user-isolated OAuth or shared_headers for shared credentials",
+    ],
+    [
+      "the unimplemented per_user_headers auth mode",
+      { mcp_servers: [mcpServer({ auth_type: "per_user_headers" })] },
+      "field mcp_servers[0]: MCP auth_type per_user_headers is not implemented; use " +
+        "per_user_oauth, original_bearer, or ferrogate_signed_jwt",
+    ],
+    [
+      "shared_headers with no static header",
+      { mcp_servers: [mcpServer({ auth_type: "shared_headers" })] },
+      "field mcp_servers[0]: MCP auth_type shared_headers requires at least one static header",
+    ],
+    [
+      "static headers under auth_type none",
+      { mcp_servers: [mcpServer({ headers: sharedHeader })] },
+      "field mcp_servers[0]: MCP static headers require auth_type shared_headers",
+    ],
+    [
+      "per_user_oauth without an oauth block",
+      { mcp_servers: [mcpServer({ auth_type: "per_user_oauth" })] },
+      "field mcp_servers[0]: MCP auth_type per_user_oauth requires oauth configuration",
+    ],
+    [
+      "original_bearer without an oauth block",
+      { mcp_servers: [mcpServer({ auth_type: "original_bearer" })] },
+      "field mcp_servers[0]: MCP auth_type original_bearer requires oauth configuration",
+    ],
+    [
+      "ferrogate_signed_jwt without an audience",
+      { mcp_servers: [mcpServer({ auth_type: "ferrogate_signed_jwt" })] },
+      "field mcp_servers[0]: MCP auth_type ferrogate_signed_jwt requires signed_jwt_audience",
+    ],
+    [
+      "static headers under a per-user identity mode",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "ferrogate_signed_jwt", signed_jwt_audience: "a", headers: sharedHeader }),
+        ],
+      },
+      "field mcp_servers[0]: per-user MCP identity modes cannot define static headers",
+    ],
+    // --- oauth config ---
+    [
+      "a non-URL oauth issuer",
+      { mcp_servers: [mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, issuer: "idp" } })] },
+      "field mcp_servers[0]: MCP oauth.issuer is invalid",
+    ],
+    [
+      "a non-http(s) oauth issuer",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, issuer: "ftp://idp.example" } }),
+        ],
+      },
+      "field mcp_servers[0]: MCP oauth.issuer must be an http or https URL",
+    ],
+    [
+      "a plaintext oauth issuer without allow_insecure_http",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, issuer: "http://idp.example" } }),
+        ],
+      },
+      "field mcp_servers[0]: MCP oauth.issuer must use https unless allow_insecure_http is " +
+        "explicitly enabled",
+    ],
+    [
+      "a blank oauth client_id",
+      { mcp_servers: [mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, client_id: " " } })] },
+      "field mcp_servers[0]: MCP oauth.client_id cannot be empty",
+    ],
+    [
+      "an empty oauth scope list",
+      { mcp_servers: [mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, scopes: [] } })] },
+      "field mcp_servers[0]: MCP oauth.scopes must contain non-empty values",
+    ],
+    [
+      "a blank oauth scope",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, scopes: ["openid", " "] } }),
+        ],
+      },
+      "field mcp_servers[0]: MCP oauth.scopes must contain non-empty values",
+    ],
+    [
+      "per_user_oauth without a client_secret_ref",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "per_user_oauth", oauth: { ...oauth, client_secret_ref: null } }),
+        ],
+      },
+      "field mcp_servers[0]: MCP per_user_oauth requires oauth.client_secret_ref",
+    ],
+    [
+      "per_user_oauth without a redirect_uri",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "per_user_oauth", oauth: { ...oauth, redirect_uri: null } }),
+        ],
+      },
+      "field mcp_servers[0]: MCP per_user_oauth requires oauth.redirect_uri",
+    ],
+    // --- static headers ---
+    [
+      "a malformed static header name",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "shared_headers", headers: [{ name: "bad header", value: "v" }] }),
+        ],
+      },
+      "field mcp_servers[0]: MCP static header name is invalid",
+    ],
+    [
+      "a protocol-owned static header",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "shared_headers", headers: [{ name: "Mcp-Session-Id", value: "v" }] }),
+        ],
+      },
+      "field mcp_servers[0]: MCP static header Mcp-Session-Id is protocol-owned",
+    ],
+    [
+      "a static header setting both value and value_env",
+      {
+        mcp_servers: [
+          mcpServer({
+            auth_type: "shared_headers",
+            headers: [{ name: "X-Key", value: "v", value_env: "E" }],
+          }),
+        ],
+      },
+      "field mcp_servers[0]: MCP static header must set exactly one of value or value_env",
+    ],
+    [
+      "a static header setting neither value nor value_env",
+      { mcp_servers: [mcpServer({ auth_type: "shared_headers", headers: [{ name: "X-Key" }] })] },
+      "field mcp_servers[0]: MCP static header must set exactly one of value or value_env",
+    ],
+    [
+      "a static header with a blank value_env",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "shared_headers", headers: [{ name: "X-Key", value_env: " " }] }),
+        ],
+      },
+      "field mcp_servers[0]: MCP static header must set exactly one of value or value_env",
+    ],
+    [
+      "a control character in a static header value",
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "shared_headers", headers: [{ name: "X-Key", value: `a${String.fromCharCode(1)}b` }] }),
+        ],
+      },
+      "field mcp_servers[0]: MCP static header value is invalid",
+    ],
+    // --- transports ---
+    [
+      "a non-http(s) network endpoint",
+      { mcp_servers: [httpServer({ url: "ftp://srv.example/rpc" })] },
+      "field mcp_servers[0]: MCP network transports require http or https url",
+    ],
+    [
+      "a scheme-less network endpoint",
+      { mcp_servers: [httpServer({ url: "/rpc" })] },
+      "field mcp_servers[0]: MCP network transports require http or https url",
+    ],
+    [
+      "a whitespace-bearing network endpoint",
+      { mcp_servers: [httpServer({ url: "https://srv example/rpc" })] },
+      "field mcp_servers[0]: invalid MCP endpoint https://srv example/rpc",
+    ],
+    [
+      "a stdio server with no command",
+      { mcp_servers: [mcpServer({ command: null })] },
+      "field mcp_servers[0]: MCP stdio server srv requires command",
+    ],
+    [
+      "a stdio server with an empty command",
+      { mcp_servers: [mcpServer({ command: "" })] },
+      "field mcp_servers[0]: MCP stdio server srv requires command",
+    ],
+  ];
+  test.each(cases)("rejects %s", (_name, raw, expected) => {
+    expect(firstError(raw)).toBe(expected);
+  });
+
+  test("accepts a fully-specified per_user_oauth network server", () => {
+    expectAccepted({ mcp_servers: [httpServer({ auth_type: "per_user_oauth", oauth })] });
+  });
+
+  test("accepts a shared_headers network server with a value_env header", () => {
+    expectAccepted({
+      mcp_servers: [
+        httpServer({ auth_type: "shared_headers", headers: [{ name: "X-Key", value_env: "MCP_KEY" }] }),
+      ],
+    });
+  });
+
+  test("accepts a ferrogate_signed_jwt server and a plain stdio server", () => {
+    expectAccepted({
+      mcp_servers: [
+        httpServer({ auth_type: "ferrogate_signed_jwt", signed_jwt_audience: "gw" }),
+        mcpServer({ name: "local" }),
+      ],
+    });
+  });
+
+  test("accepts a plaintext oauth issuer once allow_insecure_http is explicit", () => {
+    expectAccepted({
+      mcp_servers: [
+        httpServer({
+          auth_type: "original_bearer",
+          oauth: { ...oauth, issuer: "http://idp.example", allow_insecure_http: true },
+        }),
+      ],
+    });
+  });
+
+  test("accepts the legacy `headers` alias for auth_type shared_headers", () => {
+    const parsed = configSchema.parse({
+      mcp_servers: [httpServer({ auth_type: "headers", headers: sharedHeader })],
+    });
+    expect(parsed.mcp_servers[0]!.auth_type).toBe("shared_headers");
+    validateConfig(parsed);
+  });
+
+  /**
+   * PLATFORM LIMIT (kept as a PORT-TODO in src/validate/entities.ts): a Worker
+   * has no filesystem to read `tls.ca_cert_path` from and `fetch()` exposes no
+   * hook for a custom CA root or for skipping verification. The approximation is
+   * to REJECT rather than silently ignore — this pins that choice.
+   */
+  describe("mcp tls is rejected, not silently ignored", () => {
+    test("ca_cert_path", () => {
+      expect(firstError({ mcp_servers: [httpServer({ tls: { ca_cert_path: "/etc/ca.pem" } })] })).toBe(
+        "field mcp_servers[0]: MCP server srv: MCP tls.ca_cert_path is unsupported on Cloudflare " +
+          "Workers: there is no filesystem to read the PEM from and fetch() exposes no hook to add " +
+          "a custom CA root",
+      );
+    });
+    test("insecure_skip_verify", () => {
+      expect(
+        firstError({ mcp_servers: [httpServer({ tls: { insecure_skip_verify: true } })] }),
+      ).toBe(
+        "field mcp_servers[0]: MCP server srv: MCP tls.insecure_skip_verify is unsupported on " +
+          "Cloudflare Workers: fetch() exposes no hook to disable upstream certificate verification",
+      );
+    });
+    test("the stdio transport never reaches the tls leg (as in Rust)", () => {
+      expectAccepted({ mcp_servers: [mcpServer({ tls: { ca_cert_path: "/etc/ca.pem" } })] });
     });
   });
 });

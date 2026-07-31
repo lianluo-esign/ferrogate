@@ -10,11 +10,11 @@
  * field for field.
  */
 import {
-  providerAttemptForRequest,
-  validateRequestMetadata,
   type BillingEvent,
   type BillingUsageSource,
   type TokenUsage,
+  providerAttemptForRequest,
+  validateRequestMetadata,
 } from "@ferrogate/billing";
 import type { TenantContext } from "@ferrogate/core";
 import type { Usage } from "../inference/ports.js";
@@ -28,11 +28,23 @@ import type { MeteringDiagnostics } from "./ports.js";
  * each is separately billable (issue #213). The TS data plane has no failover
  * yet — `handlers.ts` dispatches exactly once — so every attempt is index 0.
  *
- * PORT-TODO(inventory-request-path §"routing/failover"): when
- * `@ferrogate/routing` lands its failover ladder, the attempt index must come
- * from the dispatch loop, not from this constant, or two attempts on one
- * request would collapse onto one idempotency key and the second would be
- * absorbed as a duplicate — i.e. silently unbilled.
+ * PORT-TODO(inventory-request-path §"routing/failover") — a SCOPE boundary and a
+ * missing upstream feature, not a platform limit. Two things have to land first,
+ * neither of them in this module:
+ *
+ *  1. `@ferrogate/routing` has to expose a failover ladder at all, and
+ *  2. `src/inference/handlers.ts` has to carry the attempt index through
+ *     `recordUsage` (it calls the sink from ten sites today, every one of them a
+ *     single dispatch).
+ *
+ * When they do, the index must come from the dispatch loop and be threaded onto
+ * `Usage`, not read from this constant. Leaving the constant in place at that
+ * point is a SILENT UNDER-BILL, not a crash: `ledgerEntryId` folds the index
+ * into the key, so two attempts on one request would collapse onto one key and
+ * the second would be absorbed by `ON CONFLICT DO NOTHING` as a healthy replay.
+ * `test/metering/durable.test.ts` ("does not double-charge the SAME request id")
+ * pins exactly that absorption, so it is worth reading as the description of the
+ * failure this marker guards against.
  */
 export const SINGLE_PROVIDER_ATTEMPT_INDEX = 0;
 
@@ -107,10 +119,7 @@ export function usageSourceFor(usage: Usage): BillingUsageSource {
  * `ledger_entry_id(event)` — the primary key of `billing_ledger`,
  * `billing_events` and `billing_report_outbox` alike.
  */
-export function billingEventFromUsage(
-  usage: Usage,
-  context: BillingEventContext,
-): BillingEvent {
+export function billingEventFromUsage(usage: Usage, context: BillingEventContext): BillingEvent {
   const metadata = usage.metadata === undefined ? {} : { ...usage.metadata };
   if (usage.metadata !== undefined) {
     // Defence in depth only: `Usage.metadata` is documented as already

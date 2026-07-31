@@ -42,14 +42,30 @@ export {
   resolveDeps,
 } from "./defaults.js";
 export {
+  AZURE_DEFAULT_API_VERSION,
   PROVIDER_ADAPTER_FAMILIES,
   anthropicAdapter,
+  azureOpenAiAdapter,
   canonicalProviderKind,
   defaultAdapterRegistry,
   defaultAuthScheme,
+  encodeAzurePathSegment,
+  grokAdapter,
   isOpenAiCompatibleKind,
   openAiCompatibleAdapter,
+  openRouterAdapter,
+  splitAzureBaseUrl,
 } from "./adapters.js";
+export type { OpenRouterProviderExtras, OpenRouterRoute } from "./adapters.js";
+export {
+  ProviderBodyTooLargeError,
+  ProviderEndpointError,
+  dispatchDeadline,
+  parseProviderEndpoint,
+  providerTransportFailureClass,
+  providerTransportMessage,
+  readBoundedProviderBody,
+} from "./dispatch.js";
 export {
   chatCompletionToMessage,
   defaultAnthropicTranslator,

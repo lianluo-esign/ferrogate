@@ -3,11 +3,23 @@
  * placeholders"): `{env.NAME}` interpolation of uppercase/digit/`_` env-var
  * names, with hard errors on unterminated/invalid/unset placeholders.
  *
- * PORT-TODO(inventory §5.8): a Worker has no `std::env`; the environment is the
- * `env` binding passed to the handler. The Rust `resolve_env_placeholders(value)`
- * read the process environment implicitly — this port takes the environment as
- * an explicit argument (defaulting to `process.env` for Node/vitest) so the
- * caller supplies the Worker `env` binding at runtime.
+ * PORT-TODO(inventory §5.8) — PLATFORM LIMIT (API SHAPE), NOT CLOSED.
+ *
+ * `std::env::var` has no workerd equivalent and cannot get one: a Worker's
+ * environment is NOT ambient process state, it is the `env` object workerd hands
+ * to the handler for that invocation, it only exists inside a request/alarm
+ * context, and its contents differ per Worker and per deployment. There is no
+ * module-scope global a library can read it from.
+ *
+ * CLOSEST BEHAVIOR IMPLEMENTED: the environment becomes an explicit first-class
+ * ARGUMENT, so the caller passes the Worker `env` binding down. The
+ * `process.env` default exists only so Node/CLI/vitest callers keep the Rust
+ * call shape; inside workerd `globalThis.process` is absent, the default
+ * degrades to `{}`, and every placeholder then FAILS CLOSED with
+ * "environment variable `NAME` is not set" rather than silently interpolating an
+ * empty string. Every rule of the Rust scanner (name charset, unterminated
+ * placeholder, unset variable, never echoing the value) is ported verbatim.
+ * Pinned by `platform-limits.test.ts` > "secrets: no std::env".
  */
 
 /** The environment a placeholder resolves against. */

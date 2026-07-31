@@ -50,13 +50,24 @@ export type SyncBridgeFuture<T> = PromiseLike<T> | (() => T | PromiseLike<T>);
  *    because on the Workers event loop there is only ever the one cooperative
  *    executor.
  *
- * PORT-TODO(inventory §7): the synchronous `-> T` return is impossible on the JS
- * event loop — you cannot block a single-threaded cooperative executor on a
- * pending promise without deadlocking it. The faithful mapping is therefore
- * `-> Promise<T>` (an `await`), which is exactly the call-site rewrite the
- * inventory prescribes. The `block_in_place` and scoped-`current_thread`
- * fallback mechanics have no CF equivalent and are intentionally not reproduced;
- * see `runtime.ts`.
+ * PORT-TODO(inventory §7) — PLATFORM LIMIT, NOT CLOSED.
+ *
+ * The exact limitation: **the synchronous `-> T` return is impossible on a JS
+ * event loop.** Rust `block_on_sync_bridge` parks the calling THREAD until the
+ * future completes; another thread makes progress meanwhile. JS has one
+ * cooperative executor per isolate, so parking it is a deadlock by
+ * construction — the very task that would resolve the promise can only run
+ * after the current stack frame returns. There is no `Atomics.wait` escape
+ * either: workerd forbids blocking the main thread, and there is no worker
+ * thread to hand the future to.
+ *
+ * The closest behavior implemented instead: `-> Promise<T>` (an `await`), which
+ * is exactly the call-site rewrite the inventory prescribes, with failure
+ * propagation preserved — a rejected promise or a throwing thunk surfaces as a
+ * rejection, the analogue of the scoped-join panic re-raise. The
+ * `block_in_place` and scoped-`current_thread` fallback mechanics are
+ * intentionally NOT reproduced; see `runtime.ts` and the pins in
+ * `test/runtime.test.ts`.
  */
 export async function blockOnSyncBridge<T>(
   future: SyncBridgeFuture<T>,

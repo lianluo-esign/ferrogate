@@ -7,16 +7,31 @@
  * connection close) plus the server side of the Streamable-HTTP contract the
  * FerroGate ingress speaks.
  *
- * PORT-TODO(inventory-edge-control §MCP): stdio transport requires Containers.
- * Workers cannot spawn processes, so `McpTransport::Stdio` upstreams have no
- * outbound implementation here; {@link HttpMcpUpstreams} refuses them at
- * dispatch with `mcp_server_unavailable` instead of silently treating them as
- * HTTP.
+ * PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — the stdio transport
+ * cannot exist in a Worker. Rust's `stdio_client.rs` spawns a CHILD PROCESS per
+ * upstream, writes JSON-RPC to its stdin, reads from its stdout, and owns a
+ * `dispatch_cleanup_handle` that kills the child on timeout. workerd has no
+ * `fork`/`exec`, no pipes and no process table; there is no API to add and no
+ * effort that closes this. The only CF home for a stdio MCP server is a
+ * Container / `@cloudflare/sandbox`, which is a different deployment artifact,
+ * not a change to this module.
  *
- * PORT-TODO(inventory-edge-control §MCP): the modern FerroGate ingress is
- * deliberately STATELESS (`mcp_ingress.rs`), so no `Mcp-Session-Id` is minted
- * and no resumable `Last-Event-ID` replay log is kept. A resumable server-side
- * stream needs a Durable Object per session (the `McpAgent` pattern).
+ * IMPLEMENTED INSTEAD: a stdio upstream stays FULLY CONFIGURABLE — the catalog
+ * decodes it and `listServers` reports it — and is refused at DISPATCH with
+ * `mcp_server_unavailable`. The refusal is deliberate and specific: silently
+ * treating a stdio upstream as HTTP would send a local-process server's traffic
+ * onto the network, and silently dropping it from the catalog would hide a
+ * misconfiguration the operator needs to see. Pinned by
+ * `test/upstream-transport.test.ts` ("refuses a stdio dispatch instead of
+ * silently treating it as HTTP") and `test/durable-identity.test.ts` ("keeps a
+ * stdio row decodable — it is refused at DISPATCH, not at config").
+ *
+ * NOTE — the server-side ingress is deliberately STATELESS, and that is PARITY,
+ * not a gap: Rust's modern ingress (`mcp_ingress.rs`) mints no `Mcp-Session-Id`
+ * and keeps no resumable `Last-Event-ID` replay log either, so neither does
+ * this. A resumable server-side stream would be a NEW feature in both trees; on
+ * CF its shape is a Durable Object per session (the `McpAgent` pattern), the
+ * same primitive `src/oauth-flow.ts` already uses in this Worker.
  */
 import type { JsonValue } from "@ferrogate/core";
 
@@ -396,10 +411,21 @@ interface UpstreamSession {
  * handshake), the deny-by-default `toolsToExecute` allowlist, and the
  * `{server}-{remote}` namespacing with longest-prefix resolution.
  *
- * Session state is per-isolate. PORT-TODO(inventory-edge-control §MCP): a
- * long-lived, shared session (the Rust `McpManager`'s `HashMap<name,
- * McpSession>` with health-check/reconnect) belongs in a Durable Object — one
- * DO per MCP session, mirroring the `McpAgent` pattern.
+ * Session state is per-isolate. PORT-TODO(inventory-edge-control §MCP "session
+ * manager"): NOT a platform limit — Cloudflare has the primitive, and this
+ * Worker already uses it (`src/oauth-flow.ts` runs a Durable Object). Rust's
+ * `McpManager` holds a process-wide `HashMap<name, McpSession>` with a
+ * health-check/reconnect loop; the CF shape is one DO per MCP session. It is
+ * deferred, not impossible.
+ *
+ * WHAT IS IMPLEMENTED, and why it is correct rather than merely cheaper: the
+ * session map is per-isolate, and protocol negotiation is re-run on a cold
+ * isolate. Nothing is lost but the handshake — the negotiated protocol version
+ * and the tool list are DERIVED state, re-fetchable from the upstream at any
+ * time, so a cold isolate produces the same answers as a warm one. The
+ * observable difference is COST: more `server/discover` / `initialize` round
+ * trips than the Rust manager made, and no cross-isolate health-check loop, so
+ * an upstream's outage is discovered per isolate rather than once globally.
  */
 export class HttpMcpUpstreams implements McpUpstreamPort {
   readonly #sessions = new Map<string, UpstreamSession>();

@@ -26,3 +26,5 @@ export * from "./wallet-d1.js";
 export * from "./workflow-budget-d1.js";
 export * from "./monotonic.js";
 export * from "./usage-d1.js";
+export * from "./billing-d1.js";
+export * from "./assets-r2.js";

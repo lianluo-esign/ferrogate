@@ -23,7 +23,26 @@ describe("RouteMatcher interface", () => {
     expect(stub.matchRoute(undefined, "/nope")).toBeUndefined();
   });
 
-  // PORT-TODO(inventory §2.8): concrete Hono/matchit matcher over AppState's
-  // hot-reloadable route table is ported in apps/gateway (Wave 3).
-  test.todo("concrete runtime-route-table matcher (apps/gateway, Wave 3)");
+  /**
+   * SCOPE PIN, not a deferral. The Rust crate `ferrogate-routing` ships only
+   * the trait; the concrete matcher lives in the gateway over `AppState`'s
+   * hot-reloadable route table, so a matcher here would be a divergence from
+   * the crate. What this package owes is that the interface is implementable
+   * and that a miss is `undefined` rather than a throw or a fallback route —
+   * a fallback would silently send an unrouted request to some upstream.
+   */
+  test("the interface is satisfiable by an ordinary object, and a miss is undefined", () => {
+    const matcher: RouteMatcher = {
+      matchRoute: (host, path) =>
+        host === "api.example.com" && path.startsWith("/v1/")
+          ? { routeName: "v1", upstreamName: "primary" }
+          : undefined,
+    };
+    expect(matcher.matchRoute("api.example.com", "/v1/chat")).toEqual({
+      routeName: "v1",
+      upstreamName: "primary",
+    });
+    expect(matcher.matchRoute("api.example.com", "/v2/chat")).toBeUndefined();
+    expect(matcher.matchRoute(undefined, "/v1/chat")).toBeUndefined();
+  });
 });

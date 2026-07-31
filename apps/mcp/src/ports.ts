@@ -8,17 +8,28 @@
  * land, bind a real implementation in {@link resolvePorts} — nothing else in
  * this app changes.
  *
- * PORT-TODO(inventory-edge-control §MCP): stdio transport requires Containers.
- * The Rust host (`crates/ferrogate-mcp/src/stdio_client.rs`) spawns a child
- * process per upstream and owns `dispatch_cleanup_handle` (timeout → kill the
- * stdio child + mark the session unavailable). Workers cannot fork, so
- * `transport: "stdio"` is accepted by config and REFUSED at dispatch with
- * `mcp_server_unavailable` rather than silently behaving like HTTP. Such
- * upstreams must move to a Container / `@cloudflare/sandbox` or stay off-CF.
+ * PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — stdio MCP upstreams
+ * are impossible in a Worker. The Rust host
+ * (`crates/ferrogate-mcp/src/stdio_client.rs`) spawns a child process per
+ * upstream and owns `dispatch_cleanup_handle` (timeout → kill the stdio child,
+ * mark the session unavailable). workerd has no `fork`/`exec`, no pipes and no
+ * process table, so there is nothing to spawn and nothing to kill.
+ *
+ * IMPLEMENTED INSTEAD: `transport: "stdio"` is accepted by config (so the
+ * operator's catalog round-trips and the misconfiguration is VISIBLE) and
+ * REFUSED at dispatch with `mcp_server_unavailable` rather than silently
+ * behaving like HTTP. Such upstreams must move to a Container /
+ * `@cloudflare/sandbox` or stay off-CF. See `src/transport.ts` for the full
+ * note and the tests that pin it.
  */
 import type { JsonValue } from "@ferrogate/core";
 
+// `./durable.js` imports the TYPES and `webCryptoIdentityCipher` back out of
+// this module. The cycle is safe because neither side touches the other at
+// module-evaluation time — every reference is inside a function body.
+import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
 import type { ParsedToolDef } from "./jsonrpc.js";
+import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
 
 // ---------------------------------------------------------------------------
 // Upstream MCP server configuration (port of `ferrogate-mcp/src/config.rs`)
@@ -368,7 +379,23 @@ export interface AssetReaderPort {
   >;
 }
 
-/** Pass-through guardrails. PORT-TODO(inventory-edge-control §MCP): bind `@ferrogate/guardrails`. */
+/**
+ * Pass-through guardrails — a STUB, and the most security-relevant one left in
+ * this Worker.
+ *
+ * PORT-TODO(inventory-edge-control §MCP): NOT a platform limit. It is a
+ * deferral, and the thing it is waiting for now exists: `@ferrogate/guardrails`
+ * is complete and its deterministic detector runs in workerd today.
+ * `apps/agent-runtime/src/ports.ts::deterministicGuardrailPort` is a working
+ * reference for exactly this binding — build a `GuardrailEnvelope` with
+ * `envelopeFromText`, call `DeterministicDetector.evaluate` with an ABSOLUTE
+ * deadline (`Date.now() + budget`, not the budget itself), and FAIL CLOSED on a
+ * detector error.
+ *
+ * Until that lands this class allows everything, which means MCP tool
+ * arguments and tool results are currently unscanned. That is a real gap, not a
+ * cosmetic one; it is named here rather than hidden behind a plausible name.
+ */
 export class AllowAllGuardrails implements GuardrailsPort {
   // eslint-disable-next-line @typescript-eslint/require-await
   async inspectInput(): Promise<GuardrailVerdict> {
@@ -381,7 +408,18 @@ export class AllowAllGuardrails implements GuardrailsPort {
   }
 }
 
-/** Approves anything already allowlisted. PORT-TODO: bind the approval store. */
+/**
+ * Approves anything already allowlisted.
+ *
+ * PORT-TODO(inventory-edge-control §MCP): NOT a platform limit — a deferral on
+ * ANOTHER APP. The human-approval queue is control-plane state
+ * (`apps/control-plane`), so binding it means a `[[services]]` service binding
+ * or a shared D1 read, neither of which this Worker can create unilaterally.
+ * Note the standing behavior: the deny-by-default `toolsToExecute` allowlist in
+ * `src/tools.ts` is enforced INDEPENDENTLY of this port, so an un-allowlisted
+ * tool is still refused — what is missing is the interactive step-up, not the
+ * allowlist.
+ */
 export class AutoApproval implements ApprovalPort {
   // eslint-disable-next-line @typescript-eslint/require-await
   async require(): Promise<undefined> {
@@ -389,7 +427,15 @@ export class AutoApproval implements ApprovalPort {
   }
 }
 
-/** In-memory asset catalog. PORT-TODO(inventory-edge-control §MCP): bind `@ferrogate/storage` (R2 + D1). */
+/**
+ * In-memory asset catalog.
+ *
+ * PORT-TODO(inventory-edge-control §MCP): NOT a platform limit — CF has both
+ * primitives this needs (R2 for the bytes, D1 for the catalog rows). It is a
+ * deferral pending `@ferrogate/storage`'s asset surface. CONSEQUENCE while it
+ * stands: assets do not survive an isolate recycle, so this is usable for the
+ * dev bundle and not for a deployment.
+ */
 export class InMemoryAssets implements AssetReaderPort {
   readonly #assets = new Map<string, { asset: StoredAsset; content: Uint8Array }>();
 
@@ -981,26 +1027,57 @@ export interface McpEnv {
 
   /**
    * KV namespace holding in-flight per-user MCP OAuth flows
-   * ({@link StoredMcpOauthFlow}). Declared in `wrangler.toml`; OPTIONAL here
-   * because nothing dereferences it yet.
-   *
-   * PORT-TODO(inventory-edge-control §MCP): back the flow half of
-   * {@link McpCredentialStorePort} with this namespace — KV's per-key
-   * `expirationTtl` is what makes the anonymous OAuth callback's `state`
-   * time-bounded, and `delete()` is what makes it single-use.
+   * ({@link StoredMcpOauthFlow}). Dereferenced by {@link resolvePorts} through
+   * `KvOauthFlowStore`; OPTIONAL here because the dev bundle runs without it
+   * and its absence must produce a clean `not_ready`, not a `TypeError`.
    */
   MCP_OAUTH_KV?: KVNamespace;
 
   /**
+   * Durable Object namespace providing the ATOMIC single-use claim on an
+   * in-flight OAuth flow (`src/oauth-flow.ts`). One instance per state digest,
+   * so two callbacks racing on the same `state` are serialized and exactly one
+   * is served — the property Workers KV cannot express.
+   *
+   * OPTIONAL, and its absence is a real degradation rather than a failure:
+   * {@link resolvePorts} falls back to `KvOauthFlowStore`, whose `get`+`delete`
+   * is not indivisible. Bind it in production.
+   */
+  MCP_OAUTH_FLOWS?: DurableObjectNamespace<McpOauthFlowClaim>;
+
+  /**
    * D1 database holding the sealed per-user identity grants
    * (`mcp_oauth_credentials`) and the tenant's upstream MCP server catalog
-   * (`mcp_servers`). Declared in `wrangler.toml`; OPTIONAL here because
-   * nothing dereferences it yet.
-   *
-   * PORT-TODO(inventory-edge-control §MCP): a revoked grant must not come back
-   * when the isolate recycles, which `InMemoryCredentialStore` cannot promise.
+   * (`mcp_servers`). Dereferenced by {@link resolvePorts} through
+   * `D1CredentialGrants` / `loadServerCatalog`; OPTIONAL for the same reason
+   * as {@link MCP_OAUTH_KV}.
    */
   DB?: D1Database;
+
+  /**
+   * 32-byte AEAD key (base64 or hex) the stored grants are sealed under —
+   * the Rust `FERROGATE_MCP_IDENTITY_KEY`.
+   *
+   * // PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — CF bindings,
+   * // Secrets Store included, resolve at DEPLOY time. There is no runtime
+   * // "open secret X by name/uuid" API, so this Worker cannot fetch its own
+   * // key, cannot hold two key versions at once, and cannot rotate without a
+   * // redeploy. Rust read the key from the process environment and could
+   * // re-read it; a Worker cannot.
+   * //
+   * // IMPLEMENTED INSTEAD: the value is decoded (base64 or hex) and
+   * // length-checked by `decodeIdentityKey`, which REFUSES anything that is
+   * // not exactly 32 bytes, and a missing or malformed key makes
+   * // {@link portsBound} false so `/readyz` answers 503 — instead of the
+   * // Worker silently sealing grants under an ephemeral per-isolate key that
+   * // would be lost on the next recycle.
+   * //
+   * // CONSEQUENCE: {@link StoredMcpOauthCredential.keyVersion} is carried on
+   * // every stored grant but is never used to SELECT a key here. It is an
+   * // honest field with no runtime resolver to feed it; key rotation is a
+   * // redeploy plus a re-seal, not an online operation.
+   */
+  FERROGATE_MCP_IDENTITY_KEY?: string;
 }
 
 let devPorts: InMemoryMcpPorts | undefined;
@@ -1153,6 +1230,22 @@ function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
 }
 
 /**
+ * Whether the deploy-time bindings the DURABLE identity store needs are all
+ * present: the D1 database, the KV namespace, and usable AEAD key material.
+ *
+ * All three or none — a Worker holding D1 but no key would seal grants under an
+ * ephemeral per-isolate key and lose every one of them on the next recycle,
+ * which is worse than refusing traffic.
+ */
+export function durableIdentityBound(env: McpEnv): boolean {
+  return (
+    env.DB !== undefined &&
+    env.MCP_OAUTH_KV !== undefined &&
+    decodeIdentityKey(env.FERROGATE_MCP_IDENTITY_KEY) !== undefined
+  );
+}
+
+/**
  * Whether this Worker has a usable port bundle for authenticated traffic.
  *
  * This is the single source of truth {@link resolvePorts} branches on, so
@@ -1160,23 +1253,58 @@ function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
  * {@link UnboundAuth} — the Workers equivalent of the Rust readiness probe
  * reporting `not_ready` while the cluster has no healthy peer.
  *
- * PORT-TODO(inventory-edge-control §MCP): once the D1/KV/Secrets-Store-backed
- * ports land this becomes a real binding check (`env.DB !== undefined`, …)
- * rather than the dev-bundle flag.
+ * It is now a REAL binding check on the durable path
+ * ({@link durableIdentityBound}) rather than the dev flag alone.
+ *
+ * // PORT-TODO(inventory-edge-control §MCP): NOT a platform limit — a
+ * // cross-app wiring deferral. The last port with no durable
+ * // implementation is {@link AuthPort} — the tenant API-key table lives in the
+ * // control plane (`apps/control-plane`), not here, so binding it means either
+ * // a `[[services]]` service binding to that Worker or a shared D1 read of its
+ * // `api_keys` table. Until one exists, a non-dev Worker reports NOT READY
+ * // even when {@link durableIdentityBound} is satisfied, because authenticating
+ * // a caller is a precondition for every authenticated surface. The identity,
+ * // flow and catalog halves ARE durable-bound below.
  */
 export function portsBound(env: McpEnv): boolean {
   return env.FG_DEV_IN_MEMORY_PORTS === "1";
 }
 
 /**
- * Resolve the port bundle for a request. Fails closed unless the Worker is
- * explicitly running with the in-memory dev bundle.
+ * Resolve the port bundle for a request.
+ *
+ * Three postures, in order:
+ *
+ *  1. **dev bundle** (`FG_DEV_IN_MEMORY_PORTS === "1"`) — everything in memory.
+ *  2. **durable identity** — D1 + KV + key material bound: the credential store
+ *     and cipher are the real, isolate-surviving implementations, so a revoked
+ *     grant stays revoked and an OAuth callback that lands on a different
+ *     isolate than the one that began the flow still completes. `auth` is still
+ *     {@link UnboundAuth}, so the surface answers 503 rather than defaulting
+ *     open — see {@link portsBound}.
+ *  3. **nothing bound** — fail closed.
+ *
+ * Within posture 2 the flow store is chosen by capability, not by config: when
+ * {@link McpEnv.MCP_OAUTH_FLOWS} is bound the single-use claim is the ATOMIC
+ * Durable-Object one, and only a deployment missing that binding degrades to
+ * KV's non-indivisible `get`+`delete`.
  */
 export function resolvePorts(env: McpEnv): McpPorts {
-  if (portsBound(env)) return inMemoryPorts();
-  // PORT-TODO(inventory-edge-control §MCP): bind D1/KV/Secrets-Store-backed
-  // implementations here once the wave-2 packages land. Until then every
-  // authenticated surface fails closed with 503 rather than defaulting open.
+  if (env.FG_DEV_IN_MEMORY_PORTS === "1") return inMemoryPorts();
   const ports = inMemoryPorts();
+  if (durableIdentityBound(env)) {
+    return {
+      ...ports,
+      auth: new UnboundAuth(),
+      credentials: new DurableCredentialStore(
+        env.MCP_OAUTH_KV as KVNamespace,
+        env.DB as D1Database,
+        env.MCP_OAUTH_FLOWS === undefined
+          ? undefined
+          : new DurableOauthFlowStore(env.MCP_OAUTH_FLOWS),
+      ),
+      cipher: identityCipherFrom(env.FERROGATE_MCP_IDENTITY_KEY) as IdentityCipherPort,
+    };
+  }
   return { ...ports, auth: new UnboundAuth() };
 }

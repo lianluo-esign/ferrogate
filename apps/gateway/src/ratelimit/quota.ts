@@ -55,6 +55,15 @@ export interface QuotaSubject {
  * `503 quota_resolution_unavailable` on a lookup error — which is why
  * {@link QuotaResolution} has an `unavailable` variant rather than defaulting
  * to "no quota".
+ *
+ * Not a platform limit. Both tables already exist in the CONTROL database
+ * (`sql/d1-ts/control/0001_init_control.sql`: `quota_policies` keyed by
+ * `(scope_type, scope_id)`, `plans` by slug), which this Worker already binds —
+ * as `BILLING_DB`, for metering. Landing this needs a `D1QuotaPolicySource`
+ * whose `policiesFor` issues ONE `batch()` for the ≤4 chain scopes plus the
+ * plan row, a purpose-named `CONTROL_DB` binding, and a rejected-promise →
+ * `{ ok: false, detail }` mapping so a D1 outage stays 503 and never silently
+ * admits an unlimited caller.
  */
 export interface QuotaPolicySource {
   policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot>;

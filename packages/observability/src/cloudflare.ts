@@ -9,11 +9,15 @@
  * to Analytics Engine + Workers Logs over bindings. OTLP/JSON is used so CF's
  * native Worker OTLP export and FerroGate telemetry line up in one store.
  *
- * PORT-TODO(§4.5): in-Worker, the "build request, don't send" split and the
- * collector-Worker hop can collapse — the gateway Worker can hold the Analytics
- * Engine binding directly and call `env.AE.writeDataPoint(...)`. This backend
- * ports the container-side HTTP shape faithfully; the in-Worker AE sink is a
- * separate wave-3 concern (`apps/gateway`).
+ * The in-Worker collapse IS ported — `./analytics-engine.ts`'s
+ * `AnalyticsEngineSink` holds the dataset binding and calls `writeDataPoint()`
+ * directly, with no collector hop and no HTTP. It is a SEPARATE type rather
+ * than another `TelemetryBackend` because that contract is "build a request,
+ * do not send it", and an AE write has no URL, method, body, or response;
+ * forcing it into `OtlpHttpRequest` would misdescribe the platform. A
+ * deployment picks one: `CloudflareBackend` when telemetry must leave the
+ * Worker as OTLP (the container-side shape, ported faithfully here), the AE
+ * sink when the gateway holds the binding itself.
  */
 import {
   ObservabilityConfigError,

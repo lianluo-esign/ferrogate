@@ -40,12 +40,22 @@ export type SyncBridgeStrategy =
   | "scoped_current_thread"
   | "event_loop";
 
-// PORT-TODO(inventory §7): tokio runtime introspection has no CF/JS equivalent.
-// `Handle::try_current()` / `runtime_flavor()` describe an OS-thread scheduler
-// that does not exist on the Workers event loop. We report the ambient executor
-// as `undefined` (no tokio-style runtime is ever "current") so the strategy
-// resolves to `event_loop`; the two thread-based branches are preserved only as
-// documented, test-covered concepts, never taken at runtime.
+// PORT-TODO(inventory §7) — PLATFORM LIMIT, NOT CLOSED.
+//
+// The exact limitation: **workerd has no OS-thread scheduler to introspect.**
+// `Handle::try_current()` / `runtime_flavor()` ask a tokio runtime object which
+// flavor of thread pool is driving the current thread. On Workers there is no
+// thread pool, no thread-local runtime handle, and no thread-spawn primitive —
+// a Worker is one cooperative event loop per isolate. There is nothing for this
+// function to interrogate, and no API that could be added to this file to make
+// there be.
+//
+// The closest behavior implemented instead: report the ambient executor as
+// `undefined` — "no tokio-style runtime is current", which is TRUE rather than
+// a stub — so `currentSyncBridgeStrategy()` resolves to `event_loop`. The two
+// thread-based branches are preserved as a pure, test-covered MAPPING
+// (`strategyForFlavor`) so the Rust branch structure is auditable, but they are
+// never taken at runtime and cannot be. `test/runtime.test.ts` pins both halves.
 export function currentRuntimeFlavor(): RuntimeFlavor | undefined {
   return undefined;
 }

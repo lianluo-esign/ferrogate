@@ -8,12 +8,15 @@
  * own check can never be silently accepted downstream.
  */
 import { endpointUrls } from "../schema/entities.js";
+import type { McpServerConfig } from "../schema/entities.js";
 import type { Config } from "../schema/index.js";
 import { parseUpstreamEndpoint } from "../routing.js";
 import {
   fail,
   isBlank,
   isSetAndEmpty,
+  isValidHeaderName,
+  isValidHeaderValue,
   validateHeaders,
   validateSecretRef,
 } from "./helpers.js";
@@ -177,17 +180,227 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
   return names;
 }
 
+/** Headers the MCP protocol owns; a static header may never set them. */
+const MCP_PROTOCOL_OWNED_HEADERS = [
+  "mcp-protocol-version",
+  "mcp-method",
+  "mcp-name",
+  "mcp-session-id",
+];
+
 /**
- * `validate_mcp_servers`. The duplicate-name gate is this crate's; the per-server
- * shape check is `ferrogate_mcp::validate_mcp_server_config`, whose modeled legs
- * (name shape + deny-by-default execution + the network-transport URL
- * requirement) are ported here.
+ * `ferrogate_mcp::config::validate_static_header`. Throws the bare reason (the
+ * caller wraps it into `field mcp_servers[i]: <reason>`, which is what the Rust
+ * `anyhow` `Display` renders).
  *
- * PORT-TODO(inventory §5.3): the remaining legs of
- * `ferrogate_mcp::validate_mcp_server_config` (reconnect backoff bounds, static
- * header/auth-mode pairing, OAuth config, per-server TLS, stdio `command`) read
- * `McpServerConfig` fields owned by `@ferrogate/mcp` (wave 2) that this schema
- * still accepts via passthrough; delegate to that crate's validator once ported.
+ * `HeaderName::from_bytes(..).context("MCP static header name is invalid")` and
+ * `HeaderValue::from_str(..).context("MCP static header value is invalid")` show
+ * only their outermost context under `Display`, so those two strings are the
+ * observable messages.
+ */
+function validateMcpStaticHeader(header: { name: string; value: string | null; value_env: string | null }): void {
+  if (!isValidHeaderName(header.name)) throw new Error("MCP static header name is invalid");
+  if (MCP_PROTOCOL_OWNED_HEADERS.some((reserved) => header.name.toLowerCase() === reserved)) {
+    throw new Error(`MCP static header ${header.name} is protocol-owned`);
+  }
+  if (header.value !== null && header.value_env === null) {
+    if (!isValidHeaderValue(header.value)) throw new Error("MCP static header value is invalid");
+    return;
+  }
+  if (header.value === null && header.value_env !== null && !isBlank(header.value_env)) return;
+  throw new Error("MCP static header must set exactly one of value or value_env");
+}
+
+/**
+ * `ferrogate_mcp::http_client::validate_http_endpoint`.
+ *
+ * Rust parses with `http::Uri`, which accepts a scheme-less reference (then
+ * fails the scheme match). JS `new URL()` throws on those instead, so the scheme
+ * is extracted first and only a syntactically well-formed absolute http(s) URL is
+ * handed to `new URL` — that keeps `"/mcp"` and `"ftp://x"` on the
+ * "require http or https" message and reserves "invalid MCP endpoint" for input
+ * `Uri` itself would reject (empty / whitespace / control characters).
+ */
+function validateMcpHttpEndpoint(raw: string): void {
+  if (raw.length === 0 || /[\s\u0000-\u001f\u007f]/.test(raw)) {
+    throw new Error(`invalid MCP endpoint ${raw}`);
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(raw)?.[1]?.toLowerCase() ?? null;
+  if (scheme !== "http" && scheme !== "https") {
+    throw new Error("MCP network transports require http or https url");
+  }
+  try {
+    new URL(raw);
+  } catch {
+    throw new Error(`invalid MCP endpoint ${raw}`);
+  }
+}
+
+/**
+ * `ferrogate_mcp::config::validate_oauth_config`. `Uri`-parse + scheme/authority
+ * checks are done with `new URL`, which enforces the same two facts (a parseable
+ * absolute URL with an authority).
+ */
+function validateMcpOauthConfig(
+  oauth: {
+    issuer: string;
+    client_id: string;
+    client_secret_ref: string | null;
+    redirect_uri: string | null;
+    scopes: string[];
+    allow_insecure_http: boolean;
+  },
+  authorizationCode: boolean,
+): void {
+  let issuer: URL;
+  try {
+    issuer = new URL(oauth.issuer);
+  } catch {
+    throw new Error("MCP oauth.issuer is invalid");
+  }
+  if ((issuer.protocol !== "http:" && issuer.protocol !== "https:") || issuer.host === "") {
+    throw new Error("MCP oauth.issuer must be an http or https URL");
+  }
+  if (issuer.protocol === "http:" && !oauth.allow_insecure_http) {
+    throw new Error("MCP oauth.issuer must use https unless allow_insecure_http is explicitly enabled");
+  }
+  if (isBlank(oauth.client_id)) throw new Error("MCP oauth.client_id cannot be empty");
+  if (oauth.scopes.length === 0 || oauth.scopes.some((scope) => isBlank(scope))) {
+    throw new Error("MCP oauth.scopes must contain non-empty values");
+  }
+  if (authorizationCode) {
+    if (oauth.client_secret_ref === null || oauth.client_secret_ref.length === 0) {
+      throw new Error("MCP per_user_oauth requires oauth.client_secret_ref");
+    }
+    if (oauth.redirect_uri === null || oauth.redirect_uri.length === 0) {
+      throw new Error("MCP per_user_oauth requires oauth.redirect_uri");
+    }
+  }
+}
+
+/**
+ * PORT-TODO(inventory §5.3) — PLATFORM LIMIT, NOT CLOSED.
+ *
+ * `ferrogate_mcp::tls::validate_mcp_tls_config` is a pre-flight that reads
+ * `tls.ca_cert_path` off local disk and PEM-parses it, so that the rustls client
+ * config it later builds is known-constructible. NEITHER half is expressible on
+ * Cloudflare: workerd has no filesystem (there is no path to read), and outbound
+ * `fetch()` uses the platform trust store with no per-request hook to add a
+ * custom CA root or to disable verification (`insecure_skip_verify`). There is no
+ * approximation of "trust this extra root" for a Worker to make.
+ *
+ * CLOSEST BEHAVIOR IMPLEMENTED: rather than accept a per-server TLS setting the
+ * runtime would then silently ignore — a security-relevant lie about who the
+ * gateway trusts — either field being set is REJECTED at load time with a message
+ * naming the limitation. Pinned by
+ * `validate-entities.test.ts` > "mcp tls is rejected, not silently ignored".
+ */
+function validateMcpTlsConfig(tls: { insecure_skip_verify: boolean; ca_cert_path: string | null }): void {
+  if (tls.ca_cert_path !== null) {
+    throw new Error(
+      "MCP tls.ca_cert_path is unsupported on Cloudflare Workers: there is no filesystem to read " +
+        "the PEM from and fetch() exposes no hook to add a custom CA root",
+    );
+  }
+  if (tls.insecure_skip_verify) {
+    throw new Error(
+      "MCP tls.insecure_skip_verify is unsupported on Cloudflare Workers: fetch() exposes no hook " +
+        "to disable upstream certificate verification",
+    );
+  }
+}
+
+/**
+ * `ferrogate_mcp::validate_mcp_server_config`, ported 1:1 in the Rust statement
+ * order (which is observable — it decides which of several problems an operator
+ * is told about first). Every leg raises the bare Rust reason; `validateMcpServers`
+ * attributes it to `field mcp_servers[{index}]`, exactly like the Rust
+ * `.map_err(|error| anyhow!("field mcp_servers[{index}]: {error}"))`.
+ *
+ * The only leg NOT ported is the per-server TLS pre-flight — see
+ * `validateMcpTlsConfig` above for the platform limitation.
+ */
+export function validateMcpServerConfig(server: McpServerConfig): void {
+  if (isBlank(server.name)) throw new Error("MCP server name cannot be empty");
+  if (server.name.includes("-")) {
+    throw new Error("MCP server name cannot contain '-' because tool names use serverName-toolName");
+  }
+  if (server.tools_to_execute.length === 0) {
+    throw new Error(
+      `MCP server ${server.name} must set tools_to_execute; execution is deny-by-default`,
+    );
+  }
+  if (server.max_reconnect_attempts === 0) {
+    throw new Error(`MCP server ${server.name} max_reconnect_attempts must be greater than 0`);
+  }
+  if (server.min_reconnect_backoff_secs === 0 || server.max_reconnect_backoff_secs === 0) {
+    throw new Error(`MCP server ${server.name} reconnect backoff values must be greater than 0`);
+  }
+  if (server.min_reconnect_backoff_secs > server.max_reconnect_backoff_secs) {
+    throw new Error(`MCP server ${server.name} min reconnect backoff cannot exceed max`);
+  }
+  switch (server.auth_type) {
+    case "oauth":
+      throw new Error(
+        "MCP auth_type oauth is not implemented; use per_user_oauth for user-isolated OAuth or " +
+          "shared_headers for shared credentials",
+      );
+    case "per_user_headers":
+      throw new Error(
+        "MCP auth_type per_user_headers is not implemented; use per_user_oauth, original_bearer, " +
+          "or ferrogate_signed_jwt",
+      );
+    case "shared_headers":
+      if (server.headers.length === 0) {
+        throw new Error("MCP auth_type shared_headers requires at least one static header");
+      }
+      break;
+    case "none":
+      if (server.headers.length > 0) {
+        throw new Error("MCP static headers require auth_type shared_headers");
+      }
+      break;
+    case "per_user_oauth":
+    case "original_bearer": {
+      if (server.oauth === null) {
+        throw new Error(`MCP auth_type ${server.auth_type} requires oauth configuration`);
+      }
+      validateMcpOauthConfig(server.oauth, server.auth_type === "per_user_oauth");
+      break;
+    }
+    case "ferrogate_signed_jwt":
+      if (server.signed_jwt_audience === null || server.signed_jwt_audience.length === 0) {
+        throw new Error("MCP auth_type ferrogate_signed_jwt requires signed_jwt_audience");
+      }
+      break;
+  }
+  for (const header of server.headers) validateMcpStaticHeader(header);
+  if (server.auth_type !== "shared_headers" && server.headers.length > 0) {
+    throw new Error("per-user MCP identity modes cannot define static headers");
+  }
+  if (server.transport === "streamable_http" || server.transport === "sse") {
+    if (server.url === null) throw new Error(`MCP network server ${server.name} requires url`);
+    validateMcpHttpEndpoint(server.url);
+    try {
+      validateMcpTlsConfig(server.tls);
+    } catch (error) {
+      // Rust: `.with_context(|| format!("MCP server {}", config.name))`. anyhow's
+      // `Display` renders only the outermost context, so the Rust message here is
+      // literally `MCP server <name>`; the TS port keeps the reason attached
+      // because it names a platform limitation the operator must act on.
+      throw new Error(`MCP server ${server.name}: ${(error as Error).message}`);
+    }
+  } else {
+    if (server.command === null || server.command.length === 0) {
+      throw new Error(`MCP stdio server ${server.name} requires command`);
+    }
+  }
+}
+
+/**
+ * `validate_mcp_servers`. The duplicate-name gate is this crate's; every per-server
+ * leg is `ferrogate_mcp::validate_mcp_server_config` (see `validateMcpServerConfig`),
+ * wrapped into `field mcp_servers[{index}]: <reason>`.
  */
 export function validateMcpServers(config: Config): void {
   const names = new Set<string>();
@@ -197,16 +410,10 @@ export function validateMcpServers(config: Config): void {
       fail(`mcp_servers[${index}].name`, `duplicate MCP server name ${server.name}`);
     }
     names.add(server.name);
-    const at = `mcp_servers[${index}]`;
-    if (isBlank(server.name)) fail(at, "MCP server name cannot be empty");
-    if (server.name.includes("-")) {
-      fail(at, "MCP server name cannot contain '-' because tool names use serverName-toolName");
-    }
-    if (server.tools_to_execute.length === 0) {
-      fail(at, `MCP server ${server.name} must set tools_to_execute; execution is deny-by-default`);
-    }
-    if (server.transport === "streamable_http" || server.transport === "sse") {
-      if (server.url === null) fail(at, `MCP network server ${server.name} requires url`);
+    try {
+      validateMcpServerConfig(server);
+    } catch (error) {
+      fail(`mcp_servers[${index}]`, error instanceof Error ? error.message : String(error));
     }
   }
 }

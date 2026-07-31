@@ -17,10 +17,14 @@
  *  - `cloudflare`  — `CloudflareBackend` (bearer-authed collector Worker, #520).
  *  - `prometheus`  — the Prometheus text-exposition renderer.
  *
- * On Cloudflare the "build request, don't send" split collapses into direct
- * Analytics Engine / Logpush / Tail bindings (inventory §4.5, §5); the
- * `PORT-TODO(§4.5)` markers in `cloudflare.ts` and `prometheus.ts` flag where
- * the in-Worker re-architecture attaches.
+ *  - `analytics-engine` — `AnalyticsEngineSink`: the IN-WORKER destination that
+ *                    holds the dataset binding and calls `writeDataPoint()`
+ *                    directly, with no collector hop (inventory §4.5).
+ *
+ * The one surface that CANNOT be ported is metric ACCUMULATION: a Worker has no
+ * long-lived process to hold counters in, so a `/metrics` route must be fed
+ * from a Durable Object or an Analytics Engine read. That is the remaining
+ * `PORT-TODO(§4.5)` in `prometheus.ts`; the renderer itself is complete.
  */
 
 export * from "./config.js";
@@ -30,3 +34,4 @@ export * from "./otlp.js";
 export * from "./backend.js";
 export * from "./cloudflare.js";
 export * from "./prometheus.js";
+export * from "./analytics-engine.js";

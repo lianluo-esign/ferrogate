@@ -2,10 +2,31 @@
  * Prometheus text-format rendering of the gateway metrics snapshot.
  * Clean-room port of `ferrogate-observability::prometheus`.
  *
- * PORT-TODO(§4.5): in a stateless Worker there is no long-lived process to
- * accumulate `GatewayMetricsSnapshot`; a Hono `GET /metrics` route must feed
- * this renderer from a Durable Object counter or an Analytics Engine SQL read.
- * The renderer itself is a pure snapshot→text function and ports 1:1.
+ * PORT-TODO(§4.5) — PLATFORM LIMIT, NOT CLOSED (renderer itself is closed).
+ *
+ * The exact limitation: **a Worker has no long-lived process to accumulate a
+ * `GatewayMetricsSnapshot` in.** The Rust gateway held its counters in process
+ * memory for the lifetime of the binary and `GET /metrics` read them directly.
+ * A Worker isolate is created and destroyed per colo, per version, per burst,
+ * so a module-scope counter bag is per-isolate: N isolates give N partial
+ * snapshots and `/metrics` returns whichever one happened to answer. There is
+ * no in-Worker equivalent of "the process's counters", and no scrape-time API
+ * that aggregates across isolates.
+ *
+ * What IS closed: the renderer. `renderPrometheusText` is a pure
+ * snapshot→text function and ports 1:1; `test/prometheus.test.ts` pins its
+ * output byte-for-byte.
+ *
+ * The two honest sources a `GET /metrics` route can feed it from, both of which
+ * are composition-root wiring rather than this module's business:
+ *   * a **Durable Object** counter (single instance, single-threaded — the same
+ *     answer `ShadowBudgetDurableObject` and the gateway rate limiter use), at
+ *     the cost of a DO hop on every increment; or
+ *   * an **Analytics Engine** SQL read, which is eventually consistent and
+ *     sampled — fine for dashboards, wrong for an exact counter.
+ *
+ * Neither is a drop-in for process memory, which is why this stays a marker.
+ * A module-scope `Map` here would look like a port and silently under-report.
  */
 import type {
   GatewayMetricsSnapshot,

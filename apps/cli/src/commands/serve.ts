@@ -3,13 +3,40 @@
  * `admin-api serve` (deprecated), `billing serve`, and
  * `storage migrate-to-supabase`.
  *
- * PORT-TODO(inventory-edge-control.md §1.4): **the CLI's identity as a process
- * launcher does not survive the port.** On Cloudflare each of these subsystems
- * is a deployed Worker (`apps/gateway`, `apps/control-plane`, …), so there is
- * no local listener to bind. Rather than silently dropping the verbs — or worse,
- * exiting 0 as if a server had started — every `serve` verb keeps its full flag
- * surface, validates what it can, and prints the exact deploy/health command
- * that replaces it, exiting with the usage class.
+ * PORT-TODO(inventory-edge-control.md §1.4) — KEPT, PLATFORM LIMIT, NOT
+ * CLOSEABLE: **the CLI's identity as a process launcher does not survive the
+ * port.**
+ *
+ * The exact limitation: the Rust `run` verb calls
+ * `pingora::Server::run_forever()` — the process itself binds `listen` and
+ * serves. workerd exposes no equivalent: a Worker is *instantiated by the
+ * Cloudflare runtime in response to an inbound request*, it never owns a
+ * listening socket, and there is no API by which a client process can hand a
+ * running isolate a config and tell it to start serving. `wrangler dev`
+ * (workerd locally) and `wrangler deploy` (the edge) are the only ways to bring
+ * one up, and both are build-and-upload operations, not a process this CLI can
+ * become. The `--upgrade` flag is doubly impossible: it is a `SIGQUIT`
+ * hand-off between two pingora processes sharing listener fds, and Workers has
+ * neither processes, signals, nor fds.
+ *
+ * Why not "just run the Hono app under `Bun.serve`"? Because it would be the
+ * fake this marker exists to prevent. `apps/gateway` is written against the
+ * Workers runtime: its rate limiter is a Durable Object, its state is a D1
+ * binding, its secrets are Secrets Store bindings, and bindings are materialized
+ * by workerd from `wrangler.toml` at (local) deploy time. A bare Bun process has
+ * none of them, so a `Bun.serve` "gateway" would answer requests with none of
+ * the gateway's actual behavior while exiting 0 — the exact "the gateway is up"
+ * lie the refusal below is designed to make impossible.
+ *
+ * The closest behavior implemented: every `serve` verb keeps its full flag
+ * surface, parses and validates it (so a typo is still caught), echoes the
+ * settings the operator supplied with secrets redacted, prints the exact
+ * `wrangler`/`ferrogate ctl` commands that replace it, and exits with the usage
+ * class. It deliberately does NOT exit 0 — a script that treats exit 0 as
+ * "the gateway is up" must fail here, loudly, rather than proceed against a
+ * gateway that was never started. `test/serve.test.ts` pins that approximation:
+ * the non-zero exit, the empty stdout, the flag surface, the secret redaction,
+ * and the fact that the marker itself is still printed.
  *
  * The flags are preserved verbatim (including their env vars and defaults)
  * because operators' scripts and docs reference them, and because they are the
@@ -412,9 +439,17 @@ export const storageCommand: CommandNode = {
         runtime.io.stderr(
           "ferrogate storage migrate-to-supabase: Postgres/Supabase is not the durable store " +
             "in the Cloudflare build.\n" +
-            "  PORT-TODO(inventory-edge-control.md §1.1): the target store is D1 " +
-            "(packages/storage owns the SQLite migrations); this verb becomes a D1 import once " +
-            "that package lands, and refuses now rather than touching data with a stale plan.\n",
+            "  PORT-TODO(inventory-edge-control.md §1.1) — KEPT, PLATFORM LIMIT: this verb's " +
+            "Rust body opens a source Postgres pool and a target Supabase pool and copies " +
+            "between them. Neither endpoint exists here: the durable store is D1, and a D1 " +
+            "database is reachable only through a DEPLOY-TIME binding held by a Worker — there " +
+            "is no bind-by-uuid API a client process can call, and this CLI is a Bun binary, " +
+            "not a Worker, so it holds no binding.\n" +
+            "  schema:  bunx wrangler d1 migrations apply <database> " +
+            "--config apps/control-plane/wrangler.toml\n" +
+            "  data:    bunx wrangler d1 execute <database> --file <dump.sql>\n" +
+            "  Refusing rather than touching data through a path that cannot honour the " +
+            "migration's transactional plan.\n",
         );
         return CliError.usage("").exitCode();
       },

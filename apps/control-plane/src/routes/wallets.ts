@@ -29,10 +29,14 @@
  * `charge` refuses to overdraw. Rust's wallet hold/settle path treats an
  * insufficient balance as a `409`, not a silent negative balance.
  *
- * PORT-TODO(inventory-data-billing §wallets): the balance update and its ledger
- * insert must become one atomic D1 `batch()` when `@ferrogate/storage` lands —
- * on the in-memory store they are two sequential writes in a single-threaded
- * isolate, which is atomic in practice but not by construction.
+ * The ledger entry and the balance it explains are written as ONE unit through
+ * {@link ControlPlaneStore.atomic}, which on the durable store is a single D1
+ * `batch()` — a real SQLite transaction — with both statements guarded on the
+ * wallet revision the balance was computed from. That closes two holes the
+ * previous sequential pair had: a failure between the two writes could leave a
+ * ledger entry with no balance movement (money the operator is told about but
+ * was never charged), and a concurrent movement could compute both new balances
+ * from the same old one and lose a charge entirely.
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
@@ -103,8 +107,13 @@ function balanceOf(record: StoreRecord): number {
 }
 
 /**
- * The shared movement path: authorize the tenant, load the wallet, append a
- * ledger entry, then move the balance to match it.
+ * The shared movement path: authorize the tenant, load the wallet, then append
+ * the ledger entry and move the balance in ONE atomic unit.
+ *
+ * The overdraft refusal is computed from the balance the unit is guarded on, so
+ * a wallet that another movement drained in between does not settle against a
+ * stale balance: the guard fails, the store retries against the new state, and
+ * the second `charge` sees the balance the first one left.
  */
 function movement(options: {
   readonly entryKind: "adjustment" | "charge";
@@ -132,22 +141,34 @@ function movement(options: {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    await deps.store.create(LEDGER, scope, {
-      id: crypto.randomUUID(),
-      wallet_id: tenantId,
-      tenant_id: tenantId,
-      kind: options.entryKind,
-      amount_cents: delta,
-      balance_after_cents: next,
-      reason: typeof body.reason === "string" ? body.reason : null,
-      reference: typeof body.reference === "string" ? body.reference : null,
-      recorded_at: now,
-    });
-    const stored = await deps.store.merge(WALLETS, scope, tenantId, {
-      balance_cents: next,
-      updated_at: now,
-    });
-    return json(c, 200, adminItem("wallet", stored));
+    const applied = await deps.store.atomic(scope, [
+      {
+        kind: "create",
+        collection: LEDGER,
+        record: {
+          id: crypto.randomUUID(),
+          wallet_id: tenantId,
+          tenant_id: tenantId,
+          kind: options.entryKind,
+          amount_cents: delta,
+          balance_after_cents: next,
+          reason: typeof body.reason === "string" ? body.reason : null,
+          reference: typeof body.reference === "string" ? body.reference : null,
+          recorded_at: now,
+        },
+      },
+      {
+        kind: "merge",
+        collection: WALLETS,
+        id: tenantId,
+        patch: { balance_cents: next, updated_at: now },
+      },
+    ]);
+    // `null` means the wallet went away between the read and the write. It is
+    // the same 404 the read would have produced, and — the point of the unit —
+    // no ledger entry was written for a movement that did not happen.
+    if (applied === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
+    return json(c, 200, adminItem("wallet", applied[1]));
   };
 }
 

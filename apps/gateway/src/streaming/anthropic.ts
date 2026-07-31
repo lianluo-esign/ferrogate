@@ -26,7 +26,7 @@
  */
 import {
   type AnthropicMessagesPort,
-  localAnthropicMessagesPort,
+  defaultAnthropicMessagesPort,
 } from "./ports.js";
 import {
   type SseFrame,
@@ -203,7 +203,7 @@ export class OpenAiToAnthropicNormalizer {
 
   constructor(options: OpenAiToAnthropicOptions) {
     this.#fallbackModel = options.fallbackModel;
-    this.#port = options.port ?? localAnthropicMessagesPort;
+    this.#port = options.port ?? defaultAnthropicMessagesPort;
   }
 
   /** True once the terminal (or error) frames have been produced. */
@@ -466,7 +466,7 @@ export function openAiToAnthropicStream(
 export function bufferedOpenAiToAnthropicSse(
   body: Uint8Array | ArrayBuffer | string,
   fallbackModel: string,
-  port: AnthropicMessagesPort = localAnthropicMessagesPort,
+  port: AnthropicMessagesPort = defaultAnthropicMessagesPort,
 ): Uint8Array {
   const completion = chatSseToCompletion(body);
   const message = port.chatCompletionToMessage(completion, fallbackModel);

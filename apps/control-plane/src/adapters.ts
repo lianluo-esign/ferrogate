@@ -7,16 +7,18 @@
  * it — the 197 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
  *
- * The credential/RBAC adapters below are still the *bootstrap* ones: they read
- * declarative JSON from Worker vars so the control plane runs and behaves
- * correctly today, while `@ferrogate/policy` (RBAC) and `@ferrogate/secrets`
- * (Secrets Store) are written concurrently.
+ * CREDENTIALS and RBAC are now durable too, on the same switch: `resolveApiKeys`
+ * builds `D1ApiKeyAuthenticator` over the control database's `static_api_keys`
+ * (hashed secrets, `scopes_json`, `platform_operator`, lifecycle columns) and
+ * `resolveRbac` builds `D1RbacAuthorizer` over `tenant_role_bindings ⋈ roles`.
+ * Both keep their declarative `Json*` twin as the per-credential/per-tenant
+ * FALLBACK, so a deployment that has provisioned no rows behaves exactly as it
+ * did, while a deployment that has cannot be loosened by a stale var.
  *
- * PORT-TODO(inventory-edge-control §5.2): replace `JsonApiKeyAuthenticator`
- * with the D1-backed `StorageApiKeyAuthenticator` twin (prefix lookup +
- * constant-time hash verify) and move the credential material into Secrets
- * Store; replace `JsonRbacAuthorizer` with `@ferrogate/policy`'s role
- * resolution.
+ * The one credential leg that is NOT durable here is the native/virtual one, and
+ * it is a platform limit rather than an unfinished port — see the PORT-TODO in
+ * `src/store/api_keys.ts`, which states it exactly (a key's scopes live in the
+ * per-tenant database and Workers resolve D1 bindings at deploy time).
  */
 import type {
   ApiKeyAuthenticatorPort,
@@ -33,6 +35,15 @@ import type {
   TenancyLifecycleGatePort,
 } from "./ports.js";
 import { DEFAULT_ADMIN_LIST_LIMIT, DEFAULT_ADMIN_LIST_MAX_LIMIT } from "./responses.js";
+import {
+  DEFAULT_DOH_ENDPOINT,
+  DEFAULT_DOH_TIMEOUT_MS,
+  DohTxtResolver,
+  type SiteDomainTxtResolver,
+  StaticAnswersTxtResolver,
+  UnboundTxtResolver,
+} from "./site_domain_txt.js";
+import { D1ApiKeyAuthenticator } from "./store/api_keys.js";
 import { D1ControlPlaneStore } from "./store/d1.js";
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 
@@ -256,6 +267,98 @@ export class JsonRbacAuthorizer implements RbacAuthorizerPort {
   }
 }
 
+/**
+ * The DURABLE RBAC authorizer: role grants read from the control database
+ * (`roles`, `tenant_role_bindings`, `permissions` in
+ * `sql/d1-ts/control/0001_init_control.sql`) instead of a Worker var.
+ *
+ * ```sql
+ * tenant_role_bindings(tenant_id, role_id) ⋈ roles(id).permission_keys_json
+ * ```
+ *
+ * A tenant's granted actions are the UNION of the permission keys of every role
+ * bound to it. `roles.permission_keys_json` is the authority — `permissions` is
+ * the human-facing catalogue of what a key means, and joining through it would
+ * make an un-catalogued key silently ungrantable, which is a different (and
+ * wrong) policy.
+ *
+ * Three properties, each of which is the reason for the shape it forces:
+ *
+ *  - **A storage failure is `503`, never an implicit allow.** `RbacDecision`
+ *    has an `"unavailable"` variant precisely so this path cannot collapse into
+ *    "denied" (which would look like a policy decision) or "allowed" (which
+ *    would be a hole opened by an outage). Rust `require_guardrail_auth` does
+ *    the same.
+ *  - **Only a DECLARED platform operator skips the check.** An unclassified
+ *    credential is a tenant with the unforgeable empty-string id, so it is
+ *    checked and denied rather than waved through (#515).
+ *  - **The fallback is the var-backed grants, not "allow".** A control database
+ *    that has no `tenant_role_bindings` rows at all is a deployment that has not
+ *    adopted durable RBAC yet, and it keeps its declarative grants; but a tenant
+ *    that HAS bindings is decided by them alone, so adding a durable binding can
+ *    never be loosened by a stale var.
+ */
+export class D1RbacAuthorizer implements RbacAuthorizerPort {
+  readonly #db: D1Database;
+  readonly #fallback: RbacAuthorizerPort;
+
+  constructor(db: D1Database, fallback: RbacAuthorizerPort) {
+    this.#db = db;
+    this.#fallback = fallback;
+  }
+
+  async authorize(auth: AuthContext, rbacAction: string): Promise<RbacDecision> {
+    if (auth.platformOperator) return { allowed: true };
+    const tenantId = auth.tenancy.tenantId ?? "";
+
+    let rows: { permission_keys_json: string }[];
+    try {
+      const result = await this.#db
+        .prepare(
+          `SELECT roles.permission_keys_json AS permission_keys_json
+             FROM tenant_role_bindings
+             JOIN roles ON roles.id = tenant_role_bindings.role_id
+            WHERE tenant_role_bindings.tenant_id = ?`,
+        )
+        .bind(tenantId)
+        .all<{ permission_keys_json: string }>();
+      rows = result.results;
+    } catch (error) {
+      // The one thing this must never do is guess.
+      return {
+        allowed: "unavailable",
+        detail: `rbac role lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    // No durable bindings for this tenant ⇒ this deployment has not moved its
+    // grants into the database. Defer to the declarative ones rather than
+    // denying every RBAC-guarded operation the moment a database is bound.
+    if (rows.length === 0) return this.#fallback.authorize(auth, rbacAction);
+
+    const granted = new Set<string>();
+    for (const row of rows) {
+      let keys: unknown;
+      try {
+        keys = JSON.parse(row.permission_keys_json);
+      } catch {
+        // A corrupt role grants nothing. Refusing to parse is not the same as
+        // refusing to authorize, so the other roles still count.
+        continue;
+      }
+      if (!Array.isArray(keys)) continue;
+      for (const key of keys) if (typeof key === "string") granted.add(key);
+    }
+
+    if (granted.has(rbacAction) || granted.has("*")) return { allowed: true };
+    return {
+      allowed: false,
+      code: "guardrail_rbac_denied",
+      message: `tenant roles do not grant required action ${rbacAction}`,
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime status + metrics
 // ---------------------------------------------------------------------------
@@ -263,10 +366,38 @@ export class JsonRbacAuthorizer implements RbacAuthorizerPort {
 export const SERVICE_NAME = "ferrogate-control-plane";
 
 /**
- * PORT-TODO(inventory-edge-control §4): source these from the live config
- * snapshot (`@ferrogate/config`) and Analytics Engine (`@ferrogate/observability`)
- * instead of the store. The SHAPE is the Rust `AdminStatus`/Prometheus
- * exposition, so consumers do not change when the sources are wired.
+ * Rust `AdminStatus` / the Prometheus exposition, over this Worker's real
+ * sources.
+ *
+ * `snapshot` is no longer the literal `"unversioned"`: it reports the
+ * `config_snapshot_id` of the gateway-config snapshot the control plane last
+ * PROMOTED (`routes/admin_config_ops.ts` writes `runtime-state/active-config`,
+ * carrying `@ferrogate/config`'s own `configSnapshotId(config)` of the candidate
+ * it validated). That is the live snapshot on this platform: there is no process
+ * holding an `ArcSwap` to interrogate, so the durable activation record IS the
+ * answer to "which config is current", and it is the value a data-plane isolate
+ * reads on its next config fetch. A deployment that has never promoted one
+ * still reports `"unversioned"`, which is true rather than fabricated.
+ *
+ * PORT-TODO(inventory-edge-control §4) — PLATFORM LIMIT, sharpened, for the
+ * `observability()` feed ONLY. Rust reads recent request/latency series off its
+ * in-process registry. The Workers equivalent is Analytics Engine, whose WRITE
+ * side is a binding but whose READ side is the account-scoped
+ * `/analytics_engine/sql` REST endpoint — an authenticated call to the live
+ * Cloudflare API, which this app is not permitted to make and which has no
+ * offline emulation in `wrangler dev --local` / vitest-pool-workers (miniflare
+ * accepts `writeDataPoint` and discards it; there is nothing to query back). So
+ * the feed answers an EMPTY list rather than fabricating series, and
+ * `test/runtime-status.test.ts` pins that it stays empty and does not invent
+ * rows. It closes when an Analytics Engine query binding exists, or behind a
+ * separate reader service that holds the account token.
+ *
+ * `metrics()` deliberately does NOT render `@ferrogate/observability`'s
+ * `renderPrometheusText`: that function serializes a `GatewayMetricsSnapshot`
+ * (upstream latencies, token counters, provider attempts) which this Worker does
+ * not measure, so exposing it would publish a scrape full of zeros that a
+ * dashboard would read as "the gateway served no traffic". The two gauges below
+ * are the ones the control plane can actually answer.
  */
 export class StoreRuntimeStatus implements RuntimeStatusPort {
   readonly #store: ControlPlaneStore;
@@ -275,6 +406,29 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
   constructor(store: ControlPlaneStore, version = "0.0.0") {
     this.#store = store;
     this.#version = version;
+  }
+
+  /**
+   * The `config_snapshot_id` of the last promoted gateway config, or
+   * `"unversioned"` when none has been promoted.
+   *
+   * Read as a platform operator because the activation record is a platform
+   * fact, and swallowing a read failure is deliberate: `GET /admin/v1/status` is
+   * the endpoint an operator hits to find out what is wrong, so it must answer
+   * even when one of its sources cannot.
+   */
+  async #activeSnapshot(): Promise<string> {
+    try {
+      const record = await this.#store.get(
+        "runtime-state",
+        { kind: "platform_operator" },
+        "active-config",
+      );
+      const snapshot = record?.config_snapshot_id;
+      return typeof snapshot === "string" && snapshot !== "" ? snapshot : "unversioned";
+    } catch {
+      return "unversioned";
+    }
   }
 
   async #count(collection: string): Promise<number> {
@@ -287,21 +441,23 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
   }
 
   async status(): Promise<RuntimeStatus> {
-    const [providers, models, apiKeys, promptTemplates, plugins, tools] = await Promise.all([
-      this.#count("providers"),
-      this.#count("models"),
-      this.#count("api-keys"),
-      this.#count("prompt-templates"),
-      this.#count("plugins"),
-      this.#count("tools"),
-    ]);
+    const [providers, models, apiKeys, promptTemplates, plugins, tools, snapshot] =
+      await Promise.all([
+        this.#count("providers"),
+        this.#count("models"),
+        this.#count("api-keys"),
+        this.#count("prompt-templates"),
+        this.#count("plugins"),
+        this.#count("tools"),
+        this.#activeSnapshot(),
+      ]);
     return {
       service: SERVICE_NAME,
       version: this.#version,
       // Rust reports `"pingora"`; the data plane is a Hono Worker now and
       // reporting otherwise would be a lie an operator could act on.
       runtime: "workers",
-      snapshot: "unversioned",
+      snapshot,
       providers,
       models,
       api_keys: apiKeys,
@@ -316,6 +472,11 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
     return { object: "overview", status: await this.status() };
   }
 
+  /**
+   * EMPTY, and deliberately so — see the PLATFORM LIMIT note on the class. An
+   * empty list is "this deployment exposes no queryable series"; a fabricated
+   * one would be read as real telemetry.
+   */
   observability(): Promise<readonly Record<string, unknown>[]> {
     return Promise.resolve([]);
   }
@@ -374,11 +535,19 @@ export interface RequestContext {
 /**
  * Pick the store the request will use.
  *
- * A bound `DB` means D1 — durability is the default, not an opt-in — and
- * `CONTROL_PLANE_STORE = "memory"` is the explicit escape hatch the unit suites
- * and a database-less local run take. Choosing memory when a database IS bound
- * without being asked to would be the silent-data-loss failure mode: writes
- * accepted with a 201, gone at the next isolate.
+ * There are exactly two outcomes now, and no third one that guesses:
+ *
+ *  - `CONTROL_PLANE_STORE = "memory"` → the in-memory reference store. An
+ *    explicit, by-name request, which is what the unit suites and a
+ *    database-less local run make.
+ *  - otherwise → D1, which REQUIRES the `DB` binding.
+ *
+ * A deployment that binds no database and asks for nothing used to fall through
+ * to the in-memory store with a warning. That is the silent-data-loss shape:
+ * every write is acknowledged with a 201 and every one of them is gone at the
+ * next isolate eviction, with a correct-looking API the whole time. It now
+ * throws, so the failure is at the first request instead of at the first
+ * eviction.
  */
 export function resolveStore(
   env: ControlPlaneBindings,
@@ -386,17 +555,78 @@ export function resolveStore(
 ): ControlPlaneStore {
   const requested = env.CONTROL_PLANE_STORE?.trim().toLowerCase();
   if (requested === "memory") return memoryStore(env);
-  if (env.DB !== undefined) {
-    return new D1ControlPlaneStore(env.DB, { requestId: context.requestId ?? null });
-  }
-  if (requested === "d1") {
-    // Asked for D1 and given no database: fail loudly rather than quietly
-    // serving an in-memory store that looks identical until the isolate dies.
+  if (env.DB === undefined || env.DB === null) {
     throw new Error(
-      "CONTROL_PLANE_STORE=d1 but no `DB` binding is configured; add the [[d1_databases]] binding or set CONTROL_PLANE_STORE=memory",
+      "control-plane: no `DB` binding is configured; add the [[d1_databases]] binding (migrations in sql/d1-ts/control/) or set CONTROL_PLANE_STORE=memory to run without durability",
     );
   }
-  return memoryStore(env);
+  return new D1ControlPlaneStore(env.DB, { requestId: context.requestId ?? null });
+}
+
+/**
+ * Pick the site-domain TXT resolver (`src/site_domain_txt.ts`).
+ *
+ * The DEFAULT is UNBOUND — it resolves nothing and every verification answers
+ * `503`. That polarity is the opposite of the store's and is equally
+ * deliberate: an un-configured deployment must not be able to mark a hostname
+ * verified, because a hostname that verifies without a published record is a
+ * hostname anybody can claim. Turning verification ON is an explicit act.
+ */
+export function resolveTxtResolver(env: ControlPlaneBindings): SiteDomainTxtResolver {
+  switch (env.SITE_DOMAIN_RESOLVER?.trim().toLowerCase()) {
+    case "doh":
+      return new DohTxtResolver(
+        env.SITE_DOMAIN_RESOLVER_ENDPOINT?.trim() || DEFAULT_DOH_ENDPOINT,
+        positiveInt(env.SITE_DOMAIN_RESOLVER_TIMEOUT_MS, DEFAULT_DOH_TIMEOUT_MS),
+      );
+    case "static":
+      return new StaticAnswersTxtResolver(env.SITE_DOMAIN_TXT_ANSWERS);
+    default:
+      return new UnboundTxtResolver();
+  }
+}
+
+/**
+ * Pick the RBAC authorizer: durable role bindings whenever the request is being
+ * served from the database, with the declarative `TENANT_RBAC_ACTIONS` grants as
+ * the per-tenant fallback (see {@link D1RbacAuthorizer}).
+ *
+ * The choice is deliberately tied to the SAME switch the store takes rather than
+ * to the mere presence of a `DB` binding: `CONTROL_PLANE_STORE = "memory"` means
+ * "run this deployment without the control database", and an authorizer that
+ * kept querying it would answer `503 rbac unavailable` for a configuration that
+ * is otherwise entirely valid. One switch, one answer to "is the database in
+ * play".
+ */
+export function resolveRbac(env: ControlPlaneBindings): RbacAuthorizerPort {
+  const declarative = new JsonRbacAuthorizer(
+    parseJson<Record<string, readonly string[]>>(env.TENANT_RBAC_ACTIONS, {}),
+  );
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
+  if (env.DB === undefined || env.DB === null) return declarative;
+  return new D1RbacAuthorizer(env.DB, declarative);
+}
+
+/**
+ * Pick the credential resolver: the control database's `static_api_keys` table
+ * whenever the request is being served from the database, with the declarative
+ * `CONTROL_PLANE_*_API_KEYS` vars as the per-credential fallback (see
+ * {@link D1ApiKeyAuthenticator}).
+ *
+ * Tied to the SAME switch the store and the RBAC authorizer take, for the same
+ * reason: `CONTROL_PLANE_STORE = "memory"` means "run this deployment without
+ * the control database", and an authenticator that kept querying it would answer
+ * `503` for a configuration that is otherwise entirely valid. One switch, one
+ * answer to "is the database in play".
+ */
+export function resolveApiKeys(env: ControlPlaneBindings): ApiKeyAuthenticatorPort {
+  const declarative = new JsonApiKeyAuthenticator(
+    parseJson<NativeKeyDeclaration[]>(env.CONTROL_PLANE_NATIVE_API_KEYS, []),
+    parseJson<StaticKeyDeclaration[]>(env.CONTROL_PLANE_STATIC_API_KEYS, []),
+  );
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
+  if (env.DB === undefined || env.DB === null) return declarative;
+  return new D1ApiKeyAuthenticator(env.DB, declarative);
 }
 
 export function resolveDeps(
@@ -407,18 +637,14 @@ export function resolveDeps(
 
   const corsAllowedOrigin = env.ADMIN_CONSOLE_ALLOWED_ORIGIN?.trim();
   return {
-    apiKeys: new JsonApiKeyAuthenticator(
-      parseJson<NativeKeyDeclaration[]>(env.CONTROL_PLANE_NATIVE_API_KEYS, []),
-      parseJson<StaticKeyDeclaration[]>(env.CONTROL_PLANE_STATIC_API_KEYS, []),
-    ),
+    apiKeys: resolveApiKeys(env),
     lifecycle: new JsonTenancyLifecycleGate(
       parseJson<Record<string, LifecycleStatus>>(env.TENANCY_LIFECYCLE, {}),
     ),
-    rbac: new JsonRbacAuthorizer(
-      parseJson<Record<string, readonly string[]>>(env.TENANT_RBAC_ACTIONS, {}),
-    ),
+    rbac: resolveRbac(env),
     store,
     runtime: new StoreRuntimeStatus(store),
+    txtResolver: resolveTxtResolver(env),
     // Absent or blank ⇒ NO admin-console origin ⇒ the preflight surface does
     // not exist at all (see `middleware/cors.ts`).
     corsAllowedOrigin:

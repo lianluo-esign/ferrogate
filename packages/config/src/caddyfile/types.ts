@@ -4,12 +4,13 @@
  * §5.2). This crate owns parse-time shape only; the runtime truth is `Config`
  * after normalization.
  *
- * PORT-TODO(inventory §5.6): `GatewayModel.capabilities` is typed here as
- * `string[]` (a `ModelCapability` slug list). The `ModelCapability` enum lives
- * in the not-yet-ported `@ferrogate/providers` (wave 2); once it lands, tighten
- * this to that enum.
+ * `GatewayModel.capabilities` is `Vec<ferrogate_providers::ModelCapability>` in
+ * Rust; the enum is inlined in `../schema/enums.ts` (the `@ferrogate/providers`
+ * package lands in wave 2), and this schema uses it so an unknown slug is
+ * rejected at parse time exactly as `FromStr` rejects it in Rust.
  */
 import { z } from "zod";
+import { modelCapabilitySchema } from "../schema/enums.js";
 
 export const gatewayTlsConfigSchema = z.object({
   cert_path: z.string(),
@@ -77,7 +78,7 @@ export const gatewayModelSchema = z.object({
   name: z.string(),
   provider: z.string(),
   provider_model: z.string(),
-  capabilities: z.array(z.string()).default([]),
+  capabilities: z.array(modelCapabilitySchema).default([]),
   context_window: z.number().int().nullable().default(null),
   input_price_per_1m: z.string().nullable().default(null),
   output_price_per_1m: z.string().nullable().default(null),

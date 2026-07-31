@@ -2,7 +2,8 @@
  * Enum vocabularies used across the `Config` schema. The snake_case values
  * mirror the Rust `#[serde(rename_all = "snake_case")]` wire form exactly.
  *
- * PORT-TODO(inventory §5.3): several of these enums are OWNED by sibling crates
+ * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION ONLY, VALUES ARE CLOSED.
+ * Several of these enums are OWNED by sibling crates
  * being ported in wave 2 (`ModelCapability`/`RoutingStrategy` →
  * `@ferrogate/providers`, `StorageProviderKind`/`PostgresTlsMode` →
  * `@ferrogate/storage`, `ContentSource` → `@ferrogate/guardrails`,
@@ -79,16 +80,24 @@ export const ALL_CONTENT_SOURCES: ContentSource[] = [
 export const mcpTransportSchema = z.enum(["streamable_http", "sse", "stdio"]);
 export type McpTransport = z.infer<typeof mcpTransportSchema>;
 
+/**
+ * `McpAuthType`. Rust carries `#[serde(alias = "headers")]` on `SharedHeaders`,
+ * so a legacy `auth_type = "headers"` deserializes to `shared_headers` — the
+ * preprocess reproduces that alias.
+ */
 export const mcpAuthTypeSchema = z
-  .enum([
-    "none",
-    "shared_headers",
-    "oauth",
-    "per_user_oauth",
-    "per_user_headers",
-    "original_bearer",
-    "ferrogate_signed_jwt",
-  ])
+  .preprocess(
+    (value) => (value === "headers" ? "shared_headers" : value),
+    z.enum([
+      "none",
+      "shared_headers",
+      "oauth",
+      "per_user_oauth",
+      "per_user_headers",
+      "original_bearer",
+      "ferrogate_signed_jwt",
+    ]),
+  )
   .default("none");
 export type McpAuthType = z.infer<typeof mcpAuthTypeSchema>;
 

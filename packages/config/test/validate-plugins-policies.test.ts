@@ -347,7 +347,7 @@ describe("validate_agent_workflows", () => {
   test("an MCP server's tools are addressable as <server>-<tool>", () => {
     expectAccepted({
       ...base,
-      mcp_servers: [{ name: "srv", transport: "stdio", tools_to_execute: ["fetch"] }],
+      mcp_servers: [{ name: "srv", transport: "stdio", command: "/usr/bin/srv", tools_to_execute: ["fetch"] }],
       agent_workflows: [workflow({ nodes: [{ id: "n1", kind: "tool", tool: "srv-fetch" }] })],
     });
   });
@@ -563,7 +563,7 @@ describe("validate_skill_packages", () => {
       withPackages([
         pkg({
           resources: {
-            mcp_servers: [{ name: "srv", transport: "stdio", tools_to_execute: ["fetch"] }],
+            mcp_servers: [{ name: "srv", transport: "stdio", command: "/usr/bin/srv", tools_to_execute: ["fetch"] }],
           },
         }),
       ]),
@@ -608,7 +608,7 @@ describe("validate_skill_packages", () => {
             { kind: "mcp_tool", id: "srv-fetch" },
           ],
           resources: {
-            mcp_servers: [{ name: "srv", transport: "stdio", tools_to_execute: ["fetch"] }],
+            mcp_servers: [{ name: "srv", transport: "stdio", command: "/usr/bin/srv", tools_to_execute: ["fetch"] }],
           },
         }),
       ]),
@@ -903,4 +903,73 @@ describe("validate_guardrails", () => {
       ]),
     );
   });
+});
+
+/**
+ * `guardrails[].regex` engine parity — the leg a previous wave left as a
+ * PORT-TODO ("Rust compiles with the `regex` crate, which rejects backreferences
+ * and lookaround that JS RegExp accepts"), now CLOSED by
+ * `usesRegexCrateUnsupportedSyntax`.
+ *
+ * The Rust `regex` crate is a finite-automaton engine, so it refuses the two
+ * backtracking-only constructs. Accepting them here would let a config that
+ * Rust REFUSES at load run with different match semantics — a detector that
+ * silently stops detecting. Rust's observable message for every rejection is the
+ * outermost anyhow context, `invalid regex`, at `guardrails[i].regex[j]`.
+ */
+describe("validate_guardrails: regex-crate accept-set parity", () => {
+  const withRegex = (...patterns: string[]) => ({
+    guardrails: [{ id: "g", name: "g", keywords: [], regex: patterns }],
+  });
+
+  const rejected: [string, string][] = [
+    ["a \\1 backreference", "(a)\\1"],
+    ["a \\9 backreference", "(a)(b)(c)(d)(e)(f)(g)(h)(i)\\9"],
+    ["a \\k<name> named backreference", "(?<x>a)\\k<x>"],
+    ["positive lookahead", "foo(?=bar)"],
+    ["negative lookahead", "foo(?!bar)"],
+    ["positive lookbehind", "(?<=foo)bar"],
+    ["negative lookbehind", "(?<!foo)bar"],
+  ];
+  test.each(rejected)("rejects %s at the exact field path", (_name, pattern) => {
+    expect(firstError(withRegex(pattern))).toBe("field guardrails[0].regex[0]: invalid regex");
+  });
+
+  test("attributes the failure to the offending regex INDEX, not the first one", () => {
+    expect(firstError(withRegex("^ok$", "a(?=b)"))).toBe(
+      "field guardrails[0].regex[1]: invalid regex",
+    );
+  });
+
+  const accepted: [string, string][] = [
+    // `\\1` is an escaped backslash then a literal `1` — not a backreference.
+    ["an escaped backslash before a digit", "\\\\1"],
+    // Inside a character class `(`, `?`, `=` and `!` are literals.
+    ["lookaround-shaped characters inside a class", "[(?=!<]+"],
+    // `(?<name>...)` is a NAMED GROUP, which the regex crate supports (>=1.9).
+    ["a named capture group", "(?<word>[a-z]+)"],
+    ["a non-capturing group", "(?:abc|def)"],
+    ["an ordinary anchored pattern", "^sk-[a-zA-Z0-9]{10,}$"],
+  ];
+  test.each(accepted)("accepts %s", (_name, pattern) => {
+    expectAccepted(withRegex(pattern));
+  });
+
+  /**
+   * The RESIDUAL, OPPOSITE-DIRECTION gap, pinned rather than papered over: a few
+   * patterns the `regex` crate accepts are rejected by JS `RegExp`, so this port
+   * is strictly stricter there. That direction fails CLOSED (a config is refused
+   * at load, never silently mis-matched at runtime), which is why it is left as a
+   * divergence instead of being emulated.
+   */
+  const strictlyStricterThanRust: [string, string][] = [
+    ["an inline-flag group `(?i)`", "(?i)abc"],
+    ["the `(?P<name>...)` named-group spelling", "(?P<word>[a-z]+)"],
+  ];
+  test.each(strictlyStricterThanRust)(
+    "is stricter than the regex crate for %s (fails closed)",
+    (_name, pattern) => {
+      expect(firstError(withRegex(pattern))).toBe("field guardrails[0].regex[0]: invalid regex");
+    },
+  );
 });

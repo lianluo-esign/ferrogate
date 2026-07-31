@@ -18,9 +18,26 @@
  *     hostname and dropped every disallowed address *before the socket was
  *     opened*, so `evil.example.com. A 127.0.0.1` was refused at connect time.
  *
- * PORT-TODO(inventory-policy-core §guardrails/net): workerd exposes no DNS
- * resolver hook, so a hostname that RESOLVES to a private IP cannot be blocked
- * pre-connect; this relies on the Worker egress boundary.
+ * PORT-TODO(inventory-policy-core §guardrails/net) — PLATFORM LIMIT, NOT CLOSED.
+ *
+ * The exact limitation: **workerd exposes no DNS resolver hook and no
+ * resolved-address callback.** The Rust `GuardrailDnsResolver` is a custom
+ * `reqwest` resolver: it saw the `SocketAddr` list `getaddrinfo` produced and
+ * dropped every disallowed address BEFORE the socket was opened, so
+ * `evil.example.com. A 127.0.0.1` was refused at connect time. On Workers,
+ * `fetch()` performs its own resolution inside the runtime; there is no
+ * `Resolver` trait, no `lookup` interception, no way to read the resolved IP
+ * from JS, and `connect()` (the `cloudflare:sockets` API) takes a hostname and
+ * resolves it internally too. So a hostname that RESOLVES to a private IP
+ * cannot be blocked pre-connect from this code. That residual gap is REAL, is
+ * not closed by anything in this file, and can only be closed at the Worker
+ * egress boundary (an account-level egress policy or a governed
+ * container/sandbox hop).
+ *
+ * The closest behavior implemented instead is the whole LITERAL surface — the
+ * part an operator, or an attacker who can write a detector config, actually
+ * controls — plus two deliberate tightenings that compensate for the missing
+ * resolver. Both are enumerated below and pinned by `test/net.test.ts`.
  *
  * That residual gap is REAL and is not closed by anything in this file. What is
  * closed is the whole *literal* surface, which is the part an operator (or an

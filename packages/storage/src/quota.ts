@@ -79,6 +79,36 @@ export function validateQuotaPolicy(policy: StoredQuotaPolicy): void {
   }
 }
 
+/**
+ * A sellable default bundle (`plans` row, issue #168). Supplies the FLOOR of
+ * the quota merge: a field is taken from the plan only when NO policy in the
+ * scope chain set it.
+ *
+ * The merge itself (`resolveEffectiveQuota`) lives in `@ferrogate/policy`, as
+ * it does in the Rust tree; this is the persisted row it reads.
+ */
+export interface StoredPlan {
+  id: string;
+  name: string;
+  slug: string;
+  mcpEnabled: boolean;
+  selfHostedWorkersEnabled: boolean;
+  adminConsoleSeats?: number;
+  defaultModelAllowlist: string[];
+  defaultRpmLimit?: number;
+  defaultTpmLimit?: number;
+  defaultMonthlyBudgetUsd?: number;
+  createdAtUnix: number;
+  updatedAtUnix: number;
+  assetHostingEnabled: boolean;
+  defaultAssetStorageQuotaBytes?: number;
+  defaultAssetMaxObjectBytes?: number;
+  defaultAgentCostBudgetUsd?: number;
+  defaultMonthlyEgressBytesBudget?: number;
+  defaultDownloadRpmLimit?: number;
+  extensionToolsEnabled: boolean;
+}
+
 /** Per-scope, per-calendar-month usage/cost rollup row. */
 export interface StoredUsageMonthlyRollup {
   id: string;

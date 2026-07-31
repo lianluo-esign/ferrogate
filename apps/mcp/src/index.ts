@@ -36,11 +36,15 @@
  * `src/transport.ts` implements both transport directions. The SDK stays a
  * declared dependency for the tenant-hosted MCP-server half (see below).
  *
- * PORT-TODO(inventory-edge-control §9.2): the OTHER half of the Rust crate —
- * `mcp_worker_deploy.rs`, which uploads a tenant's own hosted MCP-server Worker
- * (`FerroGateMcp extends McpAgent` at `/mcp` + `/sse` behind
- * `@cloudflare/workers-oauth-provider`) — becomes a `wrangler deploy` wrapper
- * in the control plane, not a runtime route here.
+ * PORT-TODO(inventory-edge-control §9.2): NOT a platform limit and NOT this
+ * Worker's work — a SCOPE boundary, recorded so it is not lost. The other half
+ * of the Rust crate, `mcp_worker_deploy.rs`, uploads a tenant's own hosted
+ * MCP-server Worker (`FerroGateMcp extends McpAgent` at `/mcp` + `/sse` behind
+ * `@cloudflare/workers-oauth-provider`). On CF that is a `wrangler deploy` /
+ * Workers-for-Platforms call, which is a CONTROL-PLANE capability: it needs an
+ * account-scoped API token, and giving this data-plane ingress the ability to
+ * deploy Workers would be a serious privilege escalation. It belongs in
+ * `apps/control-plane`, never as a runtime route here.
  */
 import { identityRouteModule } from "./identity/routes.js";
 import { type RouteModule, createMcpApp } from "./routes/index.js";

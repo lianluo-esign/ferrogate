@@ -52,6 +52,7 @@ import {
   type WorkerIdentityFailure,
   resolveDeps,
 } from "../ports.js";
+import { readSealedFrame } from "../workers/frame.js";
 import { HttpError } from "./errors.js";
 
 // ---------------------------------------------------------------------------
@@ -131,12 +132,59 @@ const TRANSPORT_SECURITY_MTLS = "mutual_tls";
 const TRANSPORT_SECURITY_SYMMETRIC_AEAD = "symmetric_aead";
 
 /**
- * Rust `SelfHostedTransportChannel`. The two marker variants are CLAIMS the
- * gateway has not cryptographically verified for the request. A Worker cannot
- * terminate mutual TLS in-process, so `VerifiedMutualTls` is unreachable here —
- * which is exactly why the production posture fails closed below.
+ * Rust `SelfHostedTransportChannel`.
+ *
+ * `unverified_mutual_tls_marker` and `symmetric_aead` are CLAIMS the gateway
+ * has not verified at the TLS layer for this request. `verified_mutual_tls` is
+ * the real thing: the EDGE validated a client certificate chain against the
+ * zone's mTLS CA and reported the outcome in `request.cf.tlsClientAuth`, which
+ * this Worker reads rather than asserts. See {@link verifiedMutualTls}.
  */
-export type TransportChannel = "unverified_mutual_tls_marker" | "symmetric_aead";
+export type TransportChannel =
+  | "verified_mutual_tls"
+  | "unverified_mutual_tls_marker"
+  | "symmetric_aead";
+
+/**
+ * The subset of `IncomingRequestCfProperties["tlsClientAuth"]` that decides
+ * whether a client certificate was actually verified.
+ */
+export interface TlsClientAuth {
+  readonly certPresented?: string;
+  readonly certVerified?: string;
+  readonly certRevoked?: string;
+}
+
+/**
+ * Rust `SelfHostedTransportChannel::VerifiedMutualTls`, re-founded on the edge.
+ *
+ * A Worker cannot validate an X.509 chain in-process — it never sees the TLS
+ * handshake, and `crypto.subtle` has no chain builder. Cloudflare's answer is
+ * that the ZONE validates the client certificate against a configured mTLS CA
+ * and hands the Worker the verdict on `request.cf.tlsClientAuth`. Reading that
+ * verdict is a real verification; asserting one from a header is not, which is
+ * why the marker path stays a separate, refused channel.
+ *
+ * All THREE conditions are required, and every one of them is load-bearing:
+ *
+ *  - `certPresented === "1"` — a certificate was actually offered.
+ *  - `certVerified === "SUCCESS"` — it chained to the zone's CA. The other
+ *    values (`FAILED`, `NONE`, and the various `CERT_*` reasons) are failures.
+ *  - `certRevoked !== "1"` — it is not revoked. Cloudflare reports `SUCCESS`
+ *    with `certRevoked: "1"` for a revoked-but-otherwise-valid certificate, so
+ *    checking only `certVerified` would admit a revoked client.
+ *
+ * `request.cf` is UNDEFINED under `wrangler dev --local` and in the offline
+ * test pool unless a test supplies it, so a local run naturally reports `false`
+ * and the production posture fails closed — the same answer the Rust build
+ * gives when no mTLS server is configured.
+ */
+export function verifiedMutualTls(request: Request): boolean {
+  const properties = (request as { cf?: { tlsClientAuth?: TlsClientAuth } }).cf;
+  const tls = properties?.tlsClientAuth;
+  if (tls === undefined) return false;
+  return tls.certPresented === "1" && tls.certVerified === "SUCCESS" && tls.certRevoked !== "1";
+}
 
 /** Rust `self_hosted_transport_security_header`. */
 export function transportChannel(headers: Headers): TransportChannel | null {
@@ -150,6 +198,24 @@ export function transportChannel(headers: Headers): TransportChannel | null {
     default:
       return null;
   }
+}
+
+/**
+ * The channel this request ACTUALLY arrived on: the declared marker, upgraded
+ * to `verified_mutual_tls` when — and only when — the edge says it verified a
+ * client certificate.
+ *
+ * A `symmetric_aead` declaration is NEVER upgraded, even over verified mTLS.
+ * The header is the worker's own statement about which transport contract it is
+ * speaking, and silently promoting a declared downgrade would let a
+ * misconfigured worker pass the production posture it was meant to fail.
+ */
+export function resolveTransportChannel(request: Request): TransportChannel | null {
+  const declared = transportChannel(request.headers);
+  if (declared === "unverified_mutual_tls_marker" && verifiedMutualTls(request)) {
+    return "verified_mutual_tls";
+  }
+  return declared;
 }
 
 /** Rust `SelfHostedTransportPosture`. */
@@ -166,26 +232,37 @@ export function transportPosture(raw: string | undefined): TransportPosture {
  * Rust `SelfHostedTransportPolicy::admit`.
  *
  * Under `marker_contract` every channel is admitted (the pre-production
- * contract behaviour). Under `require_production_mtls`, `symmetric_aead` is an
- * explicit DOWNGRADE (403) and the `mutual_tls` marker is an unverified CLAIM
- * (501) — better to reject than to accept an unverifiable claim as
- * production-grade.
+ * contract behaviour). Under `require_production_mtls`:
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.4): a Cloudflare Worker
- * // terminates TLS at the edge and cannot validate a client certificate chain
- * // in-process, so the `VerifiedMutualTls` channel Rust's
- * // `self_hosted_mtls::SelfHostedMtlsServer` produces has no CF equivalent.
- * // The honest CF replacement is Cloudflare **mTLS client-certificate
- * // validation** at the zone edge, surfaced to the Worker through
- * // `request.cf.tlsClientAuth` — wiring that requires zone configuration and
- * // is therefore deployment-only. Until it is bound, this posture fails closed
- * // for every channel, exactly as the Rust build does.
+ *  - `verified_mutual_tls` is ADMITTED — the edge validated the client
+ *    certificate chain and {@link verifiedMutualTls} read that verdict off
+ *    `request.cf.tlsClientAuth`.
+ *  - `symmetric_aead` is an explicit DOWNGRADE (403).
+ *  - the bare `mutual_tls` marker is an unverified CLAIM (501) — better to
+ *    reject than to accept an unverifiable claim as production-grade.
+ *
+ * // PORT-TODO(inventory-edge-control §agent-worker §8.4): what remains
+ * // unportable is the SERVER, not the decision. Rust's
+ * // `self_hosted_mtls::SelfHostedMtlsServer` terminates mutual TLS itself,
+ * // owning the CA bundle, the chain build and the revocation check in
+ * // process. A Worker never sees the handshake and `crypto.subtle` has no
+ * // chain builder, so that server has no CF equivalent and cannot be written
+ * // here at any effort. Implemented instead: Cloudflare zone-level mTLS does
+ * // the validation and the Worker CONSUMES the verdict
+ * // (`certPresented`/`certVerified`/`certRevoked`) — see
+ * // {@link verifiedMutualTls}, pinned by `test/mtls.test.ts`. Two consequences
+ * // follow and neither can be coded away: (1) the trust anchor is the ZONE's
+ * // mTLS CA configured at deploy time, not a CA bundle this Worker chooses at
+ * // runtime; (2) `request.cf` is absent under `wrangler dev --local` and in
+ * // the offline test pool, so a LOCAL run can never reach this channel and
+ * // correctly fails closed.
  */
 export function admitTransport(
   posture: TransportPosture,
   channel: TransportChannel,
 ): HttpError | null {
   if (posture === "marker_contract") return null;
+  if (channel === "verified_mutual_tls") return null;
   if (channel === "symmetric_aead") {
     return new HttpError(
       403,
@@ -237,14 +314,17 @@ export function workerIdentityError(failure: WorkerIdentityFailure): HttpError {
  * clear under the `mutual_tls` marker path. Both carry the identity envelope
  * this port reads.
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.3): the AEAD frame
- * // (`encrypt_json` / `decode_json`, XChaCha20-Poly1305 with a 24-byte nonce)
- * // is not yet re-implemented. WebCrypto has no XChaCha20-Poly1305, so the
- * // faithful CF replacement is AES-256-GCM over the same associated data, or
- * // the marker path over the edge's own TLS. The *credential* check the frame
- * // protects (`token_id` + constant-time `token_secret`) is fully implemented
- * // here and is what actually gates admission — the frame adds
- * // confidentiality, not authorization.
+ * The AEAD frame IS implemented — `workers/frame.ts`, AES-256-GCM over the same
+ * associated data, opened by the registry so the transport secret never leaves
+ * it. A body carrying a `sealed` object is unsealed here and the PLAINTEXT is
+ * what the handlers read; a cleartext body stays supported because Rust
+ * supports it too on the `mutual_tls` marker path. The residual divergence from
+ * Rust's XChaCha20-Poly1305 wire format, and why workerd forces it, is recorded
+ * on {@link sealWorkerFrame}'s module.
+ *
+ * Note what the frame does and does not buy: the *credential* check
+ * (`token_id` + constant-time `token_secret`) is what gates admission either
+ * way. The frame adds confidentiality and header integrity, not authorization.
  */
 export interface WorkerTransportEnvelope {
   readonly protocol_version?: number;
@@ -253,10 +333,10 @@ export interface WorkerTransportEnvelope {
 }
 
 /** Read + shape-check the internal callback body. */
-async function readWorkerEnvelope(
+async function readWorkerBody(
   c: Context<AgentRuntimeEnv>,
   maxBytes: number,
-): Promise<WorkerTransportEnvelope> {
+): Promise<Record<string, unknown>> {
   const declaredLength = Number(c.req.header("content-length") ?? "0");
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
     throw new HttpError(
@@ -290,7 +370,11 @@ async function readWorkerEnvelope(
       "self-hosted worker transport body must be a JSON object",
     );
   }
-  const envelope = parsed as Record<string, unknown>;
+  return parsed as Record<string, unknown>;
+}
+
+/** Shape-check the (possibly unsealed) transport document. */
+function requireIdentityEnvelope(envelope: Record<string, unknown>): WorkerTransportEnvelope {
   const identity = envelope.identity;
   if (typeof identity !== "object" || identity === null || Array.isArray(identity)) {
     // Deliberately NOT 401: the caller presented no identity envelope at all,
@@ -370,7 +454,7 @@ async function bearerAuth(c: Context<AgentRuntimeEnv>, operation: ApiOperation):
  * `RegisteredSelfHostedWorker`.
  */
 async function internalAuth(c: Context<AgentRuntimeEnv>): Promise<void> {
-  const channel = transportChannel(c.req.raw.headers);
+  const channel = resolveTransportChannel(c.req.raw);
   if (channel === null) {
     throw new HttpError(
       401,
@@ -383,11 +467,40 @@ async function internalAuth(c: Context<AgentRuntimeEnv>): Promise<void> {
 
   const deps = depsOrThrow(c);
   const limits = deps.config.agentRuntime();
-  const envelope = await readWorkerEnvelope(c, limits.workerTransportBodyMaxBytes);
+  const body = await readWorkerBody(c, limits.workerTransportBodyMaxBytes);
 
+  // A sealed AEAD frame is opened BEFORE anything reads an identity out of it.
+  // The registry does the opening because the frame key is derived from the
+  // transport secret, which never leaves `ports.ts`.
+  const sealed = readSealedFrame(body);
+  let document = body;
+  if (sealed !== undefined) {
+    if (channel !== "symmetric_aead") {
+      throw new HttpError(
+        400,
+        "invalid_self_hosted_worker_transport",
+        `a sealed transport frame requires ${TRANSPORT_SECURITY_HEADER}: ${TRANSPORT_SECURITY_SYMMETRIC_AEAD}`,
+      );
+    }
+    const opened = await deps.workerIdentities.unseal(sealed);
+    if (opened.outcome === "rejected") {
+      throw opened.failure.reason === "invalid_shape"
+        ? new HttpError(400, "invalid_self_hosted_worker_transport", opened.failure.detail)
+        : // An unopenable frame is a REJECTED CREDENTIAL, not a malformed one:
+          // the sender did not hold the derived key. 401 matches the answer an
+          // unknown worker gets, so the sealed path is not an oracle either.
+          new HttpError(401, "invalid_self_hosted_worker_identity", opened.failure.detail);
+    }
+    document = opened.envelope;
+  }
+
+  const envelope = requireIdentityEnvelope(document);
   const resolution = await deps.workerIdentities.validate(envelope.identity);
   if (resolution.outcome === "rejected") throw workerIdentityError(resolution.failure);
   c.set("worker", resolution.worker);
+  // Publish the PLAINTEXT document so the six callbacks read the unsealed
+  // payload rather than re-parsing the ciphertext wrapper off the raw body.
+  c.set("workerEnvelope", document);
 }
 
 /**

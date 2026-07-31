@@ -23,16 +23,33 @@
  * for a counter but it is NOT idempotent: replaying the same request id twice
  * counts it twice.
  *
- * PORT-TODO(inventory-data-billing §1.5.8 "billing outbox atomic enqueue"): the
- * Rust tree gets exactly-once from the CONTROL-database `billing_events`
- * primary key — `append_billing_event_with_outbox_enqueue` claims
- * `billing_event_id` and enqueues the outbox row in one transaction, and the
- * rollup accumulate happens only for a claim that won. Wiring that claim ahead
- * of this ledger is an `apps/control-plane` / `packages/billing` slice; the
- * claim cannot live here because `billing_events` is in the CONTROL database
- * and this batch is on a TENANT database — there is no transaction spanning
- * two D1 databases. Until it lands, the CALLER owns de-duplication (the gateway
- * records once per settled request, at the end of the stream).
+ * The claim that makes it exactly-once IS now ported — see
+ * {@link ../d1/billing-d1.js D1BillingEventLedger}, which claims
+ * `billing_event_id` and enqueues the outbox row in one atomic
+ * `controlDb.batch()` (inventory §1.5.8 item 8). Run it FIRST and accumulate
+ * here only when it returns `recorded: true`.
+ *
+ * PORT-TODO(inventory-data-billing §1.5.8) — PLATFORM LIMIT, NOT CLOSED.
+ * **D1 has no transaction spanning two databases.** `batch()` is scoped to the
+ * one `D1Database` whose `prepare()` produced the statements; there is no
+ * cross-database `BEGIN`, no two-phase commit, and no distributed-transaction
+ * API on Workers. `billing_events` is in the CONTROL database and this
+ * accumulate is on a TENANT database, so the claim and the accumulate CANNOT be
+ * one commit no matter how they are arranged, and the Postgres single-transaction
+ * shape is unreachable.
+ *
+ * The approximation implemented instead is **claim-then-accumulate**: the
+ * control-database claim is durable and atomic on its own, and it is the
+ * *narrower* half — a crash after a won claim but before the accumulate
+ * UNDER-counts one call's tokens rather than double-billing it, which is the
+ * correct direction to fail. Closing the remaining window would need an idempotency
+ * key on the tenant side too (a per-`billing_event_id` marker row folded into
+ * THIS batch), which is a schema change and a separate slice.
+ *
+ * So: the CALLER still owns ordering (claim first, accumulate only on a win),
+ * and the gateway records once per settled request at the end of the stream.
+ * `test/d1/usage-d1.test.ts` pins the additive (non-idempotent) semantics of
+ * this batch so the approximation cannot be mistaken for exactly-once.
  */
 import { periodMonthFromUnix, usageMonthlyRollupId } from "../ids.js";
 import type { QuotaScopeKind, StoredUsageMonthlyRollup } from "../quota.js";

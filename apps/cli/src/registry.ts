@@ -1582,9 +1582,11 @@ export function secretFieldsFor(group: string): readonly string[] {
 /**
  * The OpenAPI coverage manifest: every `operationId` the registry claims.
  *
- * PORT-TODO(inventory-edge-control.md §2.3): the #365 parity gate should diff
- * this against `docs/openapi/runtime-api-contract.json` at build time, and the
- * data-plane exclusion (`x-ferrogate-data-plane`) should become a test.
+ * The #365 parity gate that diffs this against
+ * `docs/openapi/admin-api.openapi.json` — including the `x-ferrogate-data-plane`
+ * exclusion (#390) — lives in `parity.ts` and is enforced by
+ * `test/parity.test.ts`. This function stays the de-duplicated view; `parity.ts`
+ * keeps the per-verb sites so duplicate mappings are detectable.
  */
 export function coverageManifest(): readonly string[] {
   const ids = new Set<string>();

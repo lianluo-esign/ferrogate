@@ -127,3 +127,61 @@ describe("SigV4 signing", () => {
     );
   });
 });
+
+/**
+ * The mechanism divergence, CLOSED by proof rather than by assertion.
+ *
+ * The inventory (§3.8) suggests Web Crypto for SigV4. `crypto.subtle` is
+ * ASYNC, and the Rust `ProviderAdapter::prepare_chat_completions` is
+ * synchronous — adopting it would force the whole adapter trait surface to
+ * become `async`, a behavioral divergence from the crate. So this package signs
+ * with its own synchronous SHA-256/HMAC-SHA256 instead.
+ *
+ * That is only legitimate if the two agree BYTE FOR BYTE, which is what these
+ * tests establish, against the platform's own implementation rather than
+ * against more fixtures of our own choosing. If the sync implementation ever
+ * drifts, this fails.
+ */
+describe("the synchronous primitives are byte-identical to crypto.subtle", () => {
+  const inputs = [
+    "",
+    "abc",
+    "AWS4-HMAC-SHA256\n20150830T123600Z\n20150830/us-east-1/iam/aws4_request",
+    "a".repeat(55), // one block minus padding boundary
+    "a".repeat(56), // forces a second block
+    "a".repeat(64), // exactly one block
+    "a".repeat(1000),
+    "🔐 multi-byte ünïcödé",
+  ];
+
+  test.each(inputs)("SHA-256 agrees with crypto.subtle for %j", async (input) => {
+    const expected = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)),
+    );
+    expect(sha256(new TextEncoder().encode(input))).toEqual(expected);
+  });
+
+  // A zero-length key is omitted: `crypto.subtle.importKey` REFUSES it
+  // ("Zero-length key is not supported"), so there is no reference value to
+  // compare against. SigV4 never derives one — every key in the chain starts
+  // with the literal "AWS4" prefix — so the case is unreachable in this crate.
+  test.each([
+    ["Jefe", "what do ya want for nothing?"],
+    ["k".repeat(64), "exactly-one-block-key"],
+    ["k".repeat(65), "key longer than the block size is hashed first"],
+    ["AWS4secret", "20150830"],
+  ])("HMAC-SHA256 agrees with crypto.subtle for key %j", async (key, message) => {
+    const encoder = new TextEncoder();
+    const imported = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(key),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const expected = new Uint8Array(
+      await crypto.subtle.sign("HMAC", imported, encoder.encode(message)),
+    );
+    expect(hmacSha256(encoder.encode(key), encoder.encode(message))).toEqual(expected);
+  });
+});
