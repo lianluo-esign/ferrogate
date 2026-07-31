@@ -127,6 +127,7 @@
  */
 export * from "./ports.js";
 export * from "./binding.js";
+export * from "./d1.js";
 export * from "./detectors.js";
 export * from "./engine.js";
 export * from "./evidence.js";

@@ -408,17 +408,38 @@ export function emptyLedgerTotals(): LedgerTotals {
   return { entries: 0, total_cost_usd: 0, total_credits: 0, total_tokens: 0 };
 }
 
+/** A value an implementation may return either directly or as a promise. */
+export type MaybePromise<T> = T | Promise<T>;
+
 /**
  * Persistence seam for settled entries (port of `trait LedgerSink`).
  * Implementations must be idempotent on {@link LedgerEntry.id}.
+ *
+ * Every method is `MaybePromise`-valued, and that is load-bearing rather than
+ * cosmetic. The Rust trait is synchronous because its durable implementation is
+ * a blocking Postgres/D1-proxy call on a thread that can block; on Workers there
+ * is no such thread and **every** durable store — D1, KV, R2, Queues, a Durable
+ * Object stub — is `Promise`-returning. A strictly-synchronous seam would
+ * therefore be implementable ONLY by {@link InMemoryLedgerSink}: a D1-backed
+ * sink would have to return an unawaited promise, the service would answer 200
+ * before the row was written, and an idempotency conflict (which must surface as
+ * HTTP 409) would become an unhandled rejection after the response had shipped.
+ *
+ * So the seam accepts both, {@link InMemoryLedgerSink} stays synchronous, and
+ * `createBillingService` awaits — which is a no-op for the sync implementation
+ * and correct for a durable one. `test/platform-limits.test.ts` pins it.
  */
 export interface LedgerSink {
   /** Persist an entry; `true` if newly recorded, `false` on an idempotent replay. */
-  record(entry: LedgerEntry): boolean;
+  record(entry: LedgerEntry): MaybePromise<boolean>;
   /** List recorded entries matching `filter`, newest last, paginated. */
-  list(filter: LedgerListFilter, offset: number, limit: number): LedgerEntry[];
+  list(
+    filter: LedgerListFilter,
+    offset: number,
+    limit: number,
+  ): MaybePromise<LedgerEntry[]>;
   /** Fetch a single entry by its idempotency id. */
-  get(id: string): LedgerEntry | undefined;
+  get(id: string): MaybePromise<LedgerEntry | undefined>;
 }
 
 /** In-memory, idempotent {@link LedgerSink} with an optional retention bound. */

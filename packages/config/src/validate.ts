@@ -201,9 +201,9 @@ export function validateX402Reconciler(config: Config): void {
         `${reconciler.confirmation_deadline_secs}s + reconcile_check_delay_secs ` +
         `${reconciler.reconcile_check_delay_secs}s + one reconciler tick of slack ` +
         `tick_interval_secs ${reconciler.tick_interval_secs}s = ${window}s); otherwise a payment ` +
-        `confirmed on-chain can no longer capture the wallet hold, delivering the stablecoin ` +
-        `without ever charging the wallet -- raise hold_ttl_secs above ${window}s or shrink the ` +
-        `confirmation window`,
+        `confirmed on-chain can no longer capture the wallet hold (it has already auto-released ` +
+        `past its TTL), delivering the stablecoin without ever charging the wallet -- raise ` +
+        `hold_ttl_secs above ${window}s or shrink the confirmation window`,
     );
   }
 }
@@ -266,9 +266,10 @@ export function validateAssetBucketR2(config: Config): void {
   if (bucket.region !== R2_REGION) {
     throw new Error(
       `field asset_bucket.region: FerroGate requires region "${R2_REGION}" for Cloudflare R2 ` +
-        `endpoints (got ${JSON.stringify(bucket.region)}); R2 ignores geographic regions but the ` +
-        `signer folds this string straight into the credential scope, so FerroGate pins the ` +
-        `canonical value`,
+        `endpoints (got ${JSON.stringify(bucket.region)}); R2 ignores geographic regions and ` +
+        `documents a blank region and "us-east-1" as aliases for "${R2_REGION}", but the signer ` +
+        `folds this string straight into the credential scope, so FerroGate pins the canonical ` +
+        `value`,
     );
   }
 }
@@ -331,7 +332,9 @@ export function validateCloudflareMcpServers(config: Config): void {
     }
     if (server.auth_type === "none") {
       throw new Error(
-        `field mcp_servers[${index}].auth_type: Cloudflare managed MCP server ${server.name} requires authentication`,
+        `field mcp_servers[${index}].auth_type: Cloudflare managed MCP server ${server.name} ` +
+          `requires authentication (shared_headers with a Cloudflare API bearer token, ` +
+          `per_user_oauth, or original_bearer); Cloudflare rejects unauthenticated requests`,
       );
     }
   }
@@ -343,11 +346,18 @@ export function validateCloudflareMcpServers(config: Config): void {
  * conventional `/mcp` (Streamable HTTP) or `/sse` on `*.workers.dev` — so an
  * ordinary Worker on `workers.dev` is NOT flagged as an MCP upstream.
  *
- * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION ONLY, BEHAVIOR IS CLOSED. The
- * function is owned by `@ferrogate/mcp` (wave 2) and is inlined here (like the
- * sibling-owned enums in `schema/enums.ts`) so `Config::validate()` can run the
- * #408 guardrails standalone. Re-export from that package once it lands; do not
- * re-derive the matcher.
+ * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION, NO OWNING LIBRARY EXISTS.
+ * BEHAVIOR IS CLOSED. The function belongs to `ferrogate-mcp`, whose TS port
+ * lives in the `apps/mcp` WORKER — there is no `@ferrogate/mcp` library
+ * package, and `packages/config` must not depend on an app (that edge points
+ * the wrong way and would drag a Worker entry module into every consumer of the
+ * config schema). So the matcher is inlined here, read verbatim from
+ * `crates/ferrogate-mcp`, and pinned by `validate-entities.test.ts` +
+ * `validate-asset-bucket-cloudflare.test.ts`. Unlike the
+ * `@ferrogate/{providers,storage,guardrails}` enum edges — which HAVE landed
+ * and are now real imports (`schema/enums.ts`) — this one cannot be closed by
+ * this package alone: it needs an `@ferrogate/mcp` library to exist first. Do
+ * not re-derive the matcher when it does.
  */
 function isCloudflareManagedMcpUrl(url: string): boolean {
   let host: string;

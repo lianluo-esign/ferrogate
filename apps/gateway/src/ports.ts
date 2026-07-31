@@ -210,10 +210,19 @@ export interface GatewayDeps {
  * Worker bindings this app reads. Deliberately tiny: real bindings (D1, KV, R2,
  * DO, Secrets Store) arrive with the adapters that back the ports above.
  *
- * PORT-TODO(inventory-edge-control §5.2): the `*_API_KEYS` vars are the
- * bootstrap/config-key path only. The durable virtual-key store moves to D1 via
- * `@ferrogate/storage`, and the worker transport secret to Secrets Store, as
- * soon as those packages land.
+ * The durable halves have landed for two of the four tables: the virtual-key
+ * store is D1 `api_keys` on `DB` (`./keys/`) and the RBAC grant graph is D1
+ * `permissions`/`roles`/`tenant_role_bindings` on `CONTROL_DB`
+ * (`D1RbacAuthorizer`, `./adapters.ts`). In both cases the var below became the
+ * FALLBACK, consulted only on a durable not-found and never on a durable
+ * failure.
+ *
+ * PORT-TODO(inventory-edge-control §5.2): `SELF_HOSTED_WORKER_REGISTRY` still
+ * carries a transport SECRET as a var. It moves to Cloudflare Secrets Store —
+ * see the marker at the top of `./adapters.ts` for why that binding cannot be
+ * exercised locally and what the shipped approximation is.
+ * `TENANCY_LIFECYCLE` is the other var with no durable leg yet; the marker on
+ * `ConfiguredTenancyLifecycleGate` names the tables it needs.
  */
 export interface GatewayBindings {
   /** JSON array of durable/native virtual keys (see `adapters.ts`). */

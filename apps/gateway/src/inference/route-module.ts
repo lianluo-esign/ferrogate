@@ -32,12 +32,24 @@
 import type { Context, Hono } from "hono";
 import type { GatewayEnv } from "../ports.js";
 import {
+  admitTokensPerMinute,
+  isTokenAdmissionRefusal,
+  settleTokenUsage,
+} from "../ratelimit/middleware.js";
+import type { TokenAdmission } from "../ratelimit/ports.js";
+import {
   GatewayRouter,
   INFERENCE_OPERATION_IDS,
   type RouteModule,
 } from "../routes/index.js";
 import { createInferenceRouter } from "./handlers.js";
 import type { InferenceEnv } from "./handlers.js";
+import {
+  type TokenAdmissionHandle,
+  type TokenGovernor,
+  callerFromAuth,
+  setInferenceRequestScope,
+} from "./identity.js";
 import type { InferenceDeps } from "./ports.js";
 
 /**
@@ -96,10 +108,59 @@ export function inferenceRouteModule(deps: InferenceDeps = {}): RouteModule {
     operationIds: [...INFERENCE_OPERATION_IDS],
     register(router: GatewayRouter): void {
       for (const operationId of INFERENCE_OPERATION_IDS) {
-        router.register(operationId, (c) =>
-          inner.fetch(c.req.raw, c.env, executionCtxOf(c)),
-        );
+        router.register(operationId, (c) => {
+          publishRequestScope(c);
+          return inner.fetch(c.req.raw, c.env, executionCtxOf(c));
+        });
       }
+    },
+  };
+}
+
+/**
+ * Hand the inner app everything the OUTER middleware chain resolved.
+ *
+ * This is the whole reason `identity.ts` exists: `inner.fetch` opens a fresh
+ * Hono context, so without this line the handlers see neither `c.get("auth")`
+ * nor the quota windows `rateLimit()` merged — and silently fall back to a
+ * platform-operator caller with no TPM gate. Both fallbacks are green in every
+ * unit test that injects its own ports, which is precisely why the wiring is
+ * asserted directly (`test/inference/wiring.test.ts`).
+ *
+ * The scope is keyed by `c.req.raw` — the exact `Request` passed to
+ * `inner.fetch` on the next line.
+ */
+function publishRequestScope(c: Context<GatewayEnv>): void {
+  const auth = c.get("auth");
+  setInferenceRequestScope(c.req.raw, {
+    // `auth` is absent only for a contract-`anonymous` operation, which none of
+    // the six inference operations is; leaving it undefined keeps the injected
+    // `deps.caller` in charge rather than fabricating an identity.
+    ...(auth === null || auth === undefined ? {} : { caller: callerFromAuth(auth) }),
+    tokens: honoTokenGovernor(c),
+  });
+}
+
+/**
+ * The TPM window as a {@link TokenGovernor}, bound to the OUTER context.
+ *
+ * `admitTokensPerMinute` / `settleTokenUsage` both read the windows
+ * `rateLimit()` published on `c`. When `rateLimit()` is not mounted at all they
+ * find nothing and answer `null`, i.e. "no TPM limit governs this request",
+ * which is the correct reading — there is no policy source to have set one.
+ */
+function honoTokenGovernor(c: Context<GatewayEnv>): TokenGovernor {
+  return {
+    async admit(estimatedTokens: number) {
+      const admitted = await admitTokensPerMinute(c, estimatedTokens);
+      if (admitted === null) return null;
+      if (isTokenAdmissionRefusal(admitted)) {
+        return { status: admitted.status, code: admitted.code, message: admitted.message };
+      }
+      return admitted;
+    },
+    async settle(handle: TokenAdmissionHandle | null, actualTokens: number) {
+      await settleTokenUsage(c, handle as TokenAdmission | null, actualTokens);
     },
   };
 }

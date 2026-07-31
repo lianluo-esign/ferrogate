@@ -317,11 +317,30 @@ const PaymentIntentWireSchema = z.object({
   scheme: z.string(),
   network_caip2: z.string(),
   mint: z.string(),
-  // PORT-TODO(inventory §3.2 "intent"): `atomic_amount` is a `u64` in Rust
-  // serde (a bare JSON integer). A JS `number` loses precision above 2^53, so
-  // wire values in that range would be corrupted. The frozen fixtures and the
-  // tested range stay well under 2^53; a fully faithful port would carry this
-  // field as a JSON string (or a bigint-aware codec) end to end.
+  // PORT-TODO(inventory §3.2 "intent") — LANGUAGE LIMIT, NOT CLOSED, and NOT
+  // closable at this layer.
+  //
+  // The exact limitation: **the precision is already gone before this schema
+  // runs.** `atomic_amount` is a `u64` in Rust serde — a bare JSON integer that
+  // `serde_json` parses exactly. `fromWire` takes an ALREADY-PARSED `unknown`,
+  // i.e. the caller has run `JSON.parse`, and `JSON.parse` materialises every
+  // number as an IEEE-754 double. `18446744073709551615` has become
+  // `18446744073709552000` by the time it reaches this line; no validator here
+  // can recover the original digits. Widening the type to `bigint` would move
+  // the corruption, not fix it.
+  //
+  // A faithful fix has to happen at the JSON TEXT boundary — a bigint-aware
+  // reviver, or the field carried as a decimal string — which changes the
+  // signature of `fromWire`/`toWire` and the on-the-wire shape shared with the
+  // Rust producer. That is a wire-contract change, and x402/Solana is
+  // DEPRIORITIZED per project directive, so it is deliberately not made here.
+  //
+  // What holds today, and is pinned in `test/intent.test.ts`: the in-memory
+  // domain type is `bigint` end to end (`PaymentIntent.atomicAmount()`,
+  // `SelectedPayment.atomicAmount`, every cap and conversion in
+  // `@ferrogate/policy`), so nothing in the money path is a float once
+  // construction succeeds. Only this serde hop is number-domain, and every
+  // frozen fixture and tested amount is orders of magnitude below 2^53.
   atomic_amount: z.number().int().nonnegative(),
   recipient: z.string(),
   authorized_resource_url: z.string(),

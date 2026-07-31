@@ -254,16 +254,24 @@ export type TlsAcmeConfig = z.infer<typeof tlsAcmeConfigSchema>;
  * CLOSEST BEHAVIOR IMPLEMENTED: the SCHEMAS stay, with the Rust field names and
  * defaults, purely so a legacy TOML or Caddyfile that still carries `[tls]` /
  * `[tls.acme]` decodes and round-trips instead of failing to parse during
- * migration. The consequence, pinned by `platform-limits.test.ts` > "tls/acme",
- * is that a `[tls]` block Rust would REFUSE (e.g. `enabled` with no
- * `cert_path`) is ACCEPTED here — it is inert config, not a promise.
+ * migration. The consequence is that a `[tls]` block Rust would REFUSE (e.g.
+ * `enabled` with no `cert_path`) is ACCEPTED here — it is inert config, not a
+ * promise.
  *
- * REVIEWER: this is the judgment call to second-guess. The alternative is the
- * `validateMcpTlsConfig` precedent in `validate/entities.ts` — REJECT the block
- * so the operator is never told TLS is configured when nothing reads it. It was
- * not taken here only because it would break the Caddyfile migration path
- * (`fromGatewayConfig` emits `tls` from a `tls`/`tls_acme` directive), where
- * Rust accepts the same document.
+ * ...but it no longer passes in SILENCE, which was the real objection. The
+ * `validateMcpTlsConfig` precedent in `validate/entities.ts` says an operator
+ * must never be told a security-relevant setting is honored when nothing reads
+ * it. Rejecting outright (that precedent's remedy) is not available here: it
+ * would break the Caddyfile migration path, where `fromGatewayConfig` emits
+ * `[tls]` from a `tls`/`tls_acme` directive and Rust accepts the same document.
+ * So the load WARNS instead — `inertTlsWarnings` in `../validate/sections.ts`,
+ * surfaced by `loadConfigFromObject`/`fromCaddyfileStr`, saying in words that
+ * the section is inert and that Cloudflare owns the certificate. Pinned by
+ * `platform-limits.test.ts` > "tls/acme", including through the loader so an
+ * unmounted warning fails the suite.
+ *
+ * REVIEWER: warn-vs-reject is still the judgment call to second-guess; the
+ * migration-path breakage is the whole reason it is a warning.
  */
 export const tlsConfigSchema = z.object({
   enabled: z.boolean().default(false),

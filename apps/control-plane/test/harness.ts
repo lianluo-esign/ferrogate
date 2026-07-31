@@ -25,6 +25,15 @@ export interface NativeKey {
   secret: string;
   id?: string;
   tenant_id?: string | null;
+  /**
+   * A native key's tenancy chain is OPTIONAL at every level — a key may declare
+   * a project or a workspace and no tenant at all. That is exactly the shape
+   * Rust's `resolve_lifecycle_chain` exists for (a `[project(active)]` chain
+   * whose suspended tenant was never read), so the harness has to be able to
+   * state it. See `lifecycle-d1.test.ts`.
+   */
+  project_id?: string | null;
+  workspace_id?: string | null;
   scopes?: string[];
   enabled?: boolean;
   revoked?: boolean;
@@ -44,6 +53,12 @@ export interface StaticKey {
 export interface World {
   nativeKeys?: NativeKey[];
   staticKeys?: StaticKey[];
+  /**
+   * `TENANCY_LIFECYCLE` — the DECLARATIVE gate, which under `store: "d1"` is only
+   * the fallback for a tenancy with no durable row. To state a suspension the
+   * durable gate reads, seed a `tenant-accounts` / `projects` / `workspaces` row
+   * with `seedD1` instead (see `lifecycle-d1.test.ts`).
+   */
   lifecycle?: Record<string, "active" | "disabled" | "suspended" | "deleted">;
   rbac?: Record<string, string[]>;
   seed?: Record<string, Record<string, unknown>[]>;

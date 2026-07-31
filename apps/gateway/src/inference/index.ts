@@ -24,6 +24,18 @@ export type { InferenceEnv } from "./handlers.js";
 export { inferenceRouteModule } from "./route-module.js";
 
 export * from "./ports.js";
+export * from "./estimate.js";
+export {
+  callerFromAuth,
+  inferenceRequestScope,
+  setInferenceRequestScope,
+  unmeteredTokenGovernor,
+} from "./identity.js";
+export type {
+  InferenceRequestScope,
+  TokenAdmissionHandle,
+  TokenGovernor,
+} from "./identity.js";
 export * from "./catalog.js";
 export * from "./schemas.js";
 export * from "./errors.js";
@@ -46,15 +58,18 @@ export {
   PROVIDER_ADAPTER_FAMILIES,
   anthropicAdapter,
   azureOpenAiAdapter,
+  bedrockAdapter,
   canonicalProviderKind,
   defaultAdapterRegistry,
   defaultAuthScheme,
   encodeAzurePathSegment,
+  geminiAdapter,
   grokAdapter,
   isOpenAiCompatibleKind,
   openAiCompatibleAdapter,
   openRouterAdapter,
   splitAzureBaseUrl,
+  vertexAdapter,
 } from "./adapters.js";
 export type { OpenRouterProviderExtras, OpenRouterRoute } from "./adapters.js";
 export {

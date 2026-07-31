@@ -14,16 +14,22 @@
  * family answers `503 asset_bucket_unavailable` exactly as an unconfigured Rust
  * gateway does — it never silently routes object bytes through the Worker.
  *
- * Production wiring is a straight substitution, because the object-store port
- * is R2-shaped: `assetRouteModule({ deps: { objects: env.ASSETS, presigner:
- * new SigV4Presigner({...}), limits: { presignEnabled: true } } })`.
+ * PRODUCTION WIRING IS LIVE. `src/index.ts` mounts
+ * `assetRouteModule({ depsFromEnv: assetDepsFromEnv })`, which reads the real
+ * `env.ASSETS` R2 bucket and — when the five `ASSET_S3_*` values are bound —
+ * a real `SigV4Presigner`, per request, memoized on the `env` object. The
+ * object-store port is R2-shaped, so a live `R2Bucket` satisfies it with no
+ * adapter and no cast.
  */
 export {
   ORDERED_ASSET_OPERATION_IDS,
+  assetDepsFromEnv,
   assetRouteModule,
   buildAssetService,
   defaultCallerResolver,
+  configuredEntitlementsFromEnv,
   entitlementsFromEnv,
+  sigV4PresignerFromEnv,
   NO_ASSET_HOSTING,
 } from "./handlers.js";
 export type {
@@ -31,9 +37,11 @@ export type {
   AssetCallerResolver,
   AssetEntitlements,
   AssetEntitlementsPort,
+  AssetObjectBindings,
   AssetRouteModuleOptions,
 } from "./handlers.js";
 
+export * from "./entitlements.js";
 export * from "./service.js";
 export * from "./ports.js";
 export * from "./keys.js";

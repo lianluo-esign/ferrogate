@@ -73,6 +73,36 @@ describe("SecretBytes redaction", () => {
     expect(secret.expose()).toEqual(raw);
   });
 
+  /**
+   * PLATFORM LIMIT PIN — kept as a PORT-TODO in `src/proof.ts`.
+   *
+   * Rust's `SecretBytes` zeroes its buffer in `Drop`. JS has no deterministic
+   * destructor, so the timed erasure is unreproducible. These assertions pin
+   * the containment that IS implemented, so nobody later "closes" the marker
+   * with a `FinalizationRegistry` scrub that runs at an unspecified time or
+   * never, and so the copy-in guarantee cannot be optimised away.
+   */
+  test("the bytes are copied in, not aliased to the caller's buffer", () => {
+    const raw = Uint8Array.from([1, 2, 3, 4]);
+    const secret = new SecretBytes(raw);
+    // A caller zeroing its own buffer (the closest thing to Rust's scrub that
+    // JS offers) must not empty the secret out from under the signer...
+    raw.fill(0);
+    expect(secret.expose()).toEqual(Uint8Array.from([1, 2, 3, 4]));
+    // ...nor may a later write to the caller's buffer inject bytes into it.
+    raw.set([9, 9, 9, 9]);
+    expect(secret.expose()).toEqual(Uint8Array.from([1, 2, 3, 4]));
+  });
+
+  test("the buffer is unreachable by enumeration, spread, or property access", () => {
+    const secret = new SecretBytes(Uint8Array.from([7, 7, 7, 7]));
+    expect(Object.keys(secret)).toEqual([]);
+    expect(Object.values(secret)).toEqual([]);
+    expect(JSON.stringify({ ...secret })).toBe("{}");
+    expect((secret as unknown as Record<string, unknown>)["bytes"]).toBeUndefined();
+    expect(JSON.stringify({ wallet: secret })).toBe('{"wallet":"[REDACTED]"}');
+  });
+
   test("no encoding of the bytes leaks (hex/base64/decimal)", () => {
     const raw = Uint8Array.from([1, 22, 240, 15, 200, 3, 99, 128]);
     const secret = new SecretBytes(raw);

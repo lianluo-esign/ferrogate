@@ -41,14 +41,17 @@ export interface AssetObjectPutOptions {
 /**
  * R2-shaped object store. A live `R2Bucket` is assignable to this type.
  *
- * PORT-TODO(inventory-request-path.md §1.6 "Object storage"): the Rust
- * `asset_bucket.rs` also exposed multipart create/upload-part/complete. R2's
- * Workers API has `createMultipartUpload`, but the presigned surface FerroGate
- * publishes is deliberately single-PUT (`upload_protocol: "single_put"`) —
- * S3 signs each part separately, so one presigned authorization cannot bind the
- * whole object's size and checksum, which is the invariant the endpoint exists
- * to enforce. Multipart therefore stays out of this port until the contract
- * grows an additive `upload_protocol` value.
+ * PORT-TODO(inventory-request-path.md §1.6 "Object storage"): NOT a platform
+ * limit and NOT unfinished work — a deliberate product decision, recorded here
+ * so it is not "fixed" by someone reading the Rust. `asset_bucket.rs` also
+ * exposed multipart create/upload-part/complete, and R2's Workers API does have
+ * `createMultipartUpload`. The presigned surface FerroGate publishes is
+ * single-PUT on purpose (`upload_protocol: "single_put"`): S3 signs each part
+ * separately, so one presigned authorization cannot bind the WHOLE object's
+ * size and checksum, and that binding is the entire invariant the presign
+ * endpoint exists to enforce (issue #368). Multipart stays out of this port
+ * until the contract grows an additive `upload_protocol` value that says which
+ * guarantee the client is getting.
  */
 export interface AssetObjectStore {
   put(
@@ -496,13 +499,23 @@ export interface PresignedUpload {
 /**
  * Issues short-TTL presigned URLs for the direct client↔bucket transfer.
  *
- * PORT-TODO(inventory-request-path.md §1.6): the Workers `R2Bucket` binding has
- * no presign method — R2 presigned URLs are an **S3-API** feature (SigV4 over
- * `<account>.r2.cloudflarestorage.com`). `sigv4.ts` implements that against R2's
- * S3 endpoint, matching the Rust `asset_bucket.rs` byte-for-byte in signing
- * shape. Where no S3 credentials are bound, {@link UnavailablePresigner}
- * degrades to the Rust `asset_bucket_unavailable` 503 rather than silently
- * routing bytes through the gateway.
+ * PORT-TODO(inventory-request-path.md §1.6): PLATFORM LIMIT, and the reason
+ * this port exists separately from {@link AssetObjectStore} at all. The Workers
+ * `R2Bucket` binding has NO presign method and no way to derive one: R2
+ * presigned URLs are an **S3-API** feature, signed with SigV4 over
+ * `https://<account_id>.r2.cloudflarestorage.com`, and that needs an S3 access
+ * key pair the bucket binding does not carry. So one bucket needs TWO
+ * credentials on this platform where the Rust needed one.
+ *
+ * What is implemented: `sigv4.ts` signs against R2's S3 endpoint, matching the
+ * Rust `asset_bucket.rs` byte-for-byte in signing shape (same signed-header
+ * set, same `content-length` + `x-amz-content-sha256` binding of size and
+ * digest into the signature), and `sigV4PresignerFromEnv` (`./handlers.ts`)
+ * builds it from the `ASSET_S3_*` bindings. `test/assets/r2.test.ts` pins the
+ * degradation: any partial credential set yields NO presigner, and the
+ * shipped-empty deployment answers the Rust `503 asset_bucket_unavailable` via
+ * {@link UnavailablePresigner} rather than routing object bytes through the
+ * Worker.
  */
 export interface AssetPresigner {
   presignPut(
@@ -571,8 +584,10 @@ export interface AssetScreeningRequest {
  * full Rust gate also ran detached minisign/Ed25519 signature verification, a
  * cross-tenant publish-approval check, and an out-of-process ClamAV/HTTP
  * scanner. This port keeps the *decision shape* (and the fail-closed default)
- * so the read-path withholding of #366 is real today, and the richer detectors
- * drop in behind this same interface.
+ * so the read-path withholding of #366 is real today — `test/assets/r2.test.ts`
+ * pins it against the live R2 bucket: an EICAR push is STORED (202) and the
+ * pull still answers 404, so "unproven" is indistinguishable from "absent" —
+ * and the richer detectors drop in behind this same interface.
  *
  * Only ONE of the three is platform-constrained, and it is not the one it looks
  * like:

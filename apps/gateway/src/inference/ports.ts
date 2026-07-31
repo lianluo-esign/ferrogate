@@ -54,6 +54,46 @@ export type ModelCapability =
   | "structured_output";
 
 /**
+ * `ferrogate_providers::AwsProviderCredentials` — the SigV4 credential the
+ * `bedrock` family signs with (issue #172).
+ *
+ * `sessionToken` is present only for temporary/STS credentials; a long-lived
+ * IAM user access key omits it. The secrets are plain strings on this seam and
+ * are wrapped in `@ferrogate/providers`' `SecretValue` the moment they cross
+ * into the package (`packageProviderAdapter`), which is where the Rust wraps
+ * them too — the route object itself is never logged or serialized.
+ */
+export interface AwsRouteCredentials {
+  /** `aws_access_key_id` — not a secret; safe in the plain provider table. */
+  readonly accessKeyId: string;
+  /** Resolved from the Worker SECRET named by `aws_secret_access_key_var`. */
+  readonly secretAccessKey: string;
+  /** Resolved from `aws_session_token_var`; absent for IAM user keys. */
+  readonly sessionToken?: string | undefined;
+  /** The AWS region — Rust reuses `Provider.region` (issue #173) for this. */
+  readonly region: string;
+}
+
+/**
+ * `ferrogate_providers::GcpProviderCredentials` — a PRE-MINTED OAuth2 access
+ * token plus project/location for the `vertex` family (issue #172).
+ *
+ * FerroGate deliberately does not mint or refresh this token: the Rust doc on
+ * `GcpProviderCredentials` states the reason (`prepare_chat_completions` is
+ * synchronous and cannot make a token round trip), and the same holds here
+ * because the adapter seam is synchronous in the TS port as well. An operator
+ * supplies an externally-refreshed token, exactly as in Rust.
+ */
+export interface GcpRouteCredentials {
+  /** Resolved from the Worker SECRET named by `gcp_access_token_var`. */
+  readonly accessToken: string;
+  /** `gcp_project_id` — not a secret. */
+  readonly projectId: string;
+  /** The GCP location — Rust reuses `Provider.region` for this. */
+  readonly location: string;
+}
+
+/**
  * One physical provider/model pair a logical model resolves to, flattened
  * together with the provider connection details the adapter needs.
  *
@@ -75,6 +115,15 @@ export interface PhysicalRoute {
   readonly baseUrl: string;
   /** Provider credential. Resolved from Secrets Store in production. */
   readonly apiKey?: string | undefined;
+  /**
+   * `ProviderConfig.aws_credentials` — required by the `bedrock` family and
+   * unread by every other one. Absent for a Bedrock route means the adapter
+   * fails closed at request-preparation time rather than sending an unsigned
+   * request, which is the Rust fail-closed shape.
+   */
+  readonly awsCredentials?: AwsRouteCredentials | undefined;
+  /** `ProviderConfig.gcp_credentials` — the `vertex` family's equivalent. */
+  readonly gcpCredentials?: GcpRouteCredentials | undefined;
   /** Credential scheme; `undefined` = the Rust default for `providerKind`. */
   readonly authScheme?: ProviderAuthScheme | undefined;
   /** `owned_by` in the `/v1/models` listing — the Rust code echoes the provider name. */
@@ -326,12 +375,26 @@ export type CallerScope =
 /**
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
- * PORT-TODO(ROUTE-MAP invariant 1): bearer authentication and `auth.scope`
+ * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
  * enforcement belong to the ONE contract-driven middleware that covers all 251
- * operations, not to this module. The inference handlers consume an
- * already-resolved caller and enforce only the two model gates the Rust
- * inference handlers owned: `can_use_model` (403 `model_not_allowed`) and the
- * tenant model-visibility filter on `GET /v1/models` (issue #515).
+ * operations, not to this module. What the inference handlers own is only the
+ * two model gates the Rust inference handlers owned — `can_use_model` (403
+ * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
+ * and on invocation (issue #515).
+ *
+ * Where this value COMES FROM is the part that was missing and is now wired:
+ * `route-module.ts` derives it from the outer `c.get("auth")` via
+ * `callerFromAuth` (`./identity.ts`) and publishes it for the inner app. Before
+ * that, the inner app fell back to `defaultCallerResolver` — a platform
+ * operator with no allow/deny list — for every request the deployed Worker
+ * served, which made both gates inert in production while every injected-caller
+ * unit test stayed green. `test/inference/wiring.test.ts` is the assertion that
+ * goes red if the wiring is removed again.
+ *
+ * `allowedModels`/`deniedModels` are still never populated from a real
+ * credential; see the PORT-TODO on `callerFromAuth`, which names the exact
+ * `src/ports.ts` change (that file is the composition root's, not this
+ * slice's).
  */
 export interface Caller {
   readonly scope: CallerScope;
@@ -439,12 +502,26 @@ export interface AnthropicTranslator {
 /**
  * `AppState::next_request_id`.
  *
- * PORT-TODO(inventory-request-path §"Cross-crate architecture" step 1): Rust
- * formats a process-wide `AtomicU64` as `fg-{:016x}`. A Worker isolate has no
- * durable counter and is horizontally replicated, so the default implementation
- * keeps the `fg-` + 16 hex-digit shape but sources the digits from
- * `crypto.getRandomValues`. Format-compatible, collision-free across isolates,
- * no longer monotonic.
+ * PORT-TODO(inventory-request-path §"Cross-crate architecture" step 1):
+ * PLATFORM LIMIT — Rust formats a process-wide `AtomicU64` as `fg-{:016x}`, so
+ * request ids are strictly increasing within one process and two ids can be
+ * ORDERED by comparison.
+ *
+ * Workers cannot reproduce that. A Worker is horizontally replicated across
+ * isolates with no shared mutable process state, and the only durable counter
+ * on the platform is a Durable Object — i.e. a network round trip on every
+ * single request, on the hot path, to produce a log correlation id. That is not
+ * a trade the Rust behavior is worth, and it would still not be monotonic
+ * across a DO migration.
+ *
+ * The approximation: the same `fg-` + 16 lowercase hex-digit SHAPE, sourced
+ * from `crypto.getRandomValues` (`defaults.ts::defaultRequestIds`). So anything
+ * that greps, parses or asserts the format keeps working, and collisions are
+ * ~2^-64 per pair rather than impossible-by-construction — but ids are NOT
+ * ordered, and nothing may infer arrival order from them.
+ * `test/inference/chat-completions.test.ts` pins the shape and the
+ * `x-request-id` passthrough; the ordering property is deliberately unpinned
+ * because it is the thing that is gone.
  */
 export interface RequestIdFactory {
   next(): string;

@@ -139,10 +139,17 @@ async function methodDependentRequiredScope(
 
   const scope = methodDependentScope(operation.method, path, value);
   if (scope === undefined) {
-    // PORT-TODO(inventory-request-path §MCP): apps/mcp may prefer to surface
-    // this as JSON-RPC -32601 *after* authenticating. The contract carries no
-    // scope for the value, so the only safe answer at the auth boundary is a
-    // denial.
+    // PORT-TODO(inventory-request-path §MCP): a CROSS-APP boundary, not a gap
+    // in this file. For `POST /v1/mcp` the JSON-RPC-native answer to an unknown
+    // `method` is error -32601 ("method not found") in a 200 envelope, and
+    // `apps/mcp` — which owns the MCP dialect — may well want that. It cannot
+    // be produced HERE: this middleware guards all 251 contract operations and
+    // knows nothing about JSON-RPC framing, and emitting a 200 from the auth
+    // boundary for an unrecognised discriminator would mean an unauthenticated
+    // caller could probe method names.
+    // The contract carries no scope for the value, so the only safe answer at
+    // the auth boundary is a denial, and 403 `scope_denied` is the one that is
+    // true: the credential was accepted, the operation was not.
     throw new HttpError(
       403,
       "scope_denied",

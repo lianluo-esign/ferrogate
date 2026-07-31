@@ -513,9 +513,14 @@ export const routeRuleSchema = z.object({
 });
 export type RouteRule = z.infer<typeof routeRuleSchema>;
 
-// PORT-TODO(inventory §5.3) — PACKAGE RELOCATION ONLY. CloudflareConfig is owned by `@ferrogate/cloudflare`
-// (wave 2); the fields the load-time guards read (account_id/api_token/base URLs/
-// tenant_tokens/r2_s3_endpoint) are modeled, the rest passes through.
+// PORT-TODO(inventory §5.3) — PACKAGE RELOCATION, NO OWNING PACKAGE EXISTS.
+// `CloudflareConfig` was slated for `@ferrogate/cloudflare`; no such package was
+// ever created (the CF surface ended up spread across `apps/*` Workers and their
+// bindings), so there is nothing to import from and nothing this package can do
+// to close it. The fields the load-time guards read (account_id / api_token /
+// base URLs / tenant_tokens / r2_s3_endpoint) are modeled exactly and the rest
+// passes through, so an operator document round-trips; `validate_cloudflare` is
+// ported in full and pinned by `validate-asset-bucket-cloudflare.test.ts`.
 export const cloudflareConfigSchema = z
   .object({
     account_id: z.string().default(""),

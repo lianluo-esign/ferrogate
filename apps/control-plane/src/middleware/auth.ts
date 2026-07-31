@@ -227,7 +227,20 @@ export function contractAuth(): MiddlewareHandler<ControlPlaneEnv> {
 
     // Tenancy lifecycle: a suspended/deleted TENANT is authenticated-but-
     // forbidden (403 `tenancy_suspended`), distinct from a suspended KEY (401).
+    //
+    // A lifecycle store that cannot answer is 503, NEVER an implicit allow —
+    // Rust `LifecycleGateError::Unavailable`. Fail-open here would make "flap
+    // the control plane" a suspension bypass, so the unavailable branch is
+    // handled BEFORE the admitted check (`"unavailable"` is truthy, so a bare
+    // `!lifecycle.admitted` would wave it straight through).
     const lifecycle = await deps.lifecycle.admit(auth, operation);
+    if (lifecycle.admitted === "unavailable") {
+      throw new HttpError(
+        503,
+        "lifecycle_status_unavailable",
+        `failed to resolve tenancy lifecycle: ${lifecycle.detail}`,
+      );
+    }
     if (!lifecycle.admitted) throw new HttpError(403, lifecycle.code, lifecycle.message);
 
     if (operation.rbacAction !== null) {

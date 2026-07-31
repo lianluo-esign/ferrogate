@@ -515,11 +515,22 @@ export function terminalErrorFrames(
         sseFrame({ data: "[DONE]" }),
       ];
     case "openai.chat":
-      // PORT-TODO(inventory-request-path §1.6): the Rust chat path only ever
-      // emitted a guardrail denial as a BUFFERED 403 body, so there is no Rust
-      // byte-shape for a mid-stream chat block. The frame below carries the
-      // identical `ErrorBody` the 403 would have, which is what an
-      // OpenAI-compatible client already parses out of a stream error frame.
+      // PORT-TODO(inventory-request-path §1.6): NO RUST BYTE-SHAPE EXISTS to
+      // port. The Rust chat path evaluated the response guardrail only after
+      // buffering, so a chat denial was always a BUFFERED 403 body and a
+      // mid-stream chat block was unreachable. This port screens INCREMENTALLY
+      // (that is the whole point — it never buffers an SSE body), which makes
+      // the case reachable and therefore makes some frame necessary.
+      // The approximation, stated exactly: the frame below carries the
+      // IDENTICAL `ErrorBody` the buffered 403 would have carried — same
+      // `message`/`type`/`code`/`request_id` — as an unnamed `data:` event,
+      // which is what an OpenAI-compatible client already parses out of a
+      // stream error frame, followed by `[DONE]`. The two sibling dialects need
+      // no approximation: `anthropic.messages` and `openai.responses` both have
+      // real Rust mid-stream error shapes (`messages_stream.rs:287`,
+      // `responses_stream.rs:260`) and are ported verbatim above.
+      // `test/guardrails/stream.test.ts` pins this frame, so it is a decision
+      // on record rather than an accident.
       return [
         jsonSseFrame(undefined, {
           error: {

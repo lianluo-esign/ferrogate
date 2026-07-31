@@ -243,6 +243,20 @@ describe("anonymous operations", () => {
     }
   });
 
+  it("serves a self-contained placeholder, not a shell for an unbuilt bundle", async () => {
+    // Pins the approximation the kept PORT-TODO in `routes/admin_overview.ts`
+    // describes. The console bundle is sequenced last in `PORT-PLAN.md`, so this
+    // document must stand on its own: a real document that names the API, with
+    // NO script/bundle reference — a shell pointing at a bundle that does not
+    // exist would answer 200 with a blank page, which reads as "the console is
+    // broken" rather than "the console is not built yet".
+    const body = await (await SELF.fetch(`${BASE}/admin/dashboard`)).text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("/admin/v1");
+    expect(body).not.toContain("<script");
+    expect(body).not.toContain(".js");
+  });
+
   it("does NOT extend that to /admin/status, which is bearer-guarded", async () => {
     const response = await SELF.fetch(`${BASE}/admin/status`);
     expect(response.status).toBe(401);

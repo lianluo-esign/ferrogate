@@ -264,6 +264,80 @@ describe("resolveEffectiveQuota", () => {
     expect(clamped.monthlyEgressBytesScope?.equals(new QuotaScopeSelector("tenant", "t1"))).toBe(true);
   });
 
+  test("#259 asset byte quotas are TENANT-scoped only; a nearer scope cannot set them", () => {
+    // Rust: `if policy.scope_type == QuotaScopeKind::Tenant { ... }`. The asset
+    // quotas are NOT min-across-the-chain like rpm/tpm — they are read off the
+    // tenant policy alone. A workspace or key policy carrying these columns must
+    // be ignored outright, or a tenant could widen its own storage ceiling by
+    // writing a workspace-level policy.
+    const q = resolveEffectiveQuota(
+      { tenantId: "t1", workspaceId: "w1", keyId: "k1" },
+      lookupFrom([
+        policy("tenant", "t1", [], undefined, undefined, undefined, true, {
+          assetStorageQuotaBytes: 1_000,
+          assetMaxObjectBytes: 100,
+        }),
+        policy("workspace", "w1", [], undefined, undefined, undefined, true, {
+          assetStorageQuotaBytes: 9_999_999,
+          assetMaxObjectBytes: 888_888,
+        }),
+        policy("key", "k1", [], undefined, undefined, undefined, true, {
+          assetStorageQuotaBytes: 7_777_777,
+          assetMaxObjectBytes: 666_666,
+        }),
+      ]),
+    );
+    expect(q.assetStorageQuotaBytes).toBe(1_000);
+    expect(q.assetMaxObjectBytes).toBe(100);
+  });
+
+  test("#259 with no tenant policy, a nearer scope still cannot supply the asset quotas", () => {
+    const q = resolveEffectiveQuota(
+      { tenantId: "t1", workspaceId: "w1" },
+      lookupFrom([
+        policy("workspace", "w1", [], undefined, undefined, undefined, true, {
+          assetStorageQuotaBytes: 9_999_999,
+          assetMaxObjectBytes: 888_888,
+        }),
+      ]),
+    );
+    expect(q.assetStorageQuotaBytes).toBeUndefined();
+    expect(q.assetMaxObjectBytes).toBeUndefined();
+  });
+
+  test("#259 the plan supplies the asset floors, and a tenant policy overrides them", () => {
+    const floors = resolveEffectiveQuota({ tenantId: "t1" }, lookupFrom([]), samplePlan());
+    expect(floors.assetStorageQuotaBytes).toBe(1_000_000);
+    expect(floors.assetMaxObjectBytes).toBe(250_000);
+
+    const overridden = resolveEffectiveQuota(
+      { tenantId: "t1" },
+      lookupFrom([
+        policy("tenant", "t1", [], undefined, undefined, undefined, true, {
+          assetStorageQuotaBytes: 4_096,
+          assetMaxObjectBytes: 512,
+        }),
+      ]),
+      samplePlan(),
+    );
+    expect(overridden.assetStorageQuotaBytes).toBe(4_096);
+    expect(overridden.assetMaxObjectBytes).toBe(512);
+
+    // A tenant policy that sets only the cumulative cap leaves the per-object
+    // ceiling on the plan default — the two dimensions are independent (#259).
+    const partial = resolveEffectiveQuota(
+      { tenantId: "t1" },
+      lookupFrom([
+        policy("tenant", "t1", [], undefined, undefined, undefined, true, {
+          assetStorageQuotaBytes: 4_096,
+        }),
+      ]),
+      samplePlan(),
+    );
+    expect(partial.assetStorageQuotaBytes).toBe(4_096);
+    expect(partial.assetMaxObjectBytes).toBe(250_000);
+  });
+
   test("a disabled policy still denies even with a plan present", () => {
     const q = resolveEffectiveQuota(
       { tenantId: "t1" },

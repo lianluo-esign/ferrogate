@@ -185,34 +185,81 @@ function readyzHandler(c: Context<GatewayEnv>): Response {
 }
 
 /**
- * Thin stubs for the tooling operations. They are real *routes* — matched,
- * authenticated, scope-checked — that answer 501 until their behavior lands, so
- * an unauthenticated caller still gets 401 rather than a misleading 501.
+ * The tooling operations, as real ROUTES that answer 501.
+ *
+ * ## Why 501 and not a payload
+ *
+ * Each of the six below is a projection of, or a dispatch into, a SUBSYSTEM
+ * THAT DOES NOT EXIST IN THIS TREE YET — see the note on each. Answering an
+ * empty list, or an invented tool result, would be a fake that papers over the
+ * gap: a client cannot tell "this gateway has no tools registered" from "this
+ * gateway cannot register tools", and the second is the truth today. 501 says
+ * the second.
+ *
+ * What IS real about them is everything the router owns. They are matched at
+ * the contract's own path, guarded by `contractAuth`, and scope-checked, so an
+ * anonymous caller gets `401 missing_api_key` and an under-scoped one
+ * `403 scope_denied` — the 501 is only ever reached by a caller who was
+ * entitled to the operation. `test/auth.test.ts` pins exactly that ladder
+ * (401 / 403 / 501 on the same path), which is the test that keeps this
+ * approximation honest: it fails if a stub ever starts answering before the
+ * guard, and it is what will have to be updated when a real handler lands.
+ *
+ * NONE of these is a platform limit. Every one is a missing upstream:
+ * Cloudflare can host all six.
  */
 function registerToolingRoutes(router: GatewayRouter): void {
   router.registerNotImplemented(
     "listTools",
-    "PORT-TODO(inventory-request-path §tool catalog): tool catalog projection",
+    // Rust `local.rs::handle_tools` → `state_tools.rs::tools_for`, which is
+    // `extension_registry.tools_for(tenant, api_key_id, route)` PLUS the
+    // registered MCP servers' tools. Neither source exists in the TS tree: the
+    // plugin/extension registry (`ferrogate-runtime`) has no package yet, and
+    // the MCP server registry lives in `apps/mcp`. Listing only one of the two
+    // would understate what a tenant may call, which is worse than 501.
+    "PORT-TODO(inventory-request-path §tool catalog): scoped projection of the " +
+      "extension registry + registered MCP servers. Blocked on both registries " +
+      "existing; not a platform limit.",
   );
   router.registerNotImplemented(
     "executeTool",
-    "PORT-TODO(inventory-request-path §tool execution): native + MCP tool dispatch",
+    // Rust `handle_tool_execute_with_backend(ToolExecuteBackend::Extension)`:
+    // approval record → governed chokepoint → extension dispatch. The governed
+    // decision path and the approval store are unported.
+    "PORT-TODO(inventory-request-path §tool execution): governed native + MCP " +
+      "tool dispatch (approval record, chokepoint allowlist, backend call). " +
+      "Blocked on the extension registry and the governed-decision port.",
   );
   router.registerNotImplemented(
     "executeFunction",
-    "PORT-TODO(inventory-request-path §function execution): sandboxed function dispatch",
+    // The only one with a real deployment constraint attached: the Rust ran
+    // user functions in an out-of-process sandbox. On Workers that is
+    // `@cloudflare/sandbox`/containers, which `apps/agent-runtime` owns —
+    // `apps/gateway` deliberately declares no container binding (see the
+    // `compatibility_date` note in wrangler.toml).
+    "PORT-TODO(inventory-request-path §function execution): sandboxed function " +
+      "dispatch. Belongs to apps/agent-runtime (containers/@cloudflare/sandbox), " +
+      "not to this Worker.",
   );
   router.registerNotImplemented(
     "listAgentSkills",
-    "PORT-TODO(inventory-request-path §skills): skill catalog",
+    // Skill PACKAGES are control-plane rows (`skill_packages`, admin CRUD);
+    // this is their tenant-facing read projection.
+    "PORT-TODO(inventory-request-path §skills): skill-package catalog projection. " +
+      "Blocked on the skill_packages read model in apps/control-plane.",
   );
   router.registerNotImplemented(
     "getAgentSkill",
-    "PORT-TODO(inventory-request-path §skills): skill detail",
+    "PORT-TODO(inventory-request-path §skills): skill detail. Same dependency as " +
+      "listAgentSkills.",
   );
   router.registerNotImplemented(
     "renderPromptTemplate",
-    "PORT-TODO(inventory-request-path §prompts): prompt template rendering",
+    // Template rows plus the renderer. The renderer is pure TS and trivial on
+    // this platform; the rows are the missing half.
+    "PORT-TODO(inventory-request-path §prompts): prompt-template rendering. " +
+      "Blocked on the prompt_templates read model in apps/control-plane; the " +
+      "renderer itself has no platform obstacle.",
   );
   // `/.well-known/agent.json` is a pure projection of the operator's
   // `[[agent_upstreams]]` table, so it is ported rather than stubbed. See

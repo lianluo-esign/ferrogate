@@ -147,3 +147,38 @@ describe("registerWireSchema", () => {
     }
   });
 });
+
+/**
+ * The FACTUAL CLAIM the surviving PORT-TODO in `src/index.ts` makes, asserted
+ * rather than asserted-in-prose: this package seeds exactly the cross-plane
+ * envelopes plus the `ferrogate-core` primitives, and nothing else. The 241
+ * remaining contract operations are registered by `apps/*` at their own
+ * composition time (nothing does so yet — that is the open half of the marker).
+ *
+ * If someone "closes" the marker by dumping per-operation bodies in here, this
+ * exact-set assertion fails, which is the intent: a shared leaf package that
+ * knows every route's body is the dependency inversion the marker forbids.
+ */
+describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", () => {
+  test("the baseline registration set is exactly these ten names", () => {
+    // This test process imports no app, so this IS the package's own baseline.
+    expect(registeredWireSchemaNames().filter((n) => !n.startsWith("op_"))).toEqual([
+      "approvalPolicy",
+      "errorEnvelope",
+      "gatewayError",
+      "requestContext",
+      "scope",
+      "tenantContext",
+      "toolCall",
+      "toolDef",
+      "toolResult",
+      "workspaceScope",
+    ]);
+  });
+
+  test("the baseline is far short of the contract, and says so in numbers", () => {
+    const seeded = registeredWireSchemaNames().filter((n) => !n.startsWith("op_")).length;
+    expect(seeded).toBe(10);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(241);
+  });
+});

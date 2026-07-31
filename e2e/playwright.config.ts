@@ -23,6 +23,7 @@
  * `wrangler dev` running by hand and the suite attaches to it instead of paying
  * the boot cost per run. CI always starts its own.
  */
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
 
@@ -42,6 +43,48 @@ const appDir = (name: string): string =>
   fileURLToPath(new URL(`../apps/${name}/`, import.meta.url));
 
 const isCi = process.env.CI !== undefined && process.env.CI !== "";
+
+/**
+ * Apply the D1 migrations to the LOCAL SQLite files before any `wrangler dev`
+ * starts.
+ *
+ * `apps/gateway/wrangler.toml` declares `DB` (tenant) and `BILLING_DB` /
+ * `CONTROL_DB` (control). `wrangler dev --local` honours those bindings by
+ * provisioning an EMPTY SQLite file per database id — it does not run
+ * `migrations_dir`. An empty file is not a state any real deployment is ever in
+ * (`wrangler deploy` is paired with `wrangler d1 migrations apply`), and the
+ * gateway is right to refuse to serve one: the quota-policy read is on the hot
+ * path of every authenticated request, and `d1QuotaPolicySource` fails CLOSED —
+ * a lookup error is `503 quota_resolution_unavailable`, never "no policies",
+ * because an outage that reads as "no policies" is unlimited traffic for every
+ * caller. So the schema has to exist before the first authenticated request,
+ * exactly as it does in production.
+ *
+ * WHY THIS RUNS AT MODULE LOAD AND NOT IN `globalSetup`. Playwright orders
+ * `createGlobalSetupTasks` as plugin-setup FIRST, then `globalSetup` — and the
+ * `webServer` array is a plugin. A `globalSetup` seed would therefore land
+ * AFTER `wrangler dev` has already opened the database. Config evaluation is
+ * the only hook that is guaranteed to precede the servers.
+ *
+ * Both migrations are `CREATE TABLE IF NOT EXISTS` throughout, so this is
+ * idempotent and safe against the `reuseExistingServer` path and against a
+ * `.wrangler/state` left over from a previous run.
+ */
+function applyLocalD1Migrations(): void {
+  const seeds: readonly [binding: string, sql: string][] = [
+    ["DB", "sql/d1-ts/tenant/0001_init_tenant.sql"],
+    ["BILLING_DB", "sql/d1-ts/control/0001_init_control.sql"],
+  ];
+  for (const [binding, sql] of seeds) {
+    execFileSync(
+      "bunx",
+      ["wrangler", "d1", "execute", binding, "--local", "-y", `--file=${repoRoot}${sql}`],
+      { cwd: appDir("gateway"), stdio: "pipe" },
+    );
+  }
+}
+
+applyLocalD1Migrations();
 
 /**
  * Common `wrangler dev` flags.

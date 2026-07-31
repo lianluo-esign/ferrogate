@@ -49,6 +49,45 @@ function intent(method: string, body: Uint8Array): PaymentIntent {
   return PaymentIntent.fromSelected(selected(2500, PAY_TO), method, RESOURCE, body, identity());
 }
 
+/**
+ * LANGUAGE LIMIT PIN — kept as a PORT-TODO on `atomic_amount` in `src/intent.ts`.
+ *
+ * `u64` money survives as `bigint` everywhere in the in-memory domain; only the
+ * serde hop is number-domain, because `JSON.parse` has already flattened the
+ * integer to a double before `fromWire` is handed the value. These assertions
+ * hold the boundary exactly where the marker says it is: if someone "fixes" the
+ * marker by turning the domain type into `number`, the money path silently
+ * becomes float and this fails.
+ */
+describe("PORT-TODO PIN — the money domain is bigint, the serde hop is not", () => {
+  test("every in-memory atomic amount is a bigint, never a number", () => {
+    const sel = selected(2500, PAY_TO);
+    expect(typeof sel.atomicAmount).toBe("bigint");
+    const built = PaymentIntent.fromSelected(sel, "GET", RESOURCE, new Uint8Array(0), identity());
+    expect(typeof built.atomicAmount()).toBe("bigint");
+    expect(built.atomicAmount()).toBe(2500n);
+    // …and it survives a wire round trip as a bigint, not as whatever
+    // `JSON.parse` handed back.
+    const round = PaymentIntent.fromWire(JSON.parse(JSON.stringify(built.toWire())));
+    expect(typeof round.atomicAmount()).toBe("bigint");
+    expect(round.atomicAmount()).toBe(2500n);
+    expect(round.intentHashHex()).toBe(built.intentHashHex());
+  });
+
+  test("the number-domain hop is exactly the serde field, and it is exact below 2^53", () => {
+    const wire = PaymentIntent.fromSelected(
+      selected(2500, PAY_TO),
+      "GET",
+      RESOURCE,
+      new Uint8Array(0),
+      identity(),
+    ).toWire();
+    expect(typeof wire.atomic_amount).toBe("number");
+    expect(wire.atomic_amount).toBe(2500);
+    expect(Number.isSafeInteger(wire.atomic_amount)).toBe(true);
+  });
+});
+
 describe("method + body binding (#351)", () => {
   test("a GET and a POST of a different body to the same URL are distinguishable", () => {
     const read = intent("GET", new Uint8Array(0));

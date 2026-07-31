@@ -67,8 +67,23 @@ describe("wave-2 package relocations (PORT-TODO inventory §5.3)", () => {
   // the crates, verbatim) so `@ferrogate/config` type-checks and validates
   // standalone. The open item is the IMPORT EDGE: re-export from the owning
   // package once it lands, and do not re-derive the logic.
-  test.todo("re-export the sibling-owned enums from @ferrogate/{providers,storage,guardrails,mcp}");
-  test.todo("re-export is_cloudflare_managed_mcp_url from @ferrogate/mcp");
+  //
+  // CLOSED: the `@ferrogate/{providers,storage,guardrails}` enums. Those three
+  // packages have landed, so `ModelCapability`/`RoutingStrategy`,
+  // `StorageProviderKind`/`PostgresTlsMode` (+ `DEFAULT_DURABLE_PROVIDER_ORDER`
+  // and the `is_durable`/`implemented` predicates) and `ContentSource` are now
+  // IMPORTED from their owner. Not cosmetic: the `ContentSource` copy had
+  // already lost the `unknown` variant, narrowing the default
+  // `guardrails[].sources` set → test/sibling-enum-parity.test.ts.
+  //
+  // STILL OPEN — but not for a wave-2 reason. `McpTransport`/`McpAuthType`,
+  // `is_cloudflare_managed_mcp_url` and `CloudflareConfig` have NO owning
+  // `packages/*` library to import from: the MCP port lives in the `apps/mcp`
+  // WORKER and there is no `@ferrogate/cloudflare` package at all. A
+  // `packages/*` library must not depend on an app, so these stay inlined
+  // (verbatim from the crates) and are pinned against the Rust source instead.
+  test.todo("re-export McpTransport/McpAuthType once an @ferrogate/mcp LIBRARY exists");
+  test.todo("re-export is_cloudflare_managed_mcp_url once an @ferrogate/mcp LIBRARY exists");
   test.todo("re-export CloudflareConfig from @ferrogate/cloudflare");
   test.todo("relocate build_target_uri/normalize_host to apps/gateway (#560)");
 });

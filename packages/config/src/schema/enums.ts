@@ -2,81 +2,98 @@
  * Enum vocabularies used across the `Config` schema. The snake_case values
  * mirror the Rust `#[serde(rename_all = "snake_case")]` wire form exactly.
  *
- * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION ONLY, VALUES ARE CLOSED.
- * Several of these enums are OWNED by sibling crates
- * being ported in wave 2 (`ModelCapability`/`RoutingStrategy` →
- * `@ferrogate/providers`, `StorageProviderKind`/`PostgresTlsMode` →
- * `@ferrogate/storage`, `ContentSource` → `@ferrogate/guardrails`,
- * `McpTransport`/`McpAuthType` → `@ferrogate/mcp`). Their values are inlined
- * here (read verbatim from the crates) so `@ferrogate/config` type-checks
- * standalone; re-export from those packages once they land.
+ * The enums OWNED by a sibling package are now IMPORTED from it rather than
+ * re-typed here, so the vocabularies cannot drift apart:
+ *   - `ModelCapability`/`RoutingStrategy` → `@ferrogate/providers`
+ *   - `StorageProviderKind`/`PostgresTlsMode` → `@ferrogate/storage`
+ *   - `ContentSource` → `@ferrogate/guardrails`
+ *
+ * That relocation was not cosmetic: the previously-inlined `ContentSource` copy
+ * had already lost the `unknown` variant, which silently narrowed the DEFAULT
+ * `guardrails[].sources` set so an unclassified content segment would not be
+ * scanned. Copies of a vocabulary drift; imports do not.
+ *
+ * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION, NOT CLOSABLE YET (one leg).
+ * `McpTransport`/`McpAuthType` are owned by `ferrogate-mcp`, and there is no
+ * `@ferrogate/mcp` PACKAGE to import them from — the MCP port lives in the
+ * `apps/mcp` Worker, and a `packages/*` library must not depend on an app (that
+ * edge points the wrong way and would drag a Worker entry point into every
+ * consumer of the config schema). They stay inlined here, read verbatim from
+ * `crates/ferrogate-mcp`, until an `@ferrogate/mcp` library exists; pinned by
+ * `test/sibling-enum-parity.test.ts`.
  */
 import { z } from "zod";
+import { contentSourceSchema as guardrailsContentSourceSchema } from "@ferrogate/guardrails";
+import { ALL_CONTENT_SOURCES as GUARDRAILS_ALL_CONTENT_SOURCES } from "@ferrogate/guardrails";
+import {
+  modelCapabilitySchema as providersModelCapabilitySchema,
+  routingStrategySchema as providersRoutingStrategySchema,
+} from "@ferrogate/providers";
+import {
+  DEFAULT_DURABLE_PROVIDER_ORDER as STORAGE_DEFAULT_DURABLE_PROVIDER_ORDER,
+  type PostgresTlsMode as StoragePostgresTlsMode,
+  type StorageProviderKind as StorageStorageProviderKind,
+} from "@ferrogate/storage/provider";
 
 // --- @ferrogate/providers ---------------------------------------------------
-export const routingStrategySchema = z
-  .enum(["priority", "lowest_cost", "lowest_latency", "balanced"])
-  .default("priority");
+// The enum is the owner's; only the Rust `#[serde(default)]` lives here, since
+// the default is a property of the `Config` field, not of the vocabulary.
+export const routingStrategySchema = providersRoutingStrategySchema.default("priority");
 export type RoutingStrategy = z.infer<typeof routingStrategySchema>;
 
-export const modelCapabilitySchema = z.enum([
-  "chat",
-  "streaming",
-  "vision",
-  "images",
-  "embeddings",
-  "tools",
-  "structured_output",
-]);
+export const modelCapabilitySchema = providersModelCapabilitySchema;
 export type ModelCapability = z.infer<typeof modelCapabilitySchema>;
 
 // --- @ferrogate/storage -----------------------------------------------------
-export const storageProviderKindSchema = z.enum([
+// `@ferrogate/storage` models these as TS unions (no Zod), so the schema is
+// built here from a tuple that the compiler proves is EXACTLY the owner's
+// union: adding or removing a variant over there fails this build instead of
+// silently letting the config vocabulary drift.
+type Exhaustive<Owner extends string, Local extends string> = [
+  Exclude<Owner, Local>,
+  Exclude<Local, Owner>,
+] extends [never, never]
+  ? true
+  : never;
+
+const STORAGE_PROVIDER_KINDS = [
   "memory",
   "supabase",
   "turso_libsql",
   "postgres",
   "mysql",
   "cloudflare_d1",
-]);
+] as const;
+const _storageKindsExhaustive: Exhaustive<
+  StorageStorageProviderKind,
+  (typeof STORAGE_PROVIDER_KINDS)[number]
+> = true;
+void _storageKindsExhaustive;
+export const storageProviderKindSchema = z.enum(STORAGE_PROVIDER_KINDS);
 export type StorageProviderKind = z.infer<typeof storageProviderKindSchema>;
 
-/** Mirrors `ferrogate_storage::DEFAULT_DURABLE_PROVIDER_ORDER`. */
-export const DEFAULT_DURABLE_PROVIDER_ORDER: StorageProviderKind[] = ["supabase", "postgres"];
+/** `ferrogate_storage::DEFAULT_DURABLE_PROVIDER_ORDER`, owned by `@ferrogate/storage`. */
+export const DEFAULT_DURABLE_PROVIDER_ORDER: StorageProviderKind[] = [
+  ...STORAGE_DEFAULT_DURABLE_PROVIDER_ORDER,
+];
 
-export const postgresTlsModeSchema = z
-  .enum(["disable", "prefer", "require", "verify_ca", "verify_full"])
-  .default("disable");
+const POSTGRES_TLS_MODES = ["disable", "prefer", "require", "verify_ca", "verify_full"] as const;
+const _postgresTlsModesExhaustive: Exhaustive<
+  StoragePostgresTlsMode,
+  (typeof POSTGRES_TLS_MODES)[number]
+> = true;
+void _postgresTlsModesExhaustive;
+export const postgresTlsModeSchema = z.enum(POSTGRES_TLS_MODES).default("disable");
 export type PostgresTlsMode = z.infer<typeof postgresTlsModeSchema>;
 
 // --- @ferrogate/guardrails --------------------------------------------------
-export const contentSourceSchema = z.enum([
-  "system",
-  "developer",
-  "user",
-  "assistant",
-  "tool_schema",
-  "tool_arguments",
-  "tool_result",
-  "metadata",
-  "text_attachment",
-]);
+export const contentSourceSchema = guardrailsContentSourceSchema;
 export type ContentSource = z.infer<typeof contentSourceSchema>;
 
-/** Mirrors `ferrogate_guardrails::all_content_sources()` (every variant). */
-export const ALL_CONTENT_SOURCES: ContentSource[] = [
-  "system",
-  "developer",
-  "user",
-  "assistant",
-  "tool_schema",
-  "tool_arguments",
-  "tool_result",
-  "metadata",
-  "text_attachment",
-];
+/** `ferrogate_guardrails::all_content_sources()` — every variant, owner-defined. */
+export const ALL_CONTENT_SOURCES: ContentSource[] = [...GUARDRAILS_ALL_CONTENT_SOURCES];
 
-// --- @ferrogate/mcp ---------------------------------------------------------
+// --- ferrogate-mcp (no `@ferrogate/mcp` package to import from — see header) -
 export const mcpTransportSchema = z.enum(["streamable_http", "sse", "stdio"]);
 export type McpTransport = z.infer<typeof mcpTransportSchema>;
 

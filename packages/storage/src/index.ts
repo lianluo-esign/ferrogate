@@ -10,8 +10,9 @@
  * every concurrency-critical algorithm (inventory §1.5): wallet no-oversell
  * reserve/settle/release, workflow-budget debit, guardrail-binding generation CAS,
  * asset quota-admission + visibility promotion, retention/GC planning, monotonic
- * presence/agent-burn upserts, budget-alert idempotency, and the site-domain
- * verification rate-limit CAS.
+ * presence/agent-burn upserts, budget-alert idempotency, the reference-guarded
+ * project/workspace deletes (§1.5.7), and the site-domain verification
+ * rate-limit CAS.
  *
  * Each algorithm ships a reference **in-memory backend** (`Memory*Store`) that is
  * the read-modify-write baseline the durable D1/Postgres backends mirror; a
@@ -37,6 +38,7 @@ export * from "./budget-alerts.js";
 export * from "./metadata-rollups.js";
 export * from "./lifecycle-status.js";
 export * from "./site-domain.js";
+export * from "./references.js";
 export * from "./payment-attempt.js";
 
 /**

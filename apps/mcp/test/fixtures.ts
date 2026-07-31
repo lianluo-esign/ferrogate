@@ -7,6 +7,7 @@
  * own code, and the exact production routing/auth/governance path runs.
  */
 import type { JsonValue } from "@ferrogate/core";
+import { env } from "cloudflare:test";
 
 import {
   inMemoryPorts,
@@ -14,6 +15,7 @@ import {
   type AuthContext,
   type DispatchContext,
   type McpDispatchHeaders,
+  type McpEnv,
   type McpServerConfig,
   type McpTool,
 } from "../src/ports.js";
@@ -97,6 +99,24 @@ export function seedFixture(): Fixture {
   );
 
   return { ports, calls };
+}
+
+/**
+ * Override an operator `[vars]` value for one test.
+ *
+ * `resolvePorts(c.env)` runs per request and the Worker under `SELF` shares
+ * this isolate (see `vitest.config.ts`), so a var written here is read by the
+ * NEXT `SELF.fetch`. Typed against {@link McpEnv} rather than `any` so a
+ * renamed var fails the typecheck instead of quietly becoming a no-op. Restore
+ * the original in `afterEach` — the env object is shared across test files.
+ */
+export function setMcpEnvVar<K extends keyof McpEnv>(key: K, value: McpEnv[K]): void {
+  (env as unknown as { -readonly [P in keyof McpEnv]: McpEnv[P] })[key] = value;
+}
+
+/** Read the current value of an operator `[vars]` value. */
+export function getMcpEnvVar<K extends keyof McpEnv>(key: K): McpEnv[K] {
+  return (env as unknown as McpEnv)[key];
 }
 
 /** POST a JSON-RPC body to `/v1/mcp`. */

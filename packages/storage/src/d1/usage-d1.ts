@@ -42,9 +42,17 @@
  * control-database claim is durable and atomic on its own, and it is the
  * *narrower* half — a crash after a won claim but before the accumulate
  * UNDER-counts one call's tokens rather than double-billing it, which is the
- * correct direction to fail. Closing the remaining window would need an idempotency
- * key on the tenant side too (a per-`billing_event_id` marker row folded into
- * THIS batch), which is a schema change and a separate slice.
+ * correct direction to fail.
+ *
+ * The residual window is NARROWABLE but not closable here, and the narrowing is
+ * concrete rather than hand-waved: a `usage_event_claims(billing_event_id TEXT
+ * PRIMARY KEY, recorded_at_unix INTEGER)` table in the TENANT schema, with an
+ * `INSERT ... ON CONFLICT DO NOTHING RETURNING` folded in as statement 0 of THIS
+ * batch, would make the accumulate itself idempotent, so a retry after a won
+ * control-database claim could be replayed safely instead of under-counting.
+ * That is a change to `sql/d1-ts/tenant/0001_init_tenant.sql` — a migration
+ * slice outside this package — and it still would NOT make the claim and the
+ * accumulate one commit: the cross-database limit below is unaffected by it.
  *
  * So: the CALLER still owns ordering (claim first, accumulate only on a win),
  * and the gateway records once per settled request at the end of the stream.

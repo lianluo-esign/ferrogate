@@ -10,14 +10,23 @@
  * windows in `keys.ts`.
  *
  * `resolveEffectiveQuota` takes its policy lookup as a closure precisely so the
- * source is swappable, so the port is a `QuotaPolicySource`:
+ * source is swappable, so the port is a `QuotaPolicySource`. Two are shipped:
  *
- *  - production → D1, via `@ferrogate/storage` (PORT-TODO below);
- *  - today      → the `GATEWAY_QUOTA_POLICIES` / `GATEWAY_PLANS` Worker vars,
- *    mirroring how `src/adapters.ts` backs the auth ports from vars until
- *    storage lands. Fail-closed on malformed JSON exactly as `parseJsonVar`
- *    does: an unreadable table configures NO policies, which cannot widen a
- *    limit that a policy would have imposed.
+ *  - {@link d1QuotaPolicySource} — the CONTROL database's `quota_policies` +
+ *    `plans` + `tenants.plan_id`, which is what `AppState::resolve_effective_quota`
+ *    reads from Supabase in Rust. Selected automatically whenever the binding is
+ *    present ({@link quotaPolicySourceFromEnv}).
+ *  - {@link quotaPolicySourceFromEnv}'s var fallback — the
+ *    `GATEWAY_QUOTA_POLICIES` / `GATEWAY_PLANS` Worker vars, mirroring how
+ *    `src/adapters.ts` backs the auth ports from vars. Fail-closed on malformed
+ *    JSON exactly as `parseJsonVar` does: an unreadable table configures NO
+ *    policies, which cannot widen a limit that a policy would have imposed.
+ *
+ * Both fail-closed differently on purpose, and the difference is the Rust one: a
+ * VAR that cannot be parsed is a static misconfiguration and configures nothing,
+ * while a D1 lookup that FAILS is an outage and answers `503
+ * quota_resolution_unavailable` — a limiter that admitted every caller during a
+ * database outage would be a free-traffic hole, not a graceful degradation.
  */
 import {
   type EffectiveQuota,
@@ -27,6 +36,7 @@ import {
   type StoredQuotaPolicy,
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
+import { boolFromSqlite, optionalNumber } from "@ferrogate/storage";
 import { type CounterWindow, requestWindows, tpmWindow } from "./keys.js";
 
 /**
@@ -48,22 +58,10 @@ export interface QuotaSubject {
 /**
  * Supplies the policies + plan for a subject.
  *
- * PORT-TODO(inventory-request-path §1.6 "Quota policies"): back this with
- * `@ferrogate/storage` (`quota_policies` + `plans` tables in D1), replacing
- * {@link quotaPolicySourceFromEnv}. `AppState::resolve_effective_quota` reads
- * both from Supabase in Rust and returns
- * `503 quota_resolution_unavailable` on a lookup error — which is why
- * {@link QuotaResolution} has an `unavailable` variant rather than defaulting
- * to "no quota".
- *
- * Not a platform limit. Both tables already exist in the CONTROL database
- * (`sql/d1-ts/control/0001_init_control.sql`: `quota_policies` keyed by
- * `(scope_type, scope_id)`, `plans` by slug), which this Worker already binds —
- * as `BILLING_DB`, for metering. Landing this needs a `D1QuotaPolicySource`
- * whose `policiesFor` issues ONE `batch()` for the ≤4 chain scopes plus the
- * plan row, a purpose-named `CONTROL_DB` binding, and a rejected-promise →
- * `{ ok: false, detail }` mapping so a D1 outage stays 503 and never silently
- * admits an unlimited caller.
+ * `AppState::resolve_effective_quota` reads both from Supabase in Rust and
+ * returns `503 quota_resolution_unavailable` on a lookup error — which is why
+ * {@link QuotaResolution} has an `unavailable` variant rather than defaulting to
+ * "no quota". {@link d1QuotaPolicySource} is the durable implementation.
  */
 export interface QuotaPolicySource {
   policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot>;
@@ -132,6 +130,22 @@ export interface QuotaBindings {
   readonly GATEWAY_PLANS?: string | undefined;
   /** JSON map of tenant id → plan slug/id, selecting which plan applies. */
   readonly GATEWAY_TENANT_PLANS?: string | undefined;
+  /**
+   * The CONTROL database (`sql/d1-ts/control/`), holding `quota_policies`,
+   * `plans` and `tenants`. Present ⇒ {@link quotaPolicySourceFromEnv} reads
+   * policies from D1 and the three vars above are no longer consulted.
+   *
+   * Two names, one database, in preference order. `BILLING_DB` is the binding
+   * `apps/gateway/wrangler.toml` ALREADY declares for metering and it points at
+   * exactly this database — the metering tables and the quota tables are in the
+   * same control migration, which is the whole reason a single `batch()` is
+   * atomic across them. `CONTROL_DB` is the purpose-named binding an operator
+   * should add once quota reads are not incidental to billing; it wins when
+   * both are bound so the rename can happen without a flag day.
+   */
+  readonly CONTROL_DB?: D1Database | undefined;
+  /** See {@link QuotaBindings.CONTROL_DB} — the already-declared alias. */
+  readonly BILLING_DB?: D1Database | undefined;
 }
 
 function parseJsonVar<T>(raw: string | undefined, fallback: T): T {
@@ -230,7 +244,7 @@ function toStoredPlan(wire: WirePlan): StoredPlan {
  * counter window's identity are different things; conflating them is how the
  * `key`-scope namespacing gets lost).
  */
-export function quotaPolicySourceFromEnv(env: QuotaBindings): QuotaPolicySource {
+export function quotaPolicySourceFromVars(env: QuotaBindings): QuotaPolicySource {
   const rows = parseJsonVar<WirePolicy[]>(env.GATEWAY_QUOTA_POLICIES, []);
   const index = new Map<string, StoredQuotaPolicy>();
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -264,3 +278,232 @@ export const NO_QUOTA_POLICIES: QuotaPolicySource = {
     return { ok: true, lookup: () => undefined };
   },
 };
+
+// ---------------------------------------------------------------------------
+// D1 adapter — `AppState::resolve_effective_quota`'s storage half
+// ---------------------------------------------------------------------------
+
+/** The `quota_policies` columns this module reads, in one place. */
+const QUOTA_POLICY_COLUMNS =
+  "id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, " +
+  "monthly_budget_usd, enabled, created_at_unix, updated_at_unix, " +
+  "alert_threshold_pcts_json, asset_storage_quota_bytes, " +
+  "monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes, " +
+  "agent_cost_budget_usd";
+
+/** Raised inside the row decoders; caught by `policiesFor` and rendered as 503. */
+class QuotaRowError extends Error {}
+
+/** `JSON` TEXT column → array, refusing (never silently emptying) a bad value. */
+function jsonArrayColumn<T>(value: unknown, column: string, id: string): T[] {
+  if (value === null || value === undefined || value === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(value));
+  } catch {
+    // NOT `[]`. An unreadable allowlist that decodes to "no allowlist" would
+    // WIDEN the effective quota — the one direction a failure must never take.
+    throw new QuotaRowError(`quota_policies.${column} on row ${id} is not valid JSON`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new QuotaRowError(`quota_policies.${column} on row ${id} is not a JSON array`);
+  }
+  return parsed as T[];
+}
+
+/** One `quota_policies` row → `StoredQuotaPolicy`. */
+function rowToStoredPolicy(row: Record<string, unknown>): StoredQuotaPolicy {
+  const id = String(row["id"] ?? "");
+  const scopeType = String(row["scope_type"] ?? "");
+  if (
+    scopeType !== "tenant" &&
+    scopeType !== "project" &&
+    scopeType !== "workspace" &&
+    scopeType !== "key"
+  ) {
+    // A scope kind the merge does not know cannot be applied, and dropping the
+    // row would silently unlimit whoever it governs.
+    throw new QuotaRowError(`quota_policies.scope_type on row ${id} is unknown: ${scopeType}`);
+  }
+  return {
+    id,
+    scopeType,
+    scopeId: String(row["scope_id"] ?? ""),
+    modelAllowlist: jsonArrayColumn<string>(row["model_allowlist_json"], "model_allowlist_json", id),
+    rpmLimit: optionalNumber(row["rpm_limit"]),
+    tpmLimit: optionalNumber(row["tpm_limit"]),
+    monthlyBudgetUsd: optionalNumber(row["monthly_budget_usd"]),
+    assetStorageQuotaBytes: optionalNumber(row["asset_storage_quota_bytes"]),
+    assetMaxObjectBytes: optionalNumber(row["asset_max_object_bytes"]),
+    agentCostBudgetUsd: optionalNumber(row["agent_cost_budget_usd"]),
+    alertThresholdPcts: jsonArrayColumn<number>(
+      row["alert_threshold_pcts_json"],
+      "alert_threshold_pcts_json",
+      id,
+    ),
+    enabled: boolFromSqlite(row["enabled"]),
+    createdAtUnix: Number(row["created_at_unix"] ?? 0),
+    updatedAtUnix: Number(row["updated_at_unix"] ?? 0),
+    monthlyEgressBytesBudget: optionalNumber(row["monthly_egress_bytes_budget"]),
+    downloadRpmLimit: optionalNumber(row["download_rpm_limit"]),
+  };
+}
+
+/** One `plans` row → `StoredPlan`. */
+function rowToStoredPlan(row: Record<string, unknown>): StoredPlan {
+  const id = String(row["id"] ?? "");
+  const allowlist = row["default_model_allowlist_json"];
+  let defaultModelAllowlist: string[] = [];
+  if (allowlist !== null && allowlist !== undefined && allowlist !== "") {
+    try {
+      const parsed: unknown = JSON.parse(String(allowlist));
+      if (!Array.isArray(parsed)) {
+        throw new Error("not an array");
+      }
+      defaultModelAllowlist = parsed as string[];
+    } catch {
+      throw new QuotaRowError(
+        `plans.default_model_allowlist_json on row ${id} is not a JSON array`,
+      );
+    }
+  }
+  return {
+    id,
+    name: String(row["name"] ?? ""),
+    slug: String(row["slug"] ?? ""),
+    mcpEnabled: boolFromSqlite(row["mcp_enabled"]),
+    selfHostedWorkersEnabled: boolFromSqlite(row["self_hosted_workers_enabled"]),
+    ...(optionalNumber(row["admin_console_seats"]) === undefined
+      ? {}
+      : { adminConsoleSeats: optionalNumber(row["admin_console_seats"]) }),
+    defaultModelAllowlist,
+    defaultRpmLimit: optionalNumber(row["default_rpm_limit"]),
+    defaultTpmLimit: optionalNumber(row["default_tpm_limit"]),
+    defaultMonthlyBudgetUsd: optionalNumber(row["default_monthly_budget_usd"]),
+    createdAtUnix: Number(row["created_at_unix"] ?? 0),
+    updatedAtUnix: Number(row["updated_at_unix"] ?? 0),
+    assetHostingEnabled: boolFromSqlite(row["asset_hosting_enabled"]),
+    defaultAssetStorageQuotaBytes: optionalNumber(row["default_asset_storage_quota_bytes"]),
+    defaultAssetMaxObjectBytes: optionalNumber(row["default_asset_max_object_bytes"]),
+    defaultAgentCostBudgetUsd: optionalNumber(row["default_agent_cost_budget_usd"]),
+    defaultMonthlyEgressBytesBudget: optionalNumber(row["default_monthly_egress_bytes_budget"]),
+    defaultDownloadRpmLimit: optionalNumber(row["default_download_rpm_limit"]),
+    extensionToolsEnabled: boolFromSqlite(row["extension_tools_enabled"]),
+  };
+}
+
+/**
+ * The durable {@link QuotaPolicySource}: the CONTROL database's `quota_policies`
+ * chain plus the tenant's `plans` floor.
+ *
+ * ## One `batch()`, not five queries
+ *
+ * `resolveEffectiveQuota` walks tenant → project → workspace → key, so up to
+ * four policy rows and one plan row are needed BEFORE the request is admitted —
+ * i.e. on the hot path of every authenticated call. They go out as a single
+ * `db.batch()`: D1 runs a batch as one round trip inside one implicit
+ * transaction, so the five reads cost one hop and cannot interleave with a
+ * control-plane write that would let the chain be read half-updated.
+ *
+ * The policy leg is ONE statement with an OR-ed `(scope_type, scope_id)`
+ * predicate rather than four statements, because `(scope_type, scope_id)` is
+ * `UNIQUE` and indexed (`idx_quota_policies_scope`): SQLite satisfies the whole
+ * disjunction from that index.
+ *
+ * ## Why every failure is 503, never "no policies"
+ *
+ * A `QuotaPolicySource` that answered `{ ok: true, lookup: () => undefined }` on
+ * a database error would turn an outage into UNLIMITED traffic for every caller
+ * — the exact opposite of what a limiter is for. So a rejected query, a row with
+ * an unknown `scope_type`, and a malformed JSON column all become
+ * `{ ok: false, detail }`, which `rateLimit` renders as the Rust
+ * `503 quota_resolution_unavailable`.
+ *
+ * The plan lookup joins `tenants.plan_id → plans.id`; a tenant row that names a
+ * plan that does not exist yields NO plan (no floor), which is the Rust
+ * behavior for a dangling `plan_id` — the join simply misses.
+ */
+export function d1QuotaPolicySource(db: D1Database): QuotaPolicySource {
+  return {
+    async policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot> {
+      const scopes: [QuotaScopeKind, string][] = [];
+      const { tenantId, projectId, workspaceId, keyId } = subject.chain;
+      if (tenantId !== undefined) scopes.push(["tenant", tenantId]);
+      if (projectId !== undefined) scopes.push(["project", projectId]);
+      if (workspaceId !== undefined) scopes.push(["workspace", workspaceId]);
+      if (keyId !== undefined) scopes.push(["key", keyId]);
+
+      // Nothing to look up: a credential with no scope chain at all cannot be
+      // governed by any policy row, so the round trip is skipped rather than
+      // issued with an empty predicate (which would scan the table).
+      if (scopes.length === 0) {
+        return { ok: true, lookup: () => undefined };
+      }
+
+      const predicate = scopes.map(() => "(scope_type = ? AND scope_id = ?)").join(" OR ");
+      const bindings = scopes.flat();
+
+      const statements = [
+        db
+          .prepare(`SELECT ${QUOTA_POLICY_COLUMNS} FROM quota_policies WHERE ${predicate}`)
+          .bind(...bindings),
+      ];
+      if (tenantId !== undefined) {
+        statements.push(
+          db
+            .prepare(
+              "SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?",
+            )
+            .bind(tenantId),
+        );
+      }
+
+      let results: { results?: unknown[] }[];
+      try {
+        results = (await db.batch(statements)) as unknown as { results?: unknown[] }[];
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: `cloudflare d1: quota policy lookup failed: ${detail}` };
+      }
+
+      const index = new Map<string, StoredQuotaPolicy>();
+      let plan: StoredPlan | undefined;
+      try {
+        for (const row of (results[0]?.results ?? []) as Record<string, unknown>[]) {
+          const policy = rowToStoredPolicy(row);
+          index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
+        }
+        const planRow = (results[1]?.results ?? [])[0] as Record<string, unknown> | undefined;
+        if (planRow !== undefined) {
+          plan = rowToStoredPlan(planRow);
+        }
+      } catch (error) {
+        if (error instanceof QuotaRowError) {
+          return { ok: false, detail: error.message };
+        }
+        throw error;
+      }
+
+      return {
+        ok: true,
+        lookup: (kind: QuotaScopeKind, id: string): StoredQuotaPolicy | undefined =>
+          index.get(`${kind}:${id}`),
+        ...(plan === undefined ? {} : { plan }),
+      };
+    },
+  };
+}
+
+/**
+ * The {@link QuotaPolicySource} the composition root gets.
+ *
+ * D1 whenever the control database is bound, the Worker vars otherwise. The
+ * order is deliberate and is NOT a merge: a deployment that has provisioned
+ * `quota_policies` rows must not have them silently widened (or narrowed) by a
+ * stale `GATEWAY_QUOTA_POLICIES` var left over from before the migration. One
+ * source of truth per deployment, chosen by which binding exists.
+ */
+export function quotaPolicySourceFromEnv(env: QuotaBindings): QuotaPolicySource {
+  const db = env.CONTROL_DB ?? env.BILLING_DB;
+  return db === undefined ? quotaPolicySourceFromVars(env) : d1QuotaPolicySource(db);
+}

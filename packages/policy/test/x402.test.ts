@@ -58,8 +58,17 @@ function selected(
     atomicAmount,
     recipient,
     resourceUrl,
-    maxTimeoutSeconds: 300n,
+    maxTimeoutSeconds: 300,
     challengeHash: new Uint8Array(32).fill(0xab),
+    // The remaining fields of the frozen `@ferrogate/payments` wire contract —
+    // the policy layer does not read them, but the type is the wire type, not a
+    // policy-local subset.
+    feePayer: FEE_PAYER,
+    memo: null,
+    recentBlockhash: null,
+    lastValidBlockHeight: null,
+    extensions: null,
+    rawRequirement: null,
   };
 }
 

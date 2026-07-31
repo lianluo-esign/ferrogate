@@ -42,6 +42,8 @@ import { canonicalProviderKind, defaultAuthScheme } from "./adapters.js";
 import type { OpenRouterRoute } from "./adapters.js";
 import { InMemoryModelResolver, emptyModelResolver } from "./defaults.js";
 import type {
+  AwsRouteCredentials,
+  GcpRouteCredentials,
   InferenceBindings,
   ModelCapability,
   ModelResolver,
@@ -86,6 +88,39 @@ export const providerRecordSchema = z
     openrouter_http_referer: z.string().trim().min(1).optional(),
     /** `ProviderConfig.openrouter_x_title` — OpenRouter attribution only. */
     openrouter_x_title: z.string().trim().min(1).optional(),
+    /**
+     * `Provider.region` (issue #173) — the provider's declared physical region.
+     * Rust makes ONE field do three jobs and this port does the same: it is the
+     * data-residency region, the AWS region a `bedrock` provider signs for, and
+     * the GCP location a `vertex` provider addresses. `Provider::region`'s doc
+     * comment states that reuse explicitly ("rather than adding a duplicate
+     * field"), so a second `aws_region` here would be an invention.
+     */
+    region: z.string().trim().min(1).optional(),
+    /**
+     * `Provider.aws_access_key_id` (issue #172) — NOT a secret, which is why
+     * Rust keeps it in plain config and so does this table.
+     */
+    aws_access_key_id: z.string().trim().min(1).optional(),
+    /**
+     * Rust `Provider.aws_secret_access_key_env`, renamed `_var` because a
+     * Worker resolves a SECRET BINDING where a process resolves an environment
+     * variable. Same split as `api_key_var`: the NAME is here, the value never.
+     */
+    aws_secret_access_key_var: z.string().trim().min(1).optional(),
+    /**
+     * Rust `Provider.aws_session_token_env`. Present only for temporary/STS
+     * credentials; omit it for a long-lived IAM user access key.
+     */
+    aws_session_token_var: z.string().trim().min(1).optional(),
+    /** `Provider.gcp_project_id` (issue #172) — not a secret, like the AWS key id. */
+    gcp_project_id: z.string().trim().min(1).optional(),
+    /**
+     * Rust `Provider.gcp_access_token_env`: the binding holding a PRE-MINTED
+     * OAuth2 access token (scope `cloud-platform`). FerroGate never mints or
+     * refreshes it — see `GcpRouteCredentials` in `./ports.ts`.
+     */
+    gcp_access_token_var: z.string().trim().min(1).optional(),
   })
   .strict();
 
@@ -149,6 +184,147 @@ function parseTable<T extends z.ZodTypeAny>(
   return { ok: true, rows: result.data as z.infer<T>[] };
 }
 
+/** Read a Worker SECRET binding by name; `undefined` unless it is a non-empty string. */
+function boundSecret(
+  secrets: Readonly<Record<string, unknown>>,
+  name: string,
+): string | undefined {
+  const value = secrets[name];
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+/** The composite credentials a `bedrock` / `vertex` provider dispatches with. */
+interface ProviderCredentials {
+  readonly aws?: AwsRouteCredentials | undefined;
+  readonly gcp?: GcpRouteCredentials | undefined;
+}
+
+/**
+ * Port of the Rust config validator's Bedrock/Vertex blocks
+ * (`ferrogate-config::validate_providers`) plus `aws_provider_credentials` /
+ * `gcp_provider_credentials` (`state.rs`), which are two halves of one rule:
+ * neither family has a bearer-token auth mode, so a missing piece of the
+ * credential must be caught before any traffic rather than producing an
+ * unsigned request.
+ *
+ * Two deliberate deviations, both STRICTER than Rust and neither able to widen
+ * anything:
+ *
+ *  1. Rust bails at CONFIG LOAD for a missing field but merely leaves
+ *     `aws_credentials: None` when the named ENV VAR is unset (the adapter then
+ *     refuses at request time). A Worker cannot refuse to boot, so both cases
+ *     land in the same place here: an unbound named binding refuses the whole
+ *     catalog, exactly as `api_key_var` already does, and every model answers
+ *     `400 model_not_found`.
+ *  2. The check runs over the PROVIDER table, not over the providers a model
+ *     happens to reference, because the Rust validator does too — a misconfigured
+ *     provider row is refused whether or not a model points at it.
+ *
+ * The `index` in the message is the provider's position in the table, matching
+ * the Rust `field providers[{index}].<field>` wording so an operator can grep
+ * either tree's diagnostic.
+ */
+function providerCredentials(
+  provider: ProviderRecord,
+  index: number,
+  secrets: Readonly<Record<string, unknown>>,
+): { ok: true; credentials: ProviderCredentials } | { ok: false; reason: string } {
+  const canonical = canonicalProviderKind(provider.kind);
+
+  if (canonical === "bedrock") {
+    if (provider.aws_access_key_id === undefined) {
+      return {
+        ok: false,
+        reason: `field providers[${index}].aws_access_key_id: required when kind = bedrock`,
+      };
+    }
+    if (provider.aws_secret_access_key_var === undefined) {
+      return {
+        ok: false,
+        reason: `field providers[${index}].aws_secret_access_key_var: required when kind = bedrock`,
+      };
+    }
+    if (provider.region === undefined) {
+      return {
+        ok: false,
+        reason: `field providers[${index}].region: required when kind = bedrock (this is the AWS region, e.g. us-east-1)`,
+      };
+    }
+    const secretAccessKey = boundSecret(secrets, provider.aws_secret_access_key_var);
+    if (secretAccessKey === undefined) {
+      return {
+        ok: false,
+        reason: `provider ${provider.name} names aws_secret_access_key_var ${provider.aws_secret_access_key_var}, which is not bound`,
+      };
+    }
+    let sessionToken: string | undefined;
+    if (provider.aws_session_token_var !== undefined) {
+      sessionToken = boundSecret(secrets, provider.aws_session_token_var);
+      if (sessionToken === undefined) {
+        return {
+          ok: false,
+          reason: `provider ${provider.name} names aws_session_token_var ${provider.aws_session_token_var}, which is not bound`,
+        };
+      }
+    }
+    return {
+      ok: true,
+      credentials: {
+        aws: {
+          accessKeyId: provider.aws_access_key_id,
+          secretAccessKey,
+          ...(sessionToken === undefined ? {} : { sessionToken }),
+          region: provider.region,
+        },
+      },
+    };
+  }
+
+  if (canonical === "vertex") {
+    if (provider.gcp_project_id === undefined) {
+      return {
+        ok: false,
+        reason: `field providers[${index}].gcp_project_id: required when kind = vertex`,
+      };
+    }
+    if (provider.gcp_access_token_var === undefined) {
+      return {
+        ok: false,
+        reason: `field providers[${index}].gcp_access_token_var: required when kind = vertex`,
+      };
+    }
+    if (provider.region === undefined) {
+      return {
+        ok: false,
+        reason: `field providers[${index}].region: required when kind = vertex (this is the GCP location, e.g. us-central1)`,
+      };
+    }
+    const accessToken = boundSecret(secrets, provider.gcp_access_token_var);
+    if (accessToken === undefined) {
+      return {
+        ok: false,
+        reason: `provider ${provider.name} names gcp_access_token_var ${provider.gcp_access_token_var}, which is not bound`,
+      };
+    }
+    return {
+      ok: true,
+      credentials: {
+        gcp: {
+          accessToken,
+          projectId: provider.gcp_project_id,
+          location: provider.region,
+        },
+      },
+    };
+  }
+
+  // Every other family authenticates with the single `api_key` string. Rust
+  // resolves `aws_credentials`/`gcp_credentials` for them too (the resolver is
+  // not kind-gated), but no non-Bedrock/Vertex adapter reads either field, so
+  // carrying them would be dead weight on the route.
+  return { ok: true, credentials: {} };
+}
+
 /**
  * Join the two tables into the flattened {@link PhysicalRoute}s the dispatch
  * seam carries, resolving each provider's credential out of `secrets`.
@@ -158,7 +334,8 @@ function parseTable<T extends z.ZodTypeAny>(
  * a binding that is absent (or not a non-empty string) is a MISCONFIGURATION,
  * not an anonymous provider: it refuses the whole catalog, because silently
  * dispatching an unauthenticated request to a paid upstream is the failure mode
- * this check exists to prevent.
+ * this check exists to prevent. The same rule covers the composite
+ * `bedrock`/`vertex` credentials — see {@link providerCredentials}.
  */
 export function buildModelCatalog(
   providers: readonly ProviderRecord[],
@@ -166,7 +343,8 @@ export function buildModelCatalog(
   secrets: Readonly<Record<string, unknown>> = {},
 ): ModelCatalogResult {
   const byName = new Map<string, ProviderRecord>();
-  for (const provider of providers) {
+  const credentialsByName = new Map<string, ProviderCredentials>();
+  for (const [index, provider] of providers.entries()) {
     if (byName.has(provider.name)) {
       return { ok: false, reason: `duplicate provider ${provider.name}` };
     }
@@ -176,7 +354,12 @@ export function buildModelCatalog(
         reason: `provider ${provider.name} has unsupported kind ${provider.kind}`,
       };
     }
+    const credentials = providerCredentials(provider, index, secrets);
+    if (!credentials.ok) {
+      return { ok: false, reason: credentials.reason };
+    }
     byName.set(provider.name, provider);
+    credentialsByName.set(provider.name, credentials.credentials);
   }
 
   // `OpenRouterRoute` is `PhysicalRoute` plus the two optional OpenRouter
@@ -212,6 +395,14 @@ export function buildModelCatalog(
       apiKey = value;
     }
 
+    const credentials = credentialsByName.get(provider.name) ?? {};
+
+    // `ModelRoute.region` IS the provider's declared region in Rust (the
+    // registry copies `Provider.region` onto every route it builds), so the
+    // provider row is the source. A model-level `region` still wins, which is
+    // additive: it can only make a route MORE specific than the provider's.
+    const region = model.region ?? provider.region;
+
     routes.push({
       logicalModel: model.name,
       provider: provider.name,
@@ -219,12 +410,14 @@ export function buildModelCatalog(
       providerKind: provider.kind,
       baseUrl: provider.base_url,
       ...(apiKey !== undefined ? { apiKey } : {}),
+      ...(credentials.aws === undefined ? {} : { awsCredentials: credentials.aws }),
+      ...(credentials.gcp === undefined ? {} : { gcpCredentials: credentials.gcp }),
       authScheme: provider.auth_scheme ?? defaultAuthScheme(provider.kind),
       ownedBy: model.owned_by ?? provider.name,
       ...(model.capabilities !== undefined
         ? { capabilities: model.capabilities as readonly ModelCapability[] }
         : {}),
-      ...(model.region !== undefined ? { region: model.region } : {}),
+      ...(region !== undefined ? { region } : {}),
       enabled: model.enabled ?? true,
       ...(model.tenant_id !== undefined ? { tenantId: model.tenant_id } : {}),
       ...(model.project_id !== undefined ? { projectId: model.project_id } : {}),

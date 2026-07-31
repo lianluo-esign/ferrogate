@@ -47,6 +47,7 @@ import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import {
   type AssetAuthFailure,
   type AssetCaller,
+  type AssetObjectStore,
   BuiltinEicarScreener,
   InMemoryAssetAuditSink,
   InMemoryAssetMetadataStore,
@@ -54,6 +55,8 @@ import {
   UnavailablePresigner,
   isAuthFailure,
 } from "./ports.js";
+import { D1AssetEntitlements } from "./entitlements.js";
+import { SigV4Presigner } from "./sigv4.js";
 import {
   assetChannelParamsSchema,
   assetNameParamsSchema,
@@ -103,9 +106,12 @@ export interface AssetEntitlementsPort {
 /**
  * Worker bindings this module reads on top of `GatewayBindings`.
  *
- * PORT-TODO(inventory-request-path.md §1.6 "Asset hosting"): entitlements move
- * to D1 (`StoredPlan` + role bindings) via `@ferrogate/storage`. Until then a
- * JSON var is the bootstrap path, exactly as the API-key vars are.
+ * The DURABLE source landed in `./entitlements.ts`: {@link D1AssetEntitlements}
+ * reads `tenants.plan_id → plans` for the plan half and the
+ * Permission → Role → TenantRoleBinding graph for the `assets.host` role half,
+ * i.e. both sides of the Rust `tenant_can_host` disjunction
+ * (`assets.rs:1804`). {@link entitlementsFromEnv} puts it in front of the var
+ * below, which now answers only for a tenant with no `tenants` row.
  */
 export interface AssetBindings {
   /** JSON map: tenant id → `AssetEntitlements` (snake_case keys). */
@@ -136,8 +142,26 @@ function parseEntitlements(raw: unknown): AssetEntitlements {
   };
 }
 
-/** `ASSET_ENTITLEMENTS` var → {@link AssetEntitlementsPort}. */
+/**
+ * Worker `env` → {@link AssetEntitlementsPort}.
+ *
+ * DURABLE FIRST: with `CONTROL_DB` bound, {@link D1AssetEntitlements} answers
+ * from `tenants → plans` plus the `assets.host` role grant — the two halves of
+ * the Rust `tenant_can_host` — and the var below is consulted only for a tenant
+ * the control plane has never heard of. Without the binding the behaviour is
+ * exactly what it was: the var, and nothing else.
+ */
 export function entitlementsFromEnv(env: AssetBindings): AssetEntitlementsPort {
+  const configured = configuredEntitlementsFromEnv(env);
+  return (
+    D1AssetEntitlements.fromEnv(env as unknown as Record<string, unknown>, {
+      fallback: configured,
+    }) ?? configured
+  );
+}
+
+/** The `ASSET_ENTITLEMENTS` var alone — the bootstrap leg. */
+export function configuredEntitlementsFromEnv(env: AssetBindings): AssetEntitlementsPort {
   let table: Record<string, unknown> | null = null;
   if (typeof env.ASSET_ENTITLEMENTS === "string") {
     try {
@@ -208,10 +232,17 @@ function requestContext(c: Context<AssetEnv>): AssetRequestContext {
   return {
     requestId: c.get("requestId") ?? "",
     // PORT-TODO(inventory-request-path.md §governed actions): the per-tenant
-    // "require a declared run id" switch and the unjoinable-action metric live
-    // in `@ferrogate/observability` + `@ferrogate/policy`, still stubs. The
-    // header is validated and threaded onto every audit row today; only the
-    // optional ENFORCEMENT (default OFF in Rust) is outstanding.
+    // "require a declared run id" switch and the unjoinable-action metric.
+    // A SCOPE boundary, not a platform limit: the switch is a per-tenant policy
+    // row (`@ferrogate/policy`) and the metric is an Analytics Engine data
+    // point (`@ferrogate/observability`, and the same `TELEMETRY` dataset the
+    // metering marker defers on — see `src/metering/ports.ts`). Neither is
+    // reachable from this module.
+    // What IS ported: the header is VALIDATED (a malformed value is
+    // `400 invalid_agent_run_id_header`, above) and threaded onto every audit
+    // row, which is the whole correlation-join leg. Only the optional
+    // ENFORCEMENT — default OFF in Rust, so the shipped behaviour is identical
+    // to an unconfigured Rust gateway — is outstanding.
     agentRunId: declared === "" ? undefined : declared,
   };
 }
@@ -291,8 +322,136 @@ export interface AssetRouteModuleOptions {
    * gateway answers).
    */
   readonly deps?: Partial<AssetServiceDeps> | undefined;
+  /**
+   * Ports resolved from the REQUEST's Worker bindings, merged over
+   * {@link AssetRouteModuleOptions.deps}.
+   *
+   * This exists for the same reason `inferenceRouteModule` takes `models` as a
+   * factory: the route module is built ONCE at module scope, while `env.ASSETS`
+   * (and the S3 credentials the presigner needs) only exist per request. The
+   * built {@link AssetService} is memoized on the `env` OBJECT — a `WeakMap`,
+   * never a plain field — so two concurrent requests each see their own
+   * bindings and neither can observe the other's, while the service is still
+   * constructed once per isolate.
+   *
+   * Pass {@link assetDepsFromEnv} at the composition root. With neither this
+   * nor `deps` the offline in-memory defaults apply, which is what makes the
+   * unit suites binding-free.
+   */
+  readonly depsFromEnv?: ((env: Record<string, unknown>) => Partial<AssetServiceDeps>) | undefined;
   readonly caller?: AssetCallerResolver | undefined;
   readonly entitlements?: AssetEntitlementsPort | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Binding-resolved ports
+// ---------------------------------------------------------------------------
+
+/**
+ * Worker bindings the asset object path reads.
+ *
+ * `ASSETS` is the R2 bucket. The five `ASSET_S3_*` entries are what the
+ * PRESIGNED family needs and the bucket binding cannot supply — see
+ * {@link sigV4PresignerFromEnv}.
+ */
+export interface AssetObjectBindings {
+  /** `[[r2_buckets]] binding = "ASSETS"`. Holds the bytes of every hosted asset. */
+  readonly ASSETS?: unknown;
+  /** `https://<account_id>.r2.cloudflarestorage.com` — R2's **S3** endpoint. */
+  readonly ASSET_S3_ENDPOINT?: string;
+  /** Bucket name as the S3 API addresses it. */
+  readonly ASSET_S3_BUCKET?: string;
+  /** R2 is always `auto`; configurable for an S3-compatible deployment. */
+  readonly ASSET_S3_REGION?: string;
+  /** SECRET (`wrangler secret put`), never a plaintext var. */
+  readonly ASSET_S3_ACCESS_KEY_ID?: string;
+  /** SECRET (`wrangler secret put`), never a plaintext var. */
+  readonly ASSET_S3_SECRET_ACCESS_KEY?: string;
+  /** Optional STS session token, for a temporary credential. */
+  readonly ASSET_S3_SESSION_TOKEN?: string;
+}
+
+/** Structural check for a live `R2Bucket` — the port is deliberately R2-shaped. */
+function isAssetObjectStore(value: unknown): value is AssetObjectStore {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<AssetObjectStore>;
+  return (
+    typeof candidate.put === "function" &&
+    typeof candidate.get === "function" &&
+    typeof candidate.head === "function" &&
+    typeof candidate.delete === "function"
+  );
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+/**
+ * The production {@link AssetPresigner}, or `null`.
+ *
+ * PLATFORM FACT, not a shortcut: the Workers `R2Bucket` binding has no presign
+ * method. R2 presigned URLs are an **S3-API** feature (SigV4 over
+ * `https://<account_id>.r2.cloudflarestorage.com`), so they need an S3 access
+ * key pair that the bucket binding does not carry and cannot derive. All five
+ * required values must be bound; a partial set yields `null` and the presign
+ * family keeps answering `503 asset_bucket_unavailable`, which is the Rust
+ * unconfigured posture. Half-configuring must never produce a URL the bucket
+ * will reject.
+ */
+export function sigV4PresignerFromEnv(env: AssetObjectBindings): SigV4Presigner | null {
+  const endpoint = nonEmpty(env.ASSET_S3_ENDPOINT);
+  const bucket = nonEmpty(env.ASSET_S3_BUCKET);
+  const accessKeyId = nonEmpty(env.ASSET_S3_ACCESS_KEY_ID);
+  const secretAccessKey = nonEmpty(env.ASSET_S3_SECRET_ACCESS_KEY);
+  if (
+    endpoint === undefined ||
+    bucket === undefined ||
+    accessKeyId === undefined ||
+    secretAccessKey === undefined
+  ) {
+    return null;
+  }
+  const sessionToken = nonEmpty(env.ASSET_S3_SESSION_TOKEN);
+  return new SigV4Presigner({
+    endpoint,
+    bucket,
+    // R2's S3 API is always `auto`; the var exists for S3-compatible targets.
+    region: nonEmpty(env.ASSET_S3_REGION) ?? "auto",
+    accessKeyId,
+    secretAccessKey,
+    ...(sessionToken !== undefined ? { sessionToken } : {}),
+  });
+}
+
+/**
+ * Worker bindings → asset ports. The composition root's half of the R2 wiring.
+ *
+ * Each port is decided on its OWN evidence, never all-or-nothing:
+ *
+ *  - `ASSETS` bound ⇒ the real bucket holds the bytes. Absent ⇒
+ *    `InMemoryAssetObjectStore`, whose contents die with the isolate, so a push
+ *    appears to succeed and a later read 404s. That is a local-dev posture, not
+ *    a deployment one.
+ *  - the five `ASSET_S3_*` values bound ⇒ {@link SigV4Presigner}. Absent ⇒
+ *    `UnavailablePresigner` ⇒ `503 asset_bucket_unavailable`.
+ *  - `presignEnabled` is turned on ONLY when BOTH hold. A presigned URL against
+ *    a bucket the gateway is not also reading from would stage bytes the commit
+ *    step could never find, and a bucket with no signing credentials cannot
+ *    issue one at all — so the flag tracks the conjunction, not either half.
+ *
+ * `metadata` is deliberately NOT resolved here: the asset registry is still the
+ * in-isolate `InMemoryAssetMetadataStore`. See the marker on that class.
+ */
+export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetServiceDeps> {
+  const bindings = env as AssetObjectBindings;
+  const objects = isAssetObjectStore(bindings.ASSETS) ? bindings.ASSETS : undefined;
+  const presigner = sigV4PresignerFromEnv(bindings);
+  return {
+    ...(objects !== undefined ? { objects } : {}),
+    ...(presigner !== null ? { presigner } : {}),
+    ...(objects !== undefined && presigner !== null ? { limits: { presignEnabled: true } } : {}),
+  };
 }
 
 /**
@@ -339,7 +498,38 @@ export function buildAssetService(deps?: Partial<AssetServiceDeps>): AssetServic
 
 /** The `RouteModule` `createGatewayApp({ modules })` mounts. */
 export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteModule {
-  const service = options.service ?? buildAssetService(options.deps);
+  /**
+   * The service, when it does not depend on request bindings. Built once, as
+   * before — `options.service` wins, then a `deps`-only module.
+   */
+  const fixed =
+    options.service ?? (options.depsFromEnv === undefined ? buildAssetService(options.deps) : null);
+
+  /**
+   * Otherwise: one service per `env` OBJECT, memoized on it. Same device as
+   * `modelsFromEnv` / the metering backend resolver, and for the same reason —
+   * a module-scoped "current env" slot would be last-write-wins under
+   * concurrency, which for an object store means one tenant's push landing in
+   * whatever bucket the other request was holding.
+   */
+  const byEnv = new WeakMap<object, AssetService>();
+  const serviceFor = (c: Context<AssetEnv>): AssetService => {
+    if (fixed !== null) {
+      return fixed;
+    }
+    const env = (c.env ?? {}) as Record<string, unknown>;
+    const cached = byEnv.get(env);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const built = buildAssetService({
+      ...options.deps,
+      ...options.depsFromEnv?.(env),
+    });
+    byEnv.set(env, built);
+    return built;
+  };
+
   const resolveCaller = options.caller ?? defaultCallerResolver(options.entitlements);
 
   /** Resolve the caller or answer its refusal. */
@@ -364,12 +554,12 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
       // --- reserved literals ------------------------------------------------
 
       on("getAssetStorageSummary", async (c) =>
-        render(await service.storageSummary(await caller(c))),
+        render(await serviceFor(c).storageSummary(await caller(c))),
       );
 
       on("listWithheldAssets", async (c) => {
         const query = parseOrThrow(withheldQuerySchema, c.req.query());
-        return render(await service.listWithheldAssets(await caller(c), query));
+        return render(await serviceFor(c).listWithheldAssets(await caller(c), query));
       });
 
       // --- presign family ---------------------------------------------------
@@ -378,7 +568,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const body = await controlBody(c, presignUploadIntentRequestSchema);
         return render(
-          await service.createUploadIntent(await caller(c), refOf(params), body, requestContext(c)),
+          await serviceFor(c).createUploadIntent(await caller(c), refOf(params), body, requestContext(c)),
         );
       });
 
@@ -386,7 +576,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const body = await controlBody(c, presignCommitRequestSchema);
         return render(
-          await service.commitUpload(await caller(c), refOf(params), body, requestContext(c)),
+          await serviceFor(c).commitUpload(await caller(c), refOf(params), body, requestContext(c)),
         );
       });
 
@@ -394,25 +584,25 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const body = await controlBody(c, presignAbortRequestSchema);
         return render(
-          await service.abortUpload(await caller(c), refOf(params), body, requestContext(c)),
+          await serviceFor(c).abortUpload(await caller(c), refOf(params), body, requestContext(c)),
         );
       });
 
       on("getAssetDownloadUrl", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
-        return render(await service.downloadUrl(await caller(c), refOf(params), requestContext(c)));
+        return render(await serviceFor(c).downloadUrl(await caller(c), refOf(params), requestContext(c)));
       });
 
       // --- reserved third/fourth segments -----------------------------------
 
       on("getAssetManifest", async (c) => {
         const params = parseOrThrow(assetNameParamsSchema, c.req.param());
-        return render(await service.manifest(await caller(c), nameOf(params)));
+        return render(await serviceFor(c).manifest(await caller(c), nameOf(params)));
       });
 
       on("listAssetChannels", async (c) => {
         const params = parseOrThrow(assetNameParamsSchema, c.req.param());
-        return render(await service.listChannels(await caller(c), nameOf(params)));
+        return render(await serviceFor(c).listChannels(await caller(c), nameOf(params)));
       });
 
       on("putAssetChannel", async (c) => {
@@ -426,7 +616,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
           parseOrThrow(channelMoveQuerySchema, { version });
         }
         return render(
-          await service.putChannel(
+          await serviceFor(c).putChannel(
             await caller(c),
             nameOf(params),
             params.channel,
@@ -439,7 +629,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
       on("deleteAssetChannel", async (c) => {
         const params = parseOrThrow(assetChannelParamsSchema, c.req.param());
         return render(
-          await service.deleteChannel(
+          await serviceFor(c).deleteChannel(
             await caller(c),
             nameOf(params),
             params.channel,
@@ -451,14 +641,14 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
       on("yankAssetVersion", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         return render(
-          await service.setVersionYank(await caller(c), refOf(params), true, requestContext(c)),
+          await serviceFor(c).setVersionYank(await caller(c), refOf(params), true, requestContext(c)),
         );
       });
 
       on("unyankAssetVersion", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         return render(
-          await service.setVersionYank(await caller(c), refOf(params), false, requestContext(c)),
+          await serviceFor(c).setVersionYank(await caller(c), refOf(params), false, requestContext(c)),
         );
       });
 
@@ -467,7 +657,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const query = parseOrThrow(platformQuerySchema, c.req.query());
         const body = await controlBody(c, assetVisibilityPromotionRequestSchema);
         return render(
-          await service.promoteVisibility(
+          await serviceFor(c).promoteVisibility(
             await caller(c),
             { ...refOf(params), variant: query.platform ?? "" },
             body,
@@ -478,18 +668,18 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
 
       // --- generic arms -----------------------------------------------------
 
-      on("listAssets", async (c) => render(await service.listAssets(await caller(c))));
+      on("listAssets", async (c) => render(await serviceFor(c).listAssets(await caller(c))));
 
       on("listAssetsByType", async (c) => {
         const params = parseOrThrow(assetTypeParamsSchema, c.req.param());
-        return render(await service.listAssets(await caller(c), params.asset_type));
+        return render(await serviceFor(c).listAssets(await caller(c), params.asset_type));
       });
 
       on("getAsset", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const query = parseOrThrow(platformQuerySchema, c.req.query());
         return renderBytes(
-          await service.pullAsset(
+          await serviceFor(c).pullAsset(
             await caller(c),
             { assetType: params.asset_type, name: params.name, reference: params.version },
             {
@@ -511,7 +701,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const context = requestContext(c);
         const content = new Uint8Array(await c.req.arrayBuffer());
         return render(
-          await service.putAsset(
+          await serviceFor(c).putAsset(
             resolved,
             { ...refOf(params), variant: query.platform ?? "" },
             {
@@ -528,7 +718,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const query = parseOrThrow(platformQuerySchema, c.req.query());
         return render(
-          await service.deleteAsset(
+          await serviceFor(c).deleteAsset(
             await caller(c),
             { ...refOf(params), variant: query.platform ?? "" },
             requestContext(c),

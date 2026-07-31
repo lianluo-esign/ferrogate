@@ -23,6 +23,12 @@
  * note and the tests that pin it.
  */
 import type { JsonValue } from "@ferrogate/core";
+import {
+  DeterministicDetector,
+  type SecretPattern,
+  envelopeManagedAction,
+  flattenedText,
+} from "@ferrogate/guardrails";
 
 // `./durable.js` imports the TYPES and `webCryptoIdentityCipher` back out of
 // this module. The cycle is safe because neither side touches the other at
@@ -320,17 +326,28 @@ export interface GuardrailVerdict {
   reason?: string;
 }
 
+/**
+ * The guardrail seam of the tool chokepoint.
+ *
+ * Both legs take the RESOLVED {@link McpTool}, not its namespaced name: Rust's
+ * managed-action binding is derived from the action itself, whose
+ * `server_name` / `tool_name` are separate fields, and the canonical target
+ * `mcp:{server}:{tool}` needs both. Re-splitting `"{server}-{remote}"` here
+ * would have to guess where the boundary is — `-` is legal inside a remote tool
+ * name — and a wrong guess mis-addresses the policy selector, which is a
+ * guardrail applied to the wrong upstream.
+ */
 export interface GuardrailsPort {
   /** Runs BEFORE execution: may block or quarantine the arguments. */
   inspectInput(
     context: DispatchContext,
-    toolName: string,
+    tool: McpTool,
     args: JsonValue,
   ): Promise<GuardrailVerdict>;
   /** Runs AFTER execution: may redact or withhold the result. */
   inspectOutput(
     context: DispatchContext,
-    toolName: string,
+    tool: McpTool,
     content: JsonValue,
   ): Promise<GuardrailVerdict>;
 }
@@ -380,32 +397,188 @@ export interface AssetReaderPort {
 }
 
 /**
- * Pass-through guardrails — a STUB, and the most security-relevant one left in
- * this Worker.
+ * Time budget handed to the detector, mirroring Rust's per-detector deadline.
  *
- * PORT-TODO(inventory-edge-control §MCP): NOT a platform limit. It is a
- * deferral, and the thing it is waiting for now exists: `@ferrogate/guardrails`
- * is complete and its deterministic detector runs in workerd today.
- * `apps/agent-runtime/src/ports.ts::deterministicGuardrailPort` is a working
- * reference for exactly this binding — build a `GuardrailEnvelope` with
- * `envelopeFromText`, call `DeterministicDetector.evaluate` with an ABSOLUTE
- * deadline (`Date.now() + budget`, not the budget itself), and FAIL CLOSED on a
- * detector error.
- *
- * Until that lands this class allows everything, which means MCP tool
- * arguments and tool results are currently unscanned. That is a real gap, not a
- * cosmetic one; it is named here rather than hidden behind a plausible name.
+ * The deterministic detector is in-process and does not block on I/O, so this
+ * is a ceiling rather than an expected cost; it exists so a pathological regex
+ * over a large tool result cannot hold the request open indefinitely.
  */
-export class AllowAllGuardrails implements GuardrailsPort {
-  // eslint-disable-next-line @typescript-eslint/require-await
-  async inspectInput(): Promise<GuardrailVerdict> {
-    return { action: "allow" };
-  }
+export const MCP_GUARDRAIL_BUDGET_MS = 250;
 
-  // eslint-disable-next-line @typescript-eslint/require-await
-  async inspectOutput(): Promise<GuardrailVerdict> {
-    return { action: "allow" };
-  }
+/** The guardrail class every action raised by this Worker carries. */
+export const MCP_MANAGED_ACTION_CLASS = "mcp";
+
+/**
+ * Rust `ManagedExternalAction::target()` for the `McpTool` arm:
+ * `mcp:{server_name}:{tool_name}`. It is the addressing half of what the
+ * detector scans, and the string a managed-action policy's `targets` selector
+ * is matched against, so the spelling is load-bearing.
+ */
+export function managedActionTarget(serverName: string, remoteName: string): string {
+  return `mcp:${serverName}:${remoteName}`;
+}
+
+/**
+ * Rust `managed_action_guardrail::payload_text`: a bare JSON string is scanned
+ * as-is (no enclosing quotes, which would split a keyword away from its
+ * neighbours), anything else by its compact JSON encoding.
+ */
+export function guardrailPayloadText(value: JsonValue): string {
+  return typeof value === "string" ? value : JSON.stringify(value ?? null);
+}
+
+/**
+ * Configuration for {@link deterministicManagedActionGuardrails}, mirroring the
+ * `{ keywords?, regex?, secretPatterns? }` shape `apps/agent-runtime` reads for
+ * the A2A stages plus the managed-action selector Rust uses to pick policies.
+ */
+export interface ManagedActionGuardrailConfig {
+  readonly keywords?: readonly string[];
+  readonly regex?: readonly string[];
+  readonly secretPatterns?: readonly SecretPattern[];
+  /**
+   * Rust `ManagedActionSelector.targets`. EMPTY means every target, exactly as
+   * an empty selector matches everything in `ferrogate-guardrails::policy`.
+   * A non-empty list restricts the detector to those canonical targets, so a
+   * policy written for one upstream does not silently police another.
+   */
+  readonly targets?: readonly string[];
+}
+
+/**
+ * The MCP tool chokepoint's guardrail seam, bound to the REAL clean-room
+ * deterministic detector.
+ *
+ * Clean-room port of `crates/ferrogate-gateway/src/server/managed_action_guardrail.rs`
+ * (`evaluate_managed_action_guardrail_async` + `payload_text`) for the
+ * `ManagedActionClass::Mcp` arm:
+ *
+ *  - the envelope is the MANAGED-ACTION one, not the chat one:
+ *    `GuardrailEnvelope::managed_action(stage, "managed_action:{target}", text)`,
+ *    whose content source is `tool_arguments` on the request stage and
+ *    `tool_result` on the response stage. Registering the detector for only one
+ *    of those sources would silently pass a whole direction, so both are
+ *    declared in `supported_sources`;
+ *  - the request-stage text is Rust `managed_action_input_text`: the canonical
+ *    target, then a newline, then the arguments — so a policy can match on the
+ *    addressing (`mcp:github:create_issue`) or on the payload;
+ *  - the response-stage text is the rendered tool result;
+ *  - the deadline is ABSOLUTE (`Date.now() + budget`), because
+ *    `DeterministicDetector.evaluate` compares its argument against
+ *    `Date.now()`. Passing the budget itself makes every evaluation throw —
+ *    which, read as a pass, silently opens the chokepoint;
+ *  - a detector error FAILS CLOSED. A detector that could not run has not
+ *    cleared the content.
+ *
+ * A verdict maps to the {@link GuardrailVerdict} vocabulary the chokepoint in
+ * `src/tools.ts` already enforces: `block` before execution, `withhold` after.
+ * Rust refuses at both stages, and so does this — `withhold` is the response
+ * stage's refusal, not a softer outcome.
+ *
+ * An UNCONFIGURED guardrail (no keywords, no regex, no secret patterns) matches
+ * nothing and allows everything: that is the answer Rust's `match_guardrail`
+ * gives when no managed-action policy is registered, and wiring this port must
+ * not change the behavior of a deployment that configured no detectors.
+ */
+export function deterministicManagedActionGuardrails(
+  config: ManagedActionGuardrailConfig,
+): GuardrailsPort {
+  const keywords = [...(config.keywords ?? [])];
+  const regex = [...(config.regex ?? [])];
+  const secretPatterns = [...(config.secretPatterns ?? [])];
+  const targets = [...(config.targets ?? [])];
+  const configured = keywords.length > 0 || regex.length > 0 || secretPatterns.length > 0;
+
+  const detector = configured
+    ? DeterministicDetector.new({
+        id: "mcp.managed_action.deterministic",
+        // Both managed-action sources, for the reason in the module note above.
+        supported_sources: ["tool_arguments", "tool_result"],
+        keywords,
+        regex,
+        secret_patterns: secretPatterns,
+      })
+    : undefined;
+
+  /** Rust `managed_selector_matches`: an EMPTY target list matches everything. */
+  const selects = (target: string): boolean =>
+    targets.length === 0 || targets.includes(target);
+
+  const evaluate = async (
+    stage: "request" | "response",
+    context: DispatchContext,
+    toolName: string,
+    renderText: () => string,
+    target: string,
+  ): Promise<GuardrailVerdict> => {
+    if (detector === undefined || !selects(target)) return { action: "allow" };
+    const refusal = stage === "request" ? "block" : "withhold";
+    let result: Awaited<ReturnType<typeof detector.evaluate>>;
+    try {
+      // Rendering the payload is INSIDE the guard on purpose, and it is a thunk
+      // for exactly that reason: `JSON.stringify` runs caller-controlled
+      // `toJSON`/getters, so it can throw. A failure THERE has cleared exactly
+      // as little as a failure inside the detector, and must refuse rather than
+      // escape as a 500 that some outer handler could mistake for a clean pass.
+      const envelope = envelopeManagedAction(stage, `managed_action:${target}`, renderText());
+      result = await detector.evaluate(
+        {
+          protocol: "managed_action",
+          stage,
+          // `DetectorTenant` has no tenant field of its own — Rust attributes a
+          // guardrail evaluation by ORGANIZATION.
+          tenant: { organization_id: context.auth.organizationId },
+          provider: target,
+          text: flattenedText(envelope),
+          segments: envelope.segments,
+        },
+        // ABSOLUTE deadline, not a duration.
+        Date.now() + MCP_GUARDRAIL_BUDGET_MS,
+      );
+    } catch (error) {
+      return {
+        action: refusal,
+        reason:
+          `mcp ${stage}-stage guardrail could not be evaluated for ${toolName}: ` +
+          `${error instanceof Error ? error.message : "detector error"}`,
+      };
+    }
+    if (result.verdict === "pass") return { action: "allow" };
+    // Evidence only — the matched TEXT is never echoed, which is the crate's
+    // standing invariant: a refusal that quoted the secret it caught would
+    // defeat the detector it came from.
+    const severities = result.findings.map((finding) => finding.severity).join(", ");
+    return {
+      action: refusal,
+      reason:
+        `mcp ${stage}-stage guardrail matched ${result.findings.length} finding(s) ` +
+        `[${severities}] on ${toolName}`,
+    };
+  };
+
+  return {
+    async inspectInput(context, tool, args) {
+      const target = managedActionTarget(tool.serverName, tool.remoteName);
+      // Rust `managed_action_input_text`: target, newline, then the payload.
+      return evaluate(
+        "request",
+        context,
+        tool.name,
+        () => `${target}\n${guardrailPayloadText(args)}`,
+        target,
+      );
+    },
+    async inspectOutput(context, tool, content) {
+      const target = managedActionTarget(tool.serverName, tool.remoteName);
+      return evaluate(
+        "response",
+        context,
+        tool.name,
+        () => guardrailPayloadText(content),
+        target,
+      );
+    },
+  };
 }
 
 /**
@@ -1026,6 +1199,20 @@ export interface McpEnv {
   FG_DEV_IN_MEMORY_PORTS?: string;
 
   /**
+   * DEV/TEST ONLY. JSON `{ keywords?, regex?, secretPatterns?, targets? }`
+   * configuring the managed-action (MCP tool argument / tool result) guardrail
+   * evaluated by the real `@ferrogate/guardrails` deterministic detector.
+   *
+   * ABSENT OR EMPTY means NO detector is configured, which matches nothing and
+   * allows everything — the same answer Rust's `match_guardrail` gives when no
+   * managed-action policy is registered. This is deliberately NOT the
+   * enforcement policy store: real detector policy is tenant-scoped and lives
+   * in the control plane, so a `[vars]` entry could only ever be a
+   * per-deployment default. See {@link deterministicManagedActionGuardrails}.
+   */
+  FG_DEV_MCP_GUARDRAILS?: string;
+
+  /**
    * KV namespace holding in-flight per-user MCP OAuth flows
    * ({@link StoredMcpOauthFlow}). Dereferenced by {@link resolvePorts} through
    * `KvOauthFlowStore`; OPTIONAL here because the dev bundle runs without it
@@ -1101,7 +1288,11 @@ export function inMemoryPorts(): InMemoryMcpPorts {
     auth: new InMemoryAuth(),
     entitlements: new InMemoryEntitlements(),
     upstreams: new InMemoryUpstreams(),
-    guardrails: new AllowAllGuardrails(),
+    // The singleton default is an UNCONFIGURED detector — it matches nothing,
+    // which is Rust's answer when no managed-action policy is registered.
+    // `resolvePorts` overrides it per request from the operator var, so the
+    // deployed Worker's guardrail is never this one.
+    guardrails: deterministicManagedActionGuardrails({}),
     approvals: new AutoApproval(),
     assets: new InMemoryAssets(),
     credentials: new InMemoryCredentialStore(),
@@ -1271,6 +1462,28 @@ export function portsBound(env: McpEnv): boolean {
 }
 
 /**
+ * Decode {@link McpEnv.FG_DEV_MCP_GUARDRAILS}.
+ *
+ * Absent, empty, or unparseable ⇒ `{}` ⇒ NO detector, which matches nothing.
+ * That is deliberate and is the same fallback `apps/agent-runtime` uses for its
+ * A2A var: a `[vars]` entry is a per-deployment default, and a typo in it must
+ * not become a guardrail that refuses every call. A typo in the OTHER direction
+ * — silently disabling a configured guardrail — is the risk this trades
+ * against, which is why the real enforcement policy is tenant-scoped control-
+ * plane state and this var is DEV/TEST ONLY.
+ */
+export function parseGuardrailVar(raw: string | undefined): ManagedActionGuardrailConfig {
+  if (raw === undefined || raw.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as ManagedActionGuardrailConfig;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Resolve the port bundle for a request.
  *
  * Three postures, in order:
@@ -1288,10 +1501,19 @@ export function portsBound(env: McpEnv): boolean {
  * {@link McpEnv.MCP_OAUTH_FLOWS} is bound the single-use claim is the ATOMIC
  * Durable-Object one, and only a deployment missing that binding degrades to
  * KV's non-indivisible `get`+`delete`.
+ *
+ * The GUARDRAIL is bound in EVERY posture, including the fail-closed one. It is
+ * this Worker's composition root for {@link deterministicManagedActionGuardrails},
+ * so dropping the binding here silently un-scans every MCP tool argument and
+ * every tool result while leaving the whole suite green — the exact defect
+ * `test/guardrails.test.ts` drives over `SELF` to prevent.
  */
 export function resolvePorts(env: McpEnv): McpPorts {
-  if (env.FG_DEV_IN_MEMORY_PORTS === "1") return inMemoryPorts();
-  const ports = inMemoryPorts();
+  const guardrails = deterministicManagedActionGuardrails(
+    parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS),
+  );
+  if (env.FG_DEV_IN_MEMORY_PORTS === "1") return { ...inMemoryPorts(), guardrails };
+  const ports = { ...inMemoryPorts(), guardrails };
   if (durableIdentityBound(env)) {
     return {
       ...ports,

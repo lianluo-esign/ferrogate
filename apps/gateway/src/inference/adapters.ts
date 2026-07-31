@@ -6,7 +6,7 @@
  * `types.rs` (`SUPPORTED_PROVIDER_ADAPTER_FAMILIES`).
  *
  * The Rust crate ships eight families (openai-compatible, anthropic, gemini,
- * grok, openrouter, azure-openai, bedrock, vertex). FIVE are implemented here:
+ * grok, openrouter, azure-openai, bedrock, vertex). FIVE are re-written here:
  * OpenAI-compatible (chat/responses/embeddings/images/catalog), Anthropic (the
  * `/v1/messages` round trip), and the three families that are OpenAI-compatible
  * on the wire — Grok (`grok.rs`), OpenRouter (`openrouter.rs`) and Azure OpenAI
@@ -17,33 +17,34 @@
  * authenticates with `api-key`), which is precisely why aliasing them was
  * refused before they were ported.
  *
- * SIX families are resolvable. The sixth, `gemini`, is not re-written here: it
- * is `@ferrogate/providers`' `GeminiAdapter` (the port of `gemini.rs`, wire
- * grammar and all) reached through {@link packageProviderAdapter}, which is the
- * same crate boundary the Rust has. Writing a second Gemini translation in this
- * file would be the duplication the port rules forbid.
+ * ALL EIGHT families are resolvable. The other three — `gemini`, `bedrock` and
+ * `vertex` — are not re-written here: they are `@ferrogate/providers`'
+ * `GeminiAdapter`, `BedrockAdapter` (SigV4) and `VertexAiAdapter` (a pre-minted
+ * GCP OAuth2 access token), the ports of `gemini.rs` / `bedrock.rs` /
+ * `vertex.rs`, wire grammar and all, reached through
+ * {@link packageProviderAdapter} — which is the same crate boundary the Rust
+ * has. Writing a second translation for any of them in this file would be the
+ * duplication the port rules forbid.
  *
- * PORT-TODO(inventory-request-path §3): `bedrock` and `vertex` stay
- * unresolvable, and NOT because of the platform — `@ferrogate/providers` ships
- * `BedrockAdapter` (SigV4, byte-exact, including the streaming content-hash
- * variant) and `VertexAiAdapter` (GCP service-account JWT) already, and
- * `packageProviderAdapter` would wrap either one unchanged. What is missing is
- * the CREDENTIAL SHAPE: both read `ProviderConfig.awsCredentials`
- * (`accessKeyId`/`secretAccessKey`/`sessionToken`/`region`) or
- * `.gcpCredentials` (service-account `clientEmail`/`privateKey`/`tokenUri`),
- * and `PhysicalRoute` in `./ports.ts` carries a single opaque `apiKey` string
- * with nowhere to put them. Packing a composite credential into `apiKey` would
- * be a fake. Add the two optional credential members to `PhysicalRoute` (and
- * read them in `catalog.ts` from the provider table + secret bindings), then
- * add the two `packageProviderAdapter` lines below. Until then
- * `defaultAdapterRegistry` resolves their aliases to `null`, which the handler
- * renders as the Rust `unsupported provider kind <kind>` message rather than
- * silently dispatching an unsigned request.
+ * Bedrock and Vertex needed a COMPOSITE credential rather than the single
+ * opaque `apiKey` string every other family carries, which is the only reason
+ * they were unresolvable: `PhysicalRoute` now carries `awsCredentials` /
+ * `gcpCredentials` (`./ports.ts`) and the provider table carries the Rust
+ * config's `aws_access_key_id` / `aws_secret_access_key_env` /
+ * `aws_session_token_env` / `gcp_project_id` / `gcp_access_token_env` /
+ * `region` fields, with `_env` becoming `_var` because a Worker names a SECRET
+ * BINDING where a process names an environment variable (`catalog.ts`). A route
+ * that reaches either adapter without its credential is refused by the adapter
+ * (`AdapterError::InvalidRequest`), and a provider table that declares such a
+ * provider without one is refused WHOLE by `buildModelCatalog` — the Worker
+ * equivalent of the Rust config validator's refusal to boot.
  */
 import {
-  AdapterError as PackageAdapterError,
+  BedrockAdapter,
   GeminiAdapter,
+  AdapterError as PackageAdapterError,
   SecretValue,
+  VertexAiAdapter,
 } from "@ferrogate/providers";
 import type {
   Json,
@@ -730,6 +731,34 @@ export function packageProviderAdapter(
     kind: canonicalKind,
     baseUrl: route.baseUrl,
     ...(route.apiKey === undefined ? {} : { apiKey: route.apiKey }),
+    // The composite credentials the `bedrock` / `vertex` families need. This is
+    // the ONLY place the plaintext is wrapped in `SecretValue`, the package's
+    // (and the Rust's) un-printable carrier — from here on a `console.log` or
+    // `JSON.stringify` of the provider config renders `[redacted]` instead of a
+    // signing key. A route that carries no credential passes NONE: the adapter
+    // has to see `undefined` and raise its own fail-closed `AdapterError`,
+    // never a half-populated credential it might try to sign with.
+    ...(route.awsCredentials === undefined
+      ? {}
+      : {
+          awsCredentials: {
+            accessKeyId: route.awsCredentials.accessKeyId,
+            secretAccessKey: new SecretValue(route.awsCredentials.secretAccessKey),
+            ...(route.awsCredentials.sessionToken === undefined
+              ? {}
+              : { sessionToken: new SecretValue(route.awsCredentials.sessionToken) }),
+            region: route.awsCredentials.region,
+          },
+        }),
+    ...(route.gcpCredentials === undefined
+      ? {}
+      : {
+          gcpCredentials: {
+            accessToken: new SecretValue(route.gcpCredentials.accessToken),
+            projectId: route.gcpCredentials.projectId,
+            location: route.gcpCredentials.location,
+          },
+        }),
   });
 
   return {
@@ -853,6 +882,37 @@ export const geminiAdapter: ProviderAdapter = packageProviderAdapter(
   new GeminiAdapter(),
 );
 
+/**
+ * `bedrock` — `@ferrogate/providers`' port of `bedrock.rs` (issue #172).
+ *
+ * Chat goes to the Bedrock Runtime `Converse` API and embeddings to
+ * `InvokeModel`, both signed with SigV4 from `PhysicalRoute.awsCredentials`.
+ * `bedrock.rs` routes BOTH through one signing helper and one `/converse` path
+ * whether or not the request streams (issue #274), so this port does too. A
+ * route with no AWS credential raises the adapter's own
+ * `bedrock provider is missing AWS credentials` instead of dispatching an
+ * unsigned request — the same fail-closed posture the Rust config validator
+ * enforces one step earlier, and which `buildModelCatalog` now also enforces.
+ */
+export const bedrockAdapter: ProviderAdapter = packageProviderAdapter(
+  "bedrock",
+  new BedrockAdapter(),
+);
+
+/**
+ * `vertex` — `@ferrogate/providers`' port of `vertex.rs` (issue #172).
+ *
+ * Gemini-on-Vertex `generateContent` / `streamGenerateContent?alt=sse` plus
+ * `:predict` embeddings, addressed by project + location and authenticated with
+ * the PRE-MINTED OAuth2 access token on `PhysicalRoute.gcpCredentials`.
+ * FerroGate never mints or refreshes that token (see `GcpRouteCredentials` in
+ * `./ports.ts`). Same fail-closed rule as Bedrock.
+ */
+export const vertexAdapter: ProviderAdapter = packageProviderAdapter(
+  "vertex",
+  new VertexAiAdapter(),
+);
+
 /** `ferrogate_providers::registry` — kind → adapter, alias-aware. */
 export const defaultAdapterRegistry: AdapterRegistry = {
   adapterFor(providerKind: string): ProviderAdapter | null {
@@ -870,10 +930,14 @@ export const defaultAdapterRegistry: AdapterRegistry = {
         return azureOpenAiAdapter;
       case "gemini":
         return geminiAdapter;
+      case "bedrock":
+        return bedrockAdapter;
+      case "vertex":
+        return vertexAdapter;
       default:
-        // See the PORT-TODO at the top of this file: `bedrock`/`vertex` fail
-        // closed for want of a credential shape on `PhysicalRoute`, rather than
-        // being aliased onto a wire-compatible neighbour.
+        // `canonicalProviderKind` returned `null`: the operator named a family
+        // that does not exist in `PROVIDER_ADAPTER_FAMILIES`. The handler
+        // renders the Rust `unsupported provider kind <kind>` message.
         return null;
     }
   },

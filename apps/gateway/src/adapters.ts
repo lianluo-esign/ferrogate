@@ -9,10 +9,25 @@
  * today, and they are swapped for D1/Secrets-Store-backed adapters — with no
  * change to `middleware/auth.ts` — as soon as the wave-2 packages land.
  *
- * PORT-TODO(inventory-edge-control §5.2): move `durable_native` resolution to
- * `@ferrogate/storage` (D1 `api_keys`, lookup by `key_prefix`, `sha256:`/
- * `blake2b:` hash verify) and the worker transport secret to
- * `@ferrogate/secrets` (Secrets Store), replacing the plaintext comparison here.
+ * Two of the four ports have since grown a DURABLE leg in this file, each in
+ * front of its config table: {@link D1RbacAuthorizer} (CONTROL D1
+ * Permission → Role → TenantRoleBinding) and, from `./keys/`,
+ * `d1ApiKeyResolverFromEnv` (TENANT D1 `api_keys`). See {@link depsFromEnv}.
+ *
+ * PORT-TODO(inventory-edge-control §5.2): the SELF-HOSTED WORKER TRANSPORT
+ * SECRET is the one credential still compared as a plaintext var here
+ * (`SELF_HOSTED_WORKER_REGISTRY.transport_secret`, {@link
+ * ConfiguredInternalTransport}). It moves to **Cloudflare Secrets Store** via
+ * `@ferrogate/secrets`. NOT a platform limit and not blocked on a schema — it
+ * is blocked on the BINDING BEING DEPLOY-TIME: a Secrets Store binding is
+ * declared in `wrangler.toml` and materialized by `wrangler deploy` against a
+ * store that must already exist in the account, so it cannot be exercised by
+ * `wrangler dev --local` or `vitest-pool-workers` the way D1/R2/Queues can. The
+ * approximation shipped here is the same constant-time comparison against a var
+ * the deployment sets with `wrangler secret put` (a secret, never a plaintext
+ * var — see the `wrangler.toml` note on `SELF_HOSTED_WORKER_REGISTRY`), which
+ * differs from Secrets Store in blast radius and rotation story, not in the
+ * comparison itself.
  */
 import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
 import type {
@@ -286,7 +301,17 @@ export type LifecycleStatus = "active" | "suspended" | "deleted" | "disabled";
  * PORT-TODO(inventory-data-billing §lifecycle): walk the full
  * tenant → project → workspace chain from D1, and honour the `Permissive`
  * admission the lifecycle status PUT/PATCH routes use to turn a hierarchy back
- * on. This adapter only reads the tenant tier.
+ * on. This adapter reads the TENANT tier only.
+ *
+ * Not a platform limit; blocked on the CHAIN, and it is a widening-risk
+ * decision rather than a mechanical one. The CONTROL migration has `tenants`,
+ * but the per-tier `lifecycle_status` columns and the project/workspace rows
+ * this needs are a `sql/d1-ts` + `packages/storage` slice, neither of which is
+ * this app's to write. The consequence of the gap is stated precisely so it is
+ * not mistaken for parity: a SUSPENDED PROJECT inside an ACTIVE TENANT is
+ * admitted today, where Rust refuses it with `403 tenancy_suspended`. It fails
+ * OPEN for the sub-tenant tiers and CLOSED for the tenant tier, which is why
+ * the tenant tier was ported first.
  */
 export class ConfiguredTenancyLifecycleGate implements TenancyLifecycleGatePort {
   readonly #statuses: Readonly<Record<string, LifecycleStatus>>;
@@ -335,11 +360,14 @@ export class ConfiguredTenancyLifecycleGate implements TenancyLifecycleGatePort 
 // ---------------------------------------------------------------------------
 
 /**
- * Rust `state.tenant_has_permission_result`: a platform operator is waved
- * through, a tenant credential is checked against its tenant's granted actions.
+ * The operator-authored bootstrap grant table — the `[vars]` half of RBAC.
  *
- * PORT-TODO(inventory-policy-core §rbac): back this with `@ferrogate/policy`
- * role/binding resolution over D1 instead of a static var.
+ * Rust has no config-file RBAC: `tenant_has_permission_result` reads the
+ * durable Permission → Role → TenantRoleBinding graph and nothing else. This
+ * table is a port-local bootstrap, in the same role `GATEWAY_STATIC_API_KEYS`
+ * plays for credentials, and {@link D1RbacAuthorizer} is the faithful leg that
+ * now sits in front of it. Empty ⇒ grants nothing, so it can only ever be
+ * additive to the durable graph, never a way around it.
  */
 export class ConfiguredRbacAuthorizer implements RbacAuthorizerPort {
   readonly #actionsByTenant: Readonly<Record<string, readonly string[]>>;
@@ -365,9 +393,148 @@ export class ConfiguredRbacAuthorizer implements RbacAuthorizerPort {
       allowed: false,
       // Rust names the denial after the action's own domain
       // (`guardrail_rbac_denied` is the only one that exists today).
-      code: rbacAction.startsWith("guardrails.") ? "guardrail_rbac_denied" : "rbac_denied",
-      message: `tenant roles do not grant required action ${rbacAction}`,
+      code: rbacDenialCode(rbacAction),
+      message: rbacDenialMessage(rbacAction),
     };
+  }
+}
+
+/**
+ * Rust names the denial after the action's own domain
+ * (`guardrail_rbac_denied` is the only domain-specific one that exists today —
+ * `guardrail_policies.rs:959`, `local.rs:236`).
+ */
+export function rbacDenialCode(rbacAction: string): string {
+  return rbacAction.startsWith("guardrails.") ? "guardrail_rbac_denied" : "rbac_denied";
+}
+
+/** The Rust denial message, verbatim. */
+export function rbacDenialMessage(rbacAction: string): string {
+  return `tenant roles do not grant required action ${rbacAction}`;
+}
+
+/** Binding name of the CONTROL D1 holding the RBAC graph (`wrangler.toml`). */
+export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
+
+/** The two statements `D1RbacAuthorizer` issues. Exported so a test can pin them. */
+export const RBAC_PERMISSION_EXISTS_SQL = "SELECT 1 AS present FROM permissions WHERE key = ?1";
+export const RBAC_TENANT_ROLE_GRANTS_SQL =
+  "SELECT roles.permission_keys_json AS permission_keys_json " +
+  "FROM tenant_role_bindings " +
+  "JOIN roles ON roles.id = tenant_role_bindings.role_id " +
+  "WHERE tenant_role_bindings.tenant_id = ?1";
+
+/**
+ * The subset of `D1Database` this adapter reads. A live binding satisfies it
+ * structurally, so nothing is cast and nothing is wrapped.
+ */
+export interface RbacDatabase {
+  prepare(sql: string): {
+    bind(...values: unknown[]): { all(): Promise<{ results?: unknown[] | null }> };
+  };
+}
+
+function isRbacDatabase(value: unknown): value is RbacDatabase {
+  return typeof value === "object" && value !== null && typeof (value as RbacDatabase).prepare === "function";
+}
+
+/**
+ * `state_rbac.rs::tenant_has_permission_result`, over the CONTROL D1.
+ *
+ * The Rust resolution is a three-table walk and every step of it is reproduced:
+ *
+ *  1. **The permission must EXIST.** `list_permissions().any(key == …)` — an
+ *     action nobody declared is denied even if a role happens to name it. That
+ *     is not a formality: it is what stops a typo in a role's
+ *     `permission_keys` from minting an entitlement.
+ *  2. **The tenant's role bindings are walked**, and a binding whose role row
+ *     is missing is SKIPPED (`let Some(role) = … else { continue }`), not
+ *     treated as a grant. The `JOIN` below drops exactly those rows.
+ *  3. **A role grants when its `permission_keys` contains the action.** No
+ *     wildcard: the Rust compares `key == permission_key`, so `"*"` in a role
+ *     is a permission literally named `*` and nothing else. The var table's
+ *     wildcard is a bootstrap convenience and is deliberately NOT copied here.
+ *
+ * Two departures from the Rust, both narrowing:
+ *
+ *  - a **platform operator** is waved through before any query, matching every
+ *    Rust call site (`if let CallerScope::Tenant(..) = auth.caller_scope()`);
+ *  - a **storage failure** answers `allowed: "unavailable"` → 503
+ *    `rbac_unavailable`, and does NOT fall through to {@link fallback}. This is
+ *    the `D1ApiKeyResolver` rule and the Rust one (`Err(error) => 503
+ *    guardrail_rbac_unavailable`): an outage must never be indistinguishable
+ *    from a decision, and must never be papered over by config.
+ *
+ * A durable NOT-GRANTED does fall through to `fallback`, because the two tables
+ * are additive sources (see {@link ConfiguredRbacAuthorizer}); with no fallback
+ * supplied it is a plain 403.
+ */
+export class D1RbacAuthorizer implements RbacAuthorizerPort {
+  readonly #db: RbacDatabase;
+  readonly #fallback: RbacAuthorizerPort | undefined;
+
+  constructor(db: RbacDatabase, options: { fallback?: RbacAuthorizerPort | undefined } = {}) {
+    this.#db = db;
+    this.#fallback = options.fallback;
+  }
+
+  /** `null` when `CONTROL_DB` is unbound, so the caller keeps its config path. */
+  static fromEnv(
+    env: Record<string, unknown>,
+    options: { fallback?: RbacAuthorizerPort | undefined } = {},
+  ): D1RbacAuthorizer | null {
+    const binding = env[CONTROL_DATABASE_BINDING];
+    return isRbacDatabase(binding) ? new D1RbacAuthorizer(binding, options) : null;
+  }
+
+  async authorize(auth: AuthContext, rbacAction: string): Promise<RbacDecision> {
+    const scope = callerScope(auth);
+    if (scope.kind === "platform_operator") return { allowed: true };
+
+    let granted: boolean;
+    try {
+      granted = await this.#durablyGrants(scope.tenantId, rbacAction);
+    } catch (error) {
+      return {
+        allowed: "unavailable",
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (granted) return { allowed: true };
+
+    if (this.#fallback !== undefined) {
+      return this.#fallback.authorize(auth, rbacAction);
+    }
+    return {
+      allowed: false,
+      code: rbacDenialCode(rbacAction),
+      message: rbacDenialMessage(rbacAction),
+    };
+  }
+
+  async #durablyGrants(tenantId: string, rbacAction: string): Promise<boolean> {
+    const declared = await this.#db.prepare(RBAC_PERMISSION_EXISTS_SQL).bind(rbacAction).all();
+    if ((declared.results ?? []).length === 0) {
+      return false;
+    }
+    const grants = await this.#db.prepare(RBAC_TENANT_ROLE_GRANTS_SQL).bind(tenantId).all();
+    for (const row of grants.results ?? []) {
+      const raw = (row as { permission_keys_json?: unknown }).permission_keys_json;
+      if (typeof raw !== "string") continue;
+      let keys: unknown;
+      try {
+        keys = JSON.parse(raw);
+      } catch {
+        // A corrupt role document grants nothing — it must not deny the whole
+        // lookup either, because one bad row would then revoke every other
+        // role the tenant holds.
+        continue;
+      }
+      if (Array.isArray(keys) && keys.some((key) => key === rbacAction)) {
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -498,18 +665,30 @@ export class ConfiguredInternalTransport implements InternalTransportPort {
 /**
  * Build the default port set from Worker bindings.
  *
- * `apiKeys` is the one wave-5 change: with a `DB` binding the durable D1
- * `api_keys` table becomes the PRIMARY credential source and the config tables
- * below become its fallback — the Rust order (`authenticate_durable` first,
- * `config.api_keys` second). `d1ApiKeyResolverFromEnv` returns `null` when `DB`
- * is unbound, so the `?? configured` keeps the pre-wave-5 object exactly.
+ * Two ports resolve durably-first, each with the config table behind it as a
+ * fallback, and each returning `null` from its `fromEnv` when its binding is
+ * absent so the `?? configured` keeps the binding-free object exactly:
+ *
+ *  - `apiKeys` — the `DB` (TENANT) `api_keys` table is the PRIMARY credential
+ *    source, the `[vars]` key tables its fallback. That is the Rust order:
+ *    `authenticate_durable` first, `config.api_keys` second.
+ *  - `rbac` — the `CONTROL_DB` Permission → Role → TenantRoleBinding graph is
+ *    the primary grant source (`state_rbac.rs`, which has no config leg at
+ *    all), the `TENANT_RBAC_ACTIONS` var its bootstrap fallback.
+ *
+ * In BOTH cases the fallback is consulted only on a durable NOT-FOUND, never on
+ * a durable FAILURE: an outage answers 503 and stops there.
  */
 export function depsFromEnv(env: GatewayBindings): GatewayDeps {
   const configured = ConfiguredApiKeyAuthenticator.fromEnv(env);
+  const configuredRbac = ConfiguredRbacAuthorizer.fromEnv(env);
   return {
     apiKeys: d1ApiKeyResolverFromEnv(env, { fallback: configured }) ?? configured,
     lifecycle: ConfiguredTenancyLifecycleGate.fromEnv(env),
-    rbac: ConfiguredRbacAuthorizer.fromEnv(env),
+    rbac:
+      D1RbacAuthorizer.fromEnv(env as unknown as Record<string, unknown>, {
+        fallback: configuredRbac,
+      }) ?? configuredRbac,
     internalTransport: ConfiguredInternalTransport.fromEnv(env),
   };
 }

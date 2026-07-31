@@ -16,7 +16,7 @@
  * they need no change to the router, the guard, or the contract table.
  */
 import { PUBLIC_API_MAJOR } from "@ferrogate/core";
-import { assetRouteModule } from "./assets/index.js";
+import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { guardrailDepsFromEnv, guardrails } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
@@ -75,13 +75,25 @@ const usage = createMeteringUsageSink({ bindings: meteringBindingsFromEnv });
  *    re-encoding, the streaming body handed back untouched, and the inbound
  *    request's abort signal forwarded so a client disconnect stops the upstream.
  *
- * The asset ports still take their offline in-memory defaults: they presign
- * nothing until a bucket binding exists. Neither default is a stub route —
- * every one of the 24 operations is matched, authenticated and scope-checked.
+ * The asset module is wired to the REAL object storage the same way, and for
+ * the same reason a factory is used: `env.ASSETS` is a per-request binding
+ * while this array is module scope.
+ *
+ *  - `depsFromEnv: assetDepsFromEnv` — `env.ASSETS` (the `[[r2_buckets]]`
+ *    binding) becomes the object store, and the five `ASSET_S3_*` values, when
+ *    bound, become a real `SigV4Presigner` and switch `presignEnabled` on. The
+ *    built `AssetService` is memoized on the `env` object, so it is constructed
+ *    once per isolate and never shared across two requests' bindings.
+ *
+ * With no bucket bound the module falls back to the offline in-memory store and
+ * the presign family answers `503 asset_bucket_unavailable` — the Rust
+ * unconfigured posture, which never routes object bytes through the Worker.
+ * Neither default is a stub route: every one of the 24 operations is matched,
+ * authenticated and scope-checked.
  */
 export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
   inferenceRouteModule({ models: modelsFromEnv, dispatcher: fetchDispatcher, usage }),
-  assetRouteModule(),
+  assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
 ];
 
 /**
@@ -118,8 +130,13 @@ export const GATEWAY_MIDDLEWARE = [
   rateLimit(),
   // Provider-scoped policies need the model→provider join, and `/v1/messages`
   // must be screened over the same document `inference/handlers.ts` dispatches.
-  guardrails((env) => ({
-    ...guardrailDepsFromEnv(env),
+  // `guardrailDepsFromEnv` is ASYNC whenever `CONTROL_DB` is bound: the durable
+  // `guardrail_policy_revisions` / `guardrail_policy_bindings` rows have to be
+  // read before the engine can be compiled, and D1 has no synchronous read.
+  // `guardrails()` awaits and memoizes the resolution once per `env`, so the
+  // load happens once per isolate, not once per request.
+  guardrails(async (env) => ({
+    ...(await guardrailDepsFromEnv(env)),
     providerForModel: (model, e) => modelsFromEnv(e as never).resolve(model)?.provider,
     translateAnthropicRequest: (body) => {
       const translated = defaultAnthropicTranslator.toChatCompletions(body);

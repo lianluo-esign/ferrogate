@@ -7,13 +7,25 @@
  * it — the 197 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
  *
- * CREDENTIALS and RBAC are now durable too, on the same switch: `resolveApiKeys`
- * builds `D1ApiKeyAuthenticator` over the control database's `static_api_keys`
- * (hashed secrets, `scopes_json`, `platform_operator`, lifecycle columns) and
- * `resolveRbac` builds `D1RbacAuthorizer` over `tenant_role_bindings ⋈ roles`.
- * Both keep their declarative `Json*` twin as the per-credential/per-tenant
- * FALLBACK, so a deployment that has provisioned no rows behaves exactly as it
- * did, while a deployment that has cannot be loosened by a stale var.
+ * CREDENTIALS, RBAC and the TENANCY LIFECYCLE GATE are now durable too, on the
+ * same switch: `resolveApiKeys` builds `D1ApiKeyAuthenticator` over the control
+ * database's `static_api_keys` (hashed secrets, `scopes_json`,
+ * `platform_operator`, lifecycle columns), `resolveRbac` builds
+ * `D1RbacAuthorizer` over `tenant_role_bindings ⋈ roles`, and
+ * `resolveLifecycle` builds `StoreTenancyLifecycleGate` over the
+ * `tenant-accounts`/`projects`/`workspaces` rows this app's own admin routes
+ * write. All three keep their declarative `Json*` twin as the
+ * per-credential/per-tenant FALLBACK, so a deployment that has provisioned no
+ * rows behaves exactly as it did, while a deployment that has cannot be loosened
+ * by a stale var.
+ *
+ * The lifecycle move is the one with a user-visible consequence: `PATCH
+ * /admin/v1/tenant-accounts/{id} {"status":"suspended"}` previously persisted a
+ * status that NOTHING read, so the app's own suspension control did not stop the
+ * suspended tenant's traffic (#514's "decorative status column", reproduced in
+ * the port). It now takes effect on the caller's next request, and the gate walks
+ * the whole `tenant → project → workspace` chain rather than only the tenant the
+ * credential happened to declare.
  *
  * The one credential leg that is NOT durable here is the native/virtual one, and
  * it is a platform limit rather than an unfinished port — see the PORT-TODO in
@@ -45,6 +57,12 @@ import {
 } from "./site_domain_txt.js";
 import { D1ApiKeyAuthenticator } from "./store/api_keys.js";
 import { D1ControlPlaneStore } from "./store/d1.js";
+import {
+  type LifecycleStatus,
+  StoreTenancyLifecycleGate,
+  decideLifecycleChain,
+  parseLifecycleStatus,
+} from "./store/lifecycle.js";
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 
 // ---------------------------------------------------------------------------
@@ -188,27 +206,18 @@ export class JsonApiKeyAuthenticator implements ApiKeyAuthenticatorPort {
 // Lifecycle + RBAC
 // ---------------------------------------------------------------------------
 
-/** Rust `LifecycleStatus`. */
-export type LifecycleStatus = "active" | "disabled" | "suspended" | "deleted";
+export type { LifecycleStatus };
 
 /**
- * `TENANCY_LIFECYCLE` is `{ "<tenant_id>": "suspended" }`.
+ * `TENANCY_LIFECYCLE` is `{ "<tenant_id>": "suspended" }` — the DECLARATIVE
+ * gate, now the fallback rather than the path (see {@link resolveLifecycle}).
  *
- * `disabled` is admitted ONLY on the lifecycle-reversal operations (#514,
- * finding 5): a tenant that used its self-service `disabled` switch on the
- * project its session key is scoped to must still be able to turn it back on,
- * or the switch is a one-way door. `suspended`/`deleted` remain platform
- * actions a tenant cannot self-serve out of.
+ * It states a one-row chain (the declared tenant) and hands it to the SAME
+ * `decideLifecycleChain` the durable gate uses, so the two cannot answer
+ * differently for the same status: the `disabled`-is-admitted-on-reversal
+ * carve-out (#514, finding 5), the code taxonomy and the message are decided in
+ * exactly one place.
  */
-const RECOVERY_OPERATION_IDS = new Set([
-  "updateTenantAccount",
-  "replaceTenantAccount",
-  "updateProject",
-  "replaceProject",
-  "updateWorkspace",
-  "replaceWorkspace",
-]);
-
 export class JsonTenancyLifecycleGate implements TenancyLifecycleGatePort {
   readonly #statuses: Readonly<Record<string, LifecycleStatus>>;
 
@@ -219,24 +228,10 @@ export class JsonTenancyLifecycleGate implements TenancyLifecycleGatePort {
   admit(auth: AuthContext, operation: { operationId: string }): Promise<LifecycleDecision> {
     const tenantId = auth.tenancy.tenantId;
     if (tenantId === null) return Promise.resolve({ admitted: true });
-    const status = this.#statuses[tenantId] ?? "active";
-
-    if (status === "active") return Promise.resolve({ admitted: true });
-    if (status === "disabled") {
-      if (RECOVERY_OPERATION_IDS.has(operation.operationId)) {
-        return Promise.resolve({ admitted: true });
-      }
-      return Promise.resolve({
-        admitted: false,
-        code: "tenancy_disabled",
-        message: `tenancy ${tenantId} is disabled`,
-      });
-    }
-    return Promise.resolve({
-      admitted: false,
-      code: status === "deleted" ? "tenancy_deleted" : "tenancy_suspended",
-      message: `tenancy ${tenantId} is ${status}`,
-    });
+    const status = parseLifecycleStatus(this.#statuses[tenantId] ?? "active");
+    return Promise.resolve(
+      decideLifecycleChain([{ kind: "tenant", id: tenantId, status }], operation),
+    );
   }
 }
 
@@ -629,6 +624,39 @@ export function resolveApiKeys(env: ControlPlaneBindings): ApiKeyAuthenticatorPo
   return new D1ApiKeyAuthenticator(env.DB, declarative);
 }
 
+/**
+ * Pick the tenancy lifecycle gate: the hierarchy rows the admin surface WRITES
+ * whenever the request is being served from the control database, with the
+ * declarative `TENANCY_LIFECYCLE` map as the fallback (see
+ * {@link StoreTenancyLifecycleGate}).
+ *
+ * This is the last of the four ports to move off a Worker var, and it is the one
+ * whose var was most obviously wrong: `PATCH /admin/v1/tenant-accounts/{id}
+ * {"status":"suspended"}` persisted a status that nothing read, so the app's own
+ * suspension control did not stop the suspended tenant's traffic. It also only
+ * ever checked the tenant, where Rust walks `tenant → project → workspace`.
+ *
+ * Tied to the SAME switch the store, the RBAC authorizer and the credential
+ * resolver take, for the same reason: `CONTROL_PLANE_STORE = "memory"` means
+ * "run this deployment without the control database". One switch, one answer to
+ * "is the database in play".
+ *
+ * Note the gate is built on the SAME `store` instance the routes write through,
+ * not on a second handle: a suspension written by a request is then visible to
+ * the gate on the very next one, with no cache to invalidate.
+ */
+export function resolveLifecycle(
+  env: ControlPlaneBindings,
+  store: ControlPlaneStore,
+): TenancyLifecycleGatePort {
+  const declarative = new JsonTenancyLifecycleGate(
+    parseJson<Record<string, LifecycleStatus>>(env.TENANCY_LIFECYCLE, {}),
+  );
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
+  if (env.DB === undefined || env.DB === null) return declarative;
+  return new StoreTenancyLifecycleGate(store, declarative);
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
@@ -638,9 +666,7 @@ export function resolveDeps(
   const corsAllowedOrigin = env.ADMIN_CONSOLE_ALLOWED_ORIGIN?.trim();
   return {
     apiKeys: resolveApiKeys(env),
-    lifecycle: new JsonTenancyLifecycleGate(
-      parseJson<Record<string, LifecycleStatus>>(env.TENANCY_LIFECYCLE, {}),
-    ),
+    lifecycle: resolveLifecycle(env, store),
     rbac: resolveRbac(env),
     store,
     runtime: new StoreRuntimeStatus(store),

@@ -291,7 +291,9 @@ describe("validate_mcp_servers", () => {
           mcpServer({ transport: "sse", url: "https://acme.mcp.cloudflare.com/sse", auth_type: "none" }),
         ],
       },
-      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication",
+      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication " +
+        "(shared_headers with a Cloudflare API bearer token, per_user_oauth, or " +
+        "original_bearer); Cloudflare rejects unauthenticated requests",
     ],
     [
       // `is_cloudflare_managed_mcp_url` matches a tenant Worker on BOTH the
@@ -302,12 +304,16 @@ describe("validate_mcp_servers", () => {
           mcpServer({ transport: "streamable_http", url: "https://tenant.workers.dev/mcp/" }),
         ],
       },
-      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication",
+      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication " +
+        "(shared_headers with a Cloudflare API bearer token, per_user_oauth, or " +
+        "original_bearer); Cloudflare rejects unauthenticated requests",
     ],
     [
       "an unauthenticated tenant workers.dev MCP endpoint on /sse (issue #408)",
       { mcp_servers: [mcpServer({ transport: "sse", url: "https://tenant.workers.dev/agent/sse" })] },
-      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication",
+      "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication " +
+        "(shared_headers with a Cloudflare API bearer token, per_user_oauth, or " +
+        "original_bearer); Cloudflare rejects unauthenticated requests",
     ],
   ];
   test.each(cases)("rejects %s", (_name, raw, expected) => {

@@ -166,10 +166,21 @@ async function presignQuery(
 /**
  * SigV4 presigner over R2's S3 API — the production {@link AssetPresigner}.
  *
- * PORT-TODO(inventory-request-path.md §1.6 "Object storage"): the credentials
- * belong in **Cloudflare Secrets Store** (deploy-time binding) rather than
- * plain Worker vars once `@ferrogate/secrets` lands; this type takes them as
- * data so that swap does not touch any call site.
+ * WIRED. `sigV4PresignerFromEnv` (`./handlers.ts`) builds this from the five
+ * `ASSET_S3_*` bindings and `src/index.ts` passes it through
+ * `assetDepsFromEnv`; with a partial credential set no presigner is built at
+ * all and the presign family keeps answering `503 asset_bucket_unavailable`.
+ *
+ * PORT-TODO(inventory-request-path.md §1.6 "Object storage"): the two secret
+ * halves (`ASSET_S3_ACCESS_KEY_ID` / `ASSET_S3_SECRET_ACCESS_KEY`) are Worker
+ * SECRETS today (`wrangler secret put`) and belong in **Cloudflare Secrets
+ * Store** once `@ferrogate/secrets` lands. Same platform constraint as the
+ * worker transport secret in `src/adapters.ts`: a Secrets Store binding is
+ * materialized at DEPLOY time against a store that must already exist in the
+ * account, so it cannot be exercised under `wrangler dev --local` or
+ * `vitest-pool-workers` the way D1/R2/Queues can. The difference is rotation
+ * and blast radius, not the signing — this class takes the credentials as DATA
+ * precisely so the swap touches no call site and no signature changes.
  */
 export class SigV4Presigner implements AssetPresigner {
   private readonly config: R2S3Endpoint;

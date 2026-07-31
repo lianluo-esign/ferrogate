@@ -8,9 +8,18 @@
  * socket, which `SELF` cannot observe.
  *
  * Every expectation below is on the app's REAL unconfigured-binding behavior.
- * The gateway's `[vars]` are fail-closed empties and no D1/KV/AI binding exists,
- * so the model registry is genuinely empty and no provider is ever called — no
- * Cloudflare account, no network, no LLM spend.
+ * The gateway's `[vars]` are fail-closed empties, so the model registry is
+ * genuinely empty and no provider is ever called — no Cloudflare account, no
+ * network, no LLM spend.
+ *
+ * The D1 bindings (`DB`, `BILLING_DB`/`CONTROL_DB`) DO exist and point at local
+ * SQLite files that `playwright.config.ts` migrates before the servers start.
+ * They are provisioned but EMPTY: no api-key row, no quota policy, no plan. That
+ * is deliberate — the credential still comes from the injected
+ * `GATEWAY_NATIVE_API_KEYS` var (the durable-NOT-FOUND fallback), and an empty
+ * `quota_policies` means "no policy restricts", which is a very different state
+ * from the "table is missing" that `d1QuotaPolicySource` correctly refuses with
+ * `503 quota_resolution_unavailable`.
  */
 import { expect, test } from "@playwright/test";
 

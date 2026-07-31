@@ -183,15 +183,21 @@ describe("gemini refusals are the Rust trait defaults, not new behavior", () => 
 });
 
 describe("registry resolution", () => {
-  it("resolves gemini and still fails closed on bedrock/vertex", () => {
+  it("resolves gemini, bedrock and vertex through the package adapters", () => {
     expect(defaultAdapterRegistry.adapterFor("gemini")?.kind).toBe("gemini");
-    // Still unported: no credential shape on `PhysicalRoute` for SigV4 / GCP
-    // service-account signing. Aliasing either onto a neighbour would dispatch
-    // an UNSIGNED request, which is worse than refusing.
-    expect(defaultAdapterRegistry.adapterFor("bedrock")).toBeNull();
-    expect(defaultAdapterRegistry.adapterFor("aws-bedrock")).toBeNull();
-    expect(defaultAdapterRegistry.adapterFor("vertex")).toBeNull();
-    expect(defaultAdapterRegistry.adapterFor("vertex-ai")).toBeNull();
+    // Bedrock and Vertex used to resolve to `null` for want of a credential
+    // shape on `PhysicalRoute` (SigV4 needs four fields, Vertex three). They are
+    // ported now — `awsCredentials`/`gcpCredentials` on the route — and the
+    // fail-closed guarantee moved INTO the adapters: a route with no credential
+    // still dispatches nothing. See `bedrock-vertex.test.ts`, which pins both
+    // the signed request and the credential-less refusal.
+    expect(defaultAdapterRegistry.adapterFor("bedrock")?.kind).toBe("bedrock");
+    expect(defaultAdapterRegistry.adapterFor("aws-bedrock")?.kind).toBe("bedrock");
+    expect(defaultAdapterRegistry.adapterFor("vertex")?.kind).toBe("vertex");
+    expect(defaultAdapterRegistry.adapterFor("vertex-ai")?.kind).toBe("vertex");
+    // A family that is not in `PROVIDER_ADAPTER_FAMILIES` at all still fails
+    // closed, which is the assertion this test was really protecting.
+    expect(defaultAdapterRegistry.adapterFor("not-a-provider")).toBeNull();
   });
 
   it("a gemini adapter handed a non-gemini route refuses it", () => {

@@ -144,12 +144,23 @@ function last4Matches(row: StoredApiKey, presentedKey: string): boolean {
  * Cross-file, not cross-platform. The exact change is three optional members on
  * `AuthContext` (`src/ports.ts`) — `allowedModels?: readonly string[]`,
  * `allowedProviders?: readonly string[]`, `requestLimitPerMinute?: number` —
- * plus the three lines below that copy them off the row. Two consumers are
- * already waiting for them: `RateLimitDeps.perKeyRequestLimit`
- * (`src/ratelimit/middleware.ts`) exists ONLY because the field is missing, and
- * the model allow/deny gate in `src/inference/` reads its lists off `Caller`
- * instead. Until then a durable key's per-key RPM cap and model/provider
- * allowlists are NOT enforced for D1-resolved credentials.
+ * plus the three lines below that copy them off the row.
+ *
+ * THREE consumers are already built and waiting on exactly those members, which
+ * is the measure of how narrow the remaining work is:
+ *
+ *  - `RateLimitDeps.perKeyRequestLimit` (`src/ratelimit/middleware.ts`) exists
+ *    ONLY because `requestLimitPerMinute` has nowhere to live;
+ *  - `callerFromAuth` (`src/inference/identity.ts`) builds the inference
+ *    `Caller` from this very `AuthContext` and has two lines commented on it
+ *    for `allowedModels`/`deniedModels`;
+ *  - `callerCanUseModel` (`src/inference/ports.ts`) is the gate itself — fully
+ *    implemented and unit-tested, and it evaluates against empty lists.
+ *
+ * Consequence while it is open, precisely scoped: for a D1-resolved credential
+ * the per-key RPM cap and the model/provider ALLOWLIST are not enforced. The
+ * tenant/project model-VISIBILITY gate (issue #515) is unaffected and IS
+ * enforced, because it reads `scope`/`projectId`, which this function does set.
  */
 function toAuthContext(row: StoredApiKey): AuthContext {
   return {
@@ -292,12 +303,23 @@ export class D1ApiKeyResolver implements ApiKeyAuthenticatorPort {
       // must not serve traffic, because `organization_id` is also the
       // attribution key for quota, metering and lifecycle.
       //
-      // PORT-TODO(inventory-edge-control §5.2): `ApiKeyResolution` in
-      // `src/ports.ts` has no variant for that 403 and `ports.ts` is not this
-      // slice's to edit, so the credential is refused as `key_suspended`
-      // (→ 401) instead of 403. Both DENY and the denial is what matters; add a
-      // `tenant_identity_required` variant to `ApiKeyResolution` and return it
-      // here to restore the exact Rust status code.
+      // PORT-TODO(inventory-edge-control §5.2): CROSS-FILE, not
+      // cross-platform. `ApiKeyResolution` in `src/ports.ts` has no variant for
+      // that 403, and `ports.ts` is the composition root's file, so the
+      // credential is refused as `key_suspended` (→ 401 `invalid_api_key`)
+      // instead of 403 `tenant_identity_required`.
+      //
+      // The approximation is a DENIAL either way, which is the security-
+      // relevant half and is pinned by "a row that names no tenant cannot serve
+      // traffic" in `test/keys/resolver.test.ts` (asserted as `not.toBe
+      // ("resolved")`, so it keeps holding when the exact variant changes).
+      // What differs is observable: the operator sees 401 rather than 403, so
+      // a misconfigured key row looks like a bad secret rather than like the
+      // configuration error it is.
+      //
+      // To close: add a `tenant_identity_required` variant to
+      // `ApiKeyResolution` (`src/ports.ts`), map it to 403 in
+      // `src/middleware/auth.ts`, and return it here.
       return { outcome: "key_suspended", reason: "disabled" };
     }
     if (row.monthlyTokenBudget === 0) {

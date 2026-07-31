@@ -22,9 +22,23 @@
  * against are implemented (`RateLimiter.reserveTokenBudget` /
  * `reserveWalletCredits`) and the refusals are spelled out in
  * `RATE_LIMIT_REFUSALS`, but the *balance source* is not this slice's — see the
- * PORT-TODO below. Step 5 is {@link enforceTokensPerMinute}, exported as a plain
- * function because the inference handlers, not the middleware chain, are where
- * a token estimate first exists.
+ * PORT-TODO below.
+ *
+ * Step 5 is NOT middleware, for the same reason it is not middleware in Rust: a
+ * token estimate does not exist until the request body has been parsed and the
+ * model resolved, which happens inside the handler. It is exported as two plain
+ * functions — {@link admitTokensPerMinute} (reports the refusal) and
+ * {@link enforceTokensPerMinute} (throws it) — and the inference handlers call
+ * the reporting form at the Rust call site, after `planUpstream` and before
+ * dispatch. `rateLimit` leaves the merged TPM window on the context for them
+ * ({@link setResolvedWindows}), because Rust resolves the quota ONCE in
+ * `finalize_auth` and every handler reads `auth.effective_quota` rather than
+ * re-merging the chain.
+ *
+ * That last hop is easy to lose: the inference handlers run inside the INNER
+ * Hono app that `inferenceRouteModule` delegates into, which does not share a
+ * context with this middleware. `src/inference/identity.ts` is what carries the
+ * windows across, and `test/inference/wiring.test.ts` fails if it stops.
  */
 import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "../middleware/errors.js";
@@ -74,9 +88,21 @@ export interface RateLimitDeps extends RateLimitOptions {
    * key row rather than in a quota policy. `AuthContext` in `src/ports.ts` does
    * not carry it yet, so it is supplied here.
    *
-   * PORT-TODO(inventory-edge-control §5.2): add `requestLimitPerMinute` to
-   * `AuthContext` when `@ferrogate/storage` backs the key table, and read it
-   * from `c.get("auth")` instead.
+   * PORT-TODO(inventory-edge-control §5.2): CROSS-FILE, not cross-platform.
+   * `D1ApiKeyResolver` ALREADY reads `request_limit_per_minute` off the
+   * `api_keys` row (`src/keys/resolver.ts::resolveStoredKey`) and then drops it,
+   * because `AuthContext` in `src/ports.ts` — the composition root's file, not
+   * this slice's — has no field to carry it.
+   *
+   * The remaining change is one optional member on `AuthContext`
+   * (`requestLimitPerMinute?: number`), one line in `toAuthContext`, and
+   * replacing this hook with `auth.requestLimitPerMinute` in `subjectFor`.
+   *
+   * Consequence while it is open, stated plainly: a durable key's per-credential
+   * TOK-12 RPM cap is enforced ONLY where a caller injects this hook
+   * (`test/ratelimit/harness/worker.ts` does; `src/index.ts` does not), so in
+   * the deployed Worker that column is currently inert and only the quota-policy
+   * chain limits a D1-resolved credential.
    */
   readonly perKeyRequestLimit?: (auth: AuthContext) => number | undefined;
 }
@@ -198,10 +224,28 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
 
     // PORT-TODO(inventory-request-path §1.6 "Budgets"): steps 2 and 3 of
     // `finalize_auth` — `monthly_budget_exceeded` and `wallet_balance_exhausted`
-    // — need `sum_scope_committed_spend` / the wallet row from
-    // `@ferrogate/storage`. The counters they reserve against are implemented
-    // (`RateLimiter.reserveTokenBudget` / `reserveWalletCredits`) and their
-    // refusals are in `RATE_LIMIT_REFUSALS`; only the balance source is missing.
+    // — are the ONLY two of the five Rust admission gates still open here.
+    //
+    // CROSS-PACKAGE, not cross-platform. Everything on THIS side is built: the
+    // counters (`RateLimiter.reserveTokenBudget` / `reserveWalletCredits`, both
+    // with a release path since JS has no `Drop`), the refusals
+    // (`RATE_LIMIT_REFUSALS.monthly_budget_exceeded` /
+    // `wallet_balance_exhausted`) and the estimate they would be charged with
+    // (`src/inference/estimate.ts`). What is missing is the BALANCE SOURCE:
+    // Rust reads `sum_scope_committed_spend(scope, month)` and the prepaid
+    // wallet row out of `ferrogate-storage`, and `@ferrogate/storage` has no
+    // adapter on this seam yet.
+    //
+    // To close: add a `SpendSource` port next to `QuotaPolicySource` in
+    // `./quota.ts` returning `{ committedSpendUsd, walletBalanceCredits }` for
+    // the subject chain, back it with D1, and insert the two checks HERE — in
+    // this order, before the RPM check, because Rust refuses on budget before
+    // it spends a request from the window.
+    //
+    // Consequence while it is open: a key over its monthly budget, or a tenant
+    // with an exhausted prepaid wallet, is NOT refused at admission. Step 5
+    // (TPM) below and step 4 (RPM) still bound it, and metering still records
+    // the spend — but the hard stop is absent.
 
     // 4. RPM.
     const outcome = await limiter.consumeRequest(resolution.rpm);
@@ -280,11 +324,80 @@ export function resolvedWindows(c: Context<GatewayEnv>): ResolvedWindows | undef
   );
 }
 
+/** A TPM refusal, in the shape `inference/errors.ts` renders. */
+export interface TokenAdmissionRefusal {
+  readonly status: number;
+  readonly code: string;
+  readonly message: string;
+  /**
+   * Whole seconds until the denying window rolls, present only on the 429.
+   * Whether it is EMITTED is still `RateLimitOptions.retryAfterHeader`'s
+   * decision (Rust attaches no `Retry-After`); this only carries the value so
+   * the opt-in wrapper has one.
+   */
+  readonly retryAfterSeconds?: number;
+}
+
 /**
  * Rust step 5 — the tokens-per-minute gate, charged with the PRE-DISPATCH
- * ESTIMATE. Call it from an inference handler once `estimated_usage.total_tokens`
- * is known, exactly where `server/chat.rs` calls
- * `try_consume_api_key_tokens_per_minute`; it throws the Rust 429 on denial.
+ * ESTIMATE, reported rather than thrown.
+ *
+ * This is the form the inference handlers use. They run inside the INNER Hono
+ * app that `inferenceRouteModule` delegates into, and that app has no error
+ * handler: an `HttpError` thrown there would be rendered as a 500 instead of
+ * the Rust 429. So the refusal is RETURNED, and `handlers.ts` sends it through
+ * the same `errorResponse` envelope as every other rejection.
+ *
+ * Three outcomes, matching the three Rust arms of
+ * `try_consume_api_key_tokens_per_minute`:
+ *
+ *  - `null`   → `auth.tpm_window()` was `None`; nothing governs this request.
+ *  - refusal  → `Ok(false)` is 429 `tpm_limit_exceeded`; `Err` is 503
+ *               `governance_counter_unavailable`, never a 429 (a counter
+ *               backend that is DOWN has not proven the caller is over limit).
+ *  - handle   → `Ok(true)`, plus the settlement handle.
+ */
+export async function admitTokensPerMinute(
+  c: Context<GatewayEnv>,
+  estimatedTokens: number,
+): Promise<TokenAdmission | TokenAdmissionRefusal | null> {
+  const resolved = resolvedWindows(c);
+  if (resolved === undefined || resolved.tpm === null) return null;
+  const admission = await resolved.limiter.consumeTokens(resolved.tpm, estimatedTokens);
+  if (admission.allowed === "unavailable") {
+    const refusal = RATE_LIMIT_REFUSALS.governance_counter_unavailable;
+    return {
+      status: refusal.status,
+      code: refusal.code,
+      message: refusal.message(admission.detail),
+    };
+  }
+  if (!admission.allowed) {
+    const refusal = RATE_LIMIT_REFUSALS.tpm_limit_exceeded;
+    return {
+      status: refusal.status,
+      code: refusal.code,
+      message: refusal.message(),
+      retryAfterSeconds: admission.retryAfterSeconds,
+    };
+  }
+  return admission;
+}
+
+/** True for the {@link admitTokensPerMinute} arm that denies the request. */
+export function isTokenAdmissionRefusal(
+  value: TokenAdmission | TokenAdmissionRefusal | null,
+): value is TokenAdmissionRefusal {
+  return value !== null && "status" in value;
+}
+
+/**
+ * Rust step 5 as a THROWING guard, for a caller that sits on the outer app and
+ * wants the `HttpError` rendered by `onError`.
+ *
+ * Kept as the documented middleware-chain form and implemented on top of
+ * {@link admitTokensPerMinute}, so the two forms cannot drift in what they
+ * refuse — only in how they report it.
  *
  * Returns the admission handle for {@link settleTokenUsage}. A `null` return
  * means no TPM limit governs this request.
@@ -293,14 +406,20 @@ export async function enforceTokensPerMinute(
   c: Context<GatewayEnv>,
   estimatedTokens: number,
 ): Promise<TokenAdmission | null> {
-  const resolved = resolvedWindows(c);
-  if (resolved === undefined || resolved.tpm === null) return null;
-  const admission = await resolved.limiter.consumeTokens(resolved.tpm, estimatedTokens);
-  if (admission.allowed === "unavailable") unavailable(admission.detail);
-  if (!admission.allowed) {
-    refuse(admission, "tpm_limit_exceeded", c.get("requestId") ?? "", resolved.options);
+  const admitted = await admitTokensPerMinute(c, estimatedTokens);
+  if (isTokenAdmissionRefusal(admitted)) {
+    const error = new HttpError(admitted.status, admitted.code, admitted.message);
+    // Opt-in only; Rust attaches no Retry-After. Same contract as `refuse`.
+    if (
+      resolvedWindows(c)?.options.retryAfterHeader === true &&
+      admitted.retryAfterSeconds !== undefined
+    ) {
+      (error as HttpError & { retryAfterSeconds?: number }).retryAfterSeconds =
+        admitted.retryAfterSeconds;
+    }
+    throw error;
   }
-  return admission;
+  return admitted;
 }
 
 /**

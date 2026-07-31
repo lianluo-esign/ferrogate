@@ -130,8 +130,21 @@ export interface GuardrailMiddlewareOptions extends GuardrailEngineDeps {
   readonly maxResponseBytes?: number | undefined;
 }
 
-/** A deps factory resolved per Worker `env`, like `middleware/auth.ts`. */
-export type GuardrailDepsResolver = (env: Record<string, unknown>) => GuardrailMiddlewareOptions;
+/**
+ * A deps factory resolved per Worker `env`, like `middleware/auth.ts`.
+ *
+ * It may be ASYNC. The durable policy source (`d1.ts`) reads
+ * `guardrail_policy_revisions` / `guardrail_policy_bindings` out of D1, and
+ * D1 has no synchronous read — so `guardrails()` awaits the resolver once per
+ * `env` and every request in the isolate shares that one snapshot. A REJECTION
+ * is not swallowed: it propagates out of the middleware, which is the
+ * fail-closed direction (503, no unscreened content forwarded) and the same
+ * posture `guardrailPolicySourceFromEnv` already takes for a malformed policy
+ * var.
+ */
+export type GuardrailDepsResolver = (
+  env: Record<string, unknown>,
+) => GuardrailMiddlewareOptions | Promise<GuardrailMiddlewareOptions>;
 
 const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -166,21 +179,44 @@ export function guardrails(
   deps: GuardrailMiddlewareOptions | GuardrailDepsResolver,
 ): MiddlewareHandler {
   let cachedEnv: unknown;
-  let cachedOptions: GuardrailMiddlewareOptions | undefined;
-  let cachedEngine: GuardrailEngine | undefined;
+  let cachedResolution: Promise<[GuardrailMiddlewareOptions, GuardrailEngine]> | undefined;
 
-  const resolve = (env: Record<string, unknown>): [GuardrailMiddlewareOptions, GuardrailEngine] => {
+  /**
+   * One resolution per `env` object, memoized as the PROMISE rather than as its
+   * value. Two concurrent first requests would otherwise each start a durable
+   * policy load; sharing the promise means one load and one compiled engine,
+   * which also keeps a `CustomHttpDetector`'s bulkhead/circuit state shared
+   * across the isolate exactly as the Rust's single `Arc<dyn GuardrailDetector>`
+   * did. A REJECTED promise is dropped from the cache so the next request
+   * retries instead of inheriting a permanent failure.
+   */
+  const resolve = async (
+    env: Record<string, unknown>,
+  ): Promise<[GuardrailMiddlewareOptions, GuardrailEngine]> => {
     if (typeof deps !== "function") {
-      cachedOptions ??= deps;
-      cachedEngine ??= new GuardrailEngine(deps);
-      return [cachedOptions, cachedEngine];
+      cachedResolution ??= Promise.resolve<[GuardrailMiddlewareOptions, GuardrailEngine]>([
+        deps,
+        new GuardrailEngine(deps),
+      ]);
+      return cachedResolution;
     }
-    if (cachedOptions === undefined || cachedEnv !== env) {
+    if (cachedResolution === undefined || cachedEnv !== env) {
       cachedEnv = env;
-      cachedOptions = deps(env);
-      cachedEngine = new GuardrailEngine(cachedOptions);
+      const pending = Promise.resolve(deps(env)).then(
+        (options): [GuardrailMiddlewareOptions, GuardrailEngine] => [
+          options,
+          new GuardrailEngine(options),
+        ],
+      );
+      pending.catch(() => {
+        if (cachedResolution === pending) {
+          cachedResolution = undefined;
+          cachedEnv = undefined;
+        }
+      });
+      cachedResolution = pending;
     }
-    return [cachedOptions, cachedEngine as GuardrailEngine];
+    return cachedResolution;
   };
 
   return async (c: Context, next: Next) => {
@@ -191,7 +227,7 @@ export function guardrails(
     }
 
     const env = (c.env ?? {}) as Record<string, unknown>;
-    const [options, engine] = resolve(env);
+    const [options, engine] = await resolve(env);
     const requestId = (c.get("requestId") as string | undefined) ?? "";
     const tenant = tenantFrom(c);
 
@@ -260,11 +296,23 @@ export function guardrails(
       }
       if (plan === "shadow_after_complete") {
         // Pass through untouched; the engine records `not_enforced` evidence.
-        // PORT-TODO(inventory-request-path §streaming shadow): the Rust
-        // evaluated the captured body once the stream completed. Doing that
-        // here would require capturing the body, which is exactly the buffering
-        // this port avoids, so the shadow evaluation reuses the incremental
-        // screener with enforcement suppressed by `effectiveShadow`.
+        //
+        // PORT-TODO(inventory-request-path §streaming shadow): a DELIBERATE
+        // approximation, and the difference is observable in evidence only.
+        // The Rust captured the whole streamed body and evaluated it ONCE at
+        // completion. Reproducing that literally would mean buffering an SSE
+        // response in a Worker — unbounded memory on a 128 MiB isolate, and the
+        // first-token latency this whole port exists to preserve — so
+        // `shadow_after_complete` here reuses the INCREMENTAL screener with
+        // enforcement suppressed by `effectiveShadow`.
+        //
+        // What is identical: the bytes the client receives (untouched, in the
+        // same order, at the same time) and the enforcement decision (none —
+        // shadow never blocks). What differs: the evidence row is decided from
+        // the frame that first matched rather than from the assembled document,
+        // so a finding that only exists ACROSS a frame boundary is not seen.
+        // Evidence is UPSERTED by evaluation id (`evidence.ts`), so a shadow
+        // stream still produces exactly ONE row per policy, not one per frame.
         c.res = new Response(
           screenSseBody(response.body, {
             engine,

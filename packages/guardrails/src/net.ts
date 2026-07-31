@@ -37,11 +37,11 @@
  * The closest behavior implemented instead is the whole LITERAL surface — the
  * part an operator, or an attacker who can write a detector config, actually
  * controls — plus two deliberate tightenings that compensate for the missing
- * resolver. Both are enumerated below and pinned by `test/net.test.ts`.
- *
- * That residual gap is REAL and is not closed by anything in this file. What is
- * closed is the whole *literal* surface, which is the part an operator (or an
- * attacker who can write a detector config) actually controls:
+ * resolver. All of it is enumerated below and pinned by `test/net.test.ts`,
+ * whose `PLATFORM LIMIT` block asserts the SHAPE of the residual gap (a public
+ * hostname is accepted whatever it resolves to) rather than describing it, so
+ * the literal-surface defense can never be mistaken for a complete SSRF
+ * defense. What is closed:
  *
  *  - scheme allowlist (`http:`/`https:` only — no `file:`, `data:`, `gopher:`,
  *    `blob:`, `ftp:`, ...);

@@ -20,7 +20,12 @@
  *     `test/platform-limits.test.ts` and the per-module marker.
  *   - `PACKAGE RELOCATION ONLY, BEHAVIOR IS CLOSED` — logic ported verbatim and
  *     inlined here so this package validates standalone; only the import edge
- *     to a wave-2 sibling is outstanding.
+ *     to a sibling is outstanding. The `@ferrogate/{providers,storage,guardrails}`
+ *     enum edges are now CLOSED (imported from their owner, pinned by
+ *     `test/sibling-enum-parity.test.ts`); what remains has no owning
+ *     `packages/*` library to import FROM — `ferrogate-mcp` is ported inside the
+ *     `apps/mcp` Worker and there is no `@ferrogate/cloudflare` package, and a
+ *     library must not depend on an app.
  *   - `DELIBERATE PRODUCT DECISION` — x402/Solana payments are deprioritized.
  *
  * The TLS/ACME validators are not marked at all: they were REMOVED as N/A on

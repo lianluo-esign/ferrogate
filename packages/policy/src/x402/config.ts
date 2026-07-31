@@ -446,7 +446,14 @@ export function resourceRuleMatches(rule: ResourceRule, url: CanonicalUrl): bool
   return pathIsUnder(url.path, rule.pathPrefix);
 }
 
-/** True iff the timeout is within `1..=MAX_TIMEOUT_SECONDS` (helper for callers). */
-export function timeoutInRange(seconds: bigint): boolean {
-  return seconds >= 1n && seconds <= MAX_TIMEOUT_SECONDS;
+/**
+ * True iff the timeout is within `1..=MAX_TIMEOUT_SECONDS` (helper for callers).
+ *
+ * `maxTimeoutSeconds` is a `u64` in Rust but the frozen wire contract in
+ * `@ferrogate/payments` caps it at 86_400, so the JS `number` that contract
+ * hands out is exact. Unlike the money fields (atomic amounts / credits), which
+ * stay `bigint`, this one cannot reach 2^53.
+ */
+export function timeoutInRange(seconds: number): boolean {
+  return Number.isInteger(seconds) && seconds >= 1 && seconds <= MAX_TIMEOUT_SECONDS;
 }

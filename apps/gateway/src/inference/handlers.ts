@@ -45,6 +45,15 @@ import {
 import { errorResponse, jsonResponse, rawUpstreamResponse, reject } from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
 import {
+  estimateChatCompletionUsage,
+  estimateEmbeddingsUsage,
+  estimateImagesUsage,
+  estimateMessagesUsage,
+} from "./estimate.js";
+import type { EstimatedUsage } from "./estimate.js";
+import { inferenceRequestScope, unmeteredTokenGovernor } from "./identity.js";
+import type { TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import {
   adapterErrorMessage,
   callerCanUseModel,
   scopeCanSeeModel,
@@ -94,6 +103,11 @@ export interface InferenceEnv {
      * would silently disable client-disconnect propagation).
      */
     inferenceClientSignal: AbortSignal | undefined;
+    /**
+     * Rust step 5, the tokens-per-minute window, bound to the OUTER request
+     * (see `./identity.ts`). Inert when the inner router is driven directly.
+     */
+    inferenceTokens: TokenGovernor;
   };
 }
 
@@ -433,6 +447,78 @@ function isRejection(value: unknown): value is InferenceRejection {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Step 5 (Rust numbering) — tokens per minute, charged with the estimate
+// ---------------------------------------------------------------------------
+
+/**
+ * `try_consume_api_key_tokens_per_minute`, at the Rust call site.
+ *
+ * Placement is copied exactly and both halves of it matter:
+ *
+ *  - AFTER `planUpstream`, because Rust checks TPM inside the provider-attempt
+ *    loop, i.e. once the model gate and route resolution have already answered.
+ *    A caller sending an unknown model gets `model_not_found` and is NOT
+ *    charged a minute's worth of tokens for it.
+ *  - BEFORE `dispatchUpstream`, because the entire point is to refuse without
+ *    paying a provider. Charging after dispatch would bill the tokens it was
+ *    meant to prevent.
+ *
+ * Rust also checks it ONCE per logical request (`tpm_checked`), not once per
+ * fallback route candidate; there is a single dispatch per request here, so
+ * one call site per handler is the same thing.
+ */
+async function admitTokens(
+  c: InferenceContext,
+  estimated: EstimatedUsage,
+): Promise<TokenAdmissionHandle | InferenceRejection | null> {
+  return await c.get("inferenceTokens").admit(estimated.totalTokens);
+}
+
+/**
+ * Reconcile the admission against the response's REAL usage.
+ *
+ * Opt-in: Rust never settles a TPM window, so with the default
+ * `RateLimitOptions` this is a no-op and the port is byte-identical.
+ *
+ * It is never allowed to fail a response, so the rejection is swallowed — same
+ * contract as {@link recordUsage}. Callers on the BUFFERED path `await` it,
+ * because they still hold the response and a settlement that lands after the
+ * next request has already been admitted has settled nothing. The two STREAMING
+ * call sites cannot: they run inside the usage tap's `flush`, where there is no
+ * response left to hold, so there it is {@link settleTokensDetached}.
+ */
+async function settleTokens(
+  c: InferenceContext,
+  admission: TokenAdmissionHandle | null,
+  actualTokens: number | undefined,
+): Promise<void> {
+  if (admission === null || actualTokens === undefined) {
+    return;
+  }
+  try {
+    await c.get("inferenceTokens").settle(admission, actualTokens);
+  } catch {
+    // A settlement failure must not fail an already-produced response.
+  }
+}
+
+/** {@link settleTokens} for the streaming tap, which cannot await. */
+function settleTokensDetached(
+  c: InferenceContext,
+  admission: TokenAdmissionHandle | null,
+  actualTokens: number | undefined,
+): void {
+  void settleTokens(c, admission, actualTokens);
+}
+
+/** The admission handle, or `null` for "nothing to settle". */
+function admissionHandle(
+  admitted: TokenAdmissionHandle | InferenceRejection | null,
+): TokenAdmissionHandle | null {
+  return admitted === null || isRejection(admitted) ? null : admitted;
+}
+
 /** Record a metering event; never allowed to fail the response. */
 function recordUsage(
   deps: ResolvedInferenceDeps,
@@ -542,10 +628,18 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   // request-size cap off them.
   app.use("*", async (c, next) => {
     const resolved = depsFor(c.env);
+    // Read BEFORE `readInferenceBody()` swaps `c.req.raw` for a re-presented
+    // Request — the scope is keyed by the object `route-module.ts` published.
+    const scope = inferenceRequestScope(c.req.raw);
     c.set("inferenceDeps", resolved);
     c.set("inferenceClientSignal", inboundSignal(c.req.raw));
     c.set("requestId", c.req.header("x-request-id") ?? resolved.requestIds.next());
-    c.set("inferenceCaller", resolved.caller(c.req.raw));
+    // The AUTHENTICATED caller when the module is mounted on the gateway app;
+    // the injected resolver otherwise (an inner-app unit test, or a deployment
+    // where the guard has not run). Never both — an authenticated request must
+    // not be re-described by a default that grants platform-operator scope.
+    c.set("inferenceCaller", scope?.caller ?? resolved.caller(c.req.raw));
+    c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
     await next();
   });
 
@@ -685,6 +779,14 @@ async function handleOpenAiInference(
     return errorResponse(planned, requestId);
   }
 
+  // Rust `estimate_chat_completion_usage` — `/v1/responses` shares it, because
+  // both surfaces go through `build_chat_completion_request_plan`.
+  const admitted = await admitTokens(c, estimateChatCompletionUsage(request, logicalModel));
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
   const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
@@ -714,7 +816,10 @@ async function handleOpenAiInference(
       usageDialect,
       planned.route,
       requestId,
-      (usage) => recordUsage(deps, meterBase, usage),
+      (usage) => {
+        recordUsage(deps, meterBase, usage);
+        settleTokensDetached(c, admission, usage?.totalTokens);
+      },
     );
   }
 
@@ -733,7 +838,9 @@ async function handleOpenAiInference(
   }
 
   const parsed = safeJson(text);
-  recordUsage(deps, meterBase, usageFromResponseBody(usageDialect, parsed));
+  const usage = usageFromResponseBody(usageDialect, parsed);
+  recordUsage(deps, meterBase, usage);
+  await settleTokens(c, admission, usage?.totalTokens);
   return rawUpstreamResponse(
     upstreamResponse.status,
     upstreamResponse.headers.get("content-type") ?? "application/json",
@@ -787,6 +894,16 @@ async function handleMessages(
     return errorResponse(planned, requestId);
   }
 
+  // Rust `estimate_messages_usage` reads the TRANSLATED body, not the Anthropic
+  // one the client sent: `to_chat_completions` has already folded the top-level
+  // `system` prompt into `messages[0]`, so estimating the original would drop
+  // the system prompt out of the reservation entirely.
+  const admitted = await admitTokens(c, estimateMessagesUsage(translated.body, logicalModel));
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
   const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
@@ -818,7 +935,10 @@ async function handleMessages(
       usageDialect,
       planned.route,
       requestId,
-      (usage) => recordUsage(deps, meterBase, usage),
+      (usage) => {
+        recordUsage(deps, meterBase, usage);
+        settleTokensDetached(c, admission, usage?.totalTokens);
+      },
     );
   }
 
@@ -837,7 +957,9 @@ async function handleMessages(
   }
 
   const parsed = safeJson(text);
-  recordUsage(deps, meterBase, usageFromResponseBody(usageDialect, parsed));
+  const usage = usageFromResponseBody(usageDialect, parsed);
+  recordUsage(deps, meterBase, usage);
+  await settleTokens(c, admission, usage?.totalTokens);
   // An Anthropic upstream answered natively → passed through unchanged; an
   // OpenAI-family upstream is reshaped so a Claude client sees a native Message
   // either way.
@@ -872,6 +994,16 @@ async function handleEmbeddings(
     return errorResponse(planned, requestId);
   }
 
+  // Rust `estimate_embeddings_usage` — the arm that scores a PRE-TOKENIZED
+  // `input` (a flat array of token ids) at one token each is the one that
+  // matters: a character-only count reads those as 0 and lets a caller drive
+  // unlimited embedding tokens straight past this gate (issue #207).
+  const admitted = await admitTokens(c, estimateEmbeddingsUsage(request, logicalModel));
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
   const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
@@ -904,7 +1036,9 @@ async function handleEmbeddings(
   }
 
   const parsed = safeJson(text);
-  recordUsage(deps, meterBase, usageFromResponseBody("openai", parsed));
+  const usage = usageFromResponseBody("openai", parsed);
+  recordUsage(deps, meterBase, usage);
+  await settleTokens(c, admission, usage?.totalTokens);
 
   // `translate_embeddings_response`: `undefined` means "pass the upstream body
   // through byte-for-byte" — correct for the OpenAI-compatible family, whose
@@ -941,6 +1075,16 @@ async function handleImages(
     return errorResponse(planned, requestId);
   }
 
+  // Rust `estimate_images_usage` (issue #275): the pre-charge unit is GENERATED
+  // IMAGES on the completion dimension, and `n` is clamped to
+  // `MAX_ESTIMATED_IMAGE_COUNT` so a hostile `"n": 1e9` cannot pre-charge the
+  // caller's entire window on a request the provider would refuse anyway.
+  const admitted = await admitTokens(c, estimateImagesUsage(request));
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
   const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
   if (isRejection(upstreamResponse)) {
     return errorResponse(upstreamResponse, requestId);
@@ -976,6 +1120,11 @@ async function handleImages(
     },
     undefined,
   );
+
+  // `image_settlement_usage`: the AUTHORITATIVE count is the response's `data`
+  // length, falling back to the pre-dispatch estimate when the body carries no
+  // countable envelope — never the caller's `n`.
+  await settleTokens(c, admission, imageCount);
 
   return rawUpstreamResponse(
     upstreamResponse.status,

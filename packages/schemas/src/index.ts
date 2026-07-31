@@ -103,6 +103,16 @@ export type { GatewayErrorData, GatewayResult } from "@ferrogate/core";
  * a silent overwrite would swap the validator for a route and be invisible.
  * Direct mutation of {@link wireSchemas} still works for reads; prefer the
  * function so collisions are caught.
+ *
+ * CURRENT STATE, stated exactly so nobody reads this marker as "done": as of
+ * this commit **no app calls {@link registerWireSchema}** — `grep -rn
+ * registerWireSchema apps/` returns nothing. The registry therefore holds only
+ * the 10 names seeded below (2 cross-plane envelopes + 8 `ferrogate-core`
+ * primitives) out of {@link OPENAPI_OPERATION_COUNT} contract operations. That
+ * does NOT mean 241 operations are unvalidated — every app validates its bodies
+ * with co-located Zod schemas today — it means those schemas are not
+ * DISCOVERABLE by operationId through this registry. Wiring them in is work in
+ * `apps/*`, not here, which is why the marker stays.
  */
 export const wireSchemas: Record<string, z.ZodTypeAny> = {
   // cross-plane envelopes (owned here)

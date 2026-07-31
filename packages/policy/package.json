@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@ferrogate/core": "workspace:*",
+    "@ferrogate/payments": "workspace:*",
     "@ferrogate/storage": "workspace:*",
     "zod": "^3.25.76"
   }

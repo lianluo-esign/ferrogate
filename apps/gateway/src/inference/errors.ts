@@ -67,10 +67,35 @@ export function errorEnvelope(
  * gateway-originated response. `x-trace-id` deliberately mirrors the request id
  * exactly as the Rust code did.
  *
- * PORT-TODO(inventory-request-path §1.3): `apply_cors_headers` is applied by
- * the Rust writer too. CORS is an app-wide concern owned by the router shell
- * (`apps/gateway/src/index.ts`), not by the inference module, so it is not
- * duplicated here.
+ * PORT-TODO(inventory-request-path §1.3): `apply_cors_headers` runs on EVERY
+ * Rust-originated response (`responses.rs`, 9 call sites) and is **not ported
+ * anywhere in `apps/gateway`** — re-checked, and the handoff this comment used
+ * to describe as done has not been taken.
+ *
+ * Still correct that it does not belong here: CORS is app-wide, it must also
+ * cover the ~245 non-inference operations, and it needs an `OPTIONS` preflight
+ * route, which is a router concern. Duplicating it per module is how the
+ * `Vary` header ends up on some responses and not others.
+ *
+ * Where it goes and what it must do, so the next owner does not have to
+ * re-derive it from `crates/`:
+ *
+ *   - a middleware in `apps/gateway/src/index.ts` (out of this slice's scope);
+ *   - reads one operator-configured origin (Rust: the `CORS_ALLOWED_ORIGIN`
+ *     `OnceLock`, i.e. a Worker var here). **Unset ⇒ emit nothing at all** —
+ *     that is the Rust default and it is a fail-closed one, so a port that
+ *     hardcodes `*` would be strictly more permissive than the tree it
+ *     replaces;
+ *   - when set: `access-control-allow-origin: <origin>` + `vary: origin` on
+ *     every response;
+ *   - `write_cors_preflight_response`: `OPTIONS` ⇒ **204** with
+ *     `content-length: 0`, `access-control-allow-methods: GET, POST, PUT,
+ *     PATCH, DELETE, OPTIONS`, `access-control-allow-headers: authorization,
+ *     content-type, x-api-key`, `access-control-max-age: 600` — and only when
+ *     an origin is configured.
+ *
+ * `apps/control-plane/src/middleware/cors.ts` is the sibling port to copy the
+ * shape from. Until it lands, a browser cannot call this gateway cross-origin.
  */
 export function gatewayHeaders(requestId: string): Record<string, string> {
   return {

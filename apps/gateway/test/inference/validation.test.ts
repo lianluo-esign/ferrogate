@@ -324,7 +324,34 @@ describe("capability gating (issue #275)", () => {
     expect((await errorBody(res)).error.code).toBe("provider_adapter_error");
   });
 
-  it("fails closed on a provider family that is not ported yet", async () => {
+  it("fails closed on a provider family that does not exist", async () => {
+    const provider = interceptProviderFetch(() => providerJson(OK));
+    try {
+      const h = harness({}, [
+        {
+          logicalModel: "mystery-model",
+          provider: "mystery-main",
+          providerModel: "mystery-1",
+          // Not in `PROVIDER_ADAPTER_FAMILIES`: `canonicalProviderKind` returns
+          // `null` and the registry has no adapter to hand back.
+          providerKind: "mystery-cloud",
+          baseUrl: "https://mystery.example",
+          enabled: true,
+        },
+      ]);
+      const res = await h.post("/v1/chat/completions", { model: "mystery-model", messages: [] });
+
+      // An unknown family is operator misconfiguration: refuse rather than
+      // guess a wire grammar, and above all dispatch nothing.
+      expect(res.status).toBe(502);
+      expect((await errorBody(res)).error.code).toBe("provider_adapter_error");
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("a bedrock route with no SigV4 credential fails closed too", async () => {
     const provider = interceptProviderFetch(() => providerJson(OK));
     try {
       const h = harness({}, [
@@ -339,11 +366,12 @@ describe("capability gating (issue #275)", () => {
       ]);
       const res = await h.post("/v1/chat/completions", { model: "bedrock-model", messages: [] });
 
-      // Bedrock requires byte-exact SigV4; dispatching an unsigned request
-      // would be worse than refusing, so an unported family fails closed
-      // instead of being aliased onto the OpenAI adapter.
-      expect(res.status).toBe(502);
-      expect((await errorBody(res)).error.code).toBe("provider_adapter_error");
+      // Bedrock is ported now, but it requires byte-exact SigV4: dispatching an
+      // UNSIGNED request would be worse than refusing, so the adapter refuses.
+      // The status is 400 `invalid_request` rather than 502 because this is the
+      // adapter's `AdapterError::InvalidRequest`, exactly as in Rust.
+      expect(res.status).toBe(400);
+      expect((await errorBody(res)).error.code).toBe("invalid_request");
       expect(provider.requests).toHaveLength(0);
     } finally {
       provider.restore();

@@ -28,15 +28,35 @@
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll } from "vitest";
+import controlMigrationSql from "../../../sql/d1-ts/control/0001_init_control.sql?raw";
 
 interface D1TestBindings {
   readonly DB?: D1Database;
+  readonly CONTROL_DB?: D1Database;
   readonly TEST_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
+}
+
+/**
+ * Split a `.sql` migration into executable statements.
+ *
+ * Line comments go first: the migration is mostly prose and a `;` inside a
+ * comment would cut a statement in half — which fails as a `SQLITE_ERROR` on
+ * some unrelated word, the least legible failure available. Same helper shape
+ * as `test/metering/d1-harness.ts`, which applies this file to `BILLING_DB`.
+ */
+function sqlStatements(migration: string): string[] {
+  return migration
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("--"))
+    .join("\n")
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
 }
 
 beforeAll(async () => {
   const bindings = env as unknown as D1TestBindings;
-  const { DB, TEST_D1_SCHEMA } = bindings;
+  const { DB, CONTROL_DB, TEST_D1_SCHEMA } = bindings;
   if (DB === undefined || TEST_D1_SCHEMA === undefined) {
     // Loud, never a silent skip: both are supplied by `vitest.config.ts` +
     // `wrangler.toml`, so an absent one means the wiring was removed and the
@@ -48,4 +68,30 @@ beforeAll(async () => {
     );
   }
   await applyD1Migrations(DB, TEST_D1_SCHEMA);
+
+  /**
+   * The CONTROL database, for exactly the same reason.
+   *
+   * `depsFromEnv` builds `D1RbacAuthorizer` whenever `CONTROL_DB` is bound, and
+   * `guardrailDepsFromEnv` builds `D1GuardrailPolicyStore` the same way. A
+   * bound database whose tables do not exist makes every `rbac_action`
+   * operation answer 503 `rbac_unavailable` — deliberately, because an outage
+   * must not look like a denial — so without this the whole suite would go red
+   * with 503s and the "fix" would look like dropping the binding, silently
+   * un-wiring the durable RBAC path in production.
+   *
+   * With the tables present and EMPTY the durable leg simply grants nothing and
+   * the `TENANT_RBAC_ACTIONS` / `GATEWAY_GUARDRAIL_POLICIES` fallbacks answer,
+   * so every pre-existing expectation holds unchanged — while the RBAC and
+   * guardrail-store suites seed real rows and exercise the durable leg for real.
+   *
+   * The migration is the DEPLOYED one, read with `?raw` from the directory
+   * `wrangler.toml`'s `migrations_dir` points at, never a fixture copy, and it
+   * is `CREATE … IF NOT EXISTS` throughout so re-application is a no-op.
+   */
+  if (CONTROL_DB !== undefined) {
+    for (const statement of sqlStatements(controlMigrationSql)) {
+      await CONTROL_DB.prepare(statement).run();
+    }
+  }
 });

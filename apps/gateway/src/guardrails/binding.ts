@@ -85,26 +85,24 @@ export interface GuardrailPolicyStore {
 }
 
 /**
- * In-isolate {@link GuardrailPolicyStore}.
+ * In-isolate {@link GuardrailPolicyStore} — and the decision table the DURABLE
+ * store obeys too.
  *
- * PORT-TODO(inventory-data-billing §"Guardrail binding CAS"): the durable
- * implementation is D1 — `UPDATE guardrail_policy_bindings SET ... WHERE
- * policy_id = ? AND generation = ? RETURNING policy_id`, empty result ⇒
- * {@link conflict}. The algorithm below is byte-for-byte the same decision
- * table so the swap is mechanical; a Worker isolate is not a durability
- * boundary, so this variant is for config-driven policies and tests.
+ * The durable half landed in `./d1.ts`: {@link D1GuardrailPolicyStore} over the
+ * `CONTROL_DB` binding, with the CAS expressed as
+ * `UPDATE guardrail_policy_bindings SET … WHERE policy_id = ? AND generation = ?
+ * RETURNING policy_id` and an empty `RETURNING` set as the {@link conflict}.
+ * `test/guardrails/d1.test.ts` runs BOTH stores through the same decision-table
+ * assertions so the two cannot drift.
  *
- * NOT a platform limit, and no longer blocked on a schema. As of this wave the
- * two tables EXIST (`guardrail_policy_revisions` / `guardrail_policy_bindings`,
- * `sql/d1-ts/control/0001_init_control.sql` — the CONTROL database, which this
- * Worker already binds as `BILLING_DB`), and `@ferrogate/storage` already ships
- * the shared pure transition builders + the CAS conflict predicate
- * (`nextGuardrailActivationBinding`, `nextGuardrailArchiveBinding`,
- * `isGuardrailPolicyBindingCasConflict`). What is missing is exactly one class,
- * `D1GuardrailPolicyStore implements GuardrailPolicyStore`, and the composition
- * line that passes the binding — and the binding is named for metering today, so
- * landing this should introduce a purpose-named `CONTROL_DB` alias in
- * `wrangler.toml` rather than reading guardrail policy out of `BILLING_DB`.
+ * This class did NOT become a test double. It is what the request path compiles:
+ * `policySourceFromStore` is synchronous (detectors are compiled eagerly, once,
+ * so a configuration error is a startup failure and a `CustomHttpDetector`'s
+ * bulkhead state is shared across the isolate), and `loadGuardrailPolicyStore`
+ * projects the durable snapshot into an instance of this class once per isolate.
+ * That is the Workers shape of the Rust gateway rebuilding
+ * `AppState.guardrail_policies` on reload rather than reading Supabase per
+ * request.
  */
 export class InMemoryGuardrailPolicyStore implements GuardrailPolicyStore {
   readonly #revisions = new Map<string, PolicyRevision>();

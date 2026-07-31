@@ -22,6 +22,7 @@
  *   terminator or filesystem to decide.
  */
 import { z } from "zod";
+import { providerIsDurable, providerIsImplemented } from "@ferrogate/storage/provider";
 import type { Config, StorageProviderKind } from "../schema/index.js";
 import { IpCidr } from "../network-access.js";
 import {
@@ -47,20 +48,12 @@ import {
   validateSecretRef,
 } from "./helpers.js";
 
-/** `StorageProviderKind::is_durable()`. */
-function isDurableProvider(provider: StorageProviderKind): boolean {
-  return provider !== "memory";
-}
-
-/** `StorageProviderKind::implemented()`. */
-function isImplementedProvider(provider: StorageProviderKind): boolean {
-  return (
-    provider === "memory" ||
-    provider === "supabase" ||
-    provider === "postgres" ||
-    provider === "cloudflare_d1"
-  );
-}
+// `StorageProviderKind::is_durable()` / `::implemented()` are OWNED by
+// `@ferrogate/storage` (that is where the backends actually exist), so they are
+// imported rather than re-derived: a provider that gains an implementation over
+// there must not still be refused by this load-time gate.
+const isDurableProvider = providerIsDurable;
+const isImplementedProvider = providerIsImplemented;
 
 /** `validate_auth_service`. */
 export function validateAuthService(config: Config): void {
@@ -721,6 +714,44 @@ export function validateNetworkAccess(config: Config): void {
       "must be greater than zero when set",
     );
   }
+}
+
+/**
+ * The compensating control for the REMOVED `validate_tls`/`validate_acme_*`
+ * family (see the module header): `[tls]` and `[tls.acme]` still DECODE so a
+ * legacy TOML/Caddyfile round-trips, but nothing on this platform reads them.
+ * Accepting them in silence would tell an operator that TLS is configured when
+ * it is not — the exact lie `validateMcpTlsConfig` refuses to tell — so instead
+ * of validating an invariant the runtime can neither satisfy nor violate, the
+ * load reports the section as INERT.
+ *
+ * Warn-only (not a refusal) on purpose: refusing would break the Caddyfile
+ * migration path, where `fromGatewayConfig` emits `[tls]` from a `tls`/`tls_acme`
+ * directive and Rust accepts the same document.
+ *
+ * Returns the warnings; wired into `loadConfigFromObject`, which is the only
+ * place a caller sees them.
+ */
+export function inertTlsWarnings(config: Config): string[] {
+  const warnings: string[] = [];
+  const tls = config.tls;
+  const manual = tls.enabled || tls.cert_path !== null || tls.key_path !== null;
+  if (manual) {
+    warnings.push(
+      "[tls] is INERT on Cloudflare: the edge terminates TLS before the Worker is invoked, so " +
+        "there is no listener to bind and no cert/key file to load (cert_path/key_path are not " +
+        "read). The section is kept only so a legacy config still loads -- manage certificates " +
+        "with Cloudflare SSL/TLS + Custom Hostnames instead.",
+    );
+  }
+  if (tls.acme.enabled) {
+    warnings.push(
+      "[tls.acme] is INERT on Cloudflare: no ACME certificate is requested or renewed. A Worker " +
+        "cannot own the :80 HTTP-01 challenge listener, has no filesystem for the ACME account " +
+        "storage_dir, and cannot exec a DNS-01 hook. Certificates are issued by Cloudflare.",
+    );
+  }
+  return warnings;
 }
 
 /**

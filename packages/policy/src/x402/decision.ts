@@ -255,7 +255,9 @@ export function authorizeX402Payment(
   const conversion = makeSnapshot(p.conversion, atomic);
   const scope = authorizedScope(request.scope);
   const intentHashHex = intent.intentHashHex();
-  const requestBodyHashHex = intent.requestBodyHashHex();
+  // Rust: `intent.request_body_hash().as_hex()` — the intent carries the hash as
+  // a validated value object, not a bare string.
+  const requestBodyHashHex = intent.requestBodyHash().asHex();
 
   const build = (
     decision: PaymentDecision,
@@ -286,8 +288,11 @@ export function authorizeX402Payment(
 
   // 0. Intent binding — checked before the master switch (incoherent input is a
   //    refusal regardless of whether the scope has payments enabled).
+  // `bindingMismatch` returns the first disagreeing field name, or `null` when
+  // the intent describes exactly the payment the challenge demands (Rust:
+  // `Option<&'static str>`).
   const mismatch = intent.bindingMismatch(selected);
-  if (mismatch !== undefined) {
+  if (mismatch !== null) {
     return deny(REASON_INTENT_MISMATCH, `payment intent does not match the challenge (${mismatch} differs)`);
   }
 

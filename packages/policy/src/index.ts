@@ -12,8 +12,13 @@
  *  - `workflow-budget` — envelope composition, budget pre-flight, node dispatch.
  *  - `stored-types`    — storage records the layer reads, re-exported from
  *                        `@ferrogate/storage` (the authoritative home, as in Rust).
- *  - `x402/*`          — x402 spend policy + payment-authorization decision
- *                        (PORT-TODO: `@ferrogate/payments` wire contract, deprioritized).
+ *  - `x402/*`          — x402 spend policy + payment-authorization decision. The
+ *                        wire contract it binds against (`SelectedPayment`,
+ *                        `PaymentIntent`, `SolanaNetwork`, address validation,
+ *                        intent hashing) is NOT redefined here: `x402/wire.ts`
+ *                        re-exports it from `@ferrogate/payments`, the same edge
+ *                        `ferrogate-policy`'s Cargo.toml declares on
+ *                        `ferrogate-payments`.
  *  - `schemas`         — Zod wire schemas for the value types.
  */
 export * from "./policy-engine.js";
@@ -25,6 +30,8 @@ export * from "./schemas.js";
 // x402 (deprioritized per inventory §2.1) — spend policy config + decision.
 export * from "./x402/config.js";
 export * from "./x402/decision.js";
+// The wire contract is @ferrogate/payments' (see `x402/wire.ts`); re-exported
+// here so a policy caller has one import, never a second definition.
 export {
   X402_VERSION,
   SCHEME_EXACT,
@@ -39,8 +46,12 @@ export {
   challengeHashHex,
   requestBodyHashHex,
   PaymentIntent,
+  PaymentIntentError,
+  RequestBodyHash,
   type SolanaNetwork,
   type SelectedPayment,
   type PaymentIntentIdentity,
+  type PaymentIntentDraft,
+  type PaymentIntentErrorKind,
 } from "./x402/wire.js";
 export { sha256, hexLower, Sha256Builder } from "./x402/sha256.js";

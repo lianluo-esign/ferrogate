@@ -368,7 +368,7 @@ export async function executeToolWithGovernance(
   }
 
   // --- input guardrail -----------------------------------------------------
-  const inputVerdict = await ports.guardrails.inspectInput(context, tool.name, request.arguments);
+  const inputVerdict = await ports.guardrails.inspectInput(context, tool, request.arguments);
   if (inputVerdict.action === "block" || inputVerdict.action === "quarantine") {
     ports.audit.record(
       auditEvent(
@@ -445,7 +445,7 @@ export async function executeToolWithGovernance(
   }
 
   // --- output guardrail ----------------------------------------------------
-  const outputVerdict = await ports.guardrails.inspectOutput(context, tool.name, content);
+  const outputVerdict = await ports.guardrails.inspectOutput(context, tool, content);
   if (outputVerdict.action === "withhold") {
     ports.audit.record(
       auditEvent(

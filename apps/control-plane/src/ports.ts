@@ -141,10 +141,20 @@ export interface ApiKeyAuthenticatorPort {
  * Rust `ferrogate-storage/src/lifecycle_gate.rs`. A *tenant/project/workspace*
  * whose lifecycle status is suspended or deleted is an authenticated-but-
  * forbidden caller → **403**, with a code naming the root cause.
+ *
+ * The `"unavailable"` variant is Rust `LifecycleGateError::Unavailable` → a
+ * retryable **503 `lifecycle_status_unavailable`**, and it exists for the same
+ * reason {@link RbacDecision}'s does: the durable gate reads rows, reads can
+ * fail, and a failed read must not collapse into `admitted: true`. Rust states
+ * the consequence plainly — "fail-open here would hand every suspended tenant a
+ * trivial bypass (make the control plane flap and keep serving)" — so the
+ * outcome is a distinct variant the type system forces every caller to handle
+ * rather than a boolean that has to default one way.
  */
 export type LifecycleDecision =
   | { readonly admitted: true }
-  | { readonly admitted: false; readonly code: string; readonly message: string };
+  | { readonly admitted: false; readonly code: string; readonly message: string }
+  | { readonly admitted: "unavailable"; readonly detail: string };
 
 export interface TenancyLifecycleGatePort {
   admit(auth: AuthContext, operation: ApiOperation): Promise<LifecycleDecision>;
@@ -383,7 +393,14 @@ export interface ControlPlaneBindings {
   readonly CONTROL_PLANE_NATIVE_API_KEYS?: string;
   /** JSON array of operator-authored static config keys; fallback for `static_api_keys`. */
   readonly CONTROL_PLANE_STATIC_API_KEYS?: string;
-  /** JSON map of tenant id → lifecycle status (`active`/`suspended`/`deleted`). */
+  /**
+   * JSON map of tenant id → lifecycle status (`active`/`suspended`/`deleted`),
+   * the FALLBACK for a deployment whose tenancy hierarchy is not in the control
+   * database yet. `resolveLifecycle` builds `StoreTenancyLifecycleGate` over the
+   * `tenant-accounts`/`projects`/`workspaces` rows the admin surface itself
+   * writes and consults this only when the caller's declared chain resolves to
+   * no row at all (see `src/store/lifecycle.ts`).
+   */
   readonly TENANCY_LIFECYCLE?: string;
   /** JSON map of tenant id → granted RBAC actions. */
   readonly TENANT_RBAC_ACTIONS?: string;

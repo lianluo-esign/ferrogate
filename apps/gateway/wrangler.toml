@@ -37,9 +37,19 @@ compatibility_flags = ["nodejs_compat"]
 # (a `[env.<name>.vars]` section, or — for anything secret — `wrangler secret
 # put`, which lands in the same `env` namespace and wins over a var).
 #
-# PORT-TODO(inventory-edge-control §5.2): all five disappear when
-# `@ferrogate/storage` (D1) and `@ferrogate/secrets` (Secrets Store) land; see
-# the PORT-TODOs at the top of `src/adapters.ts`.
+# TWO OF THE FIVE now have a DURABLE leg in front of them and are only the
+# fallback: `GATEWAY_NATIVE_API_KEYS` (behind the `DB` `api_keys` table) and
+# `TENANT_RBAC_ACTIONS` (behind the `CONTROL_DB` Permission -> Role ->
+# TenantRoleBinding graph). In both cases the fallback is consulted on a durable
+# NOT-FOUND and never on a durable FAILURE, so an outage answers 503 rather than
+# quietly reverting to config.
+#
+# PORT-TODO(inventory-edge-control §5.2): the remaining three —
+# `GATEWAY_STATIC_API_KEYS` (the operator config-key table, which the Rust also
+# has as `config.api_keys`, so it is parity, not a gap), `TENANCY_LIFECYCLE` and
+# `SELF_HOSTED_WORKER_REGISTRY`. The last is the only one carrying a SECRET and
+# is the one that wants Cloudflare Secrets Store; see the marker at the top of
+# `src/adapters.ts` for why that binding cannot be exercised locally.
 # ---------------------------------------------------------------------------
 [vars]
 
@@ -222,6 +232,34 @@ GATEWAY_API_KEY_CACHE_TTL_SECONDS = "0"
 ASSET_ENTITLEMENTS = "{}"
 
 # ---------------------------------------------------------------------------
+# R2 **S3 API** credentials — the PRESIGNED upload/download family only
+#
+# Read by `sigV4PresignerFromEnv` (src/assets/handlers.ts). All four required
+# values must be bound or the presigner is not built at all and the presign
+# family keeps answering `503 asset_bucket_unavailable`; a half-configured set
+# must never mint a URL the bucket will reject.
+#
+# WHY THESE EXIST ALONGSIDE THE BUCKET BINDING ABOVE. The Workers `R2Bucket`
+# binding has NO presign method — presigned URLs are an S3-API feature, signed
+# with SigV4 over `https://<account_id>.r2.cloudflarestorage.com`. There is no
+# way to derive an S3 access key pair from a bucket binding, so the two are
+# genuinely separate credentials for the same bucket. `src/assets/sigv4.ts`
+# implements the signing; this block is where the inputs come from.
+#
+# ONLY THE FIRST TWO ARE VARS. `ASSET_S3_ACCESS_KEY_ID`,
+# `ASSET_S3_SECRET_ACCESS_KEY` and the optional `ASSET_S3_SESSION_TOKEN` are
+# SECRETS (`wrangler secret put`, or a gitignored `.dev.vars` line locally) and
+# are deliberately NOT declared with values here. `ASSET_S3_REGION` defaults to
+# `auto` in code, which is what R2 requires; it is a var only for an
+# S3-compatible target that needs a real region.
+#
+# The empty defaults below are the fail-closed posture and are what a plain
+# `wrangler deploy` ships: no presigning until an operator opts in.
+# ---------------------------------------------------------------------------
+ASSET_S3_ENDPOINT = ""
+ASSET_S3_BUCKET = ""
+
+# ---------------------------------------------------------------------------
 # R2 — asset object storage
 #
 # Read as `env.ASSETS`, the production `AssetObjectStore` (src/assets/ports.ts:
@@ -237,14 +275,13 @@ ASSET_ENTITLEMENTS = "{}"
 # `false` by default) — the correct unconfigured posture, and the reason the
 # gateway never silently routes large object bytes through the Worker.
 #
-# WIRING STATE — read this before assuming the binding is live. `src/index.ts`
-# currently builds `assetRouteModule()` with its offline defaults, so nothing
-# dereferences `env.ASSETS` yet. The binding is declared here because it is the
-# deploy-time half of that wiring and must exist in the account before the
-# composition root can pass it. The other half is
-# `assetRouteModule({ deps: { objects: env.ASSETS, presigner: new
-# SigV4Presigner({...}), limits: { presignEnabled: true } } })` —
-# PORT-TODO(inventory-request-path.md §1.6 "Object storage").
+# WIRING STATE — LIVE. `src/index.ts` mounts
+# `assetRouteModule({ depsFromEnv: assetDepsFromEnv })`, and
+# `assetDepsFromEnv` (src/assets/handlers.ts) reads `env.ASSETS` off the
+# REQUEST's bindings and memoizes the built `AssetService` on the env object.
+# `test/assets/r2.test.ts` drives a push and a pull through `SELF.fetch` and
+# asserts the bytes are in this bucket, so an unwired composition root fails the
+# suite rather than shipping.
 #
 # `bucket_name` / `preview_bucket_name` are PLACEHOLDERS; the deploy step
 # substitutes the account's real buckets. R2 names are lowercase alphanumerics
@@ -324,6 +361,44 @@ migrations_dir = "../../sql/d1-ts/tenant"
 # ---------------------------------------------------------------------------
 [[d1_databases]]
 binding = "BILLING_DB"
+database_name = "ferrogate-control"
+database_id = "replace-at-deploy"
+migrations_dir = "../../sql/d1-ts/control"
+
+# ---------------------------------------------------------------------------
+# D1 — the CONTROL database, under its PURPOSE-NEUTRAL name
+#
+# THE SAME DATABASE AS `BILLING_DB` ABOVE — same `database_name`, same
+# `database_id`, so `wrangler dev --local` and `vitest-pool-workers` resolve
+# both bindings to one SQLite file and a deploy substitutes one real id for
+# both. This is an ALIAS, deliberately, not a second database.
+#
+# Why an alias exists at all: `BILLING_DB` is named for what metering writes,
+# and two things that are not metering now read the same control database —
+#
+#   `permissions` / `roles` / `tenant_role_bindings`
+#       read by `D1RbacAuthorizer` (src/adapters.ts), the port of
+#       `state_rbac.rs::tenant_has_permission_result`.
+#   `guardrail_policy_revisions` / `guardrail_policy_bindings`
+#       read by `D1GuardrailPolicyStore` (src/guardrails/binding.ts).
+#
+# Reading a role grant out of a binding called `BILLING_DB` would be a lie in
+# the one place a reader most needs the truth, and renaming `BILLING_DB` would
+# silently break every deployment whose secrets/config already name it. The
+# alias costs one line of TOML and no runtime object (workerd hands out two
+# handles to the same database).
+#
+# `meteringBindingsFromEnv` still reads `BILLING_DB` and ONLY `BILLING_DB`:
+# metering's binding contract is unchanged by this entry.
+#
+# What breaks without it: `depsFromEnv` finds no `CONTROL_DB` and falls back to
+# the `TENANT_RBAC_ACTIONS` var for RBAC, and `guardrailDepsFromEnv` falls back
+# to the `GATEWAY_GUARDRAIL_POLICIES` var — the pre-D1 config path, which is
+# still correct, just not durable. Neither fails open: an absent var grants
+# nothing.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "CONTROL_DB"
 database_name = "ferrogate-control"
 database_id = "replace-at-deploy"
 migrations_dir = "../../sql/d1-ts/control"

@@ -288,6 +288,30 @@ snapshot is accepted again. The merge must be a lattice join:
 SQLite has no `GREATEST`/`LEAST`; the two-argument `max`/`min` are scalar
 functions and are the port.
 
+### Reference-guarded deletes (`D1ReferenceGuardedDeletes`, §1.5.7)
+
+`deleteProjectIfUnreferenced` / `deleteWorkspaceIfUnreferenced` must refuse
+while a workspace or a virtual API key still points at the row, and report how
+many of each are in the way. Counting first and deleting second is a
+**time-of-check/time-of-use race**: a workspace created between the two
+statements is orphaned by a delete authorized against a stale count, and its
+api-keys keep authenticating against a project that no longer exists. Postgres
+closed the window with `SELECT ... FOR UPDATE` on the parent; D1 has no row
+lock, so the port removes the window instead of locking it — the guard is a
+`NOT EXISTS` subquery **inside the DELETE**, evaluated by SQLite against
+committed state at execution time:
+
+```sql
+DELETE FROM projects WHERE id = ?
+  AND NOT EXISTS (SELECT 1 FROM workspaces WHERE project_id = ?)
+  AND NOT EXISTS (SELECT 1 FROM api_keys   WHERE project_id = ?)
+```
+
+`meta.changes > 0` means the guard held. A refusal is then *labelled* — never
+decided — by a second, read-only count query that separates `not_found` from
+`referenced {workspaces, virtualKeys}`. All three tables are in the tenant
+database, so every subquery is local and the atomicity is genuine.
+
 ### Mutation-test record
 
 Each guard was broken on purpose, the suite confirmed RED, then restored and
@@ -298,7 +322,9 @@ confirmed GREEN.
 | neutralize the no-oversell arithmetic in S1 (`? <= 999999999`) | **RED** — 3 tests, incl. 5 concurrent reserves admitting 5 instead of 4 |
 | replace the in-statement guard with a naive TS read-then-write (arithmetic identical, atomicity gone) | **RED** — 20 parallel reserves against a balance affording 7 admitted **all 20** |
 | drop the `spent_*` counters from the debit CAS guard | **RED** — 10 concurrent debits against a cap of 4 applied all 10 |
-| restore each | **GREEN** — 96/96 |
+| drop the `workspaces` `NOT EXISTS` clause from the project delete | **RED** — 3 tests, incl. the late-reference race |
+| reshape the project delete into check-then-delete (same SQL semantics, guard moved out of the statement) | **RED** — exactly 1 test: the late-reference race, which every other test misses |
+| restore each | **GREEN** — 104 pure + 152 D1 |
 
 The second one is the decisive observation: `Promise.all` over the store's
 methods genuinely interleaves at the D1 level in `workerd`, so the concurrency

@@ -36,6 +36,22 @@ compatibility_flags = ["nodejs_compat"]
 # of truth both branch on), while `/healthz` still answers 200.
 FG_DEV_IN_MEMORY_PORTS = "1"
 
+# DEV / TEST ONLY. JSON `{ keywords?, regex?, secretPatterns?, targets? }`
+# configuring the MANAGED-ACTION guardrail (#200/#204) that scans MCP tool
+# ARGUMENTS before execution and tool RESULTS after, evaluated by the real
+# `@ferrogate/guardrails` deterministic detector — the clean-room port of
+# `crates/ferrogate-gateway/src/server/managed_action_guardrail.rs`.
+#
+# ABSENT OR EMPTY means NO detector is configured, which matches nothing and
+# allows everything — the same answer Rust's `match_guardrail` gives when no
+# managed-action policy is registered. This is deliberately NOT the enforcement
+# policy store: real detector policy is tenant-scoped and lives in the control
+# plane, so a `[vars]` entry could only ever be a per-deployment default.
+#
+# `targets` is Rust's `ManagedActionSelector.targets` over the canonical target
+# `mcp:{server}:{tool}`; an empty list selects every target.
+FG_DEV_MCP_GUARDRAILS = ""
+
 # ---------------------------------------------------------------------------
 # KV — per-user MCP OAuth flow state
 #

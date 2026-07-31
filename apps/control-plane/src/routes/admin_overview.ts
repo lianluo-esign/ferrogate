@@ -42,13 +42,26 @@ import {
 import { SELF_HOSTED_WORKER_SPEC } from "./self_hosted_worker.js";
 
 /**
- * The admin console shell. Rust serves a bundled single-page document
- * (`ADMIN_DASHBOARD_HTML`); the real console is rebuilt separately and is the
- * lowest-priority slice of the rewrite, so this is the honest minimum: a valid
- * document that names the API it fronts.
+ * The admin console shell.
  *
- * PORT-TODO(inventory-edge-control §4): replace with the rebuilt admin-console
- * bundle (Workers Assets / Pages) once that app is ported.
+ * PORT-TODO(inventory-edge-control §4) — KEPT, sharpened. This is NOT a platform
+ * limit: Workers Assets and Pages both serve a built SPA perfectly well, and the
+ * three anonymous routes below are already the right mount point for one. It is
+ * a **product sequencing decision** — `docs/rewrite/PORT-PLAN.md` lists
+ * `admin-console` as "rebuilt later (console = lowest priority)", behind the core
+ * and the CLI — so the console BUNDLE does not exist yet in this rewrite and
+ * there is nothing to serve.
+ *
+ * What is implemented is the honest minimum, and the honesty is the point: a
+ * valid HTML document that states which API it fronts and sends the reader to
+ * `GET /admin/v1/status`. It deliberately ships **no script tag and no bundle
+ * reference**, because a shell that loaded a non-existent bundle would answer
+ * `200` with a blank page — an operator would read that as "the console is
+ * broken" rather than "the console is not built yet". `test/auth.test.ts` pins
+ * both halves of that approximation (a real document, and no script).
+ *
+ * It closes by pointing these three routes at the built console: an
+ * `[assets]` directory on this Worker, or a Pages project fronted by a route.
  */
 export const ADMIN_DASHBOARD_HTML = `<!doctype html>
 <html lang="en">

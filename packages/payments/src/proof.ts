@@ -28,10 +28,33 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
 export class SecretBytes {
   readonly #bytes: Uint8Array;
 
-  // PORT-TODO(inventory §3.2 "proof"): the Rust `SecretBytes` scrubs its buffer
-  // to zero in `Drop`. JS is garbage-collected with no deterministic destructor,
-  // so a best-effort scrub-on-drop cannot be replicated; the redaction of
-  // Debug/serde output (the observable guarantee the tests assert) is preserved.
+  // PORT-TODO(inventory §3.2 "proof") — PLATFORM LIMIT, NOT CLOSED.
+  //
+  // The exact limitation: **JS has no deterministic destructor.** The Rust
+  // `SecretBytes` implements `Drop` and zeroes its buffer the instant the value
+  // goes out of scope, bounding how long key material sits in memory. In JS the
+  // buffer's lifetime is the garbage collector's business: there is no `Drop`,
+  // `FinalizationRegistry` callbacks are explicitly not guaranteed to run at
+  // all (and run long after the value is unreachable, i.e. after the window
+  // that matters), and even a manual `fill(0)` cannot reach copies the engine
+  // may have made while moving the TypedArray. `using`/`Symbol.dispose` would
+  // only cover scopes that opt in, which the signer boundary does not control.
+  //
+  // The closest behavior implemented instead, all of it asserted in
+  // `test/proof.test.ts`:
+  //   * the bytes are COPIED in, never aliased, so a caller that zeroes or
+  //     mutates its own buffer can neither corrupt nor read back this secret;
+  //   * `#bytes` is a true private field — unreachable by property access,
+  //     `Object.keys`, or spread;
+  //   * every stringification sink (`toString`, node inspect, `toJSON`) is
+  //     overridden to redact, so a log line, a thrown error, or a
+  //     `JSON.stringify` of an enclosing object cannot spill it in any
+  //     encoding;
+  //   * `expose()` is the single, greppable read point.
+  // What is NOT reproduced is the timed erasure itself. Nothing in this file
+  // can close that, and a `fill(0)` in a `FinalizationRegistry` would be a fake:
+  // it would read like zeroization while running at an unspecified time or
+  // never.
   constructor(bytes: Uint8Array) {
     this.#bytes = Uint8Array.from(bytes);
   }

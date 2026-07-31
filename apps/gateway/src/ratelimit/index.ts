@@ -150,7 +150,9 @@ export {
   type QuotaResolution,
   type QuotaSubject,
   NO_QUOTA_POLICIES,
+  d1QuotaPolicySource,
   quotaPolicySourceFromEnv,
+  quotaPolicySourceFromVars,
   resolveQuotaWindows,
 } from "./quota.js";
 
@@ -158,7 +160,10 @@ export {
   type RateLimitBindings,
   type RateLimitDeps,
   type ResolvedWindows,
+  type TokenAdmissionRefusal,
+  admitTokensPerMinute,
   enforceTokensPerMinute,
+  isTokenAdmissionRefusal,
   limiterForEnv,
   rateLimit,
   rateLimitRouteModule,

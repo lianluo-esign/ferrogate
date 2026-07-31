@@ -16,6 +16,7 @@
  * | `presence.ts`, `agent-cost-burn.ts` | `TenantMonotonicUpserts`|
  * | (control-plane replay floors) | `ControlMonotonicUpserts`     |
  * | `quota.ts` rollup DTOs        | `D1UsageLedger`               |
+ * | `MemoryReferenceGuardedDeletes` | `D1ReferenceGuardedDeletes` |
  *
  * The in-memory stores are not deprecated by these: they remain the executable
  * specification of the invariant, and the D1 tests assert the SAME observable
@@ -27,4 +28,5 @@ export * from "./workflow-budget-d1.js";
 export * from "./monotonic.js";
 export * from "./usage-d1.js";
 export * from "./billing-d1.js";
+export * from "./references-d1.js";
 export * from "./assets-r2.js";

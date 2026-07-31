@@ -20,9 +20,21 @@
  * duplicate them badly.
  *
  * What IS fully ported: every route, the constant-time bearer auth, the
- * pagination/filter semantics, and the error→status taxonomy, exposed as a
- * framework-agnostic **Web Fetch handler** ({@link createBillingService}) ready
- * to mount as a Hono route group. `test/service.test.ts` drives it end to end.
+ * pagination/filter semantics, the 1 MiB body cap (the ONE accept-loop guard
+ * that survives, because it is enforceable inside the isolate), and the
+ * error→status taxonomy — exposed as a framework-agnostic **Web Fetch handler**
+ * ({@link createBillingService}) ready to mount as a Hono route group.
+ * `test/service.test.ts` drives it end to end and
+ * `test/platform-limits.test.ts` pins the approximation.
+ *
+ * Ported WITH one deliberate widening: {@link LedgerSink}'s methods are
+ * `MaybePromise`-valued and this handler AWAITS them. The Rust trait is
+ * synchronous, which is free there (a blocking DB call on a thread that may
+ * block) and unimplementable here — on Workers every durable store is
+ * promise-returning, so a synchronous seam would admit no sink but the
+ * in-memory one. See the {@link LedgerSink} doc for the failure a fire-and-
+ * forget `record` would produce (a 200 shipped before the write settles, and a
+ * `billing_idempotency_conflict` that never reaches the client as 409).
  *
  * Routes (unchanged semantics):
  *  - `GET  /healthz` | `/v1/healthz`   — open readiness probe.
@@ -140,12 +152,16 @@ function clamp(value: number, lo: number, hi: number): number {
  * Price a usage event and persist the resulting ledger entry (port of
  * `BillingService::charge_and_record`). Throws {@link BillingError}.
  */
-export function chargeAndRecord(
+export async function chargeAndRecord(
   config: BillingServiceConfig,
   event: BillingEvent,
-): LedgerEntry {
+): Promise<LedgerEntry> {
   const entry = charge(config.price_book, event);
-  config.sink.record(entry);
+  // AWAITED, not fire-and-forget: on Workers every durable sink is
+  // promise-valued, and an unawaited `record` would let the 200 ship before the
+  // write settled — turning a `billing_idempotency_conflict` (409) into an
+  // unhandled rejection the caller never sees.
+  await config.sink.record(entry);
   return entry;
 }
 
@@ -200,7 +216,7 @@ export function createBillingService(
         return badRequest(error instanceof Error ? error.message : String(error));
       }
       try {
-        const entry = chargeAndRecord(config, event);
+        const entry = await chargeAndRecord(config, event);
         return json(200, ledgerEntryToWire(entry));
       } catch (error) {
         if (error instanceof BillingError) return billingErrorResponse(error);
@@ -217,7 +233,7 @@ export function createBillingService(
       );
       const filter = tenantFilterFromParams(url.searchParams);
       try {
-        const entries = config.sink.list(filter, offset, limit);
+        const entries = await config.sink.list(filter, offset, limit);
         return json(200, {
           entries: entries.map(ledgerEntryToWire),
           page_totals: ledgerTotals(entries),
@@ -231,7 +247,7 @@ export function createBillingService(
     if (method === "GET" && path.startsWith("/v1/billing/ledger/")) {
       const id = path.slice("/v1/billing/ledger/".length);
       try {
-        const entry = config.sink.get(id);
+        const entry = await config.sink.get(id);
         if (entry) return json(200, ledgerEntryToWire(entry));
         return json(404, {
           error: {

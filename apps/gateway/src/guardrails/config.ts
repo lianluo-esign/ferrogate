@@ -8,10 +8,12 @@
  * this module covers the var half so the middleware is runnable and testable
  * with zero bindings.
  *
- * PORT-TODO(inventory-data-billing §guardrail_policy_bindings): the durable
- * revision/binding tables move to the D1 control database, read through
- * `@ferrogate/storage`. `binding.ts` already holds the generation-guarded CAS
- * algorithm those writes need; only the row I/O is missing.
+ * Both halves are live. The var half is below; the DURABLE half is
+ * `D1GuardrailPolicyStore` (`./d1.ts`) over the CONTROL D1 —
+ * `guardrail_policy_revisions` + `guardrail_policy_bindings`, with the
+ * generation-guarded CAS `binding.ts` defines — and the two are merged by
+ * {@link guardrailPolicySourceFromEnv}: durable rows are ADDITIVE to the config
+ * table, so a config-only deployment behaves exactly as it did.
  */
 import { type PolicyRevision, policyRevisionSchema } from "@ferrogate/guardrails";
 import type { WorkersAiBinding } from "@ferrogate/guardrails";
@@ -20,10 +22,12 @@ import {
   emptyPolicySource,
   policySourceFromStore,
 } from "./binding.js";
+import { D1GuardrailPolicyStore, loadGuardrailPolicyStore } from "./d1.js";
 import { secretsFromEnv } from "./detectors.js";
 import type { DetectorBuildContext } from "./detectors.js";
 import { InMemoryGuardrailEvidenceSink } from "./evidence.js";
-import type { GuardrailMiddlewareOptions } from "./middleware.js";
+import type { GuardrailDepsResolver, GuardrailMiddlewareOptions } from "./middleware.js";
+import type { GuardrailPolicySource } from "./ports.js";
 
 /** JSON array of `PolicyRevision` documents. */
 export const GUARDRAIL_POLICY_VAR = "GATEWAY_GUARDRAIL_POLICIES";
@@ -64,10 +68,31 @@ function parseArray(value: unknown, name: string): unknown[] {
 export function guardrailPolicySourceFromEnv(
   env: Record<string, unknown>,
   detectorContext: DetectorBuildContext = {},
-): ReturnType<typeof policySourceFromStore> {
+): GuardrailPolicySource {
+  const store = guardrailPolicyStoreFromEnv(env);
+  if (store === undefined) {
+    return emptyPolicySource;
+  }
+  return policySourceFromStore(store, {
+    secrets: secretsFromEnv(env),
+    ...detectorContext,
+  });
+}
+
+/**
+ * The var half as a STORE rather than a compiled source, so the durable half
+ * can be layered on top of the same object before anything is compiled.
+ *
+ * `undefined` — not an empty store — when no policy var is set, which is what
+ * lets {@link guardrailPolicySourceFromEnv} keep returning the shared
+ * {@link emptyPolicySource} singleton for the unconfigured case.
+ */
+export function guardrailPolicyStoreFromEnv(
+  env: Record<string, unknown>,
+): InMemoryGuardrailPolicyStore | undefined {
   const revisions = parseArray(env[GUARDRAIL_POLICY_VAR], GUARDRAIL_POLICY_VAR);
   if (revisions.length === 0) {
-    return emptyPolicySource;
+    return undefined;
   }
   const store = new InMemoryGuardrailPolicyStore();
   const parsed: PolicyRevision[] = revisions.map(
@@ -99,16 +124,48 @@ export function guardrailPolicySourceFromEnv(
     }
   }
 
-  return policySourceFromStore(store, {
-    secrets: secretsFromEnv(env),
-    ...detectorContext,
-  });
+  return store;
 }
 
-/** Default {@link GuardrailMiddlewareOptions} for a Worker `env`. */
-export function guardrailDepsFromEnv(env: Record<string, unknown>): GuardrailMiddlewareOptions {
+/**
+ * Default {@link GuardrailMiddlewareOptions} for a Worker `env`.
+ *
+ * Returns a PROMISE when — and only when — the CONTROL D1 is bound and the
+ * durable revision/binding tables have to be read. With no `CONTROL_DB` the
+ * value is returned synchronously and the behaviour is exactly what it was
+ * before the durable half landed, which is what keeps every var-driven caller
+ * and test unchanged. `guardrails()` accepts either (see
+ * {@link GuardrailDepsResolver}).
+ *
+ * A durable read FAILURE is not caught here. The rejection reaches the
+ * middleware, which lets it become a 5xx: an engine built from a policy set
+ * that half-loaded would screen with rules silently missing, and passing
+ * unscreened content to a provider is the one outcome the guardrail exists to
+ * prevent.
+ */
+export function guardrailDepsFromEnv(
+  env: Record<string, unknown>,
+): GuardrailMiddlewareOptions | Promise<GuardrailMiddlewareOptions> {
   const ai = env.AI as WorkersAiBinding | undefined;
-  const policies = guardrailPolicySourceFromEnv(env, ai !== undefined ? { workersAi: ai } : {});
+  const detectorContext: DetectorBuildContext = ai !== undefined ? { workersAi: ai } : {};
+  const durable = D1GuardrailPolicyStore.fromEnv(env);
+
+  if (durable === null) {
+    return guardrailOptions(env, guardrailPolicySourceFromEnv(env, detectorContext));
+  }
+
+  return loadGuardrailPolicyStore(durable, guardrailPolicyStoreFromEnv(env)).then((store) =>
+    guardrailOptions(
+      env,
+      policySourceFromStore(store, { secrets: secretsFromEnv(env), ...detectorContext }),
+    ),
+  );
+}
+
+function guardrailOptions(
+  env: Record<string, unknown>,
+  policies: GuardrailPolicySource,
+): GuardrailMiddlewareOptions {
   const key = env[GUARDRAIL_EVIDENCE_KEY_VAR];
   return {
     policies,

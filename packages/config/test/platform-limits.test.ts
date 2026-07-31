@@ -142,6 +142,45 @@ describe("tls/acme: Cloudflare terminates TLS, so the sections are inert", () =>
     ).not.toThrow();
   });
 
+  /**
+   * The COMPENSATING CONTROL for that removal: silence would tell an operator
+   * TLS is configured when nothing reads it. `loadConfigFromObject` therefore
+   * reports the section as inert. These assertions are deliberately made
+   * through the LOADER, not by calling `inertTlsWarnings` directly, so they go
+   * red if the warning is implemented but never mounted on the load path — the
+   * failure mode this repo keeps hitting.
+   */
+  test("the LOADER reports a manual [tls] block as inert", () => {
+    const { warnings } = loadConfigFromObject({
+      tls: { enabled: true, cert_path: "/c.pem", key_path: "/k.pem" },
+    });
+    expect(warnings.join("\n")).toMatch(/\[tls\] is INERT on Cloudflare/);
+    expect(warnings.join("\n")).toMatch(/cert_path\/key_path are not read/);
+  });
+
+  test("the LOADER reports an [tls.acme] block as inert, separately", () => {
+    const { warnings } = loadConfigFromObject({
+      tls: { acme: { enabled: true, domains: ["gw.example"], email: "ops@example" } },
+    });
+    expect(warnings.join("\n")).toMatch(/\[tls\.acme\] is INERT on Cloudflare/);
+    // `tls.enabled` is false here, so the manual-TLS warning must NOT fire.
+    expect(warnings.join("\n")).not.toMatch(/\[tls\] is INERT/);
+  });
+
+  test("a Caddyfile `tls` directive is reported as inert through the migration bridge", () => {
+    // `fromGatewayConfig` emits `[tls]`; the operator must be told it is inert
+    // rather than have the migration quietly imply certificates are handled.
+    const { warnings } = fromCaddyfileStr(
+      "gw.example {\n  tls /etc/cert.pem /etc/key.pem\n}\n",
+      "Caddyfile",
+    );
+    expect(warnings.join("\n")).toMatch(/\[tls\] is INERT on Cloudflare/);
+  });
+
+  test("a config with no TLS section warns about nothing", () => {
+    expect(loadConfigFromObject({}).warnings).toEqual([]);
+  });
+
   test("no TLS/ACME validator is exported under any name", () => {
     const surface = Object.keys(configPackage);
     for (const absent of [

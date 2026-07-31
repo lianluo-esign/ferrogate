@@ -13,6 +13,14 @@ compatibility_flags = ["nodejs_compat"]
 # therefore how a real deployment states its credentials, and a stale var can
 # never re-enable a key the database disabled.
 #
+# `TENANCY_LIFECYCLE` moved the same way: `resolveLifecycle` gates on the
+# `tenant-accounts` / `projects` / `workspaces` rows the admin surface writes
+# (`src/store/lifecycle.ts`, walking the whole tenant -> project -> workspace
+# chain like Rust's `resolve_lifecycle_chain`), and reads this map only for a
+# tenancy that has no durable row. Suspending a tenant is now
+# `PATCH /admin/v1/tenant-accounts/{id} {"status":"suspended"}` and takes effect
+# on that tenant's next request; it used to need an edit here and a redeploy.
+#
 # `CONTROL_PLANE_NATIVE_API_KEYS` is the one that CANNOT move: a durable virtual
 # key's scopes live in the per-tenant database and Workers resolve D1 bindings at
 # deploy time, so this Worker cannot read them — see the kept platform-limit
