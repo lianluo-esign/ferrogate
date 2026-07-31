@@ -84,7 +84,8 @@ use tokio::time::sleep;
 
 use crate::cloudflare_agent_memory::{AgentInstanceIdentity, AgentMemoryError};
 use crate::cloudflare_worker::{
-    CloudflareControlSurface, CloudflareControlSurfaceError, CloudflareRunStatus,
+    CloudflareControlSurface, CloudflareControlSurfaceError, CloudflareRunObservation,
+    CloudflareRunStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -879,8 +880,44 @@ pub struct AgentCostReceipt {
     pub container_cost_unavailable: bool,
     /// The enforcement decision.
     pub decision: BudgetDecision,
+    /// What the kill controls actually observed, when the decision was
+    /// [`BudgetDecision::Kill`]. `None` for every non-kill decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kill_evidence: Option<AgentKillEvidence>,
     /// Reference to the emitted cost/enforcement audit event.
     pub audit_event_ref: String,
+}
+
+/// What one over-budget kill observed, recorded on the receipt rather than left
+/// to a log line.
+///
+/// Exists because a run's *status* cannot answer "did the cancel reach
+/// anything". The Worker reports `running` both for a run nobody cancelled and
+/// for one that was cancelled and has not unwound — deliberately, since
+/// collapsing them is what made [`KillMode::Cancel`]'s verification vacuous. So
+/// an escalation to `cleanup_run` would otherwise be indistinguishable from a
+/// destroy of a run nobody tried to cancel, on the one path whose past failures
+/// were invisible for exactly that reason.
+///
+/// The `Option` fields are three-valued on purpose: `None` is "the control
+/// surface does not report this", which is not the same answer as `Some(false)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentKillEvidence {
+    /// The kill mode that ran.
+    pub mode: KillMode,
+    /// Whether the cancel actually signalled in-flight work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_signalled: Option<bool>,
+    /// Whether the run's durable cancel latch was set when the status was read
+    /// back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_latched: Option<bool>,
+    /// The status observed by the post-cancel verification read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_status: Option<CloudflareRunStatus>,
+    /// Whether the cancel had to be escalated to a `cleanup_run` destroy.
+    pub escalated_to_destroy: bool,
 }
 
 impl AgentCostReceipt {
@@ -911,6 +948,7 @@ impl AgentCostReceipt {
             accumulated_burn_usd,
             policy_version: policy.policy_version.clone(),
             decision,
+            kill_evidence: None,
             audit_event_ref,
         })
     }
@@ -1185,7 +1223,8 @@ impl AgentRuntimeUsageSource for ScriptedUsageSource {
 // ---------------------------------------------------------------------------
 
 /// How the governor tears down an over-budget run on a [`BudgetDecision::Kill`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KillMode {
     /// `this.destroy()` — the hard kill ([`CloudflareControlSurface::cleanup_run`]).
     #[default]
@@ -1420,24 +1459,30 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
         should_dispatch(&self.ledger, &self.policy, identity).await
     }
 
-    /// Whether a just-cancelled run reached a terminal state within the
-    /// configured [`CancelSettleWindow`].
+    /// Observe a just-cancelled run, giving it the configured
+    /// [`CancelSettleWindow`] to reach a terminal state.
     ///
-    /// Reads `run_status` immediately, then up to `retries` more times with
-    /// `backoff` between reads, short-circuiting on the first settled read. A
-    /// `run_status` error propagates rather than being read as "settled" — the
-    /// caller must escalate or fail, never assume the run stopped burning.
-    async fn cancel_settled(&mut self, instance_name: &str) -> Result<bool, CostGovernorError> {
+    /// Reads immediately, then up to `retries` more times with `backoff`
+    /// between reads, stopping at the first settled read. Returns the LAST
+    /// observation, so the caller's evidence describes the state it actually
+    /// decided on. A `run_status_observed` error propagates rather than being
+    /// read as "settled" — never assume the run stopped burning.
+    async fn settle_observed(
+        &mut self,
+        instance_name: &str,
+    ) -> Result<CloudflareRunObservation, CostGovernorError> {
         let window = self.cancel_settle_window;
-        for attempt in 0..=window.retries {
-            if attempt > 0 && !window.backoff.is_zero() {
+        let mut observed = self.control.run_status_observed(instance_name)?;
+        for _ in 0..window.retries {
+            if kill_is_settled(observed.status) {
+                break;
+            }
+            if !window.backoff.is_zero() {
                 sleep(window.backoff).await;
             }
-            if kill_is_settled(self.control.run_status(instance_name)?) {
-                return Ok(true);
-            }
+            observed = self.control.run_status_observed(instance_name)?;
         }
-        Ok(false)
+        Ok(observed)
     }
 
     /// Enforce the budget for one usage window of `identity`.
@@ -1475,10 +1520,18 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
         // Record the burn regardless of decision — it happened.
         let accumulated_burn = self.ledger.add(identity, window_cost).await?;
 
+        let mut kill_evidence = None;
         if let BudgetDecision::Kill { reason } = &decision {
             match self.kill_mode {
                 KillMode::Destroy => {
                     self.control.cleanup_run(&instance_name)?;
+                    kill_evidence = Some(AgentKillEvidence {
+                        mode: KillMode::Destroy,
+                        cancel_signalled: None,
+                        cancel_latched: None,
+                        observed_status: None,
+                        escalated_to_destroy: false,
+                    });
                 }
                 KillMode::Cancel => {
                     // Cancel is cooperative and therefore best-effort (see
@@ -1487,22 +1540,47 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
                     // is still alive. `run_status` failing is NOT treated as
                     // "probably fine": it propagates, and the caller fails
                     // closed rather than recording a kill it cannot substantiate.
-                    self.control.cancel_run(&instance_name, reason)?;
-                    if !self.cancel_settled(&instance_name).await? {
+                    //
+                    // Both calls use the `_observed` variants so the receipt can
+                    // say WHY it escalated. `run_status` alone cannot: the Worker
+                    // reports `running` for a run nobody cancelled and for one
+                    // that was cancelled and has not unwound, so without
+                    // `cancel_signalled` / `cancel_latched` an escalation is
+                    // indistinguishable from a destroy of an uncancelled run.
+                    //
+                    // The status read is a bounded settle window, not a single
+                    // shot: a workload that OBEYS the signal is still `running`
+                    // for the first read or two. See `CancelSettleWindow`.
+                    let cancelled = self.control.cancel_run_observed(&instance_name, reason)?;
+                    let observed = self.settle_observed(&instance_name).await?;
+                    let escalated_to_destroy = !kill_is_settled(observed.status);
+                    if escalated_to_destroy {
                         self.control.cleanup_run(&instance_name)?;
                     }
+                    kill_evidence = Some(AgentKillEvidence {
+                        mode: KillMode::Cancel,
+                        cancel_signalled: cancelled.signalled,
+                        cancel_latched: observed.cancel_latched,
+                        observed_status: Some(observed.status),
+                        escalated_to_destroy,
+                    });
                 }
             }
         }
 
-        AgentCostReceipt::assemble(
+        let mut receipt = AgentCostReceipt::assemble(
             identity,
             &sample,
             &breakdown,
             accumulated_burn,
             &self.policy,
             decision,
-        )
+        )?;
+        // Attached here rather than threaded through `assemble`: only the branch
+        // above can observe it, and `assemble` stays usable for the non-kill
+        // decisions its other callers build.
+        receipt.kill_evidence = kill_evidence;
+        Ok(receipt)
     }
 
     /// Pull a usage sample from `source` for `window`, then [`Self::enforce`] it.

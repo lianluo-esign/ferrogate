@@ -16,10 +16,10 @@ use ferrogate_storage::{RuntimeStorageRepositories, StorageProviderKind};
 
 use super::{
     evaluate, should_dispatch, AgentBudgetPolicy, AgentBurnLedger, AgentBurnLedgerError,
-    AgentCostAttribution, AgentCostGovernor, AgentCostReceipt, AgentRuntimeUsageSample,
-    AgentRuntimeUsageSource, BudgetDecision, CancelSettleWindow, CfRuntimeCostModel,
-    CfRuntimePricing, ContainerUsageSample, CostGovernorError, CostWindow, InMemoryAgentBurnLedger,
-    KillMode, ScriptedUsageSource, StorageAgentBurnLedger,
+    AgentCostAttribution, AgentCostGovernor, AgentCostReceipt, AgentKillEvidence,
+    AgentRuntimeUsageSample, AgentRuntimeUsageSource, BudgetDecision, CancelSettleWindow,
+    CfRuntimeCostModel, CfRuntimePricing, ContainerUsageSample, CostGovernorError, CostWindow,
+    InMemoryAgentBurnLedger, KillMode, ScriptedUsageSource, StorageAgentBurnLedger,
     DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND, DEFAULT_CONTAINER_EGRESS_USD_PER_GB,
     DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND, DEFAULT_CONTAINER_VCPU_USD_PER_SECOND,
     DEFAULT_DO_REQUEST_USD_PER_MILLION, DEFAULT_DURATION_USD_PER_MILLION_GB_SECONDS,
@@ -1003,7 +1003,7 @@ fn kill_in_cancel_mode_waits_out_a_workload_that_is_still_unwinding() {
     // Zero backoff: the window's SHAPE (re-read until settled) is what is under
     // test, and a wall-clock delay would only make the suite slower.
     .with_cancel_settle_window(CancelSettleWindow::new(3, Duration::ZERO));
-    block_on(gov.enforce(&id, sample)).expect("enforce");
+    let receipt = block_on(gov.enforce(&id, sample)).expect("enforce");
 
     let calls = gov.control().calls();
     assert!(
@@ -1018,6 +1018,11 @@ fn kill_in_cancel_mode_waits_out_a_workload_that_is_still_unwinding() {
         ),
         "a run that settles inside the window must NOT be destroyed, got {calls:?}"
     );
+    // And the evidence describes the state the decision was made on: the LAST
+    // observation, not the first.
+    let evidence = receipt.kill_evidence.expect("kill evidence on a kill");
+    assert!(!evidence.escalated_to_destroy);
+    assert_eq!(evidence.observed_status, Some(CloudflareRunStatus::Stopped));
 }
 
 #[test]
@@ -1057,6 +1062,42 @@ fn cancel_settle_window_is_bounded_so_a_defiant_run_is_still_destroyed() {
 }
 
 #[test]
+fn an_escalated_kill_is_distinguishable_from_a_destroy_of_an_uncancelled_run() {
+    // The Worker reports `running` for BOTH "nobody cancelled this" and
+    // "cancelled, workload has not unwound", deliberately — collapsing the two
+    // is what made the verification vacuous. So the status the escalation acted
+    // on cannot, by itself, explain why the destroy happened. The receipt
+    // records the discriminators instead of leaving them to a log line.
+    let id = identity("run-1");
+    let sample = AgentRuntimeUsageSample {
+        metered_egress_usd: 5.0,
+        ..AgentRuntimeUsageSample::zero()
+    };
+    let mut gov = governor_with_surface(
+        1.0,
+        MockCloudflareControlSurface::new().reporting_status(CloudflareRunStatus::Running),
+    )
+    .with_kill_mode(KillMode::Cancel)
+    // A run that never settles exhausts any window; pin it to one read so this
+    // case asserts the evidence, not the wait.
+    .with_cancel_settle_window(CancelSettleWindow::IMMEDIATE);
+    let receipt = block_on(gov.enforce(&id, sample)).expect("enforce");
+
+    assert_eq!(
+        receipt.kill_evidence,
+        Some(AgentKillEvidence {
+            mode: KillMode::Cancel,
+            // The mock takes the trait's default `_observed` methods, which do
+            // not report these — `None` is "not reported", NOT "false".
+            cancel_signalled: None,
+            cancel_latched: None,
+            observed_status: Some(CloudflareRunStatus::Running),
+            escalated_to_destroy: true,
+        })
+    );
+}
+
+#[test]
 fn the_default_cancel_settle_window_actually_waits() {
     // The default is what production runs with, and a zero-retry default would
     // silently reinstate the destroy-on-first-read behaviour this rework
@@ -1070,6 +1111,41 @@ fn the_default_cancel_settle_window_actually_waits() {
         window.max_wait() <= Duration::from_secs(1),
         "an over-budget run that ignores the signal keeps burning during the window"
     );
+}
+
+#[test]
+fn a_cancel_that_settled_records_no_escalation() {
+    // The negative control for the above: without it, `escalated_to_destroy`
+    // could be hard-coded true and the assertion would still pass.
+    let id = identity("run-1");
+    let sample = AgentRuntimeUsageSample {
+        metered_egress_usd: 5.0,
+        ..AgentRuntimeUsageSample::zero()
+    };
+    let mut gov = governor_with_surface(
+        1.0,
+        MockCloudflareControlSurface::new().reporting_status(CloudflareRunStatus::Stopped),
+    )
+    .with_kill_mode(KillMode::Cancel);
+    let receipt = block_on(gov.enforce(&id, sample)).expect("enforce");
+
+    let evidence = receipt.kill_evidence.expect("kill evidence on a kill");
+    assert!(!evidence.escalated_to_destroy);
+    assert_eq!(evidence.observed_status, Some(CloudflareRunStatus::Stopped));
+}
+
+#[test]
+fn a_non_kill_decision_carries_no_kill_evidence() {
+    // Evidence of a kill that did not happen would be worse than none.
+    let id = identity("run-1");
+    let sample = AgentRuntimeUsageSample {
+        metered_egress_usd: 1.0,
+        ..AgentRuntimeUsageSample::zero()
+    };
+    let mut gov = governor(100.0);
+    let receipt = block_on(gov.enforce(&id, sample)).expect("enforce");
+    assert!(matches!(receipt.decision, BudgetDecision::Allow));
+    assert_eq!(receipt.kill_evidence, None);
 }
 
 #[test]

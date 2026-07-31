@@ -23,10 +23,15 @@
 
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { SELF } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 
 import wranglerToml from "../wrangler.toml?raw";
-import { addressingCalls, observedAborts, sideEffects } from "./harness/worker";
+import {
+  addressingCalls,
+  observedAborts,
+  resetProbeLedgers,
+  sideEffects,
+} from "./harness/worker";
 
 const TOKEN = "test-control-secret";
 const BASE = "https://agent-gateway.test";
@@ -45,6 +50,14 @@ function authedInit(extra?: RequestInit): RequestInit {
 function post(path: string, body: unknown): Promise<Response> {
   return SELF.fetch(`${BASE}${path}`, authedInit({ method: "POST", body: JSON.stringify(body) }));
 }
+
+// The harness ledgers live in module scope so a post-destroy read is real (see
+// `harness/worker.ts`), which also means they outlive every test in the isolate.
+// Without this, `addressingCalls.filter(...)[0]` and `sideEffects()` are correct
+// only because each test happens to choose a unique `runRef`.
+beforeEach(() => {
+  resetProbeLedgers();
+});
 
 function start(runId: string, extra?: Record<string, unknown>): Promise<Response> {
   return post("/control/start", {
@@ -122,6 +135,30 @@ describe("#414 cancel actually stops in-flight work", () => {
     // settled, because the run demonstrably is not.
     const status = await SELF.fetch(`${BASE}/control/status?runRef=${name}`, authedInit());
     expect(await status.json()).toMatchObject({
+      runRef: name,
+      status: "running",
+      cancelRequested: true,
+    });
+
+    // A SECOND cancel, while the same workload is STILL defiantly running. The
+    // fix for the above was once written as "cancel nulls #inFlight after
+    // aborting it", which held for exactly one call: the repeat cancel then read
+    // `aborted: false`, took the nothing-in-flight branch and wrote `stopped`
+    // again — the original defect, one line away.
+    //
+    // This is not a hypothetical second call. `AgentCostGovernor::enforce` chains
+    // `cancel_run? -> run_status? -> cleanup_run?`, so one transient failure of
+    // the last two aborts the tick and the next over-budget window re-issues the
+    // cancel; an operator cancelling a run the governor is also cancelling gets
+    // the same sequence.
+    const recancel = await post("/control/cancel", { runRef: name, reason: "over-budget" });
+    expect(recancel.status).toBe(200);
+    expect(await recancel.json()).toMatchObject({ runRef: name, status: "running", aborted: true });
+
+    // The read the governor makes after the repeat cancel. Still not settled,
+    // because the run still is not.
+    const afterRecancel = await SELF.fetch(`${BASE}/control/status?runRef=${name}`, authedInit());
+    expect(await afterRecancel.json()).toMatchObject({
       runRef: name,
       status: "running",
       cancelRequested: true,

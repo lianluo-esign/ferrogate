@@ -616,6 +616,13 @@ function notFound(runRef: string): ControlRefusal {
       this.#inFlight = controller;
       try {
         const message = await this.dispatchWorkload(request, controller.signal);
+        // NOT gated on `controller.signal.aborted`. The seam's contract is that an
+        // implementation "must reject once aborted rather than resolve", so RESOLVING
+        // with the signal already fired is by definition a workload that ignored the
+        // cancel — the defiant case. Writing `stopped` for it would reinstate the very
+        // defect {@link cancel} was fixed for: `kill_is_settled(Stopped)` is terminal,
+        // so the #428 escalation to `destroyRun` would be skipped for the one run shape
+        // that needs it. A cooperative workload lands in the `catch` branch below.
         this.setState({
           ...this.state,
           status: "completed",
@@ -709,6 +716,18 @@ function notFound(runRef: string): ControlRefusal {
      * With nothing in flight there is nothing to wait on — no workload can write the
      * status later — so the latch alone settles the run and `stopped` is written here.
      *
+     * WHY THIS METHOD MUST NOT CLEAR {@link #inFlight}. `#inFlight` is the record of
+     * "a workload is still unwinding", and only {@link invoke}'s `finally` knows when
+     * that stops being true. If `cancel` cleared the handle itself, a REPEAT cancel on
+     * a still-defiant run would read `aborted: false` and take the "nothing in flight"
+     * branch above — writing `stopped` for a workload that is still spending, which is
+     * exactly the vacuous verification this method exists to prevent. Repeat cancels
+     * are reachable: `AgentCostGovernor::enforce` chains `cancel_run? -> run_status? ->
+     * cleanup_run?`, so one transient failure of the later two aborts the tick and the
+     * next over-budget window re-issues the cancel. Aborting an already-aborted
+     * `AbortController` is a no-op, so leaving the handle in place makes the repeat
+     * cancel idempotent rather than destructive.
+     *
      * Distinct from a terminal "stop": there is no stop/pause primitive, an idle
      * agent hibernates on its own. A run that already reached a terminal state is
      * NOT flipped to `stopped`.
@@ -725,7 +744,6 @@ function notFound(runRef: string): ControlRefusal {
       }
       const aborted = this.#inFlight !== null;
       this.#inFlight?.abort(new Error(`ferrogate cancel: ${reason}`));
-      this.#inFlight = null;
       this.setState({
         ...this.state,
         status: aborted ? this.state.status : "stopped",

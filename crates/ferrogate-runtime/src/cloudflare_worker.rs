@@ -102,7 +102,12 @@ pub fn cloudflare_backend_descriptor_default() -> IsolationBackendDescriptor {
 /// surface. Distinct from [`ManagedWorkerSessionStatus`] because the CF side has
 /// its own vocabulary (a run can be `Queued` before it is `Running`); reconcile
 /// via [`CloudflareRunStatus::managed_session_status`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The serde form is the Worker's own control-route vocabulary — the exact set
+/// `cloudflare_gateway_control::parse_status` accepts — so a status recorded on
+/// a durable receipt reads the same as the wire value it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CloudflareRunStatus {
     Queued,
     Running,
@@ -386,6 +391,30 @@ pub trait CloudflareControlSurface {
         reason: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError>;
 
+    /// [`Self::cancel_run`], plus whether anything was actually **signalled**.
+    ///
+    /// The status alone cannot answer that. The Worker deliberately reports
+    /// `running` both for "never cancelled" and for "cancelled, and the workload
+    /// has not unwound yet", because collapsing the two is what made
+    /// [`crate::KillMode::Cancel`]'s verification vacuous. A caller that
+    /// escalates on the second case therefore cannot, from the status, tell an
+    /// escalation from a destroy of a run nobody tried to cancel — on the exact
+    /// path whose past failures were invisible for that reason.
+    ///
+    /// `signalled: None` means the implementation does not report it, which is
+    /// distinct from `Some(false)` ("nothing was in flight"). The default
+    /// delegates to [`Self::cancel_run`] and reports `None`.
+    fn cancel_run_observed(
+        &mut self,
+        run_ref: &str,
+        reason: &str,
+    ) -> Result<CloudflareCancelObservation, CloudflareControlSurfaceError> {
+        Ok(CloudflareCancelObservation {
+            status: self.cancel_run(run_ref, reason)?,
+            signalled: None,
+        })
+    }
+
     /// Tear down the hosted run's resources (`this.destroy()`). Maps `cleanup`.
     fn cleanup_run(
         &mut self,
@@ -397,6 +426,43 @@ pub trait CloudflareControlSurface {
         &mut self,
         run_ref: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError>;
+
+    /// [`Self::run_status`], plus the run's durable **cancel latch**.
+    ///
+    /// The companion to [`Self::cancel_run_observed`]: `cancel_latched` is what
+    /// separates a `running` run that was cancelled and has not unwound from one
+    /// nobody cancelled. `None` means the implementation does not report it. The
+    /// default delegates to [`Self::run_status`] and reports `None`.
+    fn run_status_observed(
+        &mut self,
+        run_ref: &str,
+    ) -> Result<CloudflareRunObservation, CloudflareControlSurfaceError> {
+        Ok(CloudflareRunObservation {
+            status: self.run_status(run_ref)?,
+            cancel_latched: None,
+        })
+    }
+}
+
+/// What a [`CloudflareControlSurface::cancel_run_observed`] call observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloudflareCancelObservation {
+    /// The run's status after the cancel. **Not** a claim that it stopped — see
+    /// [`CloudflareControlSurface::cancel_run`].
+    pub status: CloudflareRunStatus,
+    /// Whether in-flight work on the instance was actually signalled.
+    /// `None` when the surface does not report it.
+    pub signalled: Option<bool>,
+}
+
+/// What a [`CloudflareControlSurface::run_status_observed`] call observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloudflareRunObservation {
+    /// The run's current status.
+    pub status: CloudflareRunStatus,
+    /// Whether the run's durable cancel latch is set. `None` when the surface
+    /// does not report it.
+    pub cancel_latched: Option<bool>,
 }
 
 /// Per-run context the client keeps so lifecycle calls that only carry the

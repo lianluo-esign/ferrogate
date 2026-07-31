@@ -194,6 +194,63 @@ fn cancel_run_reports_running_when_the_worker_only_signalled_the_workload() {
 }
 
 #[test]
+fn cancel_run_observed_decodes_whether_anything_was_signalled() {
+    // `status` alone cannot answer "did the cancel reach a running workload":
+    // the Worker reports `running` both for a run nobody cancelled and for one
+    // whose signalled workload has not unwound. `aborted` is the only field that
+    // separates them, and it used to be discarded.
+    let mut s = surface(vec![ok(r#"{ "status": "running", "aborted": true }"#)]);
+    let observed = s.cancel_run_observed("cf-run-r1", "over-budget").unwrap();
+    assert_eq!(observed.status, CloudflareRunStatus::Running);
+    assert_eq!(observed.signalled, Some(true));
+
+    // ...and the negative case is a distinct value, not the absence of one.
+    let mut s = surface(vec![ok(r#"{ "status": "stopped", "aborted": false }"#)]);
+    let observed = s.cancel_run_observed("cf-run-r1", "over-budget").unwrap();
+    assert_eq!(observed.status, CloudflareRunStatus::Stopped);
+    assert_eq!(observed.signalled, Some(false));
+}
+
+#[test]
+fn an_unreported_abort_flag_is_none_rather_than_false() {
+    // Three-valued on purpose: "the surface did not say" must not read as "no
+    // workload was signalled", or a silent contract change downgrades to a
+    // confident wrong answer.
+    let mut s = surface(vec![ok(r#"{ "status": "stopped" }"#)]);
+    assert_eq!(
+        s.cancel_run_observed("cf-run-r1", "over-budget")
+            .unwrap()
+            .signalled,
+        None
+    );
+    let mut s = surface(vec![ok(r#"{ "status": "running" }"#)]);
+    assert_eq!(
+        s.run_status_observed("cf-run-r1").unwrap().cancel_latched,
+        None
+    );
+}
+
+#[test]
+fn run_status_observed_decodes_the_durable_cancel_latch() {
+    // The companion discriminator: `running` + latched is "cancelled, still
+    // unwinding"; `running` + not latched is "nobody cancelled this".
+    let mut s = surface(vec![ok(
+        r#"{ "status": "running", "cancelRequested": true }"#,
+    )]);
+    let observed = s.run_status_observed("cf-run-r1").unwrap();
+    assert_eq!(observed.status, CloudflareRunStatus::Running);
+    assert_eq!(observed.cancel_latched, Some(true));
+
+    let mut s = surface(vec![ok(
+        r#"{ "status": "running", "cancelRequested": false }"#,
+    )]);
+    assert_eq!(
+        s.run_status_observed("cf-run-r1").unwrap().cancel_latched,
+        Some(false)
+    );
+}
+
+#[test]
 fn start_run_props_round_trip_into_the_start_body() {
     let mut s = surface(vec![ok(
         r#"{ "runRef": "cf-run-r1", "status": "running" }"#,
