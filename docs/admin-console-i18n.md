@@ -151,4 +151,10 @@ error until every step below is done.
 - `e2e/i18n-route-sweep.spec.ts` — **every** registered route (derived directly
   from `APP_ROUTES` + `RESOURCE_ROUTE_PATHS`, so a new route is covered the day
   it is registered) in both locales at the desktop viewport.
+- `e2e/support/route-matrix.test.ts` — the browser-free guard on that claim. It
+  compares the derived inventory against the `<Route path=…>` bindings that
+  `e2e/support/app-route-bindings.ts` parses out of `src/App.tsx`, so registering
+  a route without going through `APP_ROUTES` / `RESOURCE_ROUTE_PATHS` fails
+  `npx vitest run`. **Never write a literal `path="…"` in `App.tsx`**; the only
+  four allowed are `/login`, `/register`, `/` and `*`.
 - `e2e/i18n-language-switch.spec.ts` — the switcher, persistence, and `<html lang>`.

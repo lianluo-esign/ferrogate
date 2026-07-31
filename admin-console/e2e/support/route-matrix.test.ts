@@ -3,13 +3,25 @@
 // `i18n-route-sweep.spec.ts` asserts the #348 box "every registered route is
 // covered by the English/Chinese browser route matrix". That claim is only as
 // good as the inventory it loops over — and the inventory is the thing a future
-// route can quietly fall out of. These tests pin it: they compare the derived
-// inventory against the two registries `App.tsx` actually builds its route tree
-// from, so an unswept route fails `npx vitest run` on the machine that added it,
-// long before the chromium pass runs.
+// route can quietly fall out of.
+//
+// These tests pin it against `src/App.tsx` ITSELF, not against the registries the
+// inventory is built from. Comparing the inventory to `APP_ROUTES` +
+// `RESOURCE_ROUTE_PATHS` is a tautology — both sides are the same expression, so
+// a hard-coded `<Route path="/app/mutant" …>` in `App.tsx` stays green. Reading
+// the router's own bindings (`app-route-bindings.ts`) makes that mutation fail
+// `npx vitest run` on the machine that added it, long before the chromium pass.
 import { describe, expect, it } from "vitest";
 import { APP_ROUTES } from "@/lib/app-routes";
 import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
+import {
+  ALLOWED_LITERAL_PATHS,
+  boundRouteTemplates,
+  parseRouteBindings,
+  readAppSource,
+  resourceSpreadParam,
+  unregisteredLiteralBindings,
+} from "./app-route-bindings";
 import {
   PROTECTED_ROUTES,
   PUBLIC_ROUTE_PATHS,
@@ -19,13 +31,54 @@ import {
 } from "./route-matrix";
 
 describe("i18n route-sweep inventory", () => {
-  it("covers every registered route template, from both registries", () => {
-    const registered = [
-      ...PUBLIC_ROUTE_PATHS,
-      ...Object.values(APP_ROUTES),
-      ...Object.values(RESOURCE_ROUTE_PATHS),
-    ].sort();
-    expect(REGISTERED_ROUTES.map((route) => route.template).sort()).toEqual(registered);
+  it("covers every route App.tsx actually binds", () => {
+    // The one assertion that is NOT circular: the right-hand side is read out of
+    // the router source, so a route bound there and missing from the inventory
+    // (or vice versa) fails here.
+    const bound = boundRouteTemplates(readAppSource()).sort();
+    expect(REGISTERED_ROUTES.map((route) => route.template).sort()).toEqual(bound);
+  });
+
+  it("rejects a hard-coded <Route path> that bypasses the registries", () => {
+    expect(
+      unregisteredLiteralBindings(readAppSource()),
+      "App.tsx binds a literal path the both-locale sweep will never visit — " +
+        "register it in APP_ROUTES or RESOURCE_ROUTE_PATHS instead",
+    ).toEqual([]);
+  });
+
+  it("binds every APP_ROUTES entry exactly once, and fans out the resource registry", () => {
+    const bindings = parseRouteBindings(readAppSource());
+    const appRouteKeys = bindings
+      .filter((binding) => binding.kind === "appRoute")
+      .map((binding) => binding.value);
+    expect(appRouteKeys.sort()).toEqual(Object.keys(APP_ROUTES).sort());
+    expect(bindings.filter((binding) => binding.kind === "resourceSpread")).toHaveLength(1);
+    expect(resourceSpreadParam(readAppSource())).toBeDefined();
+  });
+
+  it("detects a literal route the registries do not know about", () => {
+    // Pins the detector itself, so the empty result above is a real check and
+    // not a parser that silently matches nothing.
+    const mutated = readAppSource().replace(
+      "<Route path=\"/\" element=",
+      "<Route path=\"/app/mutant-literal\" element={null} />\n<Route path=\"/\" element=",
+    );
+    expect(mutated, "the mutation did not apply").not.toEqual(readAppSource());
+    expect(unregisteredLiteralBindings(mutated)).toEqual(["\"/app/mutant-literal\""]);
+    // An expression the inventory cannot resolve is the same hole as a literal.
+    expect(parseRouteBindings("<Route path={SOME_OTHER_REGISTRY.thing} />")).toEqual([
+      {
+        source: "{SOME_OTHER_REGISTRY.thing}",
+        kind: "literal",
+        value: "SOME_OTHER_REGISTRY.thing",
+      },
+    ]);
+  });
+
+  it("treats only the auth pages and the two redirects as allowed literals", () => {
+    expect([...ALLOWED_LITERAL_PATHS]).toEqual(["/login", "/register", "/", "*"]);
+    expect([...PUBLIC_ROUTE_PATHS]).toEqual(["/login", "/register"]);
   });
 
   it("visits a concrete path for every route — no unsubstituted parameter", () => {

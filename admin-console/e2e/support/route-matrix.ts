@@ -7,6 +7,11 @@
 // same two registries `src/App.tsx` builds its `<Route>` tree from — add a route
 // there and it is swept the same day, with no second list to remember.
 //
+// The registries are what `App.tsx` is SUPPOSED to bind; `app-route-bindings.ts`
+// reads what it ACTUALLY binds, and `route-matrix.test.ts` compares the two. That
+// is what stops this inventory from being a tautology: a hard-coded
+// `<Route path="/app/mutant">` fails vitest instead of quietly escaping the sweep.
+//
 // Deliberately a pure module (no `@playwright/test` import): `route-matrix.test.ts`
 // runs it under vitest to prove the derivation still covers both registries, and
 // `i18n-route-sweep.spec.ts` consumes it in the browser.
