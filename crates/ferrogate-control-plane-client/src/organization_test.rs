@@ -107,6 +107,7 @@ fn all_groups_register_and_resolve_their_verbs() {
             "workspaces",
             "plans",
             "quota-policies",
+            "x402-spend-policies",
         ]
     );
     // Representative verb resolution across groups.
@@ -139,6 +140,10 @@ fn every_declared_verb_builds_a_request() {
         (WorkspacesGroup.descriptor(), build_workspaces),
         (PlansGroup.descriptor(), build_plans),
         (QuotaPoliciesGroup.descriptor(), build_quota_policies),
+        (
+            X402SpendPoliciesGroup.descriptor(),
+            build_x402_spend_policies,
+        ),
     ];
     let input = universal_input();
     for (descriptor, build) in cases {
@@ -177,11 +182,14 @@ fn coverage_manifest_declares_the_expected_operation_ids() {
         "updatePlan",
         "listQuotaPolicies",
         "deleteQuotaPolicy",
+        "listX402SpendPolicies",
+        "getEffectiveX402SpendPolicy",
+        "evaluateX402SpendPolicy",
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 7 + 1 + 6 + 6 + 5 + 6 = 31 distinct operation ids.
-    assert_eq!(manifest.len(), 31);
+    // 7 + 1 + 6 + 6 + 5 + 6 + 3 = 34 distinct operation ids.
+    assert_eq!(manifest.len(), 34);
 }
 
 #[test]

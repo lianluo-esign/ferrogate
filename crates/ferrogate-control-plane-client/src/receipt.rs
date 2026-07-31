@@ -1422,16 +1422,29 @@ pub struct MethodEffectException {
 /// builder changes, and `method_effect_exceptions_are_all_live_and_needed`
 /// fails on any entry that names an unregistered verb, states the wrong
 /// method, or agrees with the method (i.e. is no longer an exception at all).
-pub const METHOD_EFFECT_EXCEPTIONS: &[MethodEffectException] = &[MethodEffectException {
-    group: "mcp-identity",
-    verb: "callback",
-    method: "GET",
-    effect: VerbEffect::Mutating,
-    why: "completeMcpIdentityOauth is a GET only because it is the OAuth redirect target the \
-          authorization server sends the browser to. It exchanges the authorization code and \
-          persists an identity grant, so it changes Control-Plane state and owes the operator a \
-          receipt exactly like `authorize` does.",
-}];
+pub const METHOD_EFFECT_EXCEPTIONS: &[MethodEffectException] = &[
+    MethodEffectException {
+        group: "mcp-identity",
+        verb: "callback",
+        method: "GET",
+        effect: VerbEffect::Mutating,
+        why: "completeMcpIdentityOauth is a GET only because it is the OAuth redirect target the \
+              authorization server sends the browser to. It exchanges the authorization code and \
+              persists an identity grant, so it changes Control-Plane state and owes the operator \
+              a receipt exactly like `authorize` does.",
+    },
+    MethodEffectException {
+        group: "x402-spend-policies",
+        verb: "evaluate",
+        method: "POST",
+        effect: VerbEffect::Read,
+        why: "evaluateX402SpendPolicy is a POST only because the challenge it evaluates is a \
+              document too large for a query string. It is a dry-run evaluator: it writes \
+              nothing, and its whole value to the operator IS the response body. Gating it to a \
+              MutationReceipt would withhold the evaluation the command exists to print, and \
+              would offer a --dry-run of an operation that is already one.",
+    },
+];
 
 /// The declared effect for `group verb` when the HTTP method is not a reliable
 /// witness, or `None` when the method is.

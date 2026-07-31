@@ -291,6 +291,20 @@ impl VerbDescriptor {
         self
     }
 
+    /// Declare that this verb sends an operator-supplied **partial** document
+    /// even though it does not change Control-Plane state.
+    ///
+    /// [`VerbDescriptor::read`] defaults to [`RequestDocument::None`] because
+    /// nearly every read is a `GET`. The exception is a `POST`ed dry-run
+    /// evaluator (`x402-spend-policies evaluate`): the operator's document is
+    /// the *subject* being evaluated, it reaches the server verbatim, and
+    /// nothing is stored — so refusing `--data`/`--set` on it would reject the
+    /// only input the verb has.
+    pub fn with_request_body(mut self) -> VerbDescriptor {
+        self.request_document = RequestDocument::Partial;
+        self
+    }
+
     /// Declare that this verb's body **replaces** the stored document, so a
     /// field the document omits is cleared rather than preserved (`PUT`).
     pub fn replacing_whole_document(mut self) -> VerbDescriptor {

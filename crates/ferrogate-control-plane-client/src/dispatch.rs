@@ -63,6 +63,7 @@ pub fn resource_builder(group: &str) -> Option<VerbBuilder> {
         "workspaces" => organization::build_workspaces,
         "plans" => organization::build_plans,
         "quota-policies" => organization::build_quota_policies,
+        "x402-spend-policies" => organization::build_x402_spend_policies,
         // IAM (#361).
         "virtual-keys" => iam::build_virtual_keys,
         "api-keys" => iam::build_api_keys,
