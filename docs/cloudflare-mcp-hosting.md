@@ -45,7 +45,32 @@ external API, etc.).
 > metadata. The Rust pipeline's binding/migration fields are parameterized, so a
 > stateless spec just omits them.
 
-## 2. OAuth + KV
+## 2. Auth modes: authless and OAuth
+
+One template, two variants — `McpWorkerSpec::auth_mode` (`McpAuthMode::Oauth`,
+the default, or `McpAuthMode::Authless`) is carried to the Worker as the
+`plain_text` binding `env.MCP_AUTH_MODE`, and the Worker branches on it. Two
+separate modules would have drifted apart; one module cannot.
+
+| | `authless` | `oauth` (default) |
+|---|---|---|
+| `/mcp`, `/sse` | served straight from the DO, no credential | OAuth 2.1, or the automation-bearer shortcut |
+| Other paths | `404` — `/authorize`, `/token`, `/register` are **not routed** | the OAuth provider's surface |
+| `OAUTH_KV` binding | **omitted by the deploy** (no grants to persist) | required |
+| Secrets Store read | never | one per bearer-presenting request (see below) |
+| Registered upstream `auth_type` | `none` | `shared_headers` (`Authorization` from `FERROGATE_MCP_WORKER_AUTHORIZATION`) |
+
+The mode **fails closed**: any value that is not exactly `authless` — including
+an absent binding — leaves OAuth in charge, so a binding lost to a redeploy
+cannot silently open a server up. Deploying authless with wrangler means setting
+`[vars] MCP_AUTH_MODE = "authless"` **and** deleting the `[[kv_namespaces]]`
+block; through the Rust pipeline it is `McpWorkerSpec::new(src).authless()`,
+which omits the KV binding for you.
+
+Authless is for a private/dev deployment or one that is only reachable behind
+FerroGate. It has no notion of a principal, so `whoami` reports `anonymous`.
+
+### OAuth + KV
 
 `@cloudflare/workers-oauth-provider` fronts `/mcp` + `/sse` with the OAuth 2.1
 flow — **Cloudflare is the authorization server**. The provider needs a **KV
@@ -178,7 +203,48 @@ upstream detector accepts, so a deployed server can be registered back as an
 derivable from the script name, so it is resolved once
 (`McpWorkerDeployer::workers_dev_subdomain`) and recorded on the spec
 (`with_workers_dev_subdomain`). Without it the URL is `None` — a wrong upstream
-URL registered on a tenant is worse than an absent one.
+URL registered on a tenant is worse than an absent one. `status_for` reports the
+URL only for a script that is actually deployed; an absent script reports `None`
+even though the spec could compute a URL.
+
+### Registering the deployed server back as an upstream
+
+`McpWorkerSpec::upstream_config(tools_to_execute)` turns a deployed spec into the
+`McpServerConfig` that registers it as a normal MCP upstream — so the hosted
+server passes the same list/execute path as an external one:
+
+```rust
+let spec = McpWorkerSpec::new(module_src)
+    .with_workers_dev_subdomain(deployer.workers_dev_subdomain().await?);
+deployer.deploy(&spec).await?;
+let upstream = spec.upstream_config(vec!["*".to_string()])?;   // add to McpConfig::servers
+```
+
+- **Name.** `upstream_name()` maps `-` to `_` (`ferrogate-mcp-server` →
+  `ferrogate_mcp_server`): FerroGate namespaces tools as `server-tool` and
+  therefore refuses a server name containing `-`, so the raw Worker script name
+  could never be registered.
+- **Transport** is `streamable-http` against `…/mcp`.
+- **Auth.** Authless → `auth_type: none`. OAuth → `shared_headers` with
+  `Authorization` read from the `FERROGATE_MCP_WORKER_AUTHORIZATION` env var
+  (the **complete** header value, `Bearer <token>`, because static header values
+  are substituted verbatim). That is the automation-bearer shortcut, not the
+  interactive flow: the gateway calls machine-to-machine, and
+  `McpAuthType::Oauth` is rejected by the config validator as unimplemented.
+- **Execution stays deny-by-default**: `tools_to_execute` is a required argument;
+  pass `["*"]` to allow the whole surface.
+- The gateway's own `validate_mcp_server_config` runs before the config is
+  returned, so "deployed" and "routable" are settled by one call instead of two
+  hopeful ones.
+
+### Not yet built (open on #409)
+
+The **admin CRUD surface** (create/update/delete a hosted server and report its
+URL/status over the admin API) is not implemented. `McpWorkerDeployer` is the
+typed seam such a surface would call; today the only callers are tests, so the
+pipeline is reachable by an operator only through a program that constructs it.
+No live-account deploy has been performed: every request here is asserted
+offline.
 
 ### Multipart content type
 

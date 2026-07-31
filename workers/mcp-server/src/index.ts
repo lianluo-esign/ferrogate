@@ -47,14 +47,22 @@ export interface SecretsStoreSecretBinding {
  *   (`wrangler secret put`), kept as the fallback for deployments with no
  *   Secrets Store. Optional; when neither binding is present, OAuth is the only
  *   way in.
+ * - `MCP_AUTH_MODE` — which front door this deployment enforces: `"oauth"`
+ *   (default, and the value assumed when the binding is absent) or
+ *   `"authless"`. A `plain_text` binding, not a secret — it carries no
+ *   credential. FerroGate's Rust pipeline sets it from
+ *   `McpWorkerSpec::auth_mode`, so ONE template serves both variants #409 asks
+ *   for instead of two modules that can drift apart.
  * - `OAUTH_PROVIDER` — injected by {@link OAuthProvider} into the default
  *   handler; exposes `parseAuthRequest` / `completeAuthorization` / `lookupClient`.
+ *   Absent in authless deployments, which never construct a grant.
  */
 export interface Env {
   MCP_OBJECT: DurableObjectNamespace<FerroGateMcp>;
   OAUTH_KV: KVNamespace;
   MCP_BEARER_TOKEN_STORE?: SecretsStoreSecretBinding;
   MCP_BEARER_TOKEN?: string;
+  MCP_AUTH_MODE?: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
@@ -146,7 +154,26 @@ function healthz(): Response {
 }
 
 /** The one `Authorization` scheme this Worker's automation shortcut accepts. */
-const BEARER_PREFIX = "Bearer ";
+const BEARER_SCHEME = "bearer";
+
+/**
+ * The credential carried by an `Authorization: Bearer <token>` header, or
+ * `undefined` when the request presents no bearer credential.
+ *
+ * The scheme is compared case-insensitively because RFC 7235 §2.1 defines it
+ * that way: a client sending `authorization: bearer <token>` is presenting a
+ * valid credential, and rejecting it here would have turned a spec-legal client
+ * into an unexplainable 401 at the front door. The token itself is returned
+ * verbatim — it is case-SENSITIVE and must never be normalised.
+ */
+function bearerCredential(request: Request): string | undefined {
+  const header = request.headers.get("authorization");
+  if (!header) return undefined;
+  const space = header.indexOf(" ");
+  if (space < 0) return undefined;
+  if (header.slice(0, space).toLowerCase() !== BEARER_SCHEME) return undefined;
+  return header.slice(space + 1);
+}
 
 /**
  * Whether the request presents a `Bearer` credential at all.
@@ -159,7 +186,7 @@ const BEARER_PREFIX = "Bearer ";
  * diagnostic signal that path has.
  */
 export function presentsBearer(request: Request): boolean {
-  return (request.headers.get("authorization") ?? "").startsWith(BEARER_PREFIX);
+  return bearerCredential(request) !== undefined;
 }
 
 /**
@@ -167,10 +194,8 @@ export function presentsBearer(request: Request): boolean {
  * request presents exactly the expected token.
  */
 export function matchesBearer(request: Request, expected: string): boolean {
-  const header = request.headers.get("authorization") ?? "";
-  const prefix = BEARER_PREFIX;
-  if (!header.startsWith(prefix)) return false;
-  const presented = header.slice(prefix.length);
+  const presented = bearerCredential(request);
+  if (presented === undefined) return false;
   const enc = new TextEncoder();
   const a = enc.encode(presented);
   const b = enc.encode(expected);
@@ -209,6 +234,23 @@ export async function resolveAutomationBearer(env: Env): Promise<string | undefi
     }
   }
   return env.MCP_BEARER_TOKEN || undefined;
+}
+
+/** The `MCP_AUTH_MODE` value selecting the authless variant. */
+const AUTHLESS_MODE = "authless";
+
+/**
+ * Whether this deployment is the **authless** variant: `/mcp` + `/sse` are
+ * served straight from the Durable Object with no front door at all.
+ *
+ * Fails CLOSED — anything other than the exact `authless` value (including an
+ * absent binding, so an OAuth deployment whose binding was dropped by a
+ * redeploy keeps its front door) leaves the OAuth provider in charge. The value
+ * is trimmed and lower-cased only because it is operator-typed config in
+ * `wrangler.toml`, not a credential.
+ */
+export function isAuthless(env: Env): boolean {
+  return (env.MCP_AUTH_MODE ?? "").trim().toLowerCase() === AUTHLESS_MODE;
 }
 
 /** The MCP transport handlers (Streamable HTTP at `/mcp`, legacy SSE at `/sse`). */
@@ -267,16 +309,30 @@ const oauth = new OAuthProvider({
 });
 
 /**
- * Top-level entry. An **automation bearer** (from the `MCP_BEARER_TOKEN_STORE`
- * Secrets Store binding, or the `MCP_BEARER_TOKEN` secret) short-circuits OAuth
- * and routes straight to the MCP transport — handy for CI / FerroGate's own
- * machine-to-machine calls. Everything else flows through the OAuth provider.
+ * Top-level entry. In the **authless** variant ({@link isAuthless}) `/mcp` and
+ * `/sse` are served with no authentication at all. Otherwise an **automation
+ * bearer** (from the `MCP_BEARER_TOKEN_STORE` Secrets Store binding, or the
+ * `MCP_BEARER_TOKEN` secret) short-circuits OAuth and routes straight to the MCP
+ * transport — handy for CI / FerroGate's own machine-to-machine calls.
+ * Everything else flows through the OAuth provider.
  */
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/healthz") return healthz();
+
+    // The authless variant has no front door: serve the transport directly and
+    // expose NOTHING else. The OAuth endpoints are not merely bypassed but
+    // absent — an authless deploy declares no `OAUTH_KV` binding
+    // (`McpWorkerSpec::metadata_json` omits it), so routing to the provider here
+    // would 500 on undefined KV instead of saying "no such route". No Secrets
+    // Store read either: there is no credential to compare against.
+    if (isAuthless(env)) {
+      if (url.pathname === "/mcp") return mcpHandler.fetch(request, env, ctx);
+      if (url.pathname === "/sse") return sseHandler.fetch(request, env, ctx);
+      return new Response("Not found", { status: 404 });
+    }
 
     // Only pay the Secrets Store read on the two routes a bearer can unlock, and
     // only for a request that actually presents one — an anonymous caller must

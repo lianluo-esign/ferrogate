@@ -40,6 +40,26 @@ new_sqlite_classes = ["FerroGateMcp"]
 binding = "OAUTH_KV"
 id = "REPLACE_WITH_OAUTH_KV_NAMESPACE_ID"
 
+# --- Auth mode --------------------------------------------------------------
+# Which front door this deployment enforces. ONE template serves both variants
+# issue #409 asks for:
+#
+#   "oauth"    (default) OAuth 2.1 via @cloudflare/workers-oauth-provider, plus
+#              the automation-bearer shortcut below. Needs the OAUTH_KV binding.
+#   "authless" /mcp + /sse are served straight from the Durable Object with NO
+#              authentication. Nothing else is routed (not even /authorize), and
+#              no Secrets Store read happens. Only for a private/dev deployment
+#              or one fronted by FerroGate itself.
+#
+# The value fails CLOSED: anything that is not exactly "authless" (including an
+# absent binding) leaves OAuth in charge. FerroGate's Rust deploy path sets this
+# from `McpWorkerSpec::auth_mode`; when deploying with wrangler, set it here.
+#
+# An authless deployment should ALSO delete the [[kv_namespaces]] block above:
+# it persists no grants, and a placeholder namespace id fails the upload.
+[vars]
+MCP_AUTH_MODE = "oauth"
+
 # --- Observability ----------------------------------------------------------
 [observability]
 enabled = true

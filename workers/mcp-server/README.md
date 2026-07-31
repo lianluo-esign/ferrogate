@@ -129,8 +129,21 @@ fallback.
 npm run teardown    # wrangler delete
 ```
 
-## Auth: OAuth vs bearer
+## Auth: authless, OAuth, or bearer
 
+The deployment's front door is selected by the `MCP_AUTH_MODE` variable
+(`[vars]` in `wrangler.toml`, or `McpWorkerSpec::auth_mode` on the Rust deploy
+path). It **fails closed** — anything that is not exactly `authless`, including
+an absent binding, leaves OAuth in charge.
+
+- **Authless (`MCP_AUTH_MODE = "authless"`):** `/mcp` and `/sse` are served
+  straight from the Durable Object with no credential; every other path is
+  `404` (the OAuth endpoints are not routed at all) and no Secrets Store read
+  happens. There is no principal, so `whoami` reports `anonymous`. Deploying
+  this way with wrangler also means deleting the `[[kv_namespaces]]` block —
+  authless persists no grants, and a placeholder namespace id fails the upload.
+  `McpWorkerSpec::new(src).authless()` omits that binding automatically. Use it
+  only for a private/dev server or one reachable only behind FerroGate.
 - **OAuth (default):** clients hit `/authorize` -> `/token` -> then `/mcp`. This
   reference **auto-approves** the grant for a single-tenant/dev deployment. A
   production server MUST render a consent screen and authenticate the end user in

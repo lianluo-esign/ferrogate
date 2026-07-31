@@ -48,8 +48,28 @@ const compatibilityFlags = [
   ),
 ].map((match) => match[1]);
 
-/** The deployed Durable Object class name, verbatim. */
-const doClassName = requiredMatch(/^class_name\s*=\s*"([^"]+)"/m, "the durable object class");
+/**
+ * The deployed Durable Object class name, verbatim.
+ *
+ * Read from EVERY `class_name` key and required to be unambiguous rather than
+ * taking the first match: `class_name` is not unique to the binding this suite
+ * cares about (a second `[[durable_objects.bindings]]` block would introduce
+ * another), and silently binding `MCP_OBJECT` to whichever one happens to come
+ * first in the file would run the whole suite against the wrong class.
+ */
+const doClassNames = [
+  ...new Set(
+    [...wranglerToml.matchAll(/^class_name\s*=\s*"([^"]+)"/gm)].map((match) => match[1]),
+  ),
+];
+if (doClassNames.length !== 1) {
+  throw new Error(
+    `wrangler.toml: expected exactly one durable object class_name, found ${JSON.stringify(
+      doClassNames,
+    )} — point this harness at the intended class explicitly`,
+  );
+}
+const doClassName = doClassNames[0];
 
 export default defineConfig({
   plugins: [

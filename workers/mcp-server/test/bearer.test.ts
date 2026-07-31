@@ -216,7 +216,11 @@ describe("the Bearer-prefix gate in front of the store read", () => {
     expect(presentsBearer(mcpRequest("Bearer x"))).toBe(true);
     expect(presentsBearer(mcpRequest())).toBe(false);
     expect(presentsBearer(mcpRequest("Basic x"))).toBe(false);
-    // Scheme matching is the HTTP-exact one the router uses; "bearer x" is not it.
-    expect(presentsBearer(mcpRequest("bearer x"))).toBe(false);
+    // The auth scheme is case-insensitive per RFC 7235 §2.1, so a spec-legal
+    // client sending a lower-case scheme is presenting a credential, not junk.
+    expect(presentsBearer(mcpRequest("bearer x"))).toBe(true);
+    expect(presentsBearer(mcpRequest("BEARER x"))).toBe(true);
+    // The scheme is all that is case-folded; "Bearerx" is a different scheme.
+    expect(presentsBearer(mcpRequest("Bearerx"))).toBe(false);
   });
 });

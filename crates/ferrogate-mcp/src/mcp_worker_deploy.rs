@@ -83,6 +83,40 @@
 //! `ferrogate-cloudflare` — the extraction every one of them should move to,
 //! not a fourth copy.
 //!
+//! ## Auth mode: authless vs OAuth
+//!
+//! [`McpWorkerSpec::auth_mode`] selects which front door the deployed Worker
+//! puts in front of `/mcp` + `/sse`, and it is carried to the Worker as a
+//! `plain_text` binding (`env.MCP_AUTH_MODE`) rather than by shipping a second
+//! module: one template, two behaviours, so the two variants cannot drift apart.
+//! [`McpAuthMode::Authless`] additionally **omits** the `OAUTH_KV` binding —
+//! an authless deploy has no grants to persist, and emitting the binding with an
+//! unset namespace id is exactly the deploy that fails at Cloudflare for a
+//! reason unrelated to what the operator asked for.
+//!
+//! ## Registering the deployed server back as an upstream
+//!
+//! A deployed server is only useful once the gateway routes to it, so
+//! [`McpWorkerSpec::upstream_config`] turns a spec (plus the account's
+//! `workers.dev` subdomain) into the [`crate::McpServerConfig`] that registers
+//! it as an MCP upstream — URL, transport, and an `auth_type` derived from the
+//! deployed [`auth_mode`](McpWorkerSpec::auth_mode). It runs the gateway's own
+//! [`crate::validate_mcp_server_config`] before returning, so "deployed" and
+//! "routable" are proved by the same call instead of by two hopeful ones.
+//!
+//! ## Deliberately NOT in this module (open follow-ups on #409)
+//!
+//! - **Admin CRUD surface.** #409 asks for an admin API to create/update/delete
+//!   a hosted MCP server and report its URL/status. That belongs in the admin
+//!   HTTP layer (`ferrogate-cli`), not here: this module is the typed deploy
+//!   seam it would call. Until that lands, the only callers of
+//!   [`McpWorkerDeployer`] are tests — the pipeline is reachable from an
+//!   operator only via a program that constructs it.
+//! - **Live-account proof.** Every request here is construction-faithful and
+//!   asserted offline; no `keep_bindings` / `secrets_store_secret` /
+//!   `workers.dev`-subdomain response has been exercised against a real
+//!   Cloudflare account. That is the test lane's to prove.
+//!
 //! ## Multipart content type
 //!
 //! The deploy `PUT` carries [`McpWorkerSpec::content_type`] (the
@@ -104,6 +138,10 @@ use ferrogate_cloudflare::{
 };
 use serde::Deserialize;
 use serde_json::json;
+
+use crate::config::{
+    validate_mcp_server_config, McpAuthType, McpHeaderConfig, McpServerConfig, McpTransport,
+};
 
 /// The fixed multipart boundary. A constant (not random) boundary keeps the
 /// constructed request deterministic so tests can assert the exact bytes.
@@ -130,6 +168,10 @@ pub const DEFAULT_OAUTH_KV_BINDING: &str = "OAUTH_KV";
 /// binding a `wrangler secret put` seeds, and the Worker prefers the store
 /// binding while still accepting the plain one (see `workers/mcp-server`).
 pub const DEFAULT_MCP_BEARER_SECRET_BINDING: &str = "MCP_BEARER_TOKEN_STORE";
+
+/// Default Worker binding name carrying the deployed auth mode
+/// (`env.MCP_AUTH_MODE`, a `plain_text` binding — it holds no credential).
+pub const DEFAULT_MCP_AUTH_MODE_BINDING: &str = "MCP_AUTH_MODE";
 
 /// Default Cloudflare Secrets Store secret **name** holding the automation
 /// bearer. Canonical (`^[a-z0-9-]+$`) so the same secret is also addressable as
@@ -161,6 +203,48 @@ pub const DEFAULT_MCP_BEARER_SECRET_NAME: &str = "mcp-bearer-token";
 /// `a_store_binding_declared_only_in_wrangler_toml_is_not_preserved_by_a_redeploy`
 /// pins the behaviour so a future change to it is deliberate.
 pub const DEFAULT_KEEP_BINDINGS: &[&str] = &["secret_text"];
+
+/// Environment variable an OAuth-mode upstream registration reads the
+/// `Authorization` header value from.
+///
+/// It carries the **complete header value**, i.e. `Bearer <token>`, not the bare
+/// token: FerroGate's static-header config (`McpHeaderConfig::value_env`) is
+/// substituted verbatim, so a bare token here would be sent as an
+/// `Authorization: <token>` the Worker's `Bearer `-prefix gate rejects.
+pub const MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV: &str = "FERROGATE_MCP_WORKER_AUTHORIZATION";
+
+/// Which front door the deployed Worker puts in front of `/mcp` and `/sse`.
+///
+/// Carried to the Worker as the `env.MCP_AUTH_MODE` `plain_text` binding, so a
+/// single template serves both variants #409 asks for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum McpAuthMode {
+    /// OAuth 2.1 via `@cloudflare/workers-oauth-provider`, with the automation
+    /// bearer as a machine-to-machine shortcut. Requires a KV namespace for
+    /// grant persistence, so [`McpWorkerSpec::kv_namespace_id`] must be set.
+    #[default]
+    Oauth,
+    /// No authentication at all: `/mcp` and `/sse` are served straight from the
+    /// Durable Object. The reference variant for a private/dev deployment; it
+    /// needs no KV namespace, and the deploy therefore omits that binding.
+    Authless,
+}
+
+impl McpAuthMode {
+    /// The wire value of the `MCP_AUTH_MODE` binding. The Worker compares
+    /// against exactly this string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Oauth => "oauth",
+            Self::Authless => "authless",
+        }
+    }
+
+    /// Whether a deploy in this mode needs the `OAUTH_KV` binding.
+    pub fn requires_oauth_kv(&self) -> bool {
+        matches!(self, Self::Oauth)
+    }
+}
 
 /// One Cloudflare **Secrets Store** binding to declare on the deployed Worker.
 ///
@@ -293,6 +377,9 @@ pub struct McpWorkerSpec {
     pub do_binding_name: String,
     /// The KV binding name the OAuth provider uses (`env.<NAME>`).
     pub kv_binding_name: String,
+    /// Which front door the deployed Worker enforces. Defaults to
+    /// [`McpAuthMode::Oauth`].
+    pub auth_mode: McpAuthMode,
     /// The KV namespace **id** the binding points at. REQUIRED for a live
     /// deploy: create it once (`wrangler kv namespace create OAUTH_KV`) and set
     /// it here. Empty by default so an unset id is obvious in the metadata.
@@ -333,6 +420,7 @@ impl McpWorkerSpec {
             do_class_name: DEFAULT_MCP_DO_CLASS.to_string(),
             do_binding_name: DEFAULT_MCP_DO_BINDING.to_string(),
             kv_binding_name: DEFAULT_OAUTH_KV_BINDING.to_string(),
+            auth_mode: McpAuthMode::default(),
             kv_namespace_id: String::new(),
             migration_tag: "v1".to_string(),
             compatibility_date: "2025-06-01".to_string(),
@@ -350,6 +438,41 @@ impl McpWorkerSpec {
     pub fn with_kv_namespace_id(mut self, id: impl Into<String>) -> Self {
         self.kv_namespace_id = id.into();
         self
+    }
+
+    /// Builder: select the deployed front door.
+    pub fn with_auth_mode(mut self, mode: McpAuthMode) -> Self {
+        self.auth_mode = mode;
+        self
+    }
+
+    /// Builder: deploy the authless variant ([`McpAuthMode::Authless`]).
+    pub fn authless(self) -> Self {
+        self.with_auth_mode(McpAuthMode::Authless)
+    }
+
+    /// The Durable Object binding name as it reaches Cloudflare (trimmed — see
+    /// [`McpSecretsStoreBinding::wire_binding_name`]).
+    fn wire_do_binding_name(&self) -> &str {
+        self.do_binding_name.trim()
+    }
+
+    /// The `McpAgent` class name as it reaches Cloudflare. Trimmed, and the DO
+    /// binding and the `new_sqlite_classes` migration must read the *same* view:
+    /// a class name that disagrees between them declares a migration for a class
+    /// nothing binds.
+    fn wire_do_class_name(&self) -> &str {
+        self.do_class_name.trim()
+    }
+
+    /// The KV binding name as it reaches Cloudflare (trimmed).
+    fn wire_kv_binding_name(&self) -> &str {
+        self.kv_binding_name.trim()
+    }
+
+    /// The KV namespace id as it reaches Cloudflare (trimmed).
+    fn wire_kv_namespace_id(&self) -> &str {
+        self.kv_namespace_id.trim()
     }
 
     /// Builder: declare one Secrets Store binding on the deployed Worker.
@@ -382,7 +505,112 @@ impl McpWorkerSpec {
             .as_deref()
             .map(str::trim)
             .filter(|subdomain| !subdomain.is_empty())
-            .map(|subdomain| format!("https://{}.{}.workers.dev/mcp", self.script_name, subdomain))
+            .map(|subdomain| {
+                format!(
+                    "https://{}.{}.workers.dev/mcp",
+                    self.wire_script_name(),
+                    subdomain
+                )
+            })
+    }
+
+    /// The script name as it reaches Cloudflare (trimmed): it is both a URL path
+    /// segment and the deployed hostname label, so a stray space is a 404 rather
+    /// than a validation error.
+    pub fn wire_script_name(&self) -> &str {
+        self.script_name.trim()
+    }
+
+    /// The MCP **upstream name** this deployed server registers under.
+    ///
+    /// Derived from the script name with `-` replaced by `_`, because FerroGate
+    /// namespaces MCP tools as `serverName-toolName` and therefore refuses a
+    /// server name containing `-` — while Cloudflare Worker script names
+    /// conventionally use `-` (`ferrogate-mcp-server`). Without the mapping the
+    /// default deploy could never be registered at all.
+    pub fn upstream_name(&self) -> String {
+        self.wire_script_name().replace('-', "_")
+    }
+
+    /// The [`McpServerConfig`] that registers this deployed server as an MCP
+    /// upstream — the "once deployed, register it back" leg of #409.
+    ///
+    /// `tools_to_execute` is required by the caller because MCP execution is
+    /// deny-by-default in FerroGate; pass `["*"]` to allow the Worker's whole
+    /// tool surface.
+    ///
+    /// The `auth_type` follows the deployed [`auth_mode`](Self::auth_mode):
+    ///
+    /// - [`McpAuthMode::Authless`] → [`McpAuthType::None`], no headers.
+    /// - [`McpAuthMode::Oauth`] → [`McpAuthType::SharedHeaders`] carrying an
+    ///   `Authorization` header read from
+    ///   [`MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV`]. That is the Worker's
+    ///   automation-bearer shortcut, not the interactive OAuth flow: the gateway
+    ///   calls this server machine-to-machine, and `McpAuthType::Oauth` is
+    ///   rejected by [`validate_mcp_server_config`] as unimplemented.
+    ///
+    /// # Errors
+    ///
+    /// [`CloudflareError::Config`] when the spec cannot produce a routable
+    /// upstream: no known `workers.dev` subdomain (nothing to point at), or a
+    /// config the gateway's own validator rejects. Validating here rather than
+    /// at load time means "deployed" and "routable" are settled by one call.
+    pub fn upstream_config(
+        &self,
+        tools_to_execute: Vec<String>,
+    ) -> Result<McpServerConfig, CloudflareError> {
+        let url = self.mcp_endpoint_url().ok_or_else(|| {
+            CloudflareError::Config(format!(
+                "cannot register script {:?} as an MCP upstream: the account's workers.dev \
+                 subdomain is unknown, so there is no URL to route to (resolve it with \
+                 McpWorkerDeployer::workers_dev_subdomain and set it with \
+                 McpWorkerSpec::with_workers_dev_subdomain)",
+                self.wire_script_name()
+            ))
+        })?;
+
+        let (auth_type, headers) = match self.auth_mode {
+            McpAuthMode::Authless => (McpAuthType::None, Vec::new()),
+            McpAuthMode::Oauth => (
+                McpAuthType::SharedHeaders,
+                vec![McpHeaderConfig {
+                    name: "Authorization".to_string(),
+                    value: None,
+                    value_env: Some(MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV.to_string()),
+                }],
+            ),
+        };
+
+        let config = McpServerConfig {
+            name: self.upstream_name(),
+            transport: McpTransport::StreamableHttp,
+            url: Some(url),
+            command: None,
+            args: Vec::new(),
+            auth_type,
+            headers,
+            oauth: None,
+            signed_jwt_audience: None,
+            tools_to_execute,
+            tools_to_auto_execute: Vec::new(),
+            approval_policy: Default::default(),
+            tool_include: Vec::new(),
+            tool_regex: Vec::new(),
+            tls: Default::default(),
+            timeout_ms: crate::config::default_timeout_ms(),
+            health_ping_interval_secs: crate::config::default_health_ping_interval_secs(),
+            max_reconnect_attempts: crate::config::default_max_reconnect_attempts(),
+            min_reconnect_backoff_secs: crate::config::default_min_reconnect_backoff_secs(),
+            max_reconnect_backoff_secs: crate::config::default_max_reconnect_backoff_secs(),
+        };
+
+        validate_mcp_server_config(&config).map_err(|e| {
+            CloudflareError::Config(format!(
+                "deployed MCP server {:?} does not form a routable upstream: {e:#}",
+                self.wire_script_name()
+            ))
+        })?;
+        Ok(config)
     }
 
     /// Reject a spec that cannot produce a usable deploy.
@@ -391,6 +619,13 @@ impl McpWorkerSpec {
     /// binding is a typed error **before** the request is signed and sent
     /// rather than an opaque Cloudflare 400.
     pub fn validate(&self) -> Result<(), CloudflareError> {
+        if self.wire_script_name().is_empty() {
+            return Err(CloudflareError::Config(
+                "MCP Worker script_name must not be empty: it is the {script_name} path \
+                 segment of the upload and the deployed hostname label"
+                    .to_string(),
+            ));
+        }
         for binding in &self.secrets_store_bindings {
             binding.validate()?;
         }
@@ -401,8 +636,14 @@ impl McpWorkerSpec {
         // production. Checked across the whole set (DO + KV + every secret), not
         // just among the secrets, because that is the namespace they share.
         let mut seen = HashSet::new();
-        for name in [self.do_binding_name.trim(), self.kv_binding_name.trim()]
+        let kv_binding = self
+            .auth_mode
+            .requires_oauth_kv()
+            .then(|| self.wire_kv_binding_name());
+        for name in [Some(self.wire_do_binding_name()), kv_binding]
             .into_iter()
+            .flatten()
+            .chain([DEFAULT_MCP_AUTH_MODE_BINDING])
             .chain(
                 self.secrets_store_bindings
                     .iter()
@@ -423,29 +664,42 @@ impl McpWorkerSpec {
     /// The Workers Script-API `metadata` part as JSON.
     ///
     /// Registers the module entrypoint, the `McpAgent` Durable Object namespace
-    /// binding, the `OAUTH_KV` KV-namespace binding, any
+    /// binding, the `MCP_AUTH_MODE` `plain_text` binding, the `OAUTH_KV`
+    /// KV-namespace binding (OAuth mode only — an authless deploy persists no
+    /// grants), any
     /// [`secrets_store_bindings`](Self::secrets_store_bindings), the
     /// **`new_sqlite_classes`** migration (NOT `new_classes`: the Agents SDK
     /// requires the SQLite storage backend for session state), and
     /// [`keep_bindings`](Self::keep_bindings).
     pub fn metadata_json(&self) -> serde_json::Value {
-        let mut bindings = vec![
-            json!({
-                "type": "durable_object_namespace",
-                "name": self.do_binding_name,
-                "class_name": self.do_class_name,
-            }),
-            json!({
+        let mut bindings = vec![json!({
+            "type": "durable_object_namespace",
+            "name": self.wire_do_binding_name(),
+            "class_name": self.wire_do_class_name(),
+        })];
+        // An authless deploy persists no OAuth grants, so it declares no KV
+        // binding. Emitting one anyway would carry the unset `kv_namespace_id`
+        // and fail the upload for a reason the operator never asked about.
+        if self.auth_mode.requires_oauth_kv() {
+            bindings.push(json!({
                 "type": "kv_namespace",
-                "name": self.kv_binding_name,
-                "namespace_id": self.kv_namespace_id,
-            }),
-        ];
+                "name": self.wire_kv_binding_name(),
+                "namespace_id": self.wire_kv_namespace_id(),
+            }));
+        }
         bindings.extend(
             self.secrets_store_bindings
                 .iter()
                 .map(McpSecretsStoreBinding::metadata_entry),
         );
+        // Which front door the single template enforces. `plain_text`, not a
+        // secret: it carries no credential, and an operator reading the script's
+        // bindings should be able to see the auth mode it is running in.
+        bindings.push(json!({
+            "type": "plain_text",
+            "name": DEFAULT_MCP_AUTH_MODE_BINDING,
+            "text": self.auth_mode.as_str(),
+        }));
         json!({
             "main_module": self.module_filename,
             "compatibility_date": self.compatibility_date,
@@ -457,7 +711,7 @@ impl McpWorkerSpec {
             "keep_bindings": self.keep_bindings,
             "migrations": {
                 "new_tag": self.migration_tag,
-                "new_sqlite_classes": [self.do_class_name],
+                "new_sqlite_classes": [self.wire_do_class_name()],
             },
         })
     }
@@ -503,7 +757,8 @@ impl McpWorkerSpec {
     pub fn wrangler_deploy_command(&self) -> String {
         format!(
             "wrangler deploy --name {} --compatibility-date {}",
-            self.script_name, self.compatibility_date
+            self.wire_script_name(),
+            self.compatibility_date
         )
     }
 }
@@ -611,7 +866,7 @@ impl McpWorkerDeployer {
         spec.validate()?;
         Ok(HttpRequest {
             method: HttpMethod::Put,
-            url: self.script_url(&spec.script_name),
+            url: self.script_url(spec.wire_script_name()),
             bearer_token: self.resolve_token()?,
             body: Some(spec.multipart_body()),
             // The module upload is `multipart/form-data` framed by the spec's
@@ -633,7 +888,9 @@ impl McpWorkerDeployer {
         let result = envelope.into_result(response.status, response.retry_after)?;
         Ok(McpDeployOutcome {
             // Prefer the id Cloudflare echoes; fall back to the requested name.
-            script_name: result.id.unwrap_or_else(|| spec.script_name.clone()),
+            script_name: result
+                .id
+                .unwrap_or_else(|| spec.wire_script_name().to_string()),
             mcp_url: spec.mcp_endpoint_url(),
         })
     }
@@ -709,7 +966,7 @@ impl McpWorkerDeployer {
         &self,
         spec: &McpWorkerSpec,
     ) -> Result<McpScriptStatus, CloudflareError> {
-        let status = self.status(&spec.script_name).await?;
+        let status = self.status(spec.wire_script_name()).await?;
         Ok(McpScriptStatus {
             mcp_url: status.deployed.then(|| spec.mcp_endpoint_url()).flatten(),
             ..status
