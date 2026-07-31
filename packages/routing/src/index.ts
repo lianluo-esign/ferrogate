@@ -1,21 +1,16 @@
 /**
- * `@ferrogate/routing` — canary / shadow traffic bucketing.
+ * `@ferrogate/routing` — route match + canary/shadow rollout selection.
  *
- * Replaces the Rust crate `ferrogate-routing`. Pure, deterministic assignment;
- * no I/O.
+ * Faithful clean-room port of the Rust crate `ferrogate-routing`
+ * (`lib.rs` + `rollout.rs`). Pure, deterministic primitives shared by the
+ * gateway's request path; zero I/O.
+ *
+ *  - `fnv`     — FNV-1a64 hash + the deterministic `rolloutBucket` (byte-identical
+ *                to Rust: exact FNV constants and `salt\0key` framing).
+ *  - `rollout` — `canarySelected` / `shadowSampled` / `ShadowBudgetLedger`.
+ *  - `route`   — `RouteMatch` / `RouteMatcher` (the dynamic-route abstraction).
  */
-import type { Scope } from "@ferrogate/core";
 
-/** How a bucketed request is treated relative to the primary target. */
-export type RouteStrategy = "primary" | "canary" | "shadow";
-
-/** The resolved routing decision for one request. */
-export interface RouteDecision {
-  strategy: RouteStrategy;
-  target: string;
-}
-
-/** Deterministically assigns a stable key to a routing strategy. */
-export interface Bucketing {
-  assign(key: string, scope: Scope): RouteDecision;
-}
+export { fnv1a64, rolloutBucket } from "./fnv.js";
+export { canarySelected, shadowSampled, ShadowBudgetLedger } from "./rollout.js";
+export type { RouteMatch, RouteMatcher } from "./route.js";

@@ -100,6 +100,7 @@
       "dependencies": {
         "@ferrogate/core": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
+        "zod": "^3.25.76",
       },
     },
     "packages/config": {
@@ -132,6 +133,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@ferrogate/core": "workspace:*",
+        "zod": "^3.25.76",
       },
     },
     "packages/payments": {
@@ -140,6 +142,7 @@
       "dependencies": {
         "@ferrogate/core": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
+        "zod": "^3.25.76",
       },
     },
     "packages/policy": {
@@ -147,6 +150,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@ferrogate/core": "workspace:*",
+        "zod": "^3.25.76",
       },
     },
     "packages/providers": {
@@ -161,9 +165,6 @@
     "packages/routing": {
       "name": "@ferrogate/routing",
       "version": "0.0.0",
-      "dependencies": {
-        "@ferrogate/core": "workspace:*",
-      },
     },
     "packages/schemas": {
       "name": "@ferrogate/schemas",
@@ -178,6 +179,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@ferrogate/core": "workspace:*",
+        "zod": "^3.25.76",
       },
     },
     "packages/storage": {
@@ -186,14 +188,12 @@
       "dependencies": {
         "@ferrogate/core": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
+        "zod": "^3.25.76",
       },
     },
     "packages/sync-bridge": {
       "name": "@ferrogate/sync-bridge",
       "version": "0.0.0",
-      "dependencies": {
-        "@ferrogate/core": "workspace:*",
-      },
     },
   },
   "packages": {

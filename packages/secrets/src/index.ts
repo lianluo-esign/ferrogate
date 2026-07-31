@@ -1,26 +1,87 @@
 /**
- * `@ferrogate/secrets` — secret reference resolution (`env://`, `vault://`,
- * `cf://`).
+ * `@ferrogate/secrets` — secret-reference resolution across three backends:
+ * `env://NAME`, `vault://<mount>/<path>#<field>` (HashiCorp Vault KV v2), and
+ * `cf://<store>/<name>` (Cloudflare Secrets Store).
  *
- * Replaces the Rust crate `ferrogate-secrets`. Inside a Worker a `cf://` secret
- * arrives as a Secrets Store binding (deploy-time), so resolution is a lookup,
- * never a network write.
+ * Faithful clean-room port of the Rust crate `ferrogate-secrets`. The Rust
+ * `SecretResolver` trait is synchronous (`Result<Option<String>>`); the TS
+ * surface is `async` (`Promise<string | null>`, `null` = not found, throw =
+ * genuine failure) because the Vault and Cloudflare backends do I/O, and the
+ * Rust `block_on_cloudflare` sync/async bridge collapses away entirely.
+ *
+ * The Cloudflare split — REST is write/manage-only, values resolve from a
+ * Worker binding at runtime (decision #423) — maps directly onto the Workers
+ * Secrets Store binding model.
  */
-import type { Scope } from "@ferrogate/core";
 
-/** Supported secret-reference URI schemes. */
-export const SECRET_SCHEMES = ["env://", "vault://", "cf://"] as const;
-export type SecretScheme = (typeof SECRET_SCHEMES)[number];
+// Core domain model + parse.
+export type {
+  SecretRef,
+  EnvRef,
+  VaultRef,
+  CfSecretRef,
+} from "./secret-ref.js";
+export { parseSecretRef, isSecretRef, describeSecretRef } from "./secret-ref.js";
 
-/** A secret reference string (never the secret value itself). */
-export type SecretRef = `${SecretScheme}${string}`;
+// Resolver contract + env backend.
+export type { SecretResolver } from "./resolver.js";
+export { EnvSecretResolver } from "./resolver.js";
 
-/** A resolver turns a `SecretRef` into a live secret value on demand. */
-export interface SecretResolver {
-  resolve(ref: SecretRef, scope?: Scope): Promise<string>;
-}
+// Environment helpers.
+export type { EnvLike } from "./env.js";
+export { defaultEnv, nonEmptyEnv } from "./env.js";
 
-/** Narrowing guard for a syntactically valid secret reference. */
-export function isSecretRef(value: string): value is SecretRef {
-  return SECRET_SCHEMES.some((scheme) => value.startsWith(scheme));
-}
+// Minimal HTTP client (Rust `http_get`/`http_post`).
+export type { Header, HttpOptions } from "./http.js";
+export { httpGet, httpPost } from "./http.js";
+
+// Vault backend.
+export { VaultConfig, VaultSecretResolver } from "./vault.js";
+
+// Cloudflare Secrets Store — REST manage plane.
+export { CfSecretsStoreConfig, CloudflareSecretResolver, fetchTransport } from "./cloudflare.js";
+export {
+  CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT,
+  CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT,
+  CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES,
+  CF_ACCOUNT_ID_ENV,
+  CF_API_TOKEN_ENV,
+  CF_API_BASE_URL_ENV,
+} from "./cloudflare-consts.js";
+
+// Cloudflare Secrets Store — Worker-binding value resolution (decision #423).
+export {
+  CfSecretBindings,
+  cfBindingEnvVar,
+  cfBindingNameIsUnambiguous,
+  CF_BINDING_ENV_PREFIX,
+} from "./cloudflare-bindings.js";
+
+// Cloudflare Secrets Store — write-path capacity guardrails (issue #418).
+export {
+  CfSecretsCapacityPolicy,
+  CfSecretsCapacityWarning,
+  CF_SECRETS_MAX_SECRETS_ENV,
+  CF_SECRETS_WARN_AT_ENV,
+  CF_SECRETS_MAX_VALUE_BYTES_ENV,
+  DEFAULT_CF_SECRETS_WARN_AT,
+} from "./cloudflare-caps.js";
+
+// Minimal Cloudflare REST client seam (PORT-TODO: replace with @ferrogate/cloudflare).
+export type {
+  HttpMethod,
+  HttpRequest,
+  HttpResponse,
+  HttpTransport,
+  TokenResolver,
+} from "./cloudflare-client.js";
+export {
+  CloudflareClient,
+  CloudflareConfig,
+  CloudflareError,
+  EnvTokenResolver,
+  DEFAULT_API_BASE_URL,
+} from "./cloudflare-client.js";
+
+// The dispatching registry.
+export { SecretResolverRegistry } from "./registry.js";

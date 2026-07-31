@@ -3,10 +3,20 @@ main = "src/index.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`
+# (including a static API-key table). Production MUST NOT set this: without it
+# the Worker fails CLOSED — every authenticated surface answers
+# `503 mcp_auth_unavailable` until real ports are bound below.
+[vars]
+FG_DEV_IN_MEMORY_PORTS = "1"
+
 # TODO(bindings): configure per this app's inventory before first deploy.
 # Do NOT commit real resource IDs — these are placeholders only.
-#   [[durable_objects]]     bindings = ["FerroGateMcp"] (McpAgent, new_sqlite_classes)
-#   [[migrations]]          new_sqlite_classes = ["FerroGateMcp"]
-#   [[kv_namespaces]]       binding = "OAUTH_KV"  -> OAuth 2.1 grants
-#   [vars]                  MCP_BEARER_TOKEN automation bypass (secret)
-#   mounts: /mcp (Streamable HTTP), /sse (legacy SSE)
+#   [[durable_objects]]  bindings = ["FerroGateMcpSession"]
+#                        one DO per long-lived upstream MCP session, replacing
+#                        the Rust `McpManager` HashMap + health-check/reconnect.
+#   [[migrations]]       new_sqlite_classes = ["FerroGateMcpSession"]
+#   [[kv_namespaces]]    binding = "MCP_OAUTH_KV" -> per-user OAuth flows/grants
+#   [[d1_databases]]     binding = "DB" -> mcp_oauth_flows / mcp_oauth_credentials
+#   secrets              FERROGATE_MCP_IDENTITY_KEY (Secrets Store, deploy-time
+#                        binding) seals stored grants; see `webCryptoIdentityCipher`.

@@ -8,5 +8,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "dependencies": { "hono": "^4.6.0", "zod": "^3.25.76", "@ferrogate/core": "workspace:*", "@ferrogate/schemas": "workspace:*", "@modelcontextprotocol/sdk": "^1.29.0", "agents": "^0.0.109" }
+  "dependencies": {
+    "hono": "^4.6.0",
+    "zod": "^3.25.76",
+    "@ferrogate/core": "workspace:*",
+    "@ferrogate/schemas": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.0.109"
+  }
 }

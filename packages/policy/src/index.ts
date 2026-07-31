@@ -1,37 +1,45 @@
 /**
- * `@ferrogate/policy` — quota merge and budget preflight.
+ * `@ferrogate/policy` — pure policy decision boundaries.
  *
- * Replaces the Rust crate `ferrogate-policy`. Pure decision logic; no I/O.
+ * Faithful clean-room port of the Rust crate `ferrogate-policy`: rule-based
+ * allow/deny, multi-level quota merge, workflow-graph execution budgets, and the
+ * (deprioritized) x402 Solana spend policy. Every function is pure — storage
+ * lookups are injected as closures; there is no I/O.
+ *
+ * Modules:
+ *  - `policy-engine`   — `BasicPolicyEngine`, `PolicyRule`, `PolicySubject`, `PolicyDecision`.
+ *  - `quota`           — `resolveEffectiveQuota`, `EffectiveQuota`, `QuotaScopeSelector`.
+ *  - `workflow-budget` — envelope composition, budget pre-flight, node dispatch.
+ *  - `stored-types`    — storage records the layer reads (PORT-TODO: `@ferrogate/storage`).
+ *  - `x402/*`          — x402 spend policy + payment-authorization decision
+ *                        (PORT-TODO: `@ferrogate/payments` wire contract, deprioritized).
+ *  - `schemas`         — Zod wire schemas for the value types.
  */
-import type { Identity, Scope } from "@ferrogate/core";
+export * from "./policy-engine.js";
+export * from "./quota.js";
+export * from "./workflow-budget.js";
+export * from "./stored-types.js";
+export * from "./schemas.js";
 
-/** Rate/budget limits resolved from plan + tenant + key overrides. */
-export interface QuotaLimits {
-  rpm?: number;
-  tpm?: number;
-  monthlyBudgetUsd?: number;
-}
-
-/**
- * Merge two quota layers; the override wins per-field when present. Mirrors the
- * plan → tenant → key precedence of the Rust policy merge.
- */
-export function mergeQuota(base: QuotaLimits, override: QuotaLimits): QuotaLimits {
-  return {
-    rpm: override.rpm ?? base.rpm,
-    tpm: override.tpm ?? base.tpm,
-    monthlyBudgetUsd: override.monthlyBudgetUsd ?? base.monthlyBudgetUsd,
-  };
-}
-
-/** Outcome of a pre-request budget check. */
-export interface BudgetPreflight {
-  allowed: boolean;
-  remainingUsd: number;
-  reason?: string;
-}
-
-/** Evaluates whether an identity may proceed under its resolved quota. */
-export interface PolicyEngine {
-  preflight(identity: Identity, scope: Scope, estimateUsd: number): BudgetPreflight;
-}
+// x402 (deprioritized per inventory §2.1) — spend policy config + decision.
+export * from "./x402/config.js";
+export * from "./x402/decision.js";
+export {
+  X402_VERSION,
+  SCHEME_EXACT,
+  MAX_TIMEOUT_SECONDS,
+  CAIP2_SOLANA_MAINNET,
+  CAIP2_SOLANA_DEVNET,
+  PAYMENT_INTENT_HASH_DOMAIN,
+  networkFromCaip2,
+  networkCaip2,
+  base58Decode,
+  isValidSolanaAddress,
+  challengeHashHex,
+  requestBodyHashHex,
+  PaymentIntent,
+  type SolanaNetwork,
+  type SelectedPayment,
+  type PaymentIntentIdentity,
+} from "./x402/wire.js";
+export { sha256, hexLower, Sha256Builder } from "./x402/sha256.js";

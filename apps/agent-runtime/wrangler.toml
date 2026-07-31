@@ -1,12 +1,83 @@
 name = "ferrogate-agent-runtime"
 main = "src/index.ts"
+
+# `enable_ctx_exports` (#471) is REQUIRED for the governed-egress path:
+# `@cloudflare/containers` resolves the outbound interceptor through
+# `ctx.exports.ContainerProxy`. It became the DEFAULT at compatibility date
+# 2025-11-17, and workerd now REJECTS the flag as redundant, so the date carries
+# it instead of the flag list. Do not lower this date without re-adding the flag.
 compatibility_date = "2025-11-17"
-compatibility_flags = ["nodejs_compat", "enable_ctx_exports"]
+compatibility_flags = ["nodejs_compat"]
+
+# --- Durable Objects: run state + the worker plane --------------------------
+# Agent runs are long-lived and streaming, so run state is NOT request-scoped.
+#
+#   AgentRunState  — one instance per `${tenant_id}:${run_id}`. Holds the run
+#                    row, the append-only event timeline, the cancel latch, and
+#                    the live SSE subscriber set (event fan-out). Deriving the
+#                    instance name from the tenant makes cross-tenant run
+#                    addressing STRUCTURALLY impossible: another tenant's
+#                    `run_id` resolves to a different, empty instance and is
+#                    reported 404 (never 403 — the surface is not an existence
+#                    oracle; Rust `agent_jobs.rs` module docs).
+#
+#   WorkerPlane    — one instance per `${tenant_id}:${workspace_id}`. Holds the
+#                    self-hosted run dispatch queue and its lease bookkeeping
+#                    (`InMemorySelfHostedRunQueue` in
+#                    `crates/ferrogate-runtime/src/self_hosted_worker.rs`), which
+#                    MUST survive the request that enqueued it.
+#
+# These are real bindings, not placeholders: without them the run lifecycle has
+# nowhere durable to live. They need no account resources and run offline under
+# `@cloudflare/vitest-pool-workers`.
+[[durable_objects.bindings]]
+name = "AGENT_RUN_STATE"
+class_name = "AgentRunState"
+
+[[durable_objects.bindings]]
+name = "WORKER_PLANE"
+class_name = "WorkerPlane"
+
+# DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`,
+# NOT `new_classes`) — same requirement the Agents SDK has.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
+
+[vars]
+# DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`.
+# Production MUST NOT set this: without it the Worker fails CLOSED — every
+# authenticated surface answers 503 until real ports are bound.
+FG_DEV_IN_MEMORY_PORTS = "1"
+
+# Transport posture for the 6 internal `/v1/self-hosted-workers/*` callbacks
+# (Rust `SelfHostedTransportPosture`). "1" selects `RequireProductionMtls`,
+# which rejects the `symmetric_aead` and unverified `mutual_tls` marker
+# downgrade paths. Workers cannot terminate mutual TLS in-process, so enabling
+# it here fails closed for every channel this Worker can currently observe —
+# that is the honest boundary, exactly as in Rust.
+FG_REQUIRE_PRODUCTION_MTLS = "0"
+
+# Governed egress allowlist for the isolation tier (#471). Comma-separated bare
+# hostnames. EMPTY MEANS SEALED: with no authorized host every sandbox starts
+# with NO egress and any egress request is refused 422. A forgotten
+# configuration must fail closed.
+CONTAINER_GOVERNED_EGRESS_HOSTS = ""
 
 # TODO(bindings): configure per this app's inventory before first deploy.
 # Do NOT commit real resource IDs — these are placeholders only.
-#   [[durable_objects]]     AgentGateway (Agent DO), AgentSandbox (Sandbox container)
-#   [[migrations]]          new_sqlite_classes = ["AgentGateway"]
-#   [[containers]]          image for AgentSandbox (enableInternet=false, interceptHttps=true)
-#   [vars]                  GATEWAY_CONTROL_TOKEN (bearer)
-#   route groups: /control/*, /memory/*, /schedule/*, /container/*, /git-credential/*
+#   [[durable_objects.bindings]]  name = "CONTAINER_SANDBOX", class_name = "AgentSandbox"
+#   [[migrations]]                tag = "v2", new_sqlite_classes = ["AgentSandbox"]
+#   [[containers]]                name/class_name/image for AgentSandbox
+#                                 (`enableInternet = false`, `interceptHttps = true`
+#                                 pinned — load-bearing #471 egress control).
+#                                 Requires a PAID account, so it is not wired
+#                                 into the offline test harness; see
+#                                 `src/runs/governance.ts` PORT-TODOs.
+#   [[d1_databases]]              binding = "DB"    -> agent_runs / agent_run_events,
+#                                 self_hosted_worker_records, self_hosted_run_dispatches
+#   [[r2_buckets]]                binding = "ARTIFACTS" -> worker-reported artifacts
+#   [[queues]]                    billing/metering fan-out for agent runs
+#   [[analytics_engine_datasets]] run-timeline telemetry sink (apps/telemetry)
+#   secrets                       FG_SELF_HOSTED_WORKER_REGISTRY (Secrets Store,
+#                                 deploy-time binding) -> the worker identity table

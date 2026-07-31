@@ -1,32 +1,29 @@
 /**
- * `@ferrogate/billing` — price book and usage ledger.
+ * `@ferrogate/billing` — token-usage metering + the standalone billing
+ * microservice (issue #129).
  *
- * Replaces the Rust crate `ferrogate-billing`. On Cloudflare, counters live in
- * Durable Objects, the ledger fans out through Queues, and totals persist to D1.
+ * Faithful clean-room port of the Rust crate `ferrogate-billing`: a
+ * {@link PriceBook} rate card, a pure {@link charge} that turns a
+ * {@link BillingEvent} into a priced {@link LedgerEntry}, the idempotent
+ * {@link LedgerSink} persistence seam, the HTTP service boundary
+ * ({@link createBillingService}), and (issue #356, DEPRIORITIZED) the inbound
+ * fixed-price x402 revenue seam. Storage-free and pure TypeScript: no Cloudflare
+ * bindings, no I/O — the durable sinks live in `@ferrogate/storage`.
+ *
+ * Modules:
+ *  - `usage`        — `TokenUsage`, `ModelPrice`, `CostEstimate`,
+ *                     `BillingUsageSource`, `ProviderAttempt`.
+ *  - `event`        — `BillingEvent` (+ wire schema), `BillingError`, request
+ *                     metadata bounds, `BillingEventSink`.
+ *  - `pricing`      — `PriceBook`, `PriceEntry`, egress metering, constants.
+ *  - `ledger`       — `charge`, `LedgerEntry`, `CostSource`, `ledgerEntryId`,
+ *                     `LedgerSink`, `LedgerListFilter`, `LedgerTotals`.
+ *  - `service`      — `createBillingService`, `billingErrorHttpStatus`.
+ *  - `x402-inbound` — inbound revenue seam (payment legs deferred).
  */
-import type { Scope } from "@ferrogate/core";
-import type { ErrorEnvelope } from "@ferrogate/schemas";
-
-/** Per-unit prices for a metered dimension (input/output tokens, requests). */
-export interface PriceBook {
-  currency: string;
-  inputPerMTokUsd: number;
-  outputPerMTokUsd: number;
-}
-
-/** A single metered usage event to be recorded. */
-export interface UsageEvent {
-  scope: Scope;
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-  costUsd: number;
-}
-
-/** Sink that durably records usage events (Queue → D1 ledger). */
-export interface LedgerSink {
-  record(event: UsageEvent): Promise<void>;
-}
-
-/** Failure shape surfaced by the ledger, reusing the shared error envelope. */
-export type BillingError = ErrorEnvelope;
+export * from "./usage.js";
+export * from "./event.js";
+export * from "./pricing.js";
+export * from "./ledger.js";
+export * from "./service.js";
+export * from "./x402-inbound.js";

@@ -3,6 +3,22 @@ main = "src/index.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Bootstrap vars for the ports in `src/adapters.ts`. These are DEV/TEST defaults
+# only: the credential material moves to Secrets Store and the store to D1 as
+# soon as `@ferrogate/secrets` / `@ferrogate/storage` land, at which point every
+# `*_API_KEYS` var below disappears (see PORT-TODOs in `src/adapters.ts`).
+#
+# `ADMIN_CONSOLE_ALLOWED_ORIGIN` is deliberately ABSENT: with no console origin
+# configured the `OPTIONS /admin/{*rest}` preflight surface does not exist at
+# all, which is the contract's `dynamic_surfaces` semantics. Set it only for a
+# deployment that actually fronts an admin console.
+[vars]
+CONTROL_PLANE_NATIVE_API_KEYS = "[]"
+CONTROL_PLANE_STATIC_API_KEYS = "[]"
+TENANCY_LIFECYCLE = "{}"
+TENANT_RBAC_ACTIONS = "{}"
+CONTROL_PLANE_SEED = "{}"
+
 # TODO(bindings): configure per this app's inventory before first deploy.
 # Do NOT commit real resource IDs — these are placeholders only.
 #   [[d1_databases]]        name = "DB"          -> control-plane store (D1 batch/RETURNING)

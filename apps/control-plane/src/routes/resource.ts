@@ -1,0 +1,502 @@
+/**
+ * The generic, contract-driven resource machinery.
+ *
+ * 197 operations, and roughly 170 of them are the SAME six shapes over ~60
+ * named collections:
+ *
+ * ```
+ *   GET    /admin/v1/{collection}          → list
+ *   POST   /admin/v1/{collection}          → create   (201)
+ *   GET    /admin/v1/{collection}/{id}     → read     (404 when absent)
+ *   PUT    /admin/v1/{collection}/{id}     → replace  (200)
+ *   PATCH  /admin/v1/{collection}/{id}     → merge    (200)
+ *   DELETE /admin/v1/{collection}/{id}     → delete   (200, AdminDeleteResponse)
+ * ```
+ *
+ * Hand-writing those 170 handlers is how a port drifts: one of them forgets the
+ * tenant check, one answers 200 where Rust answers 201, one returns a bare array
+ * instead of the `AdminList` envelope. So the shape is derived from the
+ * contract path template and implemented ONCE here. A group module declares its
+ * collections (name, response object, Zod body schema) and hands over explicit
+ * `overrides` for the genuinely custom operations — activate, rollback,
+ * run-now, verify, rotate, replay, the nested sub-collections.
+ *
+ * The build is fail-closed: `crudGroup` THROWS at module load if a contract
+ * operation in the group matches neither a declared collection shape nor an
+ * override. A new operation in the JSON therefore breaks the build rather than
+ * silently 404-ing at runtime.
+ *
+ * Status/envelope parity is taken from
+ * `crates/ferrogate-gateway/src/server/agent_schedules.rs` (the canonical admin
+ * CRUD family): POST without a path id → **201 Created**, PUT/PATCH on an
+ * existing id → **200 OK**, DELETE → **200** with
+ * `{ object, id, deleted: true }`, list → the `AdminList` envelope.
+ */
+import type { Context } from "hono";
+import { z } from "zod";
+import { STABLE_PATH_PREFIX, type ApiOperation } from "../contract.js";
+import { HttpError } from "../middleware/errors.js";
+import {
+  callerScope,
+  StoreConflictError,
+  type CallerScope,
+  type ControlPlaneDeps,
+  type ControlPlaneEnv,
+  type StoreRecord,
+} from "../ports.js";
+import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
+
+/** Every route handler in this app. */
+export type Handler = (c: Context<ControlPlaneEnv>) => Promise<Response> | Response;
+
+/** A contract group's contribution to the route table. */
+export interface GroupModule {
+  /** The contract `group` this module owns (must match `route_patterns`). */
+  readonly group: string;
+  /** Build `operationId → handler` for exactly the operations passed in. */
+  build(operations: readonly ApiOperation[]): Map<string, Handler>;
+}
+
+// ---------------------------------------------------------------------------
+// Request helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Rust `limits().admin_body_max_bytes()`. Over the limit is
+ * `413 payload_too_large`, answered before the body is parsed.
+ */
+export const ADMIN_BODY_MAX_BYTES = 1_048_576;
+
+/** The caller resolved by the auth middleware, as a store scope. */
+export function scopeOf(c: Context<ControlPlaneEnv>): CallerScope {
+  const auth = c.get("auth");
+  if (auth === null || auth === undefined) {
+    // Unreachable behind `contractAuth`, which sets `auth` for every bearer
+    // operation. Fail closed rather than defaulting to platform root.
+    throw new HttpError(401, "invalid_api_key", "invalid API key");
+  }
+  return callerScope(auth);
+}
+
+export function depsOf(c: Context<ControlPlaneEnv>): ControlPlaneDeps {
+  return c.get("deps");
+}
+
+/**
+ * Zod-validate a JSON request body. Rust answers `400 invalid_request_body`
+ * with the deserializer's own message; the Zod issue list plays that role here.
+ */
+export async function readJson<S extends z.ZodTypeAny>(
+  c: Context<ControlPlaneEnv>,
+  schema: S,
+): Promise<z.infer<S>> {
+  const declaredLength = c.req.header("content-length");
+  if (declaredLength !== undefined) {
+    const length = Number.parseInt(declaredLength, 10);
+    if (Number.isSafeInteger(length) && length > ADMIN_BODY_MAX_BYTES) {
+      throw new HttpError(
+        413,
+        "payload_too_large",
+        `request body exceeds maximum size of ${ADMIN_BODY_MAX_BYTES} bytes`,
+      );
+    }
+  }
+
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    throw new HttpError(400, "invalid_request_body", "request body must be a JSON object");
+  }
+
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    const detail = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+      .join("; ");
+    throw new HttpError(400, "invalid_request_body", `request body is invalid: ${detail}`);
+  }
+  return parsed.data;
+}
+
+/**
+ * A path parameter, Zod-validated. Rust treats an empty or slash-bearing id as
+ * "no such route" (`if id.is_empty() || id.contains('/') { return not_found }`),
+ * so a blank segment is a 404 here too, never a 500 downstream.
+ */
+export const pathParamSchema = z.string().trim().min(1);
+
+export function pathParam(c: Context<ControlPlaneEnv>, name: string): string {
+  const parsed = pathParamSchema.safeParse(c.req.param(name));
+  if (!parsed.success) {
+    throw new HttpError(404, "not_found", `no route for ${c.req.method} ${c.req.path}`);
+  }
+  return parsed.data;
+}
+
+/** JSON response with the request-id headers Rust attaches to every response. */
+export function json(c: Context<ControlPlaneEnv>, status: number, body: unknown): Response {
+  const requestId = c.get("requestId") ?? null;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (requestId !== null) {
+    headers["x-request-id"] = requestId;
+    headers["x-trace-id"] = requestId;
+  }
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
+/** Raw (non-JSON) response — the dashboard HTML and the Prometheus exposition. */
+export function raw(
+  c: Context<ControlPlaneEnv>,
+  status: number,
+  contentType: string,
+  body: string,
+): Response {
+  const requestId = c.get("requestId") ?? null;
+  const headers: Record<string, string> = { "content-type": contentType };
+  if (requestId !== null) {
+    headers["x-request-id"] = requestId;
+    headers["x-trace-id"] = requestId;
+  }
+  return new Response(body, { status, headers });
+}
+
+// ---------------------------------------------------------------------------
+// Collection specification
+// ---------------------------------------------------------------------------
+
+/**
+ * The permissive base body every admin resource accepts. Admin payloads are
+ * open-ended configuration documents whose full shape lives in the (still
+ * concurrently-written) `@ferrogate/schemas`; `passthrough()` keeps unknown
+ * fields instead of silently dropping operator data, which would be a real
+ * behaviour regression.
+ *
+ * PORT-TODO(inventory-edge-control §4): tighten each collection's schema to the
+ * per-resource Rust mutation struct (e.g. `AdminAgentScheduleMutation`) once
+ * `@ferrogate/schemas` exposes them.
+ */
+export const adminRecordSchema = z
+  .object({
+    id: z.string().trim().min(1).optional(),
+    name: z.string().trim().min(1).optional(),
+    enabled: z.boolean().optional(),
+    tenant_id: z.string().trim().min(1).nullish(),
+  })
+  .passthrough();
+
+export type AdminRecordBody = z.infer<typeof adminRecordSchema>;
+
+/** One CRUD collection under `/admin/v1/`. */
+export interface CollectionSpec {
+  /** Path segment, e.g. `agent-schedules`. */
+  readonly segment: string;
+  /** Singular name used in the response envelope, e.g. `agent_schedule`. */
+  readonly object: string;
+  /** Store collection key. Defaults to {@link CollectionSpec.segment}. */
+  readonly collection?: string;
+  /**
+   * Body field that carries the record's identity on create. Defaults to `id`.
+   * Some collections are keyed by a natural key instead (`name` for
+   * `mcp-servers`/`policies`, `hostname` for `site-domains`).
+   */
+  readonly idField?: string;
+  /** Schema for POST / PUT bodies. */
+  readonly body?: z.ZodTypeAny;
+  /** Schema for PATCH bodies. Defaults to {@link CollectionSpec.body}. */
+  readonly patch?: z.ZodTypeAny;
+}
+
+interface ResolvedSpec {
+  readonly segment: string;
+  readonly object: string;
+  readonly collection: string;
+  readonly idField: string;
+  readonly body: z.ZodTypeAny;
+  readonly patch: z.ZodTypeAny;
+}
+
+function resolveSpec(spec: CollectionSpec): ResolvedSpec {
+  const body = spec.body ?? adminRecordSchema;
+  return {
+    segment: spec.segment,
+    object: spec.object,
+    collection: spec.collection ?? spec.segment,
+    idField: spec.idField ?? "id",
+    body,
+    patch: spec.patch ?? body,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The six generic handlers
+// ---------------------------------------------------------------------------
+
+export function listHandler(spec: ResolvedSpec): Handler {
+  return async (c) => {
+    const deps = depsOf(c);
+    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+    const page = await deps.store.list(spec.collection, scopeOf(c), query);
+    return json(c, 200, listResponse(page, query));
+  };
+}
+
+export function createHandler(spec: ResolvedSpec): Handler {
+  return async (c) => {
+    const deps = depsOf(c);
+    const body = (await readJson(c, spec.body)) as Record<string, unknown>;
+    const declaredId = body[spec.idField];
+    const id =
+      typeof declaredId === "string" && declaredId.trim() !== ""
+        ? declaredId.trim()
+        : crypto.randomUUID();
+    const record: StoreRecord = { ...body, [spec.idField]: id, id };
+    try {
+      const stored = await deps.store.create(spec.collection, scopeOf(c), record);
+      // Rust: POST with no path id is 201 Created.
+      return json(c, 201, adminItem(spec.object, stored));
+    } catch (error) {
+      if (error instanceof StoreConflictError) {
+        throw new HttpError(409, "conflict", `${spec.object} ${id} already exists`);
+      }
+      throw error;
+    }
+  };
+}
+
+export function readHandler(spec: ResolvedSpec, param: string): Handler {
+  return async (c) => {
+    const id = pathParam(c, param);
+    const record = await depsOf(c).store.get(spec.collection, scopeOf(c), id);
+    if (record === null) throw notFound(spec, id);
+    return json(c, 200, adminItem(spec.object, record));
+  };
+}
+
+export function replaceHandler(spec: ResolvedSpec, param: string): Handler {
+  return async (c) => {
+    const id = pathParam(c, param);
+    const body = (await readJson(c, spec.body)) as Record<string, unknown>;
+    const stored = await depsOf(c).store.replace(spec.collection, scopeOf(c), id, {
+      ...body,
+      [spec.idField]: id,
+    });
+    if (stored === null) throw notFound(spec, id);
+    // Rust: an upsert WITH a path id is 200 OK, not 201.
+    return json(c, 200, adminItem(spec.object, stored));
+  };
+}
+
+export function mergeHandler(spec: ResolvedSpec, param: string): Handler {
+  return async (c) => {
+    const id = pathParam(c, param);
+    const body = (await readJson(c, spec.patch)) as Record<string, unknown>;
+    const stored = await depsOf(c).store.merge(spec.collection, scopeOf(c), id, body);
+    if (stored === null) throw notFound(spec, id);
+    return json(c, 200, adminItem(spec.object, stored));
+  };
+}
+
+export function deleteHandler(spec: ResolvedSpec, param: string): Handler {
+  return async (c) => {
+    const id = pathParam(c, param);
+    const removed = await depsOf(c).store.remove(spec.collection, scopeOf(c), id);
+    if (!removed) throw notFound(spec, id);
+    return json(c, 200, adminDeleted(spec.object, id));
+  };
+}
+
+/**
+ * The 404 a tenant-scoped caller gets for a row that exists but belongs to
+ * another tenant — indistinguishable from "no such row", which is the point:
+ * a 403 here would confirm the resource's existence across the tenant boundary.
+ */
+function notFound(spec: ResolvedSpec, id: string): HttpError {
+  return new HttpError(404, "not_found", `${spec.object} ${id} not found`);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-resource helpers (used by group modules for nested collections)
+// ---------------------------------------------------------------------------
+
+/**
+ * A read-only sub-collection such as `/{id}/fires` or `/{id}/ledger`: scoped to
+ * the parent row, 404 when the parent is not visible to the caller.
+ */
+export function subListHandler(options: {
+  readonly parent: CollectionSpec;
+  readonly parentParam: string;
+  readonly collection: string;
+  /** Field on the child rows that references the parent id. */
+  readonly parentField: string;
+}): Handler {
+  const parent = resolveSpec(options.parent);
+  return async (c) => {
+    const deps = depsOf(c);
+    const scope = scopeOf(c);
+    const parentId = pathParam(c, options.parentParam);
+    if ((await deps.store.get(parent.collection, scope, parentId)) === null) {
+      throw notFound(parent, parentId);
+    }
+    const url = new URL(c.req.url);
+    const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
+    const scoped = {
+      ...query,
+      // Force the parent filter regardless of what the client asked for.
+      filters: { ...query.filters, [options.parentField]: parentId },
+    };
+    const page = await deps.store.list(options.collection, scope, scoped);
+    return json(c, 200, listResponse(page, scoped));
+  };
+}
+
+/**
+ * A POST action on an existing row (`activate`, `rotate`, `run-now`, `verify`,
+ * `approve`, …): loads the row for the caller's scope, applies `apply`, stores
+ * the result, and answers `200 { object, <object> }`.
+ */
+export function actionHandler(options: {
+  readonly spec: CollectionSpec;
+  readonly param: string;
+  /** Body schema; omit for actions Rust accepts with no body. */
+  readonly body?: z.ZodTypeAny;
+  readonly apply: (
+    record: StoreRecord,
+    body: Record<string, unknown>,
+    now: number,
+  ) => Record<string, unknown>;
+}): Handler {
+  const spec = resolveSpec(options.spec);
+  const bodySchema = options.body ?? z.record(z.unknown()).optional();
+  return async (c) => {
+    const deps = depsOf(c);
+    const scope = scopeOf(c);
+    const id = pathParam(c, options.param);
+    const existing = await deps.store.get(spec.collection, scope, id);
+    if (existing === null) throw notFound(spec, id);
+
+    // Rust reads an empty body as the default mutation for these actions, so an
+    // absent body is not an error.
+    const hasBody = (c.req.header("content-length") ?? "0") !== "0";
+    const body = hasBody ? ((await readJson(c, bodySchema)) as Record<string, unknown>) : {};
+
+    const patch = options.apply(existing, body, Math.floor(Date.now() / 1000));
+    const stored = await deps.store.merge(spec.collection, scope, id, patch);
+    if (stored === null) throw notFound(spec, id);
+    return json(c, 200, adminItem(spec.object, stored));
+  };
+}
+
+/** A read-only listing with no mutations and no item route (reports, feeds). */
+export function readOnlyCollection(segment: string, object: string): CollectionSpec {
+  return { segment, object };
+}
+
+// ---------------------------------------------------------------------------
+// The group builder
+// ---------------------------------------------------------------------------
+
+/** Path template shape of an operation, relative to `/admin/v1/`. */
+function relativeSegments(operation: ApiOperation): string[] | null {
+  if (!operation.path.startsWith(`${STABLE_PATH_PREFIX}/`)) return null;
+  return operation.path.slice(STABLE_PATH_PREFIX.length + 1).split("/");
+}
+
+function paramName(segment: string): string | null {
+  if (!segment.startsWith("{") || !segment.endsWith("}")) return null;
+  const inner = segment.slice(1, -1);
+  return inner.startsWith("*") ? null : inner;
+}
+
+/**
+ * Build a group's `operationId → handler` map.
+ *
+ * Resolution order, per operation:
+ *  1. an explicit entry in `overrides` (custom actions, nested routes, the
+ *     un-versioned root paths);
+ *  2. the derived CRUD shape for a declared collection;
+ *  3. **throw** — an unhandled contract operation is a build failure.
+ */
+export function crudGroup(
+  group: string,
+  collections: readonly CollectionSpec[],
+  overrides: Readonly<Record<string, Handler>> = {},
+): GroupModule {
+  const specs = new Map(collections.map((spec) => [spec.segment, resolveSpec(spec)]));
+
+  return {
+    group,
+    build(operations) {
+      const handlers = new Map<string, Handler>();
+      for (const operation of operations) {
+        const override = overrides[operation.operationId];
+        if (override !== undefined) {
+          handlers.set(operation.operationId, override);
+          continue;
+        }
+
+        const segments = relativeSegments(operation);
+        const head = segments?.[0];
+        const spec = head === undefined ? undefined : specs.get(head);
+        if (segments === undefined || segments === null || spec === undefined) {
+          throw new Error(
+            `control-plane group ${group}: operation ${operation.operationId} (${operation.method} ${operation.path}) has no handler`,
+          );
+        }
+
+        const derived = deriveCrudHandler(spec, operation, segments);
+        if (derived === null) {
+          throw new Error(
+            `control-plane group ${group}: operation ${operation.operationId} (${operation.method} ${operation.path}) is not a plain CRUD shape — add an override`,
+          );
+        }
+        handlers.set(operation.operationId, derived);
+      }
+
+      // Every declared override must correspond to an operation in this group,
+      // or the group module has drifted from the contract in the other
+      // direction (a handler for an operation that no longer exists).
+      const known = new Set(operations.map((operation) => operation.operationId));
+      for (const operationId of Object.keys(overrides)) {
+        if (!known.has(operationId)) {
+          throw new Error(
+            `control-plane group ${group}: override ${operationId} matches no contract operation in this group`,
+          );
+        }
+      }
+      return handlers;
+    },
+  };
+}
+
+function deriveCrudHandler(
+  spec: ResolvedSpec,
+  operation: ApiOperation,
+  segments: readonly string[],
+): Handler | null {
+  if (segments.length === 1) {
+    if (operation.method === "GET") return listHandler(spec);
+    if (operation.method === "POST") return createHandler(spec);
+    return null;
+  }
+  if (segments.length === 2) {
+    const param = paramName(segments[1] ?? "");
+    if (param === null) return null;
+    switch (operation.method) {
+      case "GET":
+        return readHandler(spec, param);
+      case "PUT":
+        return replaceHandler(spec, param);
+      case "PATCH":
+        return mergeHandler(spec, param);
+      case "DELETE":
+        return deleteHandler(spec, param);
+      default:
+        return null;
+    }
+  }
+  return null;
+}
+
+/** Re-exported so group modules can build one-off handlers over a spec. */
+export { resolveSpec };
