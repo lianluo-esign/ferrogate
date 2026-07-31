@@ -677,7 +677,10 @@ fn an_authless_deploy_omits_the_oauth_kv_binding_it_would_have_no_namespace_for(
         .authless()
         .with_kv_namespace_id("kv-abc123");
     let body = String::from_utf8(with_id.multipart_body()).unwrap();
-    assert!(!body.contains("kv-abc123"), "authless body leaked a KV id: {body}");
+    assert!(
+        !body.contains("kv-abc123"),
+        "authless body leaked a KV id: {body}"
+    );
 
     // The OAuth default keeps it, so the assertion above is about the mode and
     // not about a binding this pipeline stopped emitting entirely.
@@ -758,8 +761,14 @@ fn an_oauth_deploy_registers_back_as_a_routable_shared_headers_upstream() {
     let spec = McpWorkerSpec::new("export default {};").with_workers_dev_subdomain("acme");
     let config = spec.upstream_config(vec!["*".to_string()]).unwrap();
 
-    assert_eq!(config.url.as_deref(), Some(spec.mcp_endpoint_url().unwrap().as_str()));
-    assert_eq!(config.url.as_deref(), Some("https://ferrogate-mcp-server.acme.workers.dev/mcp"));
+    assert_eq!(
+        config.url.as_deref(),
+        Some(spec.mcp_endpoint_url().unwrap().as_str())
+    );
+    assert_eq!(
+        config.url.as_deref(),
+        Some("https://ferrogate-mcp-server.acme.workers.dev/mcp")
+    );
     assert_eq!(config.transport, McpTransport::StreamableHttp);
     assert_eq!(config.auth_type, McpAuthType::SharedHeaders);
     assert_eq!(config.headers.len(), 1);
@@ -814,11 +823,23 @@ fn the_authorization_the_gateway_sends_is_the_complete_header_value_the_worker_a
     let resolved = crate::config::resolved_headers(&config).expect("headers resolve");
     std::env::remove_var(MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV);
 
-    assert_eq!(resolved, vec![("Authorization".to_string(), "Bearer s3cret-token".to_string())]);
+    assert_eq!(
+        resolved,
+        vec![(
+            "Authorization".to_string(),
+            "Bearer s3cret-token".to_string()
+        )]
+    );
     let (_, value) = &resolved[0];
     let (scheme, token) = value.split_once(' ').expect("a scheme and a credential");
-    assert!(scheme.eq_ignore_ascii_case("bearer"), "the Worker only accepts the Bearer scheme");
-    assert_eq!(token, "s3cret-token", "the token must reach the Worker unmodified");
+    assert!(
+        scheme.eq_ignore_ascii_case("bearer"),
+        "the Worker only accepts the Bearer scheme"
+    );
+    assert_eq!(
+        token, "s3cret-token",
+        "the token must reach the Worker unmodified"
+    );
 
     // And an unset variable is a named failure, not a silently empty header.
     let err = crate::config::resolved_headers(&config).unwrap_err();
@@ -856,7 +877,10 @@ fn a_registration_the_gateway_would_reject_fails_at_the_deploy_seam_not_at_load_
         message.contains("tools_to_execute"),
         "the deploy seam must forward the validator's reason: {message}"
     );
-    assert!(message.contains("ferrogate-mcp-server"), "and name the script: {message}");
+    assert!(
+        message.contains("ferrogate-mcp-server"),
+        "and name the script: {message}"
+    );
 }
 
 #[test]
@@ -918,8 +942,7 @@ fn the_do_binding_class_and_kv_names_reach_cloudflare_trimmed_and_agree_with_the
     assert_eq!(meta["bindings"][1]["name"], "OAUTH_KV");
     assert_eq!(meta["bindings"][1]["namespace_id"], "kv-abc123");
     assert_eq!(
-        meta["migrations"]["new_sqlite_classes"][0],
-        meta["bindings"][0]["class_name"],
+        meta["migrations"]["new_sqlite_classes"][0], meta["bindings"][0]["class_name"],
         "the migrated class and the bound class must be the same string"
     );
 
@@ -934,7 +957,11 @@ fn the_do_binding_class_and_kv_names_reach_cloudflare_trimmed_and_agree_with_the
     let request = deployer(CapturingTransport::new(ok(200, "{}")))
         .build_deploy_request(&padded)
         .unwrap();
-    assert!(request.url.ends_with("/workers/scripts/tenant-mcp"), "{}", request.url);
+    assert!(
+        request.url.ends_with("/workers/scripts/tenant-mcp"),
+        "{}",
+        request.url
+    );
 }
 
 #[test]
