@@ -1,0 +1,6 @@
+# FerroGate TS/CF-Workers monorepo — Bun config.
+[install]
+# Deterministic installs across the workspace.
+exact = false
+# Hoist shared deps (hono, zod, workers-types) to the root node_modules.
+linker = "hoisted"
