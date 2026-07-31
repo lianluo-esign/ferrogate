@@ -240,6 +240,50 @@ export interface GatewayBindings {
   readonly GATEWAY_PROVIDERS?: string;
   /** JSON array of logical model entries — read by `inference/catalog.ts`. */
   readonly GATEWAY_MODELS?: string;
+
+  // -------------------------------------------------------------------------
+  // Wave-5 bindings. Each is declared in `wrangler.toml` and read by the
+  // module named below; nothing here is optional-for-decoration.
+  // -------------------------------------------------------------------------
+
+  /**
+   * The tenant control database (`sql/d1-ts/tenant/0001_init_tenant.sql`).
+   * Read by `src/keys/resolver.ts` (`d1ApiKeyResolverFromEnv`) — with it bound
+   * the durable `api_keys` table is the PRIMARY credential source and the
+   * `GATEWAY_*_API_KEYS` vars above become the fallback, which is the Rust
+   * order (`authenticate_durable` first, `config.api_keys` second). Unbound,
+   * `depsFromEnv` returns byte-identically what it returned before wave 5.
+   */
+  readonly DB?: D1Database;
+  /** Resolution-cache TTL for `src/keys/cache.ts`. Absent/junk ⇒ 0 (disabled). */
+  readonly GATEWAY_API_KEY_CACHE_TTL_SECONDS?: string;
+
+  /**
+   * `RateLimiterDurableObject` namespace — one DO instance per counter key,
+   * read by `src/ratelimit/middleware.ts` (`limiterForEnv`). Unbound, the
+   * limiter degrades to the per-isolate in-memory counter, which is NOT a
+   * correct production limiter (see `src/ratelimit/memory.ts`).
+   *
+   * The class itself must be re-exported from `src/worker.ts`: workerd resolves
+   * a binding's `class_name` against the ENTRY module.
+   */
+  readonly RATE_LIMIT?: DurableObjectNamespace;
+  /** JSON array of quota policy rows — `src/ratelimit/quota.ts`. Fail-closed empty. */
+  readonly GATEWAY_QUOTA_POLICIES?: string;
+  /** JSON map plan slug → plan defaults — `src/ratelimit/quota.ts`. */
+  readonly GATEWAY_PLANS?: string;
+  /** JSON map tenant id → plan slug — `src/ratelimit/quota.ts`. */
+  readonly GATEWAY_TENANT_PLANS?: string;
+
+  /** JSON array of `PolicyRevision` — `src/guardrails/config.ts`. Empty ⇒ no screening. */
+  readonly GATEWAY_GUARDRAIL_POLICIES?: string;
+  /** JSON array of `{ policy_id, active_revision }` — `src/guardrails/config.ts`. */
+  readonly GATEWAY_GUARDRAIL_BINDINGS?: string;
+  /**
+   * Keyed-HMAC secret for guardrail evidence `input_fingerprint`. A SECRET
+   * (`wrangler secret put`), never a committed var.
+   */
+  readonly GUARDRAIL_EVIDENCE_HMAC_KEY?: string;
 }
 
 /** Per-request context values set by the middleware chain. */

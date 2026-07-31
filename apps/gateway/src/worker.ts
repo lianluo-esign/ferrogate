@@ -27,3 +27,22 @@
  * exists to catch.
  */
 export { default } from "./index.js";
+
+/**
+ * The `RATE_LIMIT` Durable Object class.
+ *
+ * workerd resolves a `[[durable_objects.bindings]]` `class_name` against the
+ * ENTRY module — this file — so without this line the Worker fails AT STARTUP
+ * with "Durable Object class RateLimiterDurableObject not found", and
+ * `@cloudflare/vitest-pool-workers` does not reproduce that check, so the whole
+ * unit suite would stay green on an unbootable Worker. That is exactly the
+ * defect the docblock above describes, in its second form.
+ *
+ * A DO class is a LEGAL named export of the entry module: the restriction
+ * documented above is on non-handler, non-class VALUES (arrays, plain objects),
+ * which is why `GATEWAY_ROUTE_MODULES` and friends stay in `index.ts`.
+ *
+ * `bunx wrangler dev --local` booting and answering `/healthz` is the proof;
+ * see `test/ratelimit/harness/` for the same export under vitest.
+ */
+export { RateLimiterDurableObject } from "./ratelimit/index.js";

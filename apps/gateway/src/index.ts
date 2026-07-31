@@ -17,12 +17,39 @@
  */
 import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 import { assetRouteModule } from "./assets/index.js";
+import { guardrailDepsFromEnv, guardrails } from "./guardrails/index.js";
 import {
+  defaultAnthropicTranslator,
   fetchDispatcher,
   inferenceRouteModule,
   modelsFromEnv,
 } from "./inference/index.js";
+import { createMeteringUsageSink } from "./metering/index.js";
+import { rateLimit } from "./ratelimit/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
+
+/**
+ * The durable metering sink behind `UsageSink` (wave 5).
+ *
+ * Until now the inference module took its `InMemoryUsageSink` default, i.e.
+ * captured usage went nowhere. `MeteringUsageSink` prices the usage through
+ * `@ferrogate/billing`, writes an idempotent ledger entry keyed on the
+ * `ledger_entry_id`, and commits a durable outbox record in the same batch.
+ *
+ * It is built ONCE, at module scope, because `UsageSink` is a construction-time
+ * dependency of the route module while Worker bindings are per request — so it
+ * takes the in-memory ledger/outbox and the isolate-lifetime scheduler.
+ *
+ * PORT-TODO(inventory-data-billing §2.5): backing it with `D1LedgerStore(env.DB)`
+ * + `QueueBillingReportPublisher(env.BILLING)` and `executionContextScheduler(ctx)`
+ * needs `UsageSink.record` widened to carry the `ExecutionContext`
+ * (`src/metering/index.ts` states the one-line signature change). Binding a
+ * module-scoped "current ctx" is NOT a substitute — workerd refuses I/O started
+ * on behalf of a different request. Until then no `[[queues]]` binding is
+ * declared, because declaring one nothing reads is the drift `wrangler.toml`
+ * forbids.
+ */
+const usage = createMeteringUsageSink();
 
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
@@ -49,11 +76,46 @@ import { type RouteModule, createGatewayApp } from "./routes/index.js";
  * every one of the 24 operations is matched, authenticated and scope-checked.
  */
 export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
-  inferenceRouteModule({ models: modelsFromEnv, dispatcher: fetchDispatcher }),
+  inferenceRouteModule({ models: modelsFromEnv, dispatcher: fetchDispatcher, usage }),
   assetRouteModule(),
 ];
 
-const { app, router } = createGatewayApp({ modules: GATEWAY_ROUTE_MODULES });
+/**
+ * The cross-cutting middleware the deployed data plane runs, in the Rust
+ * ingress order (`docs/legacy/inventory-request-path.md` §"Cross-crate
+ * architecture", steps 5/11 + `auth::finalize_auth` → `server/chat.rs`):
+ *
+ *   contractAuth  →  rateLimit  →  guardrails  →  validate  →  dispatch
+ *
+ * Admission comes FIRST because the Rust charges the RPM/quota windows inside
+ * `finalize_auth`, before the body is ever examined; screening comes second
+ * because `server/chat.rs` evaluates guardrail policies after the credential
+ * and its budget are settled. Reversing the two would spend detector work —
+ * including paid provider calls — on requests that were never admitted.
+ *
+ * `createGatewayApp` mounts these after the auth guard and before every route,
+ * so all 31 gateway operations are covered (see `CreateGatewayAppOptions`).
+ */
+export const GATEWAY_MIDDLEWARE = [
+  // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
+  // bound and the config-var quota source; both fail closed.
+  rateLimit(),
+  // Provider-scoped policies need the model→provider join, and `/v1/messages`
+  // must be screened over the same document `inference/handlers.ts` dispatches.
+  guardrails((env) => ({
+    ...guardrailDepsFromEnv(env),
+    providerForModel: (model, e) => modelsFromEnv(e as never).resolve(model)?.provider,
+    translateAnthropicRequest: (body) => {
+      const translated = defaultAnthropicTranslator.toChatCompletions(body);
+      return translated.ok ? translated.body : undefined;
+    },
+  })),
+] as const;
+
+const { app, router } = createGatewayApp({
+  modules: GATEWAY_ROUTE_MODULES,
+  middleware: GATEWAY_MIDDLEWARE,
+});
 
 /** The registry of what the deployed Worker actually mounted (anti-drift test). */
 export const gatewayRouter = router;

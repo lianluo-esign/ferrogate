@@ -1,0 +1,328 @@
+/**
+ * Guardrail EVIDENCE — sanitized rows only.
+ *
+ * `docs/legacy/inventory-policy-core.md`, "Appendix: cross-cutting security
+ * invariants to preserve verbatim":
+ *
+ * > 1. **`matched_text` is never persisted** (guardrails) — only `fingerprint`
+ * >    goes to durable evidence; conformance harness asserts the raw value
+ * >    never appears in serialized results.
+ * > 2. **HMAC-keyed, non-reversible fingerprints** (`hmac-sha256:<hex>`) for
+ * >    all secret/PII evidence.
+ *
+ * The rows built here are therefore a CLOSED, structural vocabulary:
+ * verdict / action / enforcement / stage / mode, per-category finding COUNTS,
+ * detector version + config digest, latency — plus one keyed
+ * `input_fingerprint` over the envelope's per-segment content fingerprints.
+ * **No prompt text, no completion text, no matched value, no byte content ever
+ * enters an evidence row.** `Finding.matched_text` exists only inside the
+ * in-memory decision path and is dropped at this boundary, which is why
+ * {@link buildCheckEvidence} takes {@link GuardrailCheckEvaluation} (already
+ * projected to counts) rather than the raw `DetectorResult`.
+ *
+ * Port of `state_quota_and_policy.rs:935 record_guardrail_evaluation`,
+ * `:1250 guardrail_envelope_fingerprint` and `:1477 sanitized_guardrail_evidence_token`.
+ */
+import {
+  type AggregateOutcome,
+  type DetectorStage,
+  hmacSha256,
+  toHex,
+} from "@ferrogate/guardrails";
+import type {
+  GuardrailCheckEvaluation,
+  GuardrailCheckEvidence,
+  GuardrailEvaluationContext,
+  GuardrailEvidence,
+  GuardrailEvidenceSink,
+  GuardrailPolicyRuntime,
+  PolicyAction,
+} from "./ports.js";
+
+/**
+ * `sanitized_guardrail_evidence_token` — a token that is not a short
+ * `[A-Za-z0-9._\-/]` string is replaced by a constant, so a hostile detector
+ * cannot smuggle content out through a category name or version string.
+ */
+export function sanitizedEvidenceToken(value: string, fallback: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 64 || !/^[A-Za-z0-9._\-/]+$/.test(trimmed)) {
+    return fallback;
+  }
+  return trimmed;
+}
+
+/** `guardrail_evaluation_id` — deterministic per (request, policy@rev, stage). */
+export function evaluationId(
+  requestId: string,
+  policyImmutableId: string,
+  stage: DetectorStage,
+): string {
+  return `${requestId}/${policyImmutableId}/${stage}`;
+}
+
+/**
+ * `guardrail_envelope_fingerprint` (`state_quota_and_policy.rs:1250`).
+ *
+ * HMAC over `tenant \0 protocol \0 stage (\0 segment_fingerprint)*`. The segment
+ * fingerprints are themselves `sha256:<hex>` of the content, so the evidence row
+ * is two hashes removed from any plaintext. With no key configured the Rust
+ * returned the literal `hmac-sha256:unavailable` rather than an unkeyed digest —
+ * reproduced verbatim, because an unkeyed digest of a short prompt IS reversible.
+ */
+export function envelopeFingerprint(
+  context: Pick<GuardrailEvaluationContext, "envelope" | "tenant">,
+  key: Uint8Array | undefined,
+): string {
+  if (key === undefined || key.byteLength === 0) {
+    return "hmac-sha256:unavailable";
+  }
+  const encoder = new TextEncoder();
+  const parts: Uint8Array[] = [
+    encoder.encode(context.tenant.organizationId ?? "platform"),
+    new Uint8Array([0]),
+    encoder.encode(context.envelope.protocol),
+    new Uint8Array([0]),
+    encoder.encode(context.envelope.stage),
+  ];
+  for (const segment of context.envelope.segments) {
+    parts.push(new Uint8Array([0]), encoder.encode(segment.fingerprint));
+  }
+  let total = 0;
+  for (const part of parts) {
+    total += part.byteLength;
+  }
+  const message = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    message.set(part, offset);
+    offset += part.byteLength;
+  }
+  return `hmac-sha256:${toHex(hmacSha256(key, message))}`;
+}
+
+/** `guardrail_evidence_action` — the action label when no candidate was built. */
+export function evidenceAction(actions: readonly PolicyAction[]): string {
+  for (const action of actions) {
+    if (action.kind === "block" || action.kind === "require_approval") {
+      return "block";
+    }
+    if (action.kind === "redact" || action.kind === "quarantine") {
+      return "redact";
+    }
+  }
+  return actions.some((action) => action.kind === "record") ? "record" : "allow";
+}
+
+/** `guardrail_evidence_scope` — the most specific declared tenancy dimension. */
+function evidenceScope(tenant: GuardrailEvaluationContext["tenant"]): {
+  scopeType: string;
+  scopeId?: string;
+} {
+  if (tenant.apiKeyId !== undefined) return { scopeType: "api_key", scopeId: tenant.apiKeyId };
+  if (tenant.projectId !== undefined) return { scopeType: "project", scopeId: tenant.projectId };
+  if (tenant.workspaceId !== undefined) {
+    return { scopeType: "workspace", scopeId: tenant.workspaceId };
+  }
+  if (tenant.organizationId !== undefined) {
+    return { scopeType: "organization", scopeId: tenant.organizationId };
+  }
+  return { scopeType: "platform" };
+}
+
+export interface BuildEvaluationEvidenceArgs {
+  readonly id: string;
+  readonly context: GuardrailEvaluationContext;
+  readonly policy: GuardrailPolicyRuntime;
+  readonly stage: DetectorStage;
+  readonly aggregate: AggregateOutcome;
+  readonly action: string;
+  readonly enforcementStatus: string;
+  readonly evaluations: readonly GuardrailCheckEvaluation[];
+  readonly latencyMs: number;
+  readonly applied: boolean;
+  readonly hmacKey?: Uint8Array | undefined;
+  readonly nowUnix: number;
+}
+
+export function buildEvaluationEvidence(args: BuildEvaluationEvidenceArgs): GuardrailEvidence {
+  const findingCategoryCounts: Record<string, number> = {};
+  let findingCount = 0;
+  for (const evaluation of args.evaluations) {
+    findingCount += evaluation.findingCount;
+    for (const [category, count] of Object.entries(evaluation.findingCategoryCounts)) {
+      findingCategoryCounts[category] = (findingCategoryCounts[category] ?? 0) + count;
+    }
+  }
+  const scope = evidenceScope(args.context.tenant);
+  const target = [args.context.model, args.context.provider]
+    .filter((value): value is string => value !== undefined)
+    .join("/");
+  return {
+    id: args.id,
+    requestId: args.context.requestId,
+    ...(args.context.traceId !== undefined ? { traceId: args.context.traceId } : {}),
+    ...(args.context.agentRunId !== undefined ? { agentRunId: args.context.agentRunId } : {}),
+    ...(args.context.actorApiKeyId !== undefined ? { subjectId: args.context.actorApiKeyId } : {}),
+    tenant: args.context.tenant,
+    scopeType: scope.scopeType,
+    ...(scope.scopeId !== undefined ? { scopeId: scope.scopeId } : {}),
+    target: target.length > 0 ? target : "unspecified",
+    protocol: args.context.envelope.protocol,
+    stage: args.stage,
+    mode: args.policy.revision.mode,
+    policyId: args.policy.revision.policy_id,
+    policyRevision: args.policy.revision.revision,
+    verdict: args.aggregate,
+    action: args.action,
+    enforcementStatus: args.enforcementStatus,
+    latencyMs: args.latencyMs,
+    findingCategoryCounts,
+    findingCount,
+    transformed: args.applied && args.action === "redact" && args.aggregate === "fail",
+    inputFingerprint: envelopeFingerprint(args.context, args.hmacKey),
+    occurredAtUnix: args.nowUnix,
+    ...(args.context.actionFingerprint !== undefined
+      ? { actionFingerprint: args.context.actionFingerprint }
+      : {}),
+  };
+}
+
+export interface BuildCheckEvidenceArgs {
+  readonly evaluationId: string;
+  readonly policy: GuardrailPolicyRuntime;
+  readonly stage: DetectorStage;
+  readonly action: string;
+  readonly enforcementStatus: string;
+  readonly evaluations: readonly GuardrailCheckEvaluation[];
+  readonly candidateCheckId?: string | undefined;
+  readonly aggregate: AggregateOutcome;
+  readonly applied: boolean;
+  /** `[verdict, error_kind]` for a check that never executed. */
+  readonly syntheticCheck?: readonly [string, string] | undefined;
+}
+
+export function buildCheckEvidence(
+  args: BuildCheckEvidenceArgs,
+): readonly GuardrailCheckEvidence[] {
+  if (args.syntheticCheck !== undefined) {
+    const [verdict, errorKind] = args.syntheticCheck;
+    return args.policy.checks
+      .filter((check) => check.enabled && check.stage === args.stage)
+      .map((check) => ({
+        id: `${args.evaluationId}/${check.id}`,
+        evaluationId: args.evaluationId,
+        checkId: check.id,
+        detectorId: check.detectorId,
+        detectorVersion: "not_executed",
+        configDigest: check.detectorConfigDigest,
+        verdict: verdict as GuardrailCheckEvidence["verdict"],
+        action: args.action,
+        enforcementStatus: args.enforcementStatus,
+        latencyMs: 0,
+        findingCategoryCounts: {},
+        findingCount: 0,
+        transformed: false,
+        usedFallback: false,
+        errorKind: sanitizedEvidenceToken(errorKind, "streaming_error"),
+      }));
+  }
+  return args.evaluations.map((evaluation) => {
+    const runtime = args.policy.checks.find((check) => check.id === evaluation.checkId);
+    return {
+      id: `${args.evaluationId}/${evaluation.checkId}`,
+      evaluationId: args.evaluationId,
+      checkId: evaluation.checkId,
+      detectorId: runtime?.detectorId ?? "unknown",
+      detectorVersion: evaluation.detectorVersion,
+      configDigest: runtime?.detectorConfigDigest ?? "sha256:unknown",
+      verdict: evaluation.outcome,
+      action: args.action,
+      enforcementStatus: args.enforcementStatus,
+      latencyMs: evaluation.latencyMs,
+      findingCategoryCounts: evaluation.findingCategoryCounts,
+      findingCount: evaluation.findingCount,
+      transformed:
+        args.applied &&
+        args.action === "redact" &&
+        args.candidateCheckId === evaluation.checkId &&
+        evaluation.outcome === "fail",
+      usedFallback: evaluation.usedFallback,
+      ...(evaluation.detectorError !== undefined
+        ? { errorKind: evaluation.detectorError.kind }
+        : {}),
+    };
+  });
+}
+
+/**
+ * Bounded in-isolate evidence sink.
+ *
+ * The Rust guarded persistence with a semaphore and **failed closed when the
+ * permit could not be acquired** (`state_quota_and_policy.rs:1094-1105`:
+ * "guardrail evaluation persistence queue is full; failing closed" → returns
+ * `false`). Reproduced here: once `capacity` rows are buffered, `append`
+ * returns `false` and the engine converts the request into
+ * `guardrail_evidence_unavailable`.
+ *
+ * PORT-TODO(inventory-data-billing §guardrail_evaluations): durable evidence is
+ * D1 (`guardrail_evaluations` + `guardrail_check_evaluations`); the Postgres
+ * RLS scoping is replaced by per-tenant database separation. This sink is the
+ * offline/local implementation and the one the suite asserts non-persistence
+ * against.
+ */
+export class InMemoryGuardrailEvidenceSink implements GuardrailEvidenceSink {
+  readonly #evaluations: GuardrailEvidence[] = [];
+  readonly #checks: GuardrailCheckEvidence[] = [];
+  readonly #capacity: number;
+
+  constructor(capacity = 1024) {
+    this.#capacity = capacity;
+  }
+
+  /**
+   * UPSERT by `evaluation.id`. `guardrail_evaluation_id` is deterministic per
+   * `(request_id, policy@revision, stage)`, so a second write for the same id is
+   * the same logical row — which is what makes INCREMENTAL streaming screening
+   * (one engine call per SSE frame, `stream.ts`) produce ONE evidence row per
+   * policy instead of one per frame. The last write wins, i.e. the row records
+   * the frame that actually decided the stream.
+   */
+  append(evaluation: GuardrailEvidence, checks: readonly GuardrailCheckEvidence[]): boolean {
+    const existing = this.#evaluations.findIndex((row) => row.id === evaluation.id);
+    if (existing >= 0) {
+      this.#evaluations[existing] = evaluation;
+      for (let i = this.#checks.length - 1; i >= 0; i -= 1) {
+        if (this.#checks[i]?.evaluationId === evaluation.id) {
+          this.#checks.splice(i, 1);
+        }
+      }
+      this.#checks.push(...checks);
+      return true;
+    }
+    if (this.#evaluations.length >= this.#capacity) {
+      return false;
+    }
+    this.#evaluations.push(evaluation);
+    this.#checks.push(...checks);
+    return true;
+  }
+
+  evaluations(): readonly GuardrailEvidence[] {
+    return this.#evaluations;
+  }
+
+  checks(): readonly GuardrailCheckEvidence[] {
+    return this.#checks;
+  }
+
+  /** Everything this sink would durably write, as one serialized blob. */
+  serialized(): string {
+    return JSON.stringify({ evaluations: this.#evaluations, checks: this.#checks });
+  }
+}
+
+/** An evidence sink that always refuses — drives the fail-closed branch. */
+export const unavailableEvidenceSink: GuardrailEvidenceSink = {
+  append: () => false,
+};

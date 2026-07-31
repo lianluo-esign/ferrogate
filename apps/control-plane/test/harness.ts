@@ -10,6 +10,14 @@
  * Every call mints a fresh `CONTROL_PLANE_SEED` nonce so `resolveDeps` rebuilds
  * the per-isolate in-memory store — otherwise state would leak between tests
  * and a passing assertion could be someone else's leftover row.
+ *
+ * `arm()` pins `CONTROL_PLANE_STORE = "memory"`. The Worker's DEFAULT is the D1
+ * store whenever `DB` is bound (and `wrangler.toml` binds it, so it is bound
+ * here too); these suites are about routing, auth, envelopes and status parity,
+ * and they state their world through `CONTROL_PLANE_SEED`, which only the
+ * in-memory store reads. The durable store is driven — through this same
+ * exported Worker — by `d1-store.test.ts`, and the two stores are held to one
+ * behavioural contract by `store-conformance.test.ts`.
  */
 import { env } from "cloudflare:test";
 
@@ -40,6 +48,14 @@ export interface World {
   rbac?: Record<string, string[]>;
   seed?: Record<string, Record<string, unknown>[]>;
   corsAllowedOrigin?: string | null;
+  /**
+   * Which store the Worker builds for this test. Defaults to `"memory"` (see
+   * the module docblock); `"d1"` leaves `CONTROL_PLANE_STORE` UNSET so the
+   * Worker takes its production default — D1, because `wrangler.toml` binds
+   * `DB`. `seed` is ignored under `"d1"`; seed those rows with
+   * `seedD1` from `./d1.js` instead.
+   */
+  store?: "memory" | "d1";
 }
 
 let nonce = 0;
@@ -51,6 +67,11 @@ export function arm(world: World = {}): void {
   const bindings = env as unknown as MutableEnv;
   nonce += 1;
 
+  // `undefined` (not `"d1"`) so the D1 suites exercise the DEFAULT branch of
+  // `resolveStore`. Pinning the string would let the default rot to `memory`
+  // with every test still green — the durable path would be tested only when
+  // asked for, which is never in production.
+  bindings.CONTROL_PLANE_STORE = world.store === "d1" ? undefined : "memory";
   bindings.CONTROL_PLANE_NATIVE_API_KEYS = JSON.stringify(world.nativeKeys ?? []);
   bindings.CONTROL_PLANE_STATIC_API_KEYS = JSON.stringify(world.staticKeys ?? []);
   bindings.TENANCY_LIFECYCLE = JSON.stringify(world.lifecycle ?? {});

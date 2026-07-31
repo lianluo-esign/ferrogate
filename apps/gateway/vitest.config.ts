@@ -1,5 +1,21 @@
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+
+/**
+ * The REAL tenant-database migration, read from the same directory
+ * `wrangler.toml`'s `migrations_dir` points `wrangler d1 migrations apply` at.
+ * `test/setup-d1.ts` applies it to `env.DB` before every test file.
+ *
+ * This is not optional plumbing. `wrangler.toml` now declares
+ * `[[d1_databases]] binding = "DB"`, which makes `depsFromEnv` build the D1
+ * key resolver as the PRIMARY credential source — and a bound `DB` whose
+ * `api_keys` table does not exist raises `ApiKeyStoreUnavailable`, i.e. every
+ * bearer request in this suite would answer 503 instead of falling through to
+ * the config keys below. Running the deployed migration rather than a fixture
+ * copy is also what keeps the tests honest: a column rename in the migration
+ * breaks them, instead of them passing against a private schema.
+ */
+const migrations = await readD1Migrations("../../sql/d1-ts/tenant");
 
 /**
  * Test fixtures for the contract-driven auth middleware.
@@ -77,9 +93,23 @@ export default defineConfig({
           SELF_HOSTED_WORKER_REGISTRY: JSON.stringify(SELF_HOSTED_WORKER_REGISTRY),
           TENANCY_LIFECYCLE: JSON.stringify({ tenant_b: "suspended" }),
           TENANT_RBAC_ACTIONS: JSON.stringify({ tenant_a: ["guardrails.policy.read"] }),
+          // Pinned EMPTY so the suite is hermetic. `wrangler: { configPath }`
+          // makes miniflare load `apps/gateway/.dev.vars` too, and that file is
+          // gitignored local developer state — a machine that has one
+          // configured with a real provider/model (for the separate cloud
+          // verification) made `test/contract.test.ts`'s "empty registry ⇒
+          // `{object:"list",data:[]}`" assertion fail on an otherwise correct
+          // tree. An explicit binding wins over `.dev.vars`, so the registry the
+          // suite sees is the one the suite states, on every machine.
+          GATEWAY_PROVIDERS: "[]",
+          GATEWAY_MODELS: "[]",
+          TEST_D1_SCHEMA: migrations,
         },
       },
     }),
   ],
-  test: { include: ["test/**/*.test.ts"] },
+  test: {
+    include: ["test/**/*.test.ts"],
+    setupFiles: ["./test/setup-d1.ts"],
+  },
 });

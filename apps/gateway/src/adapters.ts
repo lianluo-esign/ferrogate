@@ -14,6 +14,7 @@
  * `blake2b:` hash verify) and the worker transport secret to
  * `@ferrogate/secrets` (Secrets Store), replacing the plaintext comparison here.
  */
+import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
@@ -494,10 +495,19 @@ export class ConfiguredInternalTransport implements InternalTransportPort {
 // Composition
 // ---------------------------------------------------------------------------
 
-/** Build the default port set from Worker bindings. */
+/**
+ * Build the default port set from Worker bindings.
+ *
+ * `apiKeys` is the one wave-5 change: with a `DB` binding the durable D1
+ * `api_keys` table becomes the PRIMARY credential source and the config tables
+ * below become its fallback — the Rust order (`authenticate_durable` first,
+ * `config.api_keys` second). `d1ApiKeyResolverFromEnv` returns `null` when `DB`
+ * is unbound, so the `?? configured` keeps the pre-wave-5 object exactly.
+ */
 export function depsFromEnv(env: GatewayBindings): GatewayDeps {
+  const configured = ConfiguredApiKeyAuthenticator.fromEnv(env);
   return {
-    apiKeys: ConfiguredApiKeyAuthenticator.fromEnv(env),
+    apiKeys: d1ApiKeyResolverFromEnv(env, { fallback: configured }) ?? configured,
     lifecycle: ConfiguredTenancyLifecycleGate.fromEnv(env),
     rbac: ConfiguredRbacAuthorizer.fromEnv(env),
     internalTransport: ConfiguredInternalTransport.fromEnv(env),

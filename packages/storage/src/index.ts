@@ -38,3 +38,22 @@ export * from "./metadata-rollups.js";
 export * from "./lifecycle-status.js";
 export * from "./site-domain.js";
 export * from "./payment-attempt.js";
+
+/**
+ * The D1 persistence foundation (JOBs 1–4).
+ *
+ * `./tenant-router.js` is the tenantId → D1 handle seam; `./d1/*` are the
+ * durable twins of the in-memory algorithms above, running the atomic
+ * `batch()` / guarded-`UPDATE ... RETURNING` primitives against a real D1
+ * binding. The SQL these expect is `sql/d1-ts/control/0001_init_control.sql`
+ * (account-global) and `sql/d1-ts/tenant/0001_init_tenant.sql` (one per
+ * tenant); see `packages/storage/README.md` for the split and for how a
+ * composition root wires the router.
+ *
+ * NOTE these exports pull in `@cloudflare/workers-types` `D1Database` TYPES
+ * only — there is no top-level side effect and no binding is touched at import
+ * time, so importing `@ferrogate/storage` from a non-Worker context (the CLI,
+ * a plain vitest suite) stays safe.
+ */
+export * from "./tenant-router.js";
+export * from "./d1/index.js";

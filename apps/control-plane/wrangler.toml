@@ -4,9 +4,19 @@ compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Bootstrap vars for the ports in `src/adapters.ts`. These are DEV/TEST defaults
-# only: the credential material moves to Secrets Store and the store to D1 as
-# soon as `@ferrogate/secrets` / `@ferrogate/storage` land, at which point every
-# `*_API_KEYS` var below disappears (see PORT-TODOs in `src/adapters.ts`).
+# only: the credential material moves to Secrets Store as soon as
+# `@ferrogate/secrets` lands, at which point every `*_API_KEYS` var below
+# disappears (see PORT-TODOs in `src/adapters.ts`).
+#
+# `CONTROL_PLANE_SEED` now seeds ONLY the in-memory fallback store. With the
+# `DB` binding below present the Worker uses the D1 store and ignores it; it is
+# kept so a database-less local run (`CONTROL_PLANE_STORE = "memory"`) still has
+# a way to state its world.
+#
+# `CONTROL_PLANE_STORE` is deliberately UNSET: absent means "D1 whenever `DB` is
+# bound", so a deployment that provisions a database cannot accidentally serve
+# an in-memory store whose writes vanish with the isolate. Set it to `"memory"`
+# only for a local run with no database.
 #
 # `ADMIN_CONSOLE_ALLOWED_ORIGIN` is deliberately ABSENT: with no console origin
 # configured the `OPTIONS /admin/{*rest}` preflight surface does not exist at
@@ -36,27 +46,26 @@ CONTROL_PLANE_SEED = "{}"
 # Both become direct `env.DB` calls here, so `D1_PROXY_TOKEN` and the proxy's
 # base URL disappear with it — there is no longer an HTTP hop to authenticate.
 #
-# The schema is the Postgres control-plane store's D1 twin
-# (`control_plane_store_d1`, PORT-PLAN.md "Postgres→D1"): providers, models,
-# api-keys, tenants/projects/workspaces, virtual-keys, quota-policies, plans,
-# wallets + ledger, guardrail policy revisions and the CAS-guarded binding row,
-# site-domains, agent schedules/workflows/upstreams, prompt templates,
-# skill packages, request logs, billing outbox, RBAC roles/permissions and the
-# self-hosted-worker records — i.e. the collections `src/store/memory.ts` serves
-# today from `CONTROL_PLANE_SEED`.
+# `src/store/d1.ts` reads this binding. Every admin collection persists into the
+# schema's generic `control_plane_resources` document table (`resource_kind` =
+# the collection, `document_json` = the whole record) and every applied mutation
+# appends an `audit_events` row — both tables are the control-database
+# migration's, unchanged: `sql/d1-ts/control/0001_init_control.sql`.
+#
+# `migrations_dir` points at that same directory, so
+# `wrangler d1 migrations apply ferrogate-control [--local]` provisions exactly
+# the DDL the test suite applies (`vitest.config.ts` reads it with
+# `readD1Migrations`). Tests and deploys therefore cannot run different schemas.
 #
 # `database_id` is a DOCUMENTED PLACEHOLDER, not a real resource. `wrangler
 # deploy` will refuse it, which is deliberate: the id must be supplied by
 # whoever provisions the database (`wrangler d1 create ferrogate-control`),
 # never invented and committed here.
-#
-# PORT-TODO(inventory-edge-control §5.2): swap `MemoryControlPlaneStore` in
-# `src/adapters.ts` for the D1-backed store that reads this binding, and drop
-# the `CONTROL_PLANE_*_API_KEYS` / `CONTROL_PLANE_SEED` vars above with it.
 [[d1_databases]]
 binding = "DB"
 database_name = "ferrogate-control"
 database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+migrations_dir = "../../sql/d1-ts/control"
 
 # TODO(bindings): the remaining bindings, configured per this app's inventory
 # before first deploy. Do NOT commit real resource IDs — placeholders only.

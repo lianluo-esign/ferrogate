@@ -32,7 +32,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
  * `/scim/v2/*` provisioning — see `docs/legacy/inventory-edge-control.md` §5.1.
  */
 import { Hono } from "hono";
-import { resolveDeps } from "./adapters.js";
+import { SERVICE_NAME, resolveDeps } from "./adapters.js";
 import {
   CONTROL_PLANE_GROUPS,
   CONTROL_PLANE_OPERATIONS,
@@ -57,9 +57,16 @@ app.notFound(controlPlaneNotFoundHandler);
 
 app.use("*", requestId);
 
-/** The composition root, resolved per request from the Worker bindings. */
+/**
+ * The composition root, resolved per request from the Worker bindings.
+ *
+ * The request id is threaded in because the durable store stamps it onto the
+ * `audit_events` row of every mutation it applies — an audit entry nobody can
+ * correlate back to a request is evidence of very little. It runs AFTER
+ * `requestId`, which is what makes `c.get("requestId")` available here.
+ */
 app.use("*", async (c, next) => {
-  c.set("deps", resolveDeps(c.env));
+  c.set("deps", resolveDeps(c.env, { requestId: c.get("requestId") }));
   await next();
 });
 
@@ -91,10 +98,32 @@ export const MOUNTED_OPERATION_IDS: readonly string[] = MOUNTED_ROUTES.map(
 export const CONTROL_PLANE_ROUTE_MODULES: readonly GroupModule[] = GROUP_MODULES;
 
 /**
- * Liveness / build introspection. `/health` and `/version` are NOT contract
- * operations — the contract's shared probes are `/healthz` and `/readyz`
- * (implemented in every Worker) — so they sit outside the 197 by design.
+ * The two SHARED contract probes (`docs/rewrite/ROUTE-MAP.md`: implemented in
+ * EVERY Worker; `auth.kind: "anonymous"`, `visibility: "public"` in
+ * `docs/openapi/runtime-api-contract.json`).
+ *
+ * They were missing here — `gateway`, `mcp`, `agent-runtime` and `telemetry`
+ * all mount them, and this Worker mounted only the historic `/health`. Nothing
+ * in the unit suite could see the hole: it drives named contract operations,
+ * and an unmounted anonymous probe is not one of the 197 this app owns. It
+ * surfaced on the first real `wrangler dev --local` boot, where `/healthz`
+ * answered `404 not_found` — i.e. every uptime check and load-balancer origin
+ * probe pointed at the fleet-standard path would have marked this Worker down.
+ *
+ * Mounted as plain routes rather than through `registerRoutes`, deliberately:
+ * folding them into the contract-driven registry would move them inside the
+ * operation count the anti-drift test pins. `contractAuth` still runs over them
+ * — it is an `app.use("*", …)` — and passes them through because neither path is
+ * one of the 197 operations it guards, which is the same treatment `/health`
+ * and `/version` have always had. `test/health.test.ts` asserts both answer 200
+ * with NO credential, so a future guard change that starts challenging them
+ * fails there rather than in an operator's uptime dashboard.
+ *
+ * `/health` and `/version` are NOT contract operations and stay outside the 197
+ * by design.
  */
+app.get("/healthz", (c) => c.json({ status: "ok", service: SERVICE_NAME, runtime: "workers" }));
+app.get("/readyz", (c) => c.json({ status: "ready", service: SERVICE_NAME, runtime: "workers" }));
 app.get("/health", (c) => c.json({ ok: true }));
 app.get("/version", (c) =>
   c.json({

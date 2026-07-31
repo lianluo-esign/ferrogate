@@ -1,12 +1,16 @@
 /**
  * The composition root: binding-backed implementations of the ports.
  *
- * These are the *bootstrap* adapters — they read declarative JSON from Worker
- * vars so the control plane runs, is testable, and behaves correctly today,
- * while `@ferrogate/storage` (D1), `@ferrogate/policy` (RBAC) and
- * `@ferrogate/secrets` (Secrets Store) are written concurrently. Swapping in
- * the real backends touches ONLY this file: nothing in `middleware/` or
- * `routes/` knows where a key comes from.
+ * The STORE is now the real one: {@link resolveStore} builds
+ * `D1ControlPlaneStore` on the `DB` binding, and the in-memory reference store
+ * is the explicit fallback. Nothing in `middleware/` or `routes/` changed for
+ * it — the 197 handlers still talk only to `ControlPlaneStore`, which is what
+ * made a one-file swap possible.
+ *
+ * The credential/RBAC adapters below are still the *bootstrap* ones: they read
+ * declarative JSON from Worker vars so the control plane runs and behaves
+ * correctly today, while `@ferrogate/policy` (RBAC) and `@ferrogate/secrets`
+ * (Secrets Store) are written concurrently.
  *
  * PORT-TODO(inventory-edge-control §5.2): replace `JsonApiKeyAuthenticator`
  * with the D1-backed `StorageApiKeyAuthenticator` twin (prefix lookup +
@@ -29,6 +33,7 @@ import type {
   TenancyLifecycleGatePort,
 } from "./ports.js";
 import { DEFAULT_ADMIN_LIST_LIMIT, DEFAULT_ADMIN_LIST_MAX_LIMIT } from "./responses.js";
+import { D1ControlPlaneStore } from "./store/d1.js";
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 
 // ---------------------------------------------------------------------------
@@ -341,22 +346,64 @@ function positiveInt(raw: string | undefined, fallback: number): number {
 }
 
 /**
- * Build the dependency set for one request from the Worker's bindings.
- *
- * The store is a module-level singleton per isolate so state survives across
- * requests (an in-memory store rebuilt per request would make every write
- * invisible to the next read). Everything else is cheap and rebuilt per call.
+ * The in-memory fallback store, a module-level singleton per isolate so state
+ * survives across requests (an in-memory store rebuilt per request would make
+ * every write invisible to the next read). The D1 store needs no such trick —
+ * its state is in the database — so it is built fresh per request, which is
+ * what lets it carry the request's correlation id onto its audit rows.
  */
 let sharedStore: MemoryControlPlaneStore | null = null;
 let sharedStoreSeed: string | undefined;
 
-export function resolveDeps(env: ControlPlaneBindings): ControlPlaneDeps {
+function memoryStore(env: ControlPlaneBindings): MemoryControlPlaneStore {
   if (sharedStore === null || sharedStoreSeed !== env.CONTROL_PLANE_SEED) {
     sharedStore = new MemoryControlPlaneStore(
       parseJson<MemoryStoreSeed>(env.CONTROL_PLANE_SEED, {}),
     );
     sharedStoreSeed = env.CONTROL_PLANE_SEED;
   }
+  return sharedStore;
+}
+
+/** Per-request context the adapters need but the bindings cannot carry. */
+export interface RequestContext {
+  /** `x-request-id`, stamped onto every audit row this request writes. */
+  readonly requestId?: string | null;
+}
+
+/**
+ * Pick the store the request will use.
+ *
+ * A bound `DB` means D1 — durability is the default, not an opt-in — and
+ * `CONTROL_PLANE_STORE = "memory"` is the explicit escape hatch the unit suites
+ * and a database-less local run take. Choosing memory when a database IS bound
+ * without being asked to would be the silent-data-loss failure mode: writes
+ * accepted with a 201, gone at the next isolate.
+ */
+export function resolveStore(
+  env: ControlPlaneBindings,
+  context: RequestContext = {},
+): ControlPlaneStore {
+  const requested = env.CONTROL_PLANE_STORE?.trim().toLowerCase();
+  if (requested === "memory") return memoryStore(env);
+  if (env.DB !== undefined) {
+    return new D1ControlPlaneStore(env.DB, { requestId: context.requestId ?? null });
+  }
+  if (requested === "d1") {
+    // Asked for D1 and given no database: fail loudly rather than quietly
+    // serving an in-memory store that looks identical until the isolate dies.
+    throw new Error(
+      "CONTROL_PLANE_STORE=d1 but no `DB` binding is configured; add the [[d1_databases]] binding or set CONTROL_PLANE_STORE=memory",
+    );
+  }
+  return memoryStore(env);
+}
+
+export function resolveDeps(
+  env: ControlPlaneBindings,
+  context: RequestContext = {},
+): ControlPlaneDeps {
+  const store = resolveStore(env, context);
 
   const corsAllowedOrigin = env.ADMIN_CONSOLE_ALLOWED_ORIGIN?.trim();
   return {
@@ -370,8 +417,8 @@ export function resolveDeps(env: ControlPlaneBindings): ControlPlaneDeps {
     rbac: new JsonRbacAuthorizer(
       parseJson<Record<string, readonly string[]>>(env.TENANT_RBAC_ACTIONS, {}),
     ),
-    store: sharedStore,
-    runtime: new StoreRuntimeStatus(sharedStore),
+    store,
+    runtime: new StoreRuntimeStatus(store),
     // Absent or blank ⇒ NO admin-console origin ⇒ the preflight surface does
     // not exist at all (see `middleware/cors.ts`).
     corsAllowedOrigin:

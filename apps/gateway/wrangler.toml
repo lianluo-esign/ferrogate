@@ -161,6 +161,57 @@ GATEWAY_DEV_AUTH = "false"
 GATEWAY_PROVIDERS = "[]"
 GATEWAY_MODELS = "[]"
 
+# ---------------------------------------------------------------------------
+# [vars] — quota policies and plan floors
+#
+# Read by `quotaPolicySourceFromEnv` (src/ratelimit/quota.ts), the port of the
+# Rust quota policy rows + plan defaults. `GATEWAY_QUOTA_POLICIES` is a JSON
+# array of `{ scope_type, scope_id, rpm_limit?, tpm_limit?, enabled? }`;
+# `GATEWAY_PLANS` maps plan slug → `{ slug, default_rpm_limit?,
+# default_tpm_limit? }`; `GATEWAY_TENANT_PLANS` maps tenant id → plan slug.
+#
+# A plan value is a FLOOR, not an override (issue #168): a field takes the plan
+# default only when NO policy in the tenant→project→workspace→key chain set it.
+#
+# All three default EMPTY, which means "no window governs any caller" — the
+# limiter admits. That is the Rust posture (`request_windows()` returns an empty
+# vec when nothing is configured), not a fail-open hole: a policy row that
+# EXISTS and is `enabled: false` answers 403 `quota_scope_disabled`, and a
+# policy source that fails to parse is refused whole rather than partially
+# applied.
+# ---------------------------------------------------------------------------
+GATEWAY_QUOTA_POLICIES = "[]"
+GATEWAY_PLANS = "{}"
+GATEWAY_TENANT_PLANS = "{}"
+
+# ---------------------------------------------------------------------------
+# [vars] — guardrail policies
+#
+# Read by `guardrailDepsFromEnv` (src/guardrails/config.ts).
+# `GATEWAY_GUARDRAIL_POLICIES` is a JSON array of `PolicyRevision`;
+# `GATEWAY_GUARDRAIL_BINDINGS` a JSON array of `{ policy_id, active_revision }`.
+# Empty ⇒ no policy selects for any request and the middleware passes straight
+# through. A BOUND policy fails CLOSED: a detector timeout or error selects the
+# policy's `on_error`, whose default is `block` ⇒ 403
+# `guardrail_provider_unavailable` (see the fail-posture block in
+# `src/guardrails/index.ts`, with the Rust citations).
+#
+# GUARDRAIL_EVIDENCE_HMAC_KEY is deliberately NOT declared: it is the keyed-HMAC
+# secret for the evidence `input_fingerprint` and belongs in
+# `wrangler secret put`, never in a committed var. Without it fingerprints are
+# unkeyed; no plaintext is written either way (`matched_text` never crosses the
+# evidence boundary).
+# ---------------------------------------------------------------------------
+GATEWAY_GUARDRAIL_POLICIES = "[]"
+GATEWAY_GUARDRAIL_BINDINGS = "[]"
+
+# Read by `apiKeyCacheTtlSeconds` (src/keys/resolver.ts). Seconds a positive or
+# negative D1 key resolution may be reused inside one isolate. `"0"` (the
+# default, and the value shipped here) DISABLES the cache, so a key revoked in
+# the control plane stops working on the very next request. Raise it only with
+# the revocation lag that implies understood.
+GATEWAY_API_KEY_CACHE_TTL_SECONDS = "0"
+
 # Read by `entitlementsFromEnv` (src/assets/handlers.ts).
 # JSON map tenant id → { asset_hosting_enabled, asset_storage_quota_bytes,
 # asset_max_object_bytes }. Fail-closed: a tenant with no row may NOT publish
@@ -204,39 +255,94 @@ binding = "ASSETS"
 bucket_name = "replace-at-deploy-ferrogate-assets"
 preview_bucket_name = "replace-at-deploy-ferrogate-assets-preview"
 
+# ---------------------------------------------------------------------------
+# D1 — the tenant database holding the durable `api_keys` table
+#
+# Read as `env.DB` by `d1ApiKeyResolverFromEnv` (src/keys/resolver.ts), which
+# `depsFromEnv` (src/adapters.ts) makes the PRIMARY credential source when the
+# binding is present. The `[vars]` key tables above become its fallback, which
+# is the Rust order: `authenticate_durable` first, `config.api_keys` second.
+#
+# The schema is `sql/d1-ts/tenant/0001_init_tenant.sql` — `migrations_dir`
+# points there so `wrangler d1 migrations apply ferrogate-tenant [--local]`
+# provisions exactly the DDL the test suite applies (`vitest.config.ts` reads it
+# with `readD1Migrations`), and tests and deploys cannot run different schemas.
+# THIS MUST BE RUN BEFORE FIRST TRAFFIC: with the binding present but the table
+# absent, `D1ApiKeyStore` raises `ApiKeyStoreUnavailable` and every bearer
+# request answers `503 external_auth_unavailable` — deliberately, because an
+# outage must never be indistinguishable from a revocation.
+#
+# Only `api_keys` is read here, and only ever READ — the gateway data plane
+# never writes a key row.
+#
+# `database_name` / `database_id` are DOCUMENTED PLACEHOLDERS. The deploy step
+# substitutes the account's real database; `wrangler dev --local` and
+# `vitest-pool-workers` ignore the id entirely and provision a local SQLite file.
+# Never commit a real database uuid here.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "ferrogate-tenant"
+database_id = "replace-at-deploy"
+migrations_dir = "../../sql/d1-ts/tenant"
+
+# ---------------------------------------------------------------------------
+# Durable Objects — the rate-limit / quota counters
+#
+# One DO instance per counter key replaces the Rust `ClusterCounterBackend`
+# (Redis) RPM/TPM/token-budget/wallet sliding windows. Read as `env.RATE_LIMIT`
+# by `limiterForEnv` (src/ratelimit/middleware.ts); with NO binding the limiter
+# degrades to a per-isolate in-memory counter, which is not a correct
+# cross-isolate limiter — so this binding is what makes the limits real.
+#
+# `class_name` is resolved by workerd against the ENTRY MODULE (`main`, i.e.
+# `src/worker.ts`), NOT against the file that defines the class. `src/worker.ts`
+# therefore re-exports `RateLimiterDurableObject`; delete that line and the
+# Worker stops booting while every vitest test still passes.
+#
+# `new_sqlite_classes` (not `new_classes`) because the counters use the SQLite
+# storage backend, which is the current default for new namespaces and the one
+# `DurableObjectState.storage.sql` requires.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiterDurableObject"]
+
 # ===========================================================================
 # NOT DECLARED — and why
 #
-# The scaffold's `TODO(bindings)` block listed D1, KV, Durable Objects, Queues,
-# Workers AI / AI Gateway, Secrets Store and Analytics Engine. As of this
-# commit NOTHING in `apps/gateway/src/**` reads any of them: the auth ports are
-# backed by the `[vars]` above, asset metadata/audit by the in-memory stores in
-# `src/assets/ports.ts`, and inference resolves models from an in-memory
-# registry (`src/inference/defaults.ts`). Declaring them now would be dead
-# configuration, and in two cases actively harmful:
+# Wave 5 introduced `[[d1_databases]] DB` and the `RATE_LIMIT` Durable Object
+# above, each together with the code that reads it. The rule is unchanged: a
+# binding lands in the same commit as its first reader, never before.
 #
-#   * `[[durable_objects.bindings]]` REFERENCES AN EXPORTED CLASS. This Worker
-#     exports none, so a `RATE_LIMIT` / `SESSION` binding would fail the Worker
-#     at startup — including under `@cloudflare/vitest-pool-workers`.
-#   * `[[services]]` names another deployed Worker; an unimplemented target
-#     turns every call into a runtime error instead of a clean 503.
+# `[[services]]` stays undeclared for the reason it always has: it names another
+# deployed Worker, and an unimplemented target turns every call into a runtime
+# error instead of a clean 503.
 #
-# Each is introduced by the slice that first reads it, together with its code:
+# Each remaining entry is introduced by the slice that first reads it:
 #
-#   [[d1_databases]]  binding = "DB", database_id = <deploy-time placeholder>
-#       asset metadata (`AssetMetadataStore`, src/assets/ports.ts) plus the
-#       durable api-key / RBAC / lifecycle tables now served from `[vars]`.
-#       PORT-TODO(inventory-edge-control §5.2) + (inventory-request-path §1.6).
 #   [[kv_namespaces]]  binding = "CACHE", id = <deploy-time placeholder>
 #       resolved-config and key-lookup cache (Rust `resolved_provider_secrets`,
-#       `response_cache`). PORT-TODO(inventory-request-path §1.7).
-#   [[durable_objects.bindings]] + [[migrations]]  RATE_LIMIT, SESSION
-#       the Rust `ClusterCounterBackend` RPM/TPM/token sliding windows and
-#       streaming-session state — one DO per counter key replaces Redis.
-#       PORT-TODO(inventory-request-path §1.7 "Counters").
-#   [[queues]]
+#       `response_cache`). The api-key resolution cache is currently an
+#       isolate-local map (`src/keys/cache.ts`), not KV.
+#       PORT-TODO(inventory-request-path §1.7).
+#   [[durable_objects.bindings]]  SESSION
+#       streaming-session state. `RATE_LIMIT` landed in wave 5; `SESSION` has no
+#       reader yet. PORT-TODO(inventory-request-path §1.7).
+#   [[queues]]  binding = "BILLING"
 #       metering / ledger fan-out (Rust `metering_events`, `evidence_writer`).
-#       PORT-TODO(inventory-data-billing §metering).
+#       `src/metering/` HAS the reader — `QueueBillingReportPublisher` and
+#       `D1LedgerStore` — but neither can be constructed from the composition
+#       root yet: `UsageSink` is built once at module scope while bindings are
+#       per request, and `UsageSink.record()` carries no `ExecutionContext`, so
+#       durable writes cannot be handed to `ctx.waitUntil`. The sink therefore
+#       runs on its in-memory ledger + outbox until that signature is widened.
+#       Declaring the queue now would be a binding nothing reads.
+#       PORT-TODO(inventory-data-billing §2.5).
 #   [ai] / AI Gateway
 #       Workers AI Llama Guard guardrail detector + governed provider egress.
 #       PORT-TODO(inventory-request-path §1.6 "Workers AI Llama Guard").

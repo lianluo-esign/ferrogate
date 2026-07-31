@@ -1,9 +1,10 @@
 /**
  * In-memory {@link ControlPlaneStore} — the reference implementation.
  *
- * Its job is to make the Worker RUNNABLE and the behaviour TESTABLE now, while
- * `@ferrogate/storage` (D1) is written concurrently. It is a full, honest
- * implementation of the port's contract, not a stub: create/replace/merge/
+ * No longer the production store — `src/store/d1.ts` is, whenever the `DB`
+ * binding exists — but still the one the unit suites run against and still the
+ * one that DEFINES the contract. It is a full, honest implementation of the
+ * port, not a stub: create/replace/merge/
  * remove/list all behave, and — the part that actually matters — **tenant
  * isolation is enforced here rather than in each of the 197 handlers.**
  *
@@ -22,9 +23,12 @@
  *    caller declare someone else's;
  *  - a platform operator sees every row and may address any tenant.
  *
- * PORT-TODO(inventory-data-billing §storage): replace with a D1-backed adapter
- * over `@ferrogate/storage` once that package lands. The port surface does not
- * change; only this file is swapped in the composition root.
+ * It remains the store the unit suites run against (`CONTROL_PLANE_STORE
+ * = "memory"`), and the reference the D1 store is held to: both are driven
+ * through the SAME conformance suite (`test/store-conformance.test.ts`) so a
+ * behavioural difference between them is a test failure rather than a
+ * production-only surprise. The list/search/filter predicates they share live in
+ * `./query.ts`.
  */
 import {
   type CallerScope,
@@ -34,37 +38,7 @@ import {
   StoreConflictError,
   type StoreRecord,
 } from "../ports.js";
-
-/** Fields a `?search=` scans, in the order Rust's `matches_search` receives them. */
-const SEARCH_FIELDS = ["id", "name", "hostname", "status", "description", "kind", "type"];
-
-function matchesSearch(record: StoreRecord, search: string | null): boolean {
-  if (search === null) return true;
-  const needle = search.toLowerCase();
-  return SEARCH_FIELDS.some((field) => {
-    const value = record[field];
-    return typeof value === "string" && value.toLowerCase().includes(needle);
-  });
-}
-
-function matchesFilters(record: StoreRecord, filters: Readonly<Record<string, string>>): boolean {
-  return Object.entries(filters).every(([key, expected]) => {
-    const value = record[key];
-    if (value === undefined || value === null) return false;
-    return String(value) === expected;
-  });
-}
-
-/** A tenant-scoped caller may only see rows attributed to its own tenant. */
-function visibleTo(record: StoreRecord, scope: CallerScope): boolean {
-  if (scope.kind === "platform_operator") return true;
-  // An un-attributed row is global/platform data; a tenant caller may read it
-  // but (see `create`/`replace`) never claims it. Rows belonging to another
-  // tenant are invisible.
-  const owner = record.tenant_id;
-  if (owner === undefined || owner === null) return true;
-  return owner === scope.tenantId;
-}
+import { pageOf, visibleTo } from "./query.js";
 
 export interface MemoryStoreSeed {
   readonly [collection: string]: readonly StoreRecord[];
@@ -98,17 +72,10 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   }
 
   list(collection: string, scope: CallerScope, query: ListQuery): Promise<ListPage> {
-    const all = [...this.#bucket(collection).values()].filter(
-      (record) =>
-        visibleTo(record, scope) &&
-        matchesSearch(record, query.search) &&
-        matchesFilters(record, query.filters),
+    const visible = [...this.#bucket(collection).values()].filter((record) =>
+      visibleTo(record, scope),
     );
-    if (!query.paginate) return Promise.resolve({ items: all, total: all.length });
-    return Promise.resolve({
-      items: all.slice(query.offset, query.offset + query.limit),
-      total: all.length,
-    });
+    return Promise.resolve(pageOf(visible, query));
   }
 
   get(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
@@ -117,7 +84,11 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     return Promise.resolve(record);
   }
 
-  create(collection: string, scope: CallerScope, record: StoreRecord): Promise<StoreRecord> {
+  // `async` on purpose: a durable store can only REJECT on a conflict, and a
+  // synchronous `throw` here would mean `store.create(...).catch(...)` worked
+  // against D1 and blew up against memory. The conformance suite holds both to
+  // the rejecting form.
+  async create(collection: string, scope: CallerScope, record: StoreRecord): Promise<StoreRecord> {
     const bucket = this.#bucket(collection);
     if (bucket.has(record.id)) throw new StoreConflictError(collection, record.id);
     const stored: StoreRecord = {

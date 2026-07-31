@@ -332,6 +332,17 @@ export interface ControlPlaneBindings {
   readonly ADMIN_CONSOLE_ALLOWED_ORIGIN?: string;
   /** Seed rows for the in-memory store, as `{ collection: record[] }`. */
   readonly CONTROL_PLANE_SEED?: string;
+  /**
+   * Which {@link ControlPlaneStore} the composition root builds.
+   *
+   * `"d1"` (the DEFAULT whenever {@link ControlPlaneBindings.DB} is bound) is
+   * the durable store; `"memory"` forces the in-memory reference store even
+   * when a D1 binding exists, which is how the unit suites pin behaviour that
+   * has nothing to do with persistence. The polarity is deliberate: a
+   * deployment that binds a database gets the database, and running without one
+   * has to be asked for.
+   */
+  readonly CONTROL_PLANE_STORE?: string;
   readonly ADMIN_LIST_DEFAULT_LIMIT?: string;
   readonly ADMIN_LIST_MAX_LIMIT?: string;
   /**
@@ -339,12 +350,15 @@ export interface ControlPlaneBindings {
    * `wrangler.toml`) — the native replacement for BOTH the D1 REST client and
    * the `workers/d1-proxy` batch/`RETURNING` hot path.
    *
-   * Optional because `resolveDeps` still builds `MemoryControlPlaneStore` from
-   * `CONTROL_PLANE_SEED`; typed here so the code and the deployment manifest
-   * agree on the binding's name today rather than after the swap.
+   * When bound, `resolveDeps` builds {@link ControlPlaneStore} on it
+   * (`src/store/d1.ts`) unless {@link ControlPlaneBindings.CONTROL_PLANE_STORE}
+   * asks for `"memory"`. Still optional so the Worker boots — with the
+   * in-memory reference store and a warning — in a local/dev config that has no
+   * database provisioned yet.
    *
-   * PORT-TODO(inventory-edge-control §5.2 / §9.3): back `ControlPlaneStore`
-   * with this binding and make it required.
+   * PORT-TODO(inventory-edge-control §5.2): make this required once the
+   * TS-era migrations (`sql/d1-ts/`) ship, so a deployment cannot start with a
+   * store whose writes vanish on isolate eviction.
    */
   readonly DB?: D1Database;
 }

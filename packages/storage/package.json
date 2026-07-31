@@ -5,7 +5,12 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "types": "./src/index.ts",
-  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run && vitest run --config vitest.d1.config.ts",
+    "test:pure": "vitest run",
+    "test:d1": "vitest run --config vitest.d1.config.ts"
+  },
   "dependencies": {
     "@ferrogate/core": "workspace:*",
     "@ferrogate/schemas": "workspace:*",

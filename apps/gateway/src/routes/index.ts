@@ -16,7 +16,7 @@
  * is mounted here.
  */
 import { Hono } from "hono";
-import type { Context } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { depsFromEnv } from "../adapters.js";
 import { type ApiOperation, type HttpMethod, operationById } from "../contract.js";
 import { type DepsResolver, contractAuth } from "../middleware/auth.js";
@@ -236,6 +236,18 @@ export interface CreateGatewayAppOptions {
   readonly deps?: DepsResolver;
   /** Extra route modules (inference, assets, …). */
   readonly modules?: readonly RouteModule[];
+  /**
+   * Cross-cutting middleware mounted AFTER `contractAuth` and BEFORE every
+   * route — the seam the rate-limit and guardrail slices are wired through.
+   *
+   * The position is load-bearing twice over. Hono runs matched handlers in
+   * REGISTRATION order, so an `app.use("*", …)` added by the caller after
+   * `createGatewayApp` returns would run after the route handler and gate
+   * nothing; and both middlewares read `c.get("auth")`, so they must follow the
+   * guard that sets it. `src/index.ts` supplies them in the Rust ingress order
+   * — admission (rate limit / quota) before content screening (guardrails).
+   */
+  readonly middleware?: readonly MiddlewareHandler<GatewayEnv>[];
 }
 
 /** The assembled Worker plus the registry the anti-drift test inspects. */
@@ -254,6 +266,12 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // ONE table-driven guard for all 251 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.
   app.use("*", contractAuth(options.deps ?? depsFromEnv));
+
+  // Post-auth, pre-route: rate limit / quota admission, then guardrail
+  // screening. See `CreateGatewayAppOptions.middleware`.
+  for (const middleware of options.middleware ?? []) {
+    app.use("*", middleware);
+  }
 
   const router = new GatewayRouter(app);
 

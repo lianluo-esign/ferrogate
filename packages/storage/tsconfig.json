@@ -1,4 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src"]
+  "compilerOptions": {
+    // `cloudflare:test` (used by the D1 suite) ships its types with the pool.
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"]
+  },
+  // `test` is included so the D1 suite is type-checked too. A test file outside
+  // the program is a test that can drift from the API it exercises without
+  // `tsc --noEmit` ever noticing.
+  "include": ["src", "test", "vitest.config.ts", "vitest.d1.config.ts"]
 }

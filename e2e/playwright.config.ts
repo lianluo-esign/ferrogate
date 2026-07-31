@@ -70,8 +70,20 @@ function wranglerDev(port: number, inspectorPort: number, extra = ""): string {
  * `wrangler` splits `--var` on the FIRST colon only (`collectKeyValues`), so a
  * JSON value containing colons round-trips intact. The single quotes are POSIX
  * shell quoting; the JSON itself contains none.
+ *
+ * `GATEWAY_PROVIDERS` / `GATEWAY_MODELS` are pinned EMPTY for a different
+ * reason: `wrangler dev` also loads `apps/gateway/.dev.vars`, which is
+ * gitignored local developer state. A machine with a real provider + model
+ * configured there (for the separate cloud verification) made
+ * `gateway.spec.ts`'s "empty registry ⇒ `data: []`" assertion fail on an
+ * otherwise correct tree. `--var` beats `.dev.vars`, so the registry the suite
+ * sees is the one the suite states — on a laptop and in CI alike.
  */
-const gatewayVarFlag = ` --var 'GATEWAY_NATIVE_API_KEYS:${JSON.stringify(GATEWAY_NATIVE_API_KEYS)}'`;
+const gatewayVarFlag = [
+  ` --var 'GATEWAY_NATIVE_API_KEYS:${JSON.stringify(GATEWAY_NATIVE_API_KEYS)}'`,
+  " --var 'GATEWAY_PROVIDERS:[]'",
+  " --var 'GATEWAY_MODELS:[]'",
+].join("");
 
 export default defineConfig({
   testDir: "./tests",

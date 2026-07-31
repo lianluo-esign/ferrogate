@@ -60,11 +60,20 @@ const HONO_ROUTES: readonly HonoRoute[] = (
 const HONO_KEYS = new Set(HONO_ROUTES.map((route) => `${route.method} ${route.path}`));
 
 /**
- * The two routes `src/index.ts` mounts that are NOT contract operations. They
- * are named here so the "nothing extra is mounted" assertion below is exact
- * rather than a tolerance.
+ * The routes `src/index.ts` mounts that are not among the 197 operations this
+ * app OWNS. They are named here so the "nothing extra is mounted" assertion
+ * below is exact rather than a tolerance.
+ *
+ * `/healthz` and `/readyz` ARE contract operations, but shared ones — every
+ * Worker implements them and no single app owns them, so they are outside
+ * `CONTROL_PLANE_OPERATIONS` while still being routes that must exist. This app
+ * shipped without them until a real `wrangler dev --local` boot answered
+ * `404 not_found` on `/healthz`; listing them here is what keeps them from
+ * being dropped again.
+ *
+ * `/health` and `/version` are not contract operations at all.
  */
-const NON_CONTRACT_ROUTES = ["GET /health", "GET /version"] as const;
+const NON_CONTRACT_ROUTES = ["GET /healthz", "GET /readyz", "GET /health", "GET /version"] as const;
 
 function contractKey(operationId: string): string {
   const operation = operationById(operationId);
@@ -86,7 +95,7 @@ describe("the app src/index.ts exports has all 197 operations in its ROUTING TAB
     ).toEqual([]);
   });
 
-  it("mounts NOTHING beyond the 197 + /health + /version", () => {
+  it("mounts NOTHING beyond the 197 + the shared probes + /health + /version", () => {
     const expected = new Set<string>([
       ...CONTROL_PLANE_OPERATIONS.map((operation) => `${operation.method} ${operation.honoPath}`),
       ...NON_CONTRACT_ROUTES,
@@ -94,8 +103,9 @@ describe("the app src/index.ts exports has all 197 operations in its ROUTING TAB
     const stray = [...HONO_KEYS].filter((key) => !expected.has(key)).sort();
     expect(stray, `routes with no contract operation: ${stray.join(", ")}`).toEqual([]);
     // …and the table is exactly that set, so a duplicate mount is visible too.
-    expect(HONO_ROUTES).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT + 2);
-    expect(HONO_KEYS.size).toBe(EXPECTED_CONTROL_PLANE_OPERATION_COUNT + 2);
+    const extra = NON_CONTRACT_ROUTES.length;
+    expect(HONO_ROUTES).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT + extra);
+    expect(HONO_KEYS.size).toBe(EXPECTED_CONTROL_PLANE_OPERATION_COUNT + extra);
   });
 
   it("mounts each operation at the contract's own template, in Hono syntax", () => {
