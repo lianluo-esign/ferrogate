@@ -175,7 +175,7 @@ fn register_creates_on_the_collection() {
     .unwrap();
     assert_eq!(spec.method, Method::POST);
     assert_eq!(spec.path, "/admin/v1/self-hosted-workers");
-    assert_eq!(spec.body.unwrap()["name"], "edge-1");
+    assert_eq!(spec.json_body().unwrap()["name"], "edge-1");
 }
 
 #[test]

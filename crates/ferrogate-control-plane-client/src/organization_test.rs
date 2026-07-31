@@ -235,7 +235,7 @@ fn assign_plan_puts_the_plan_document_onto_the_tenant_plan_subpath() {
     .unwrap();
     assert_eq!(spec.method, Method::PUT);
     assert_eq!(spec.path, "/admin/v1/tenant-accounts/t_1/plan");
-    assert_eq!(spec.body.as_ref().unwrap()["plan_id"], "pro");
+    assert_eq!(spec.json_body().unwrap()["plan_id"], "pro");
 }
 
 #[test]

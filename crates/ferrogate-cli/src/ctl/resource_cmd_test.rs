@@ -102,7 +102,7 @@ fn resource_args_fold_segments_body_and_list() {
         .1
         .clone();
     let resource = ResourceArgs::from_arg_matches(&verb_matches).unwrap();
-    let input = resource.to_input().unwrap();
+    let input = resource.to_input(None).unwrap();
     assert_eq!(
         input.segments,
         vec!["tenant".to_string(), "acme".to_string()]
@@ -112,7 +112,7 @@ fn resource_args_fold_segments_body_and_list() {
     let spec = build_request("quota-policies", "update", &input).unwrap();
     assert_eq!(spec.method.as_str(), "PATCH");
     assert_eq!(spec.path, "/admin/v1/quota-policies/tenant/acme");
-    assert_eq!(spec.body, Some(json!({"limit": 5})));
+    assert_eq!(spec.json_body(), Some(&json!({"limit": 5})));
 }
 
 #[test]
@@ -121,6 +121,8 @@ fn malformed_filter_is_a_usage_error() {
         segments: vec![],
         data: None,
         file: None,
+        body_file: None,
+        headers: vec![],
         limit: None,
         offset: None,
         filters: vec!["missing-equals".to_string()],
@@ -128,7 +130,7 @@ fn malformed_filter_is_a_usage_error() {
         all_pages: false,
         dry_run: false,
     };
-    let error = args.to_input().unwrap_err();
+    let error = args.to_input(None).unwrap_err();
     assert!(error.to_string().contains("KEY=VALUE"));
 }
 
@@ -138,6 +140,8 @@ fn malformed_body_is_a_usage_error() {
         segments: vec![],
         data: Some("not json".to_string()),
         file: None,
+        body_file: None,
+        headers: vec![],
         limit: None,
         offset: None,
         filters: vec![],
@@ -145,7 +149,7 @@ fn malformed_body_is_a_usage_error() {
         all_pages: false,
         dry_run: false,
     };
-    let error = args.to_input().unwrap_err();
+    let error = args.to_input(None).unwrap_err();
     assert!(error.to_string().contains("not valid JSON"));
 }
 
@@ -212,7 +216,7 @@ fn sort_flags_reach_the_request_query() {
         .clone();
     let input = ResourceArgs::from_arg_matches(&verb_matches)
         .unwrap()
-        .to_input()
+        .to_input(None)
         .unwrap();
     let spec = build_request("virtual-keys", "list", &input).unwrap();
     assert!(
@@ -235,6 +239,8 @@ fn empty_sort_key_is_a_usage_error() {
         segments: vec![],
         data: None,
         file: None,
+        body_file: None,
+        headers: vec![],
         limit: None,
         offset: None,
         filters: vec![],
@@ -242,7 +248,7 @@ fn empty_sort_key_is_a_usage_error() {
         all_pages: false,
         dry_run: false,
     };
-    let error = args.to_input().unwrap_err();
+    let error = args.to_input(None).unwrap_err();
     assert!(error.to_string().contains("--sort"));
 }
 
@@ -275,7 +281,7 @@ fn a_flag_swallowed_as_a_sort_key_is_a_usage_error() {
         vec!["--output".to_string()],
         "this test is only meaningful while clap still swallows the flag"
     );
-    let error = args.to_input().unwrap_err();
+    let error = args.to_input(None).unwrap_err();
     assert!(
         error.to_string().contains("--output"),
         "the message must name the flag that was swallowed: {error}"
@@ -310,7 +316,7 @@ fn all_pages_leaves_the_cursor_to_the_walker() {
     let args = ResourceArgs::from_arg_matches(&verb_matches).unwrap();
     assert!(args.all_pages);
     assert_eq!(args.limit, Some(25));
-    let spec = build_request("virtual-keys", "list", &args.to_input().unwrap()).unwrap();
+    let spec = build_request("virtual-keys", "list", &args.to_input(None).unwrap()).unwrap();
     assert!(
         !spec
             .query
@@ -690,4 +696,82 @@ fn confirmation_required_metadata_set_is_exactly_the_guarded_operator_actions() 
             "guarded command '{guarded_command}' parsed --yes as false"
         );
     }
+}
+
+/// The two request shapes are not interchangeable, and the refusal names the
+/// flag that does work. Without this, `assets put --data @bundle.zip` would
+/// publish a JSON-quoted approximation of the artifact.
+#[test]
+fn the_wrong_body_flag_for_the_verb_is_refused_with_the_right_one_named() {
+    let json_document_verb = ResourceArgs {
+        segments: vec![],
+        data: None,
+        file: None,
+        body_file: Some(PathBuf::from("bundle.zip")),
+        headers: vec![],
+        limit: None,
+        offset: None,
+        filters: vec![],
+        sorts: vec![],
+        all_pages: false,
+        dry_run: false,
+    };
+    let error = json_document_verb.to_input(None).unwrap_err();
+    assert!(
+        error.to_string().contains("--data or --file"),
+        "unexpected message: {error}"
+    );
+
+    let binary_verb = ResourceArgs {
+        data: Some("{}".to_string()),
+        body_file: None,
+        ..json_document_verb
+    };
+    let error = binary_verb
+        .to_input(Some("application/octet-stream"))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("--body-file"),
+        "unexpected message: {error}"
+    );
+}
+
+/// `--header` is the header-parameter counterpart of `--filter`, including the
+/// `NAME=VALUE` refusal. A value containing `=` (a base64 signature) survives.
+#[test]
+fn header_flags_parse_like_filters_and_keep_values_containing_equals() {
+    let args = ResourceArgs {
+        segments: vec![],
+        data: None,
+        file: None,
+        body_file: None,
+        headers: vec![
+            "x-site-public=true".to_string(),
+            "x-asset-signature=c2ln==".to_string(),
+        ],
+        limit: None,
+        offset: None,
+        filters: vec![],
+        sorts: vec![],
+        all_pages: false,
+        dry_run: false,
+    };
+    let input = args.to_input(None).unwrap();
+    assert_eq!(
+        input.headers,
+        vec![
+            ("x-site-public".to_string(), "true".to_string()),
+            ("x-asset-signature".to_string(), "c2ln==".to_string()),
+        ]
+    );
+
+    let malformed = ResourceArgs {
+        headers: vec!["missing-equals".to_string()],
+        ..args
+    };
+    let error = malformed.to_input(None).unwrap_err();
+    assert!(
+        error.to_string().contains("NAME=VALUE"),
+        "unexpected message: {error}"
+    );
 }

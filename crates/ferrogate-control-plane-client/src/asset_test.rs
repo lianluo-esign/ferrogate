@@ -14,12 +14,16 @@ use crate::action_identity::ClientActionIdentity;
 use crate::auth::AuthSource;
 use crate::command::{CommandGroup, SecretDisclosure};
 use crate::context::{EffectiveContext, DEFAULT_TIMEOUT_MILLIS};
+use crate::dispatch::build_request;
 use crate::dispatch::redact_response;
 use crate::error::{CliResult, ExitClass};
 use crate::output::OutputFormat;
 use crate::registry_helpers::ResourceInput;
 use crate::resource::{redact_secret_fields, ListParams};
-use crate::transport::{ControlPlaneClient, PreparedRequest, RawResponse, RequestSpec, Transport};
+use crate::transport::{
+    ControlPlaneClient, PageRequest, PreparedRequest, RawResponse, RequestBody, RequestSpec,
+    Transport,
+};
 use http::Method;
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Waker};
@@ -92,6 +96,9 @@ fn universal_input() -> ResourceInput {
     ResourceInput::new()
         .with_segments(["models", "llama", "stable", "1.2.3"])
         .with_body(serde_json::json!({"size_bytes": 42}))
+        // `assets put` takes the artifact's bytes, not a document, so the
+        // universal input carries both payload shapes.
+        .with_raw_body("application/octet-stream", b"artifact".to_vec())
 }
 
 #[test]
@@ -196,12 +203,18 @@ fn asset_item_verbs_use_the_composite_key() {
     let put = build_assets(
         "put",
         &key.clone()
-            .with_body(serde_json::json!({"visibility": "private"})),
+            .with_raw_body("application/octet-stream", b"artifact".to_vec()),
     )
     .unwrap();
     assert_eq!(put.method, Method::PUT);
     assert_eq!(put.path, "/v1/assets/models/llama/1.2.3");
-    assert!(put.body.is_some());
+    assert_eq!(
+        put.body,
+        Some(RequestBody::Bytes {
+            media_type: "application/octet-stream".to_string(),
+            bytes: b"artifact".to_vec(),
+        })
+    );
 }
 
 #[test]
@@ -550,7 +563,7 @@ fn signature_rejection_on_put_maps_to_validation_class() {
         "put",
         &ResourceInput::new()
             .with_segments(["models", "llama", "1.2.3"])
-            .with_body(serde_json::json!({"size_bytes": 1})),
+            .with_raw_body("application/octet-stream", b"artifact".to_vec()),
     )
     .unwrap();
     let (transport, _seen) = fake(
@@ -601,4 +614,147 @@ fn quota_denial_on_upload_intent_maps_to_its_class() {
         ControlPlaneClient::new(context(), None, transport, ClientActionIdentity::fixture());
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
+}
+
+/// The destructive sibling of the `get` fix. `deleteAsset` declares `platform`,
+/// and dropping it does not fail the call — the server resolves some other
+/// variant, destroys it, and the operator sees exit 0 with no diagnostic.
+#[test]
+fn asset_delete_forwards_the_platform_filter() {
+    let spec = build_assets(
+        "delete",
+        &ResourceInput::new()
+            .with_segments(["cli_tool", "mytool", "1.0.0"])
+            .with_list(ListParams::new().with_filter("platform", "linux-x64")),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::DELETE);
+    assert_eq!(spec.path, "/v1/assets/cli_tool/mytool/1.0.0");
+    assert_eq!(
+        spec.query,
+        vec![("platform".to_string(), "linux-x64".to_string())]
+    );
+}
+
+/// `putAsset`'s body is the artifact. Publishing must send the bytes verbatim
+/// and carry both query parameters the operation declares.
+#[test]
+fn asset_put_publishes_bytes_and_forwards_platform_and_channel() {
+    let mut registry = Registry::new();
+    register(&mut registry).unwrap();
+    let verb = registry.resolve("assets", "put").unwrap();
+    assert_eq!(
+        verb.raw_request_media_type(),
+        Some("application/octet-stream"),
+        "the publish body is opaque bytes, not a JSON document"
+    );
+
+    // Deliberately not valid UTF-8: a document-shaped path would have to lose
+    // or re-encode these bytes.
+    let artifact = vec![0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe];
+    let spec = build_assets(
+        "put",
+        &ResourceInput::new()
+            .with_segments(["static_site", "docs", "1.0.0"])
+            .with_raw_body("application/zip", artifact.clone())
+            .with_list(
+                ListParams::new()
+                    .with_filter("platform", "linux-x64")
+                    .with_filter("channel", "stable"),
+            ),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::PUT);
+    assert_eq!(spec.path, "/v1/assets/static_site/docs/1.0.0");
+    assert_eq!(
+        spec.body,
+        Some(RequestBody::Bytes {
+            media_type: "application/zip".to_string(),
+            bytes: artifact,
+        })
+    );
+    assert_eq!(
+        spec.query,
+        vec![
+            ("platform".to_string(), "linux-x64".to_string()),
+            ("channel".to_string(), "stable".to_string()),
+        ]
+    );
+}
+
+/// A mutation carries the operator's filters and nothing else. `--limit`/
+/// `--sort` are list-walking state; putting them on a `POST` would make a
+/// mutating verb look like a paginated read.
+#[test]
+fn promote_visibility_carries_filters_but_not_pagination_or_sort() {
+    let spec = build_assets(
+        "promote-visibility",
+        &ResourceInput::new()
+            .with_segments(["cli_tool", "mytool", "1.0.0"])
+            .with_body(serde_json::json!({"scan_outcome": "clean", "evidence": "ev_1"}))
+            .with_list(
+                ListParams::new()
+                    .with_filter("platform", "linux-x64")
+                    .with_page(PageRequest {
+                        offset: 0,
+                        limit: Some(5),
+                    })
+                    .with_sort("created_at"),
+            ),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::POST);
+    assert_eq!(
+        spec.path, "/v1/assets/cli_tool/mytool/1.0.0/visibility",
+        "the visibility promotion posts to its own sub-path"
+    );
+    assert_eq!(
+        spec.query,
+        vec![("platform".to_string(), "linux-x64".to_string())],
+        "only the variant selector belongs on a mutation"
+    );
+}
+
+/// Static-site publish is `assets put` plus the header parameters `putAsset`
+/// declares for it — there is no separate publish operation in the contract, so
+/// there must be no invented verb either. The header seam is generic and folded
+/// on centrally, so this holds for every family.
+#[test]
+fn static_site_publish_carries_the_site_headers_through_the_generic_seam() {
+    let spec = build_request(
+        "assets",
+        "put",
+        &ResourceInput::new()
+            .with_segments(["static_site", "docs", "2.0.0"])
+            .with_raw_body("application/zip", b"PK\x03\x04".to_vec())
+            .with_headers([
+                ("x-site-public", "true"),
+                ("x-site-spa-fallback", "true"),
+                ("x-asset-visibility", "public"),
+            ]),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::PUT);
+    assert_eq!(
+        spec.headers,
+        vec![
+            ("x-site-public".to_string(), "true".to_string()),
+            ("x-site-spa-fallback".to_string(), "true".to_string()),
+            ("x-asset-visibility".to_string(), "public".to_string()),
+        ]
+    );
+}
+
+/// `verifySiteDomain` declares `tenant`; the sweep found it discarding it.
+#[test]
+fn site_domain_verify_forwards_the_tenant_filter() {
+    let spec = build_site_domains(
+        "verify",
+        &ResourceInput::new()
+            .with_segments(["docs.example.com"])
+            .with_list(ListParams::new().with_filter("tenant", "acme")),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::POST);
+    assert_eq!(spec.query, vec![("tenant".to_string(), "acme".to_string())]);
 }

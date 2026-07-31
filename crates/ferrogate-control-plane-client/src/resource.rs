@@ -74,26 +74,23 @@ impl ResourceApi {
         Ok(path)
     }
 
-    /// `GET` a collection or nested list. `segments` is empty for the top-level
-    /// list; non-empty for a nested list such as tenant-role bindings under a
-    /// tenant. Pagination and filter parameters from `params` are folded in.
+    /// `GET` a collection, a nested list, or a single item. `segments` is empty
+    /// for the top-level list; non-empty for a nested list such as tenant-role
+    /// bindings under a tenant, or for one addressed item. Pagination, filter,
+    /// and sort parameters from `params` are folded in.
+    ///
+    /// Item reads use this same entry point rather than a separate `get`:
+    /// several of them declare required or disambiguating query parameters in
+    /// the contract — `getAsset`'s `platform`, which it marks *"Required when
+    /// resolution is otherwise ambiguous"*, is the case that exposed this — so a
+    /// variant that dropped `params` was a trap, not a narrowing. Discarding
+    /// them made `--filter platform=linux-x64` a silent no-op, which is worse
+    /// than an error: the operator gets some other variant and no indication of
+    /// it (issue #363 review).
     pub fn read(&self, segments: &[&str], params: &ListParams) -> CliResult<RequestSpec> {
         let mut spec = RequestSpec::new(Method::GET, self.item_path(segments)?);
         spec = params.apply(spec);
         Ok(spec)
-    }
-
-    /// A `GET` on the item identified by `segments`.
-    ///
-    /// `params` is threaded through rather than dropped: several item reads
-    /// declare required or disambiguating query parameters in the contract —
-    /// `getAsset`'s `platform`, which it marks *"Required when resolution is
-    /// otherwise ambiguous"*, is the case that exposed this. Discarding them
-    /// made `--filter platform=linux-x64` a silent no-op, which is worse than
-    /// an error: the operator gets some other variant and no indication of it
-    /// (issue #363 review).
-    pub fn get(&self, segments: &[&str], params: &ListParams) -> CliResult<RequestSpec> {
-        self.read(segments, params)
     }
 
     /// The top-level collection listing.
@@ -127,6 +124,23 @@ impl ResourceApi {
     /// `PUT` a full replacement document over the item.
     pub fn replace(&self, segments: &[&str], body: Value) -> CliResult<RequestSpec> {
         self.mutate(Method::PUT, segments, Some(body))
+    }
+
+    /// `PUT` an opaque byte payload over the item.
+    ///
+    /// The asset registry's publish operation (`putAsset`) declares its request
+    /// body as `*/*` with `format: binary`: the artifact itself, not a document
+    /// describing it. Without this the verb could exist in the command tree and
+    /// in the parity manifest while being structurally unable to publish
+    /// anything (issue #363 review).
+    pub fn replace_bytes(
+        &self,
+        segments: &[&str],
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> CliResult<RequestSpec> {
+        Ok(RequestSpec::new(Method::PUT, self.item_path(segments)?)
+            .with_raw_body(media_type, bytes))
     }
 
     /// `PATCH` a partial update over the item.
@@ -191,13 +205,28 @@ impl ListParams {
         self
     }
 
-    /// Fold pagination, filters, and sort keys into a request spec.
+    /// Fold the explicit filters — and only those — into a request spec.
     ///
-    /// `pub(crate)` so a family builder can thread operator-supplied query
-    /// parameters onto a mutation too: `promoteAssetVisibility` declares
-    /// `platform`, which reaches the CLI as a filter and would otherwise be
-    /// dropped the same way `getAsset`'s was.
-    pub(crate) fn apply(&self, mut spec: RequestSpec) -> RequestSpec {
+    /// This is the mutation-side entry point. `deleteAsset`, `putAsset`, and
+    /// `promoteAssetVisibility` each declare a `platform` query parameter that
+    /// selects *which variant* the call acts on, and it reaches the CLI as a
+    /// `--filter`; dropping it on a delete destroys a different object than the
+    /// operator named, with exit 0 and no diagnostic (issue #363 review).
+    ///
+    /// Pagination and sort are deliberately excluded rather than merely
+    /// unnecessary here: `--limit 5` on a `POST .../visibility` would put
+    /// list-walking state on a mutation, which is the same ambiguity the
+    /// `--all-pages`-on-a-mutation refusal exists to prevent.
+    pub(crate) fn apply_filters(&self, mut spec: RequestSpec) -> RequestSpec {
+        for (key, value) in &self.filters {
+            spec = spec.with_query(key.clone(), value.clone());
+        }
+        spec
+    }
+
+    /// Fold pagination, filters, and sort keys into a request spec. Read-side
+    /// only; a mutation uses [`ListParams::apply_filters`].
+    fn apply(&self, mut spec: RequestSpec) -> RequestSpec {
         if let Some(page) = &self.page {
             spec = spec.with_page(page);
         }

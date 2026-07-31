@@ -85,6 +85,19 @@ struct ResourceArgs {
     #[arg(long, value_name = "PATH")]
     file: Option<PathBuf>,
 
+    /// Path to the raw bytes a binary write verb publishes (`-` reads stdin).
+    /// Accepted only by verbs whose contract body is binary (`assets put`); the
+    /// bytes are sent verbatim, never decoded or re-encoded.
+    #[arg(long = "body-file", value_name = "PATH", conflicts_with_all = ["data", "file"])]
+    body_file: Option<PathBuf>,
+
+    /// Request header declared by the operation, as `NAME=VALUE` (repeatable).
+    /// This is the header-parameter counterpart of `--filter`: `putAsset`'s
+    /// `x-asset-signature` / `x-site-public`, `getAsset`'s `Range`. Headers the
+    /// client owns — the credential and the audit identity — are refused.
+    #[arg(long = "header", value_name = "NAME=VALUE")]
+    headers: Vec<String>,
+
     /// Page size for a list verb.
     #[arg(long, value_name = "N")]
     limit: Option<u64>,
@@ -132,7 +145,16 @@ struct ResourceArgs {
 impl ResourceArgs {
     /// Fold the parsed resource flags into the framework-neutral
     /// [`ResourceInput`] the shared request builders consume.
-    fn to_input(&self) -> CliResult<ResourceInput> {
+    ///
+    /// `raw_media_type` is the invoked verb's declared
+    /// [`RequestMode`](ferrogate_control_plane_client::command::RequestMode):
+    /// `Some(default_content_type)` for a verb whose contract body is binary,
+    /// `None` for the JSON-document majority. Both mismatches are refused here,
+    /// in one place, so neither can reach the wire: a document handed to a
+    /// binary verb would publish a JSON-quoted approximation of the artifact,
+    /// and bytes handed to a document verb would be sent as a body the server's
+    /// schema cannot parse.
+    fn to_input(&self, raw_media_type: Option<&str>) -> CliResult<ResourceInput> {
         let mut list = ListParams::new();
         // Under --all-pages the walker owns the cursor, so no offset/limit is
         // baked into the spec here; `--limit` becomes the walk's page size.
@@ -174,11 +196,54 @@ impl ResourceArgs {
 
         let mut input = ResourceInput::new()
             .with_segments(self.segments.clone())
-            .with_list(list);
-        if let Some(body) = self.read_body()? {
-            input = input.with_body(body);
+            .with_list(list)
+            .with_headers(self.parse_headers()?);
+        match raw_media_type {
+            Some(media_type) => {
+                if self.data.is_some() || self.file.is_some() {
+                    return Err(CliError::usage(
+                        "this verb publishes bytes, not a JSON document; supply the artifact with \
+                         --body-file <PATH> instead of --data/--file"
+                            .to_string(),
+                    ));
+                }
+                if let Some(path) = &self.body_file {
+                    input = input.with_raw_body(media_type, read_bytes_or_stdin(path)?);
+                }
+            }
+            None => {
+                if self.body_file.is_some() {
+                    return Err(CliError::usage(
+                        "--body-file applies to verbs whose request body is binary; this verb \
+                         takes a JSON request document via --data or --file"
+                            .to_string(),
+                    ));
+                }
+                if let Some(body) = self.read_body()? {
+                    input = input.with_body(body);
+                }
+            }
         }
         Ok(input)
+    }
+
+    /// Parse `--header NAME=VALUE` pairs. Splitting on the first `=` keeps a
+    /// value containing `=` (a base64 signature, for one) intact.
+    fn parse_headers(&self) -> CliResult<Vec<(String, String)>> {
+        self.headers
+            .iter()
+            .map(|header| {
+                let (name, value) = header.split_once('=').ok_or_else(|| {
+                    CliError::usage(format!("--header must be NAME=VALUE, got '{header}'"))
+                })?;
+                if name.trim().is_empty() {
+                    return Err(CliError::usage(format!(
+                        "--header name must not be empty in '{header}'"
+                    )));
+                }
+                Ok((name.trim().to_string(), value.to_string()))
+            })
+            .collect()
     }
 
     /// Read and parse the request document from `--data` or `--file`, if either
@@ -199,6 +264,29 @@ impl ResourceArgs {
             }
             None => Ok(None),
         }
+    }
+}
+
+/// Read a publish payload as bytes, never as text.
+///
+/// `read_to_string` would be a corruption bug here for the same reason
+/// `String::from_utf8_lossy` was one on the download side: an artifact is not
+/// UTF-8, and a lossy decode would replace every invalid byte with U+FFFD before
+/// the object ever reached the bucket.
+fn read_bytes_or_stdin(path: &Path) -> CliResult<Vec<u8>> {
+    if path.as_os_str() == "-" {
+        let mut buffer = Vec::new();
+        std::io::stdin().read_to_end(&mut buffer).map_err(|error| {
+            CliError::usage(format!("failed to read request bytes from stdin: {error}"))
+        })?;
+        Ok(buffer)
+    } else {
+        std::fs::read(path).map_err(|error| {
+            CliError::usage(format!(
+                "failed to read request bytes from {}: {error}",
+                path.display()
+            ))
+        })
     }
 }
 
@@ -330,7 +418,7 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     // Confirmation deliberately precedes this conversion: `--file -` may
     // consume stdin, and a guarded mutation must not lose its prompt merely
     // because its request body also comes from stdin.
-    let input = resource.to_input()?;
+    let input = resource.to_input(descriptor.raw_request_media_type())?;
 
     // `--sort` is honest about being unhonored. A structural parse of
     // `docs/openapi/admin-api.openapi.json` finds **zero** operations declaring

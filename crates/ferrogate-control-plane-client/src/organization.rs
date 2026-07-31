@@ -87,7 +87,7 @@ impl CommandGroup for TenantAccountsGroup {
 /// precise operator intent); everything else is CRUD keyed by `tenant_id`.
 pub fn build_tenant_accounts(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
-        "resolved-defaults" => TENANT_ACCOUNTS.get(
+        "resolved-defaults" => TENANT_ACCOUNTS.read(
             &[
                 first_segment(input, "tenant-accounts")?,
                 "resolved-defaults",

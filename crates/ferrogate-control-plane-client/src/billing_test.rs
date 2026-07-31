@@ -247,7 +247,7 @@ fn wallet_money_body_passes_through_exactly_unrounded() {
             .with_body(serde_json::json!({"delta_credits": -123456789})),
     )
     .unwrap();
-    assert_eq!(adjust.body.as_ref().unwrap()["delta_credits"], -123456789);
+    assert_eq!(adjust.json_body().unwrap()["delta_credits"], -123456789);
 
     let (transport, seen) = fake(200, br#"{"balance_credits": 999}"#);
     let client =

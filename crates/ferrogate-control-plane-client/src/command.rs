@@ -98,6 +98,26 @@ pub enum ResponseMode {
     Raw { media_type: String },
 }
 
+/// How a verb's request body is supplied on the command line.
+///
+/// The mirror image of [`ResponseMode`], and load-bearing for the same reason:
+/// the generic dispatcher has to know whether `--data`/`--file` (a JSON
+/// document) or `--body-file` (opaque bytes) is the correct way to feed this
+/// operation, and the two are not interchangeable. `putAsset` declares a `*/*`
+/// binary body — routing an artifact through `serde_json` cannot express it —
+/// while every other mutation on the surface takes a document. Declaring it here
+/// means a verb added tomorrow states which it is, and the dispatcher refuses
+/// the wrong flag with a message naming the right one instead of sending a
+/// JSON-quoted approximation of a tarball.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestMode {
+    /// A complete JSON document, or no body at all.
+    Json,
+    /// Opaque bytes read from a file or stdin, sent under `media_type` unless
+    /// the operator restates `content-type` explicitly.
+    Raw { media_type: String },
+}
+
 /// Whether a read verb's response is allowed to carry its group's one-time
 /// secret material out to the operator.
 ///
@@ -137,6 +157,8 @@ pub struct VerbDescriptor {
     pub confirmation: ConfirmationPolicy,
     /// Whether the response is structured CLI data or a byte-faithful export.
     pub response_mode: ResponseMode,
+    /// Whether the request body is a JSON document or opaque bytes.
+    pub request_mode: RequestMode,
     /// Whether this verb's response legitimately carries the group's one-time
     /// secret material (issue #363: `download-url` was blanking its own
     /// payload).
@@ -173,6 +195,7 @@ impl VerbDescriptor {
             effect: VerbEffect::Read,
             confirmation: ConfirmationPolicy::None,
             response_mode: ResponseMode::Structured,
+            request_mode: RequestMode::Json,
             secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
@@ -195,6 +218,7 @@ impl VerbDescriptor {
             response_mode: ResponseMode::Raw {
                 media_type: media_type.into(),
             },
+            request_mode: RequestMode::Json,
             secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
@@ -215,8 +239,30 @@ impl VerbDescriptor {
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::None,
             response_mode: ResponseMode::Structured,
+            request_mode: RequestMode::Json,
             secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
+        }
+    }
+
+    /// A **state-changing** verb whose request body is the artifact itself
+    /// rather than a document describing it.
+    ///
+    /// `media_type` is what the bytes are labelled as when the operator does not
+    /// say otherwise. For `putAsset` — whose contract body is `*/*` — that is
+    /// `application/octet-stream`; a static-site bundle or a signed archive
+    /// restates it with `--header content-type=…`.
+    pub fn raw_write(
+        name: impl Into<String>,
+        about: impl Into<String>,
+        operation_id: impl Into<String>,
+        media_type: impl Into<String>,
+    ) -> VerbDescriptor {
+        VerbDescriptor {
+            request_mode: RequestMode::Raw {
+                media_type: media_type.into(),
+            },
+            ..VerbDescriptor::mutating(name, about, operation_id)
         }
     }
 
@@ -234,6 +280,7 @@ impl VerbDescriptor {
             effect: VerbEffect::Mutating,
             confirmation: ConfirmationPolicy::Required,
             response_mode: ResponseMode::Structured,
+            request_mode: RequestMode::Json,
             secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
@@ -248,6 +295,7 @@ impl VerbDescriptor {
             effect: VerbEffect::Local,
             confirmation: ConfirmationPolicy::None,
             response_mode: ResponseMode::Structured,
+            request_mode: RequestMode::Json,
             secret_disclosure: SecretDisclosure::Redacted,
             positional_query_segments: 0,
         }
@@ -298,6 +346,15 @@ impl VerbDescriptor {
         match &self.response_mode {
             ResponseMode::Structured => None,
             ResponseMode::Raw { media_type } => Some(media_type),
+        }
+    }
+
+    /// The default media type of a request body supplied as opaque bytes, or
+    /// `None` when this verb takes a JSON document.
+    pub fn raw_request_media_type(&self) -> Option<&str> {
+        match &self.request_mode {
+            RequestMode::Json => None,
+            RequestMode::Raw { media_type } => Some(media_type),
         }
     }
 }
