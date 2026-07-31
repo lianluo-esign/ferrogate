@@ -107,6 +107,20 @@ class FakeMemoryHost implements AgentMemoryHost {
     this.state = state;
   }
 
+  /**
+   * Models `ctx.storage.transactionSync`: a throw inside `body` must leave the
+   * table exactly as it was, so a half-written batch cannot be observed.
+   */
+  transactionSync<T>(body: () => T): T {
+    const snapshot = this.rows.map((r) => ({ ...r }));
+    try {
+      return body();
+    } catch (err) {
+      this.rows = snapshot;
+      throw err;
+    }
+  }
+
   rawSql(query: string, bindings: SqlBinding[]): RawSqlResult {
     this.statements.push(query);
     const sql = query.trim().toLowerCase();
@@ -296,6 +310,51 @@ describe("memoryChatHistoryAppend", () => {
       code: "sqlite_full",
     });
   });
+
+  it("rolls the whole batch back when one message fails mid-write", () => {
+    // A per-row loop would leave the rows before the failure persisted. The
+    // batch is one transaction, so a failure anywhere leaves the table
+    // untouched — no partially applied append is observable.
+    const host = new FakeMemoryHost(0, 10);
+    const original = host.rawSql.bind(host);
+    let inserts = 0;
+    host.rawSql = ((query: string, bindings: SqlBinding[]) => {
+      if (query.trim().toLowerCase().startsWith("insert or replace into")) {
+        inserts += 1;
+        if (inserts === 3) throw new Error("value too large");
+      }
+      return original(query, bindings);
+    }) as AgentMemoryHost["rawSql"];
+
+    const result = memoryChatHistoryAppend(host, [
+      { id: "a", message: 1 },
+      { id: "b", message: 2 },
+      { id: "c", message: 3 },
+      { id: "d", message: 4 },
+    ]);
+    expect(result).toMatchObject({ ok: false, code: "sql_error" });
+    expect(host.rows).toEqual([]);
+  });
+
+  it("still leaves history at or below the cap when the batch fails", () => {
+    // The post-condition "history <= cap once append returns" has to hold on
+    // the failure path too — the table can already be over cap from a layer-2
+    // INSERT, and a rolled-back batch does not fix that on its own.
+    const host = new FakeMemoryHost(9, 4);
+    const original = host.rawSql.bind(host);
+    host.rawSql = ((query: string, bindings: SqlBinding[]) => {
+      if (query.trim().toLowerCase().startsWith("insert or replace into")) {
+        throw new Error("value too large");
+      }
+      return original(query, bindings);
+    }) as AgentMemoryHost["rawSql"];
+
+    expect(memoryChatHistoryAppend(host, [{ id: "x", message: 1 }])).toMatchObject({
+      ok: false,
+      code: "sql_error",
+    });
+    expect(host.rows.length).toBeLessThanOrEqual(host.maxPersistedMessages);
+  });
 });
 
 describe("isChatMessageInput", () => {
@@ -365,11 +424,61 @@ describe("reservedTableViolation", () => {
     );
   });
 
-  it("does not mistake a string literal mentioning the table for a reference", () => {
+  it("refuses a single-quoted token naming the table — SQLite reads it as an identifier", () => {
+    // A single-quoted token IS an identifier wherever an identifier is legal
+    // and a string is not, so this statement really does write the control
+    // table. Skipping single-quoted regions let it straight through.
+    expect(
+      reservedTableViolation(
+        "insert into 'cf_agents_schedules' (id, callback, type, time) values ('x','destroyRun','scheduled',1)",
+      ),
+    ).toMatch(/cf_agents_schedules/);
+    // The blunt consequence: a literal that only mentions the name is refused
+    // too. Bound parameters are the escape hatch — they are never scanned.
     expect(
       reservedTableViolation("insert into notes (id, body) values ('n1', 'cf_agents_state')"),
-    ).toBeNull();
-    expect(reservedTableViolation("select 'it''s cf_agents_state' as note")).toBeNull();
+    ).toMatch(/cf_agents_state/);
+    expect(reservedTableViolation("insert into notes (id, body) values (?, ?)")).toBeNull();
+  });
+
+  it("does not let a quoted identifier desynchronize the scan", () => {
+    // SQLite treats `--`, `/*` and `'` inside a quoted identifier as ordinary
+    // characters. A scanner that does not swallows the rest of the statement
+    // and reports the reserved name it never reached.
+    for (const construction of [
+      `with t as (select 1 as "a--b") insert into cf_agents_state (id, state) values ('x','{}')`,
+      `with t as (select 1 as "a/*b") insert into cf_agents_state (id, state) values ('x','{}')`,
+      `with t as (select 1 as "a'b") insert into cf_agents_state (id, state) select 'x','{}'`,
+      `select 1 as \`a--b\`; delete from cf_agents_state`,
+      `select 1 as [a--b]; delete from cf_agents_state`,
+      `select "a'b", * from cf_agents_state where c='d'`,
+    ]) {
+      expect(reservedTableViolation(construction)).toMatch(/cf_agents_/);
+    }
+  });
+
+  it("keeps a quoted body from splicing onto the preceding token", () => {
+    // `from"cf_agents_state"` is valid SQLite. Unwrapping the quotes in place
+    // would put `from` immediately before the name and break the \b anchor.
+    expect(reservedTableViolation('delete from"cf_agents_state"')).toMatch(
+      /cf_agents_state/,
+    );
+  });
+
+  it("refuses a statement it cannot tokenize to the end", () => {
+    // Fail-closed: running off the end of an unterminated region used to mean
+    // "found nothing, allow". Unterminated quoting is a SQLite syntax error
+    // anyway, so nothing valid is lost.
+    expect(reservedTableViolation("select 1 /* never closed")).toMatch(/unterminated/);
+    expect(reservedTableViolation("select 'never closed")).toMatch(/unterminated/);
+    expect(reservedTableViolation('select "never closed')).toMatch(/unterminated/);
+    expect(reservedTableViolation("select [never closed")).toMatch(/unterminated/);
+    expect(reservedTableViolation("select `never closed")).toMatch(/unterminated/);
+  });
+
+  it("still reads a doubled quote as an escape, not as a closer", () => {
+    expect(reservedTableViolation("select 'it''s fine' as note")).toBeNull();
+    expect(reservedTableViolation('select 1 as "a""b"')).toBeNull();
   });
 
   it("does not fire on a table that merely ends with the reserved prefix", () => {
@@ -502,6 +611,44 @@ describe("memory routes (Worker-side E2E)", () => {
     expect(await res.json()).toMatchObject({ error: "sql_forbidden" });
   });
 
+  it("refuses a quoting construction that desynchronizes a naive scan", async () => {
+    // End-to-end proof for the lexer fix: the `"a--b"` alias made the guard
+    // discard the rest of the line, so this single statement reached
+    // `sql.exec` and wrote `cf_agents_state` past `validateStateChange`.
+    const instance = "fg.tenant-e2e.sess.desync";
+    const seed = await SELF.fetch(
+      `${BASE}/memory/state/set`,
+      authed({ instance, state: validState({ lastMessage: "before" }) }),
+    );
+    expect(seed.status).toBe(200);
+
+    const res = await SELF.fetch(
+      `${BASE}/memory/sql/query`,
+      authed({
+        instance,
+        sql: `with t as (select 1 as "a--b") insert into cf_agents_state (id, state) values ('x', '{}')`,
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: "sql_forbidden" });
+
+    // The state the statement targeted is untouched.
+    const after = await SELF.fetch(`${BASE}/memory/state/get`, authed({ instance }));
+    expect(await after.json()).toMatchObject({ state: { lastMessage: "before" } });
+  });
+
+  it("refuses a single-quoted control-table name", async () => {
+    const res = await SELF.fetch(
+      `${BASE}/memory/sql/query`,
+      authed({
+        instance: "fg.tenant-e2e.sess.quoted",
+        sql: "insert into 'cf_agents_schedules' (id, callback, type, time) values ('x', 'destroyRun', 'scheduled', 1)",
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: "sql_forbidden" });
+  });
+
   it("still serves FerroGate's own tables through the same route", async () => {
     const instance = "fg.tenant-e2e.sess.sql";
     const create = await SELF.fetch(
@@ -593,6 +740,27 @@ describe("memory routes (Worker-side E2E)", () => {
       }),
     );
     expect(oversized.status).toBe(413);
+
+    // Over the 2 MB Durable Object value limit: 413, the same status
+    // `state/set` and `sql/query` report — not a 400 `sql_error` from the DO.
+    const oversizeMessage = await SELF.fetch(
+      `${BASE}/memory/chat/append`,
+      authed({
+        instance,
+        messages: [{ id: "big", message: { text: "x".repeat(2 * 1024 * 1024 + 16) } }],
+      }),
+    );
+    expect(oversizeMessage.status).toBe(413);
+
+    const longId = await SELF.fetch(
+      `${BASE}/memory/chat/append`,
+      authed({ instance, messages: [{ id: "i".repeat(257), message: 1 }] }),
+    );
+    expect(longId.status).toBe(400);
+
+    // None of the refused batches reached the table.
+    const read = await SELF.fetch(`${BASE}/memory/chat/get`, authed({ instance }));
+    expect(await read.json()).toMatchObject({ count: 0 });
   });
 
   it("keeps two instances' memory disjoint", async () => {

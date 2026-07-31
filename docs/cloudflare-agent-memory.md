@@ -57,10 +57,21 @@ route is a hole under two invariants this surface documents as enforced:
 The rule is deliberately blunt — a reserved identifier **anywhere** in the
 statement is refused, reads included — because deciding "is this position a
 write" needs a real SQL parser, and a partial parser is how such guards fail.
-Identifier quoting and comments are normalized away before the scan, and
-string literals are stripped so a literal mentioning a table is not a
-reference. Nothing legitimate is lost: layer 1 has `/memory/state/*`, layer 3
-has `/memory/chat/*`, and schedules have the #426 `/schedule/*` routes — each
+
+The scan tokenizes where SQLite does, and reads **every quoted form**:
+`"x"`, `` `x` ``, `[x]` and `'x'` alike. Single quotes are included because
+SQLite accepts a single-quoted token as an *identifier* wherever an identifier
+is legal and a string is not, so `insert into 'cf_agents_schedules' …` really
+does name the control table. The blunt consequence is that a string literal
+merely *mentioning* a reserved name is refused too; pass such text as a **bound
+parameter**, which the scan never reads. Inside a quoted region, `--`, `/*` and
+`'` are ordinary characters — treating them otherwise desynchronizes the
+scanner from SQLite's tokenizer, and the swallowed span is exactly where a
+reserved name hides. A statement whose quoting or block comment never closes is
+**refused rather than scanned past the end**: the guard fails closed.
+
+Nothing legitimate is lost: layer 1 has `/memory/state/*`, layer 3 has
+`/memory/chat/*`, and schedules have the #426 `/schedule/*` routes — each
 applying its own governance. FerroGate's own tables (`fg_*`, the chat table)
 are unaffected.
 
@@ -99,10 +110,12 @@ Worker) is the test agent's to run; it is not locally provable.
   `AgentMemoryError::SqliteFull`, and `sql_query_with_prune_on_full` runs the
   prune path (chat-history DELETE) and retries the statement once.
 - **2 MB row/value limit**: state replaces are measured and rejected (422)
-  before `setState`; oversized SQL string params are rejected (413) before
-  they reach the DO. Both checks measure **UTF-8 bytes** (`TextEncoder`), not
-  `String.length` — a code-unit count would let a multi-byte payload several
-  times over the limit through.
+  before `setState`; oversized SQL string params and oversized
+  `/memory/chat/append` messages are rejected (413) before they reach the DO.
+  Every check measures **UTF-8 bytes** (`TextEncoder`) on the JSON actually
+  persisted, not `String.length` — a code-unit count would let a multi-byte
+  payload several times over the limit through. `chat/append` also bounds the
+  caller-chosen message `id` at 256 characters (400).
 - **`maxPersistedMessages` cap**: the pinned Agents SDK (`agents` 0.0.109)
   predates the SDK-side `maxPersistedMessages` option, so the gateway enforces
   the cap itself: `MEMORY_MAX_PERSISTED_MESSAGES` (default 200) bounds
@@ -112,8 +125,12 @@ Worker) is the test agent's to run; it is not locally provable.
   from `min(total, cap)` arithmetic — the eviction outcome FerroGate records is
   an observation, not an assumption. `/memory/chat/append` applies the cap in
   the same call, so history cannot exceed it between an append and a later
-  prune. When the SDK option graduates into the pinned version, defer to it and
-  keep this route as the governed surface.
+  prune — on **both** paths: the batch is one `transactionSync`, so a failure
+  mid-batch rolls the whole append back, and the failure path prunes before
+  returning. A per-row loop would have persisted the rows before the failure
+  and skipped the prune, parking the table above the cap while reporting
+  failure. When the SDK option graduates into the pinned version, defer to it
+  and keep this route as the governed surface.
 - **A blank `MEMORY_MAX_PERSISTED_MESSAGES` means UNCONFIGURED, not zero.**
   `Number("")` is `0` and a cap of zero makes every prune delete the entire
   history, so a declared-but-empty var falls back to the default; an explicit
