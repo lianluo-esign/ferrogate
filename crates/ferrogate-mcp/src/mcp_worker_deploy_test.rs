@@ -15,9 +15,12 @@ use ferrogate_cloudflare::{
 };
 
 use super::{
-    McpSecretsStoreBinding, McpWorkerDeployer, McpWorkerSpec, DEFAULT_MCP_BEARER_SECRET_BINDING,
+    McpAuthMode, McpSecretsStoreBinding, McpWorkerDeployer, McpWorkerSpec,
+    DEFAULT_MCP_AUTH_MODE_BINDING, DEFAULT_MCP_BEARER_SECRET_BINDING,
     DEFAULT_MCP_BEARER_SECRET_NAME, DEFAULT_MCP_SCRIPT_NAME, MCP_MULTIPART_BOUNDARY,
+    MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV,
 };
+use crate::config::{McpAuthType, McpTransport};
 
 /// A transport that captures every request and replays a scripted response.
 /// (`CloudflareError` is not `Clone`, so the mock stores an owned `HttpResponse`
@@ -629,4 +632,338 @@ fn status_for_an_undeployed_script_reports_no_url_even_though_the_spec_knows_one
         spec.mcp_endpoint_url().as_deref(),
         Some("https://ferrogate-mcp-server.acme.workers.dev/mcp")
     );
+}
+
+// ---------------------------------------------------------------------------
+// #409 test-lane additions: the authless variant and the register-back-as-an-
+// upstream leg landed in d1a62932 with NO Rust coverage at all ("Not-tested: no
+// Worker-side coverage added for the authless route or for `upstream_config`").
+// Everything below either drives one of those paths or pins a value that two
+// separate artifacts (this crate and workers/mcp-server) must agree on.
+// ---------------------------------------------------------------------------
+
+/// The Worker source this crate deploys, read from the repo so a rename on
+/// either side of the deploy boundary is a failing test rather than a runtime
+/// binding that is simply never read.
+fn worker_source() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../workers/mcp-server/src/index.ts");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read the deployed Worker source at {path:?}: {e}"))
+}
+
+#[test]
+fn an_authless_deploy_omits_the_oauth_kv_binding_it_would_have_no_namespace_for() {
+    // An authless deploy persists no grants. Emitting `OAUTH_KV` anyway would
+    // carry the unset namespace id and fail the upload for a reason the operator
+    // never asked about.
+    let spec = McpWorkerSpec::new("export default {};").authless();
+    let meta = spec.metadata_json();
+    let bindings = meta["bindings"].as_array().expect("bindings is an array");
+
+    assert!(
+        bindings.iter().all(|b| b["type"] != "kv_namespace"),
+        "authless must declare no KV binding: {bindings:?}"
+    );
+    // The DO binding is NOT optional: authless still serves from the DO.
+    assert_eq!(bindings[0]["type"], "durable_object_namespace");
+    assert_eq!(meta["migrations"]["new_sqlite_classes"][0], "FerroGateMcp");
+    // …and it must not reach the wire either, not merely be absent from a view.
+    let body = String::from_utf8(spec.multipart_body()).unwrap();
+    assert!(!body.contains("kv_namespace"), "authless body: {body}");
+
+    // Setting a namespace id does not resurrect it: the mode decides.
+    let with_id = McpWorkerSpec::new("export default {};")
+        .authless()
+        .with_kv_namespace_id("kv-abc123");
+    let body = String::from_utf8(with_id.multipart_body()).unwrap();
+    assert!(!body.contains("kv-abc123"), "authless body leaked a KV id: {body}");
+
+    // The OAuth default keeps it, so the assertion above is about the mode and
+    // not about a binding this pipeline stopped emitting entirely.
+    let oauth = McpWorkerSpec::new("export default {};").with_kv_namespace_id("kv-abc123");
+    assert!(oauth.metadata_json()["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["type"] == "kv_namespace"));
+}
+
+#[test]
+fn the_auth_mode_reaches_the_worker_as_a_plain_text_binding_in_both_modes() {
+    for (mode, wire) in [
+        (McpAuthMode::Oauth, "oauth"),
+        (McpAuthMode::Authless, "authless"),
+    ] {
+        let spec = McpWorkerSpec::new("export default {};").with_auth_mode(mode);
+        let meta = spec.metadata_json();
+        let binding = meta["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == DEFAULT_MCP_AUTH_MODE_BINDING)
+            .unwrap_or_else(|| panic!("{wire}: no {DEFAULT_MCP_AUTH_MODE_BINDING} binding"));
+
+        // `plain_text`, not `secret_text`: it carries no credential, and an
+        // operator reading the script's bindings must be able to see the mode.
+        assert_eq!(binding["type"], "plain_text", "{wire}");
+        assert_eq!(binding["text"], wire, "{wire}");
+        assert_eq!(mode.as_str(), wire);
+        assert_eq!(mode.requires_oauth_kv(), wire == "oauth");
+        assert!(String::from_utf8(spec.multipart_body())
+            .unwrap()
+            .contains(&format!("\"text\":\"{wire}\"")));
+    }
+    // The default is the guarded mode, so an unspecified deploy is not authless.
+    assert_eq!(McpWorkerSpec::new("x").auth_mode, McpAuthMode::Oauth);
+}
+
+#[test]
+fn the_deployed_worker_reads_exactly_the_binding_names_and_mode_values_this_crate_sends() {
+    // These are two separate artifacts: a metadata binding the Worker never reads
+    // (or a mode string it compares differently) is inert, and no amount of
+    // per-side testing catches it. Both sides are pinned here.
+    let source = worker_source();
+
+    for binding in [
+        DEFAULT_MCP_AUTH_MODE_BINDING,
+        DEFAULT_MCP_BEARER_SECRET_BINDING,
+        super::DEFAULT_MCP_DO_BINDING,
+        super::DEFAULT_OAUTH_KV_BINDING,
+    ] {
+        assert!(
+            source.contains(&format!("{binding}:")) || source.contains(&format!("{binding}?:")),
+            "the deployed Worker declares no env.{binding}, so the deploy metadata binds \
+             something nothing reads"
+        );
+    }
+    assert!(
+        source.contains(&format!("env.{DEFAULT_MCP_AUTH_MODE_BINDING}")),
+        "the Worker must actually branch on the auth-mode binding, not just type it"
+    );
+    // The mode value is a string comparison on the Worker side; `oauth` is only
+    // "everything that is not authless", so `authless` is the one that must match.
+    assert!(
+        source.contains(&format!("\"{}\"", McpAuthMode::Authless.as_str())),
+        "the Worker does not recognise the authless value this crate sends"
+    );
+    assert!(
+        source.contains(&format!("class {}", super::DEFAULT_MCP_DO_CLASS)),
+        "the DO class the migration declares does not exist in the deployed module"
+    );
+}
+
+#[test]
+fn an_oauth_deploy_registers_back_as_a_routable_shared_headers_upstream() {
+    let spec = McpWorkerSpec::new("export default {};").with_workers_dev_subdomain("acme");
+    let config = spec.upstream_config(vec!["*".to_string()]).unwrap();
+
+    assert_eq!(config.url.as_deref(), Some(spec.mcp_endpoint_url().unwrap().as_str()));
+    assert_eq!(config.url.as_deref(), Some("https://ferrogate-mcp-server.acme.workers.dev/mcp"));
+    assert_eq!(config.transport, McpTransport::StreamableHttp);
+    assert_eq!(config.auth_type, McpAuthType::SharedHeaders);
+    assert_eq!(config.headers.len(), 1);
+    assert_eq!(config.headers[0].name, "Authorization");
+    assert_eq!(
+        config.headers[0].value_env.as_deref(),
+        Some(MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV)
+    );
+    // A literal value would put the credential in config; only the env indirection
+    // is acceptable here.
+    assert_eq!(config.headers[0].value, None);
+
+    // "Deployed" and "routable" must be the same fact: the gateway's own
+    // validator accepts what this produced.
+    crate::config::validate_mcp_server_config(&config).expect("registered upstream must validate");
+    // The tool namespace is `serverName-toolName`, so the registered name cannot
+    // contain '-' — the default SCRIPT name does.
+    assert!(!config.name.contains('-'), "{}", config.name);
+    assert_eq!(config.name, "ferrogate_mcp_server");
+    assert!(spec.wire_script_name().contains('-'));
+}
+
+#[test]
+fn an_authless_deploy_registers_with_no_credential_rather_than_an_unusable_header() {
+    let config = McpWorkerSpec::new("export default {};")
+        .authless()
+        .with_workers_dev_subdomain("acme")
+        .upstream_config(vec!["echo".to_string()])
+        .unwrap();
+
+    assert_eq!(config.auth_type, McpAuthType::None);
+    // `auth_type: none` + a static header is a config the validator rejects
+    // outright, so an authless registration MUST carry no headers.
+    assert!(config.headers.is_empty());
+    crate::config::validate_mcp_server_config(&config).expect("authless upstream must validate");
+    assert_eq!(config.tools_to_execute, vec!["echo".to_string()]);
+}
+
+#[test]
+fn the_authorization_the_gateway_sends_is_the_complete_header_value_the_worker_accepts() {
+    // The Worker's front door parses `Authorization: Bearer <token>` and rejects
+    // anything whose first token is not the `Bearer` scheme. FerroGate substitutes
+    // a static header's `value_env` VERBATIM, so the variable must hold the whole
+    // header value. This is the write-path/read-path pair that a "the env var is
+    // named correctly" assertion would never catch.
+    let config = McpWorkerSpec::new("export default {};")
+        .with_workers_dev_subdomain("acme")
+        .upstream_config(vec!["*".to_string()])
+        .unwrap();
+
+    std::env::set_var(MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV, "Bearer s3cret-token");
+    let resolved = crate::config::resolved_headers(&config).expect("headers resolve");
+    std::env::remove_var(MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV);
+
+    assert_eq!(resolved, vec![("Authorization".to_string(), "Bearer s3cret-token".to_string())]);
+    let (_, value) = &resolved[0];
+    let (scheme, token) = value.split_once(' ').expect("a scheme and a credential");
+    assert!(scheme.eq_ignore_ascii_case("bearer"), "the Worker only accepts the Bearer scheme");
+    assert_eq!(token, "s3cret-token", "the token must reach the Worker unmodified");
+
+    // And an unset variable is a named failure, not a silently empty header.
+    let err = crate::config::resolved_headers(&config).unwrap_err();
+    assert!(
+        format!("{err:#}").contains(MCP_WORKER_UPSTREAM_AUTHORIZATION_ENV),
+        "the error must name the variable to set: {err:#}"
+    );
+}
+
+#[test]
+fn a_deployed_server_with_no_known_url_is_refused_registration_rather_than_guessed() {
+    let err = McpWorkerSpec::new("export default {};")
+        .upstream_config(vec!["*".to_string()])
+        .unwrap_err();
+    let CloudflareError::Config(message) = &err else {
+        panic!("expected a config error, got {err:?}");
+    };
+    assert!(
+        message.contains("workers.dev") && message.contains("with_workers_dev_subdomain"),
+        "the error must say how to obtain the URL: {message}"
+    );
+}
+
+#[test]
+fn a_registration_the_gateway_would_reject_fails_at_the_deploy_seam_not_at_load_time() {
+    // Execution is deny-by-default: an empty allowlist is not "allow nothing
+    // yet", it is a config the gateway refuses. Better to learn that here than
+    // from a gateway that will not start after a successful deploy.
+    let spec = McpWorkerSpec::new("export default {};").with_workers_dev_subdomain("acme");
+    let err = spec.upstream_config(Vec::new()).unwrap_err();
+    let CloudflareError::Config(message) = &err else {
+        panic!("expected a config error, got {err:?}");
+    };
+    assert!(
+        message.contains("tools_to_execute"),
+        "the deploy seam must forward the validator's reason: {message}"
+    );
+    assert!(message.contains("ferrogate-mcp-server"), "and name the script: {message}");
+}
+
+#[test]
+fn the_registered_url_is_the_same_string_deploy_and_status_report() {
+    // Three call sites produce "the URL of the deployed server". If they can
+    // disagree, an operator registers one thing and monitors another.
+    let transport = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":{"id":"ferrogate-mcp-server"}}"#,
+    ));
+    let deploy_client = deployer(transport.clone());
+    let spec = McpWorkerSpec::new("export default {};").with_workers_dev_subdomain("acme");
+    let rt = runtime();
+
+    let deployed = rt.block_on(deploy_client.deploy(&spec)).unwrap().mcp_url;
+    let registered = spec.upstream_config(vec!["*".to_string()]).unwrap().url;
+    assert_eq!(deployed, registered);
+
+    let listing = CapturingTransport::new(ok(
+        200,
+        r#"{"success":true,"errors":[],"messages":[],"result":[{"id":"ferrogate-mcp-server"}]}"#,
+    ));
+    let status_client = deployer(listing);
+    let status = rt.block_on(status_client.status_for(&spec)).unwrap();
+    assert_eq!(status.mcp_url, registered);
+}
+
+#[test]
+fn an_empty_script_name_is_refused_before_anything_is_signed_or_sent() {
+    // `wrangler.toml`'s name is an operator-typed field; empty, it would PUT to
+    // `/workers/scripts/` — a different endpoint entirely.
+    let transport = CapturingTransport::new(ok(200, "{}"));
+    let deployer = deployer(transport.clone());
+    let mut spec = McpWorkerSpec::new("export default {};");
+    spec.script_name = "   ".to_string();
+
+    let err = deployer.build_deploy_request(&spec).unwrap_err();
+    assert!(
+        matches!(&err, CloudflareError::Config(message) if message.contains("script_name")),
+        "got {err:?}"
+    );
+    assert!(transport.captured.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_do_binding_class_and_kv_names_reach_cloudflare_trimmed_and_agree_with_the_migration() {
+    // A class name that disagrees between the binding and `new_sqlite_classes`
+    // declares a migration for a class nothing binds — Cloudflare accepts the
+    // upload and the DO is unreachable.
+    let mut spec = McpWorkerSpec::new("export default {};").with_kv_namespace_id(" kv-abc123 ");
+    spec.do_binding_name = " MCP_OBJECT ".to_string();
+    spec.do_class_name = " FerroGateMcp\t".to_string();
+    spec.kv_binding_name = " OAUTH_KV ".to_string();
+
+    spec.validate().unwrap();
+    let meta = spec.metadata_json();
+    assert_eq!(meta["bindings"][0]["name"], "MCP_OBJECT");
+    assert_eq!(meta["bindings"][0]["class_name"], "FerroGateMcp");
+    assert_eq!(meta["bindings"][1]["name"], "OAUTH_KV");
+    assert_eq!(meta["bindings"][1]["namespace_id"], "kv-abc123");
+    assert_eq!(
+        meta["migrations"]["new_sqlite_classes"][0],
+        meta["bindings"][0]["class_name"],
+        "the migrated class and the bound class must be the same string"
+    );
+
+    // Untrimmed names must not survive anywhere in the request body either.
+    let body = String::from_utf8(spec.multipart_body()).unwrap();
+    assert!(!body.contains(" MCP_OBJECT "), "{body}");
+    assert!(!body.contains(" kv-abc123 "), "{body}");
+
+    // And the URL the PUT goes to is the trimmed script name, not the typed one.
+    let mut padded = McpWorkerSpec::new("export default {};");
+    padded.script_name = " tenant-mcp ".to_string();
+    let request = deployer(CapturingTransport::new(ok(200, "{}")))
+        .build_deploy_request(&padded)
+        .unwrap();
+    assert!(request.url.ends_with("/workers/scripts/tenant-mcp"), "{}", request.url);
+}
+
+#[test]
+fn a_secret_binding_colliding_with_the_auth_mode_binding_is_refused_too() {
+    // MCP_AUTH_MODE shares the flat bindings[] namespace, so a secret named the
+    // same would make `env.MCP_AUTH_MODE` Cloudflare's choice — and the mode
+    // fails closed, so the silent outcome is "the authless deploy kept OAuth".
+    let spec = McpWorkerSpec::new("export default {};").with_secrets_store_binding(
+        McpSecretsStoreBinding {
+            binding_name: DEFAULT_MCP_AUTH_MODE_BINDING.to_string(),
+            store_id: "store-9f3".to_string(),
+            secret_name: "mcp-bearer-token".to_string(),
+        },
+    );
+    let err = spec.validate().unwrap_err();
+    assert!(
+        matches!(&err, CloudflareError::Config(m) if m.contains(DEFAULT_MCP_AUTH_MODE_BINDING)),
+        "got {err:?}"
+    );
+
+    // In authless mode the KV binding is not emitted, so a secret may legally
+    // take that name — the duplicate check must follow what is actually sent.
+    McpWorkerSpec::new("export default {};")
+        .authless()
+        .with_secrets_store_binding(McpSecretsStoreBinding {
+            binding_name: "OAUTH_KV".to_string(),
+            store_id: "store-9f3".to_string(),
+            secret_name: "mcp-bearer-token".to_string(),
+        })
+        .validate()
+        .expect("authless emits no KV binding, so there is nothing to collide with");
 }

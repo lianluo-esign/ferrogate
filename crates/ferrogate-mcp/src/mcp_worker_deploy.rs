@@ -680,7 +680,7 @@ impl McpWorkerSpec {
         // An authless deploy persists no OAuth grants, so it declares no KV
         // binding. Emitting one anyway would carry the unset `kv_namespace_id`
         // and fail the upload for a reason the operator never asked about.
-        if self.auth_mode.requires_oauth_kv() {
+        {
             bindings.push(json!({
                 "type": "kv_namespace",
                 "name": self.wire_kv_binding_name(),
