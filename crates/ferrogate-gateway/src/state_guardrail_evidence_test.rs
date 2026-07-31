@@ -458,6 +458,51 @@ fn final_outcome_reads_the_stored_decision_for_new_rows() {
     );
 }
 
+/// #571 box 2 — a streamed request log carries the `200` its header was
+/// written with even when the stream died mid-answer, so `final_outcome`
+/// derived from the status alone called an interrupted generation
+/// `succeeded`. The typed terminal outcome on `error_code` is the only thing
+/// on the row that knows better; dropping that term from
+/// `investigation_final_outcome` puts this back to `succeeded`.
+#[test]
+fn an_interrupted_stream_never_reads_as_a_succeeded_investigation() {
+    // Precondition: the status alone is indistinguishable from a clean stream.
+    let clean = request_log("request-clean-stream", 200);
+    assert_eq!(clean.error_code, None);
+    assert_eq!(investigation_final_outcome(&[clean], &[]), "succeeded");
+
+    for outcome in [
+        StreamTerminalOutcome::ProviderFailedBeforeFirstByte,
+        StreamTerminalOutcome::ProviderFailedAfterFirstByte,
+        StreamTerminalOutcome::DownstreamFailedBeforeFirstByte,
+        StreamTerminalOutcome::DownstreamFailedAfterFirstByte,
+    ] {
+        let mut interrupted = request_log("request-broken-stream", 200);
+        interrupted.error_code = outcome.request_log_error_code().map(str::to_string);
+        assert_eq!(
+            investigation_final_outcome(&[interrupted], &[]),
+            "failed",
+            "{outcome:?} must not be reported as a finished request"
+        );
+    }
+}
+
+/// #571: `final_outcome` reads only tokens THIS build produced. An error code
+/// from any other vocabulary is not a stream verdict, so it must not be
+/// silently promoted into one — the surrounding status-based branches stay in
+/// charge of it.
+#[test]
+fn a_foreign_error_code_is_not_read_as_a_stream_verdict() {
+    let mut other = request_log("request-other-failure", 200);
+    other.error_code = Some("rate_limit_exceeded".into());
+    assert_eq!(investigation_final_outcome(&[other], &[]), "succeeded");
+
+    // And it still loses to the status-based branches when those apply.
+    let mut server_error = request_log("request-server-error", 502);
+    server_error.error_code = Some("provider_dispatch_error".into());
+    assert_eq!(investigation_final_outcome(&[server_error], &[]), "failed");
+}
+
 /// #306 legacy fallback: rows persisted before migration 047 carry NO stored
 /// decision — `final_outcome` keeps deriving from the
 /// verdict/action/enforcement heuristic for exactly those rows.

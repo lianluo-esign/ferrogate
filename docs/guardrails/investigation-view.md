@@ -77,6 +77,32 @@ match the `GuardrailInvestigationTimeline` schema in the OpenAPI document.
 Raw prompt/response content is never stored in the evidence; guardrail findings
 carry only an HMAC fingerprint (`input_fingerprint`) and byte offsets.
 
+### Reading a streamed request's ending (issue #571)
+
+A streamed response has no status line of its own. Its `200` header is written
+before the first provider byte arrives, so `requests[].status_code` is `200` for
+every stream that got as far as a header — including one that died halfway.
+`requests[].error_code` is what says how the stream actually ended:
+
+| `error_code` | What happened | Did the client get bytes? |
+|---|---|---|
+| absent | The stream reached EOF and the terminal chunk was flushed. | yes, all of them |
+| `provider_stream_failed_before_first_byte` | The provider stream broke with nothing delivered yet. | no |
+| `provider_stream_failed_after_first_byte` | The provider stream broke mid-answer. The delivered answer is partial and the generation's true end state is unknown. | yes, partially |
+| `stream_downstream_failed_before_first_byte` | Writing to the client failed before anything landed. | no |
+| `stream_downstream_failed_after_first_byte` | Writing to the client failed mid-answer; what the provider generated past that point was billed but never delivered. | yes, partially |
+
+The `_after_first_byte` half of each pair is the replay boundary: the client
+already holds part of an answer, so the gateway does not retry or fall back
+past that point — a replay would duplicate any tool call that partial answer
+carried. Both `_after_first_byte` codes therefore mean "partial, outcome
+unknown", never "failed, nothing happened".
+
+`final_outcome` reflects this: any request row carrying one of these four codes
+reads as `failed`, not `succeeded`. Error codes from other vocabularies (for
+example `rate_limit_exceeded`) are not stream verdicts and leave `final_outcome`
+to the status-based rules above.
+
 ## RBAC: which key can read investigation evidence
 
 `GET /admin/v1/investigations` requires the `admin.read` scope **and** the

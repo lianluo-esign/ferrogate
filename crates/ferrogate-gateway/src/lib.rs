@@ -370,6 +370,11 @@ mod responses;
 /// streaming normalizer that renders a Responses-shaped SSE sequence.
 mod responses_stream;
 
+/// Typed terminal outcome of a streamed provider response: how the stream
+/// actually ended, which side broke it, and whether the client had already been
+/// given bytes -- the replay boundary the durable evidence records (issue #571).
+mod stream_terminal_outcome;
+
 /// The Pingora service and everything served over it: the proxy filters, the
 /// LLM API surfaces (chat/messages/embeddings/images/MCP/A2A), and the
 /// Admin/Control API resource handlers.

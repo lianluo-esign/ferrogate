@@ -829,7 +829,7 @@ impl FerroGateway {
                             };
                             let normalizer =
                                 MessagesStreamNormalizer::new(reader, request.model.clone());
-                            let stream_result = write_streaming_response(
+                            let streamed = write_streaming_response(
                                 session,
                                 status,
                                 "text/event-stream",
@@ -905,6 +905,19 @@ impl FerroGateway {
                                 );
                             }
 
+                            if !streamed.outcome.is_complete() {
+                                warn!(
+                                    request_id = %ctx.request_id,
+                                    logical_model = %request.model,
+                                    provider = %provider.name,
+                                    provider_model = %model_route.provider_model,
+                                    stream_outcome = streamed.outcome.as_wire_token(),
+                                    client_received_bytes = streamed.outcome.client_received_bytes(),
+                                    "messages streamed response did not complete; recording partial \
+                                     terminal evidence"
+                                );
+                            }
+
                             state.record_request_log(StoredRequestLog {
                                 request_id: ctx.request_id.clone(),
                                 trace_id: ctx.trace_id.clone(),
@@ -921,8 +934,18 @@ impl FerroGateway {
                                 provider_model: Some(model_route.provider_model.clone()),
                                 gateway_config_id: None,
                                 gateway_config_revision: None,
+                                // #571: the status line the client actually
+                                // received. It was written before the first
+                                // provider byte arrived, so it cannot say
+                                // whether the stream finished -- the typed
+                                // outcome below is what carries that, and a
+                                // stream broken after its first token used to be
+                                // recorded here as a clean success.
                                 status_code: status.as_u16(),
-                                error_code: None,
+                                error_code: streamed
+                                    .outcome
+                                    .request_log_error_code()
+                                    .map(str::to_string),
                                 prompt_recorded: record_bodies,
                                 response_recorded: false,
                                 prompt_body: record_bodies.then(|| chat_body.to_string()),
@@ -941,7 +964,7 @@ impl FerroGateway {
                                         body: Vec::new(),
                                         truncated: true,
                                     });
-                                if stream_result.is_ok() {
+                                if streamed.outcome.is_complete() {
                                     // Shadow evaluation runs on the RAW chat
                                     // SSE capture with the ChatCompletions
                                     // protocol -- the same envelope chat.rs
@@ -985,7 +1008,7 @@ impl FerroGateway {
                                     }
                                 }
                             }
-                            return stream_result;
+                            return streamed.result;
                         }
                     }
                 };

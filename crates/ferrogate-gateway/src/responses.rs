@@ -6,9 +6,13 @@
 
 use bytes::Bytes;
 use http::{header, StatusCode};
-use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as PingoraResult};
+use pingora::{
+    http::ResponseHeader, proxy::Session, Error as PingoraError, ErrorType, OrErr,
+    Result as PingoraResult,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::stream_terminal_outcome::StreamedResponse;
 use ferrogate_runtime::SelfHostedWorkerIdentity;
 use ferrogate_storage::{AssetVisibility, StoredAsset};
 use std::{
@@ -2441,6 +2445,15 @@ pub(crate) fn streaming_body_channel<S: StreamingBodySource>(
 /// downstream write (client disconnect) propagates immediately: this
 /// function returns, dropping `upstream` and with it the provider
 /// connection.
+///
+/// Returns a [`StreamedResponse`] rather than a bare `PingoraResult` (issue
+/// #571). The `200` header goes out before the first provider byte arrives, so
+/// the status line cannot say whether the stream finished; the caller needs the
+/// typed terminal outcome to write honest evidence, and it needs it *before* it
+/// propagates the error, because the usage settlement and the request log both
+/// still have to run. Errors are classified by side — the provider feed versus
+/// the downstream write — and by whether the client had already been given
+/// bytes, which is the boundary past which no replay is permissible.
 pub(crate) async fn write_streaming_response<S, R>(
     session: &mut Session,
     status: StatusCode,
@@ -2449,25 +2462,32 @@ pub(crate) async fn write_streaming_response<S, R>(
     mut upstream: StreamingBodyUpstream<S>,
     mut transform: R,
     request_id: &str,
-) -> PingoraResult<()>
+) -> StreamedResponse
 where
     S: StreamingBodySource,
     R: Read + Send,
 {
-    let mut response = ResponseHeader::build(status, Some(4))?;
-    response.insert_header(header::CONTENT_TYPE, content_type)?;
-    response.insert_header("x-request-id", request_id)?;
-    response.insert_header("x-trace-id", request_id)?;
-    response.insert_header("x-ferrogate-runtime", "pingora")?;
-    apply_cors_headers(&mut response)?;
-    session
-        .write_response_header(Box::new(response), false)
-        .await?;
+    // Header construction and the header write share the "client has nothing"
+    // bucket: both leave `bytes_emitted` at zero, which is the only fact the
+    // evidence chain draws a conclusion from.
+    let mut bytes_emitted = 0_u64;
+    let header = match streaming_response_header(status, content_type, request_id) {
+        Ok(header) => header,
+        Err(error) => return StreamedResponse::downstream_failed(bytes_emitted, error),
+    };
+    if let Err(error) = session.write_response_header(Box::new(header), false).await {
+        return StreamedResponse::downstream_failed(bytes_emitted, error);
+    }
 
     if !initial_body.is_empty() {
-        session
+        let emitted = initial_body.len() as u64;
+        if let Err(error) = session
             .write_response_body(Some(Bytes::from(initial_body)), false)
-            .await?;
+            .await
+        {
+            return StreamedResponse::downstream_failed(bytes_emitted, error);
+        }
+        bytes_emitted = bytes_emitted.saturating_add(emitted);
     }
 
     let mut buffer = [0_u8; 8192];
@@ -2480,14 +2500,24 @@ where
             match transform.read(&mut buffer) {
                 Ok(0) => break 'stream,
                 Ok(read) => {
-                    session
+                    if let Err(error) = session
                         .write_response_body(Some(Bytes::copy_from_slice(&buffer[..read])), false)
-                        .await?
+                        .await
+                    {
+                        return StreamedResponse::downstream_failed(bytes_emitted, error);
+                    }
+                    bytes_emitted = bytes_emitted.saturating_add(read as u64);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => {
-                    return Err(error)
-                        .or_err(ErrorType::ReadError, "reading provider streaming response")
+                    return StreamedResponse::provider_failed(
+                        bytes_emitted,
+                        PingoraError::because(
+                            ErrorType::ReadError,
+                            "reading provider streaming response",
+                            error,
+                        ),
+                    );
                 }
             }
         }
@@ -2496,12 +2526,34 @@ where
             // EOF was fed; nothing further can arrive, so end the stream.
             break;
         }
-        upstream_done = !upstream
+        match upstream
             .advance()
             .await
-            .or_err(ErrorType::ReadError, "reading provider streaming response")?;
+            .or_err(ErrorType::ReadError, "reading provider streaming response")
+        {
+            Ok(advanced) => upstream_done = !advanced,
+            Err(error) => return StreamedResponse::provider_failed(bytes_emitted, error),
+        }
     }
-    session.write_response_body(None, true).await
+    match session.write_response_body(None, true).await {
+        Ok(()) => StreamedResponse::completed(),
+        Err(error) => StreamedResponse::downstream_failed(bytes_emitted, error),
+    }
+}
+
+/// Builds the header every streamed provider response is written with.
+fn streaming_response_header(
+    status: StatusCode,
+    content_type: &str,
+    request_id: &str,
+) -> PingoraResult<ResponseHeader> {
+    let mut response = ResponseHeader::build(status, Some(4))?;
+    response.insert_header(header::CONTENT_TYPE, content_type)?;
+    response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
+    response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(&mut response)?;
+    Ok(response)
 }
 
 pub(crate) async fn write_streaming_bytes_response(

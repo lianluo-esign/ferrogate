@@ -32,6 +32,7 @@ use crate::metering::{MeteringExportStatus, MeteringExporter};
 use crate::model_routing::{
     ModelRouteRequirements, ModelRouteSelectionReason, ModelRoutingDecision,
 };
+use crate::stream_terminal_outcome::StreamTerminalOutcome;
 use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
     ProviderAttempt, TokenUsage as BillingTokenUsage,

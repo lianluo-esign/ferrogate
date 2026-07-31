@@ -403,7 +403,9 @@ fn investigation_final_outcome(
     if guardrails.iter().any(guardrail_evaluation_denied) {
         return "blocked".to_string();
     }
-    if requests.iter().any(|request| request.status_code >= 500) {
+    if requests.iter().any(|request| request.status_code >= 500)
+        || requests.iter().any(request_stream_did_not_complete)
+    {
         "failed".to_string()
     } else if requests.iter().any(|request| request.status_code >= 400) {
         "blocked".to_string()
@@ -412,6 +414,16 @@ fn investigation_final_outcome(
     } else {
         "succeeded".to_string()
     }
+}
+
+/// #571: a streamed request log always carries the `200` its header was written
+/// with, because that header goes out before the first provider byte arrives.
+/// Deriving `final_outcome` from the status alone therefore reported a stream
+/// that died mid-answer as `succeeded`. The typed terminal outcome on
+/// `error_code` is the only thing on the row that knows better.
+fn request_stream_did_not_complete(request: &StoredRequestLog) -> bool {
+    StreamTerminalOutcome::from_request_log_error_code(request.error_code.as_deref())
+        .is_some_and(|outcome| !outcome.is_complete())
 }
 
 /// #306: group every investigation evidence row carrying a shared

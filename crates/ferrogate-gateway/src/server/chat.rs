@@ -49,6 +49,7 @@ use crate::model_routing::{
     conservative_input_token_upper_bound, ModelEndpointKind, ModelRouteRequirements,
     ModelRoutingAuditContext, ModelRoutingDecision,
 };
+use crate::stream_terminal_outcome::StreamTerminalOutcome;
 
 use super::{
     body::read_request_body,
@@ -1353,9 +1354,30 @@ impl FerroGateway {
                                 )
                                 .await;
                             }
+                            // #571: the terminal outcome is an INPUT here, not a
+                            // constant. The `200` header is already on the wire
+                            // when this runs, so `status_code` alone cannot say
+                            // whether the stream finished; a stream that broke
+                            // after its first token used to be recorded as a
+                            // clean success and disappeared from the Admin
+                            // overview's error count entirely.
                             let record_pass_through_completion =
-                                async |stream_body: Option<&[u8]>| {
+                                async |stream_body: Option<&[u8]>,
+                                       outcome: StreamTerminalOutcome| {
                                     record_stream_usage(stream_body).await;
+                                    if !outcome.is_complete() {
+                                        warn!(
+                                            request_id = %ctx.request_id,
+                                            logical_model = %request.model,
+                                            provider = %provider.name,
+                                            provider_model = %model_route.provider_model,
+                                            stream_outcome = outcome.as_wire_token(),
+                                            client_received_bytes =
+                                                outcome.client_received_bytes(),
+                                            "streamed response did not complete; recording partial \
+                                             terminal evidence"
+                                        );
+                                    }
                                     state.record_request_log(StoredRequestLog {
                                         request_id: ctx.request_id.clone(),
                                         trace_id: ctx.trace_id.clone(),
@@ -1376,8 +1398,14 @@ impl FerroGateway {
                                         gateway_config_revision: gateway_config
                                             .as_ref()
                                             .map(|profile| profile.revision),
+                                        // The status line the client actually
+                                        // received; the outcome, not a
+                                        // rewritten status, carries the truth
+                                        // about how the stream ended.
                                         status_code: response.status.as_u16(),
-                                        error_code: None,
+                                        error_code: outcome
+                                            .request_log_error_code()
+                                            .map(str::to_string),
                                         prompt_recorded: record_bodies,
                                         response_recorded: false,
                                         prompt_body: record_bodies.then(|| body_json.to_string()),
@@ -1391,7 +1419,7 @@ impl FerroGateway {
                             if streaming_guardrail_plan
                                 == crate::state::StreamingGuardrailPlan::ShadowAfterComplete
                             {
-                                let (stream_result, capture, usage_capture) = if endpoint
+                                let (streamed, capture, usage_capture) = if endpoint
                                     == AiEndpoint::Responses
                                 {
                                     let provider_kind =
@@ -1459,8 +1487,13 @@ impl FerroGateway {
                                         body: Vec::new(),
                                         truncated: true,
                                     });
-                                record_pass_through_completion(Some(&usage_body)).await;
-                                if stream_result.is_ok() {
+                                record_pass_through_completion(Some(&usage_body), streamed.outcome)
+                                    .await;
+                                // Shadow evaluation stays gated on a clean
+                                // terminal outcome: a truncated capture is not
+                                // the model's answer, and judging it would put a
+                                // verdict on text the client never received.
+                                if streamed.outcome.is_complete() {
                                     let guardrail_envelope = normalize_guardrail_response(
                                         endpoint.guardrail_protocol(),
                                         &captured.body,
@@ -1501,11 +1534,9 @@ impl FerroGateway {
                                             .await;
                                     }
                                 }
-                                return stream_result;
+                                return streamed.result;
                             }
-                            let (stream_result, usage_capture) = if endpoint
-                                == AiEndpoint::Responses
-                            {
+                            let (streamed, usage_capture) = if endpoint == AiEndpoint::Responses {
                                 let provider_kind = responses_stream_provider_kind(&provider.kind);
                                 let (upstream, feed_reader) = streaming_body_channel(response.body);
                                 let normalized = ResponsesStreamNormalizer::new(
@@ -1551,8 +1582,8 @@ impl FerroGateway {
                                 .lock()
                                 .map(|capture| capture.body())
                                 .unwrap_or_default();
-                            record_pass_through_completion(Some(&captured)).await;
-                            return stream_result;
+                            record_pass_through_completion(Some(&captured), streamed.outcome).await;
+                            return streamed.result;
                         }
                         Err(error) => {
                             state.record_provider_failure(&provider.name);
