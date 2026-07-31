@@ -782,6 +782,30 @@ pub enum AssetBucketBackend {
     WorkersStaticAssets,
 }
 
+/// Shortest presigned-URL lifetime `[asset_bucket].presign_ttl_secs` may
+/// declare (#368). Zero is not "no expiry" -- SigV4 would sign an already
+/// expired `X-Amz-Expires`, so every issued upload URL would be dead on
+/// arrival.
+pub const ASSET_PRESIGN_MIN_TTL_SECS: u64 = 1;
+
+/// Longest presigned-URL lifetime `[asset_bucket].presign_ttl_secs` may
+/// declare (#368): SigV4's own 7-day maximum for `X-Amz-Expires`. Anything
+/// larger is not a longer-lived URL, it is a URL S3-compatible backends refuse
+/// outright.
+pub const ASSET_PRESIGN_MAX_TTL_SECS: u64 = 604_800;
+
+/// Largest object a *single* presigned PUT can carry (#368/#259): S3's 5 GiB
+/// single-request object limit.
+///
+/// This is the typed link between two facts that were previously only prose:
+/// the gateway's presigned upload protocol is `single_put` (multipart is
+/// unsupported, since per-part signatures cannot bind a whole-object size and
+/// checksum), and a single PUT tops out at 5 GiB. So
+/// `[asset_bucket].presign_max_object_bytes` cannot exceed this without the
+/// gateway approving intents -- and burning tenant quota headroom on them --
+/// that no S3-compatible bucket could ever accept in one request.
+pub const ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AssetBucketConfig {
     #[serde(default)]
@@ -806,14 +830,29 @@ pub struct AssetBucketConfig {
     #[serde(default)]
     pub secret_access_key_env: Option<String>,
     /// TTL (seconds) for gateway-issued presigned upload/download URLs
-    /// (issue #259). Bounded to S3's 7-day maximum and defaulted to 15
-    /// minutes when unset -- short-lived by design so a leaked URL expires
-    /// quickly.
+    /// (issue #259). It is the **URL expiry**: the value is signed into
+    /// `X-Amz-Expires`, so the bucket itself refuses the direct PUT/GET once
+    /// it elapses. Must lie in
+    /// `[ASSET_PRESIGN_MIN_TTL_SECS, ASSET_PRESIGN_MAX_TTL_SECS]`
+    /// (#368: rejected at config load, not silently rounded, so an operator
+    /// who writes `presign_ttl_secs = 31536000` learns the URL would not have
+    /// lasted a year instead of discovering it at the bucket boundary).
+    /// Defaults to 15 minutes when unset -- short-lived by design so a leaked
+    /// URL expires quickly.
     #[serde(default)]
     pub presign_ttl_secs: Option<u64>,
     /// Per-object size ceiling (bytes) for the presigned large-file path
     /// (issue #259). Independent of the cumulative, tenant-wide
     /// `asset_storage_quota_bytes` cap. Defaults to 5 GiB when unset.
+    ///
+    /// #368: the presigned upload protocol is a **single PUT** -- multipart is
+    /// deliberately unsupported, because S3 signs each part separately and one
+    /// presigned authorization therefore cannot bind the whole object's size
+    /// and checksum, which is the entire point of the bound presign. That makes
+    /// [`ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES`] a hard protocol ceiling on
+    /// this field rather than a suggestion: a larger value would hand out an
+    /// authorization the bucket cannot honour in one request. Values above it
+    /// (and `0`) are rejected at config load.
     #[serde(default)]
     pub presign_max_object_bytes: Option<u64>,
     /// The largest object the gateway will ever hold in memory for an asset

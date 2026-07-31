@@ -130,6 +130,7 @@ impl Config {
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
         self.validate_asset_bucket()?;
+        self.validate_asset_presign_limits()?;
         self.validate_x402_reconciler()?;
         self.validate_x402_spend_policies()?;
         self.validate_cloudflare()?;
@@ -492,6 +493,67 @@ impl Config {
             bail!(
                 "field asset_bucket.secret_access_key_env: required when asset_bucket.enabled = true"
             );
+        }
+        Ok(())
+    }
+
+    /// Validates the two `[asset_bucket]` knobs that decide what a gateway-issued
+    /// presigned upload authorization actually promises (issue #368).
+    ///
+    /// Both were previously only clamped at runtime, which quietly turned an
+    /// operator's declaration into a different one. That matters here because
+    /// these two values ARE the upload contract:
+    ///
+    /// * `presign_ttl_secs` is signed into `X-Amz-Expires`, so it is the URL
+    ///   expiry the bucket enforces. A value outside
+    ///   `[ASSET_PRESIGN_MIN_TTL_SECS, ASSET_PRESIGN_MAX_TTL_SECS]` cannot be
+    ///   honored by any SigV4 backend; silently rounding it means an operator
+    ///   who asked for a year-long URL believes they got one.
+    /// * `presign_max_object_bytes` is the per-object ceiling an upload intent
+    ///   is admitted against, and the presigned upload protocol is a single
+    ///   PUT (multipart is deliberately unsupported -- per-part signatures
+    ///   cannot bind a whole-object size + checksum, which is the invariant
+    ///   #368 exists to enforce). Declaring a ceiling above
+    ///   [`ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES`] would have the gateway
+    ///   approve intents, and reserve tenant quota headroom for them, that no
+    ///   S3-compatible bucket can accept in one request.
+    ///
+    /// Only *declared* values are checked, so a config that omits the fields
+    /// (the overwhelming majority) is unaffected and keeps its defaults.
+    fn validate_asset_presign_limits(&self) -> AnyResult<()> {
+        use crate::config::types::{
+            ASSET_PRESIGN_MAX_TTL_SECS, ASSET_PRESIGN_MIN_TTL_SECS,
+            ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES,
+        };
+
+        if let Some(ttl) = self.asset_bucket.presign_ttl_secs {
+            if !(ASSET_PRESIGN_MIN_TTL_SECS..=ASSET_PRESIGN_MAX_TTL_SECS).contains(&ttl) {
+                bail!(
+                    "field asset_bucket.presign_ttl_secs: {ttl} is outside the signable presigned-URL \
+                     lifetime [{ASSET_PRESIGN_MIN_TTL_SECS}, {ASSET_PRESIGN_MAX_TTL_SECS}] seconds \
+                     (SigV4's X-Amz-Expires maximum is 7 days); a URL signed with this expiry would \
+                     be refused by the bucket"
+                );
+            }
+        }
+        if let Some(max_object_bytes) = self.asset_bucket.presign_max_object_bytes {
+            if max_object_bytes == 0 {
+                bail!(
+                    "field asset_bucket.presign_max_object_bytes: cannot be 0 -- that would reject \
+                     every upload intent; omit the field to take the default, or disable \
+                     asset_bucket entirely"
+                );
+            }
+            if max_object_bytes > ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES {
+                bail!(
+                    "field asset_bucket.presign_max_object_bytes: {max_object_bytes} exceeds \
+                     {ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES}, the largest object a single \
+                     presigned PUT can carry. The presigned upload protocol is a single PUT \
+                     (multipart is unsupported: per-part signatures cannot bind the whole object's \
+                     size and checksum), so a larger ceiling would approve upload intents no \
+                     S3-compatible bucket can accept"
+                );
+            }
         }
         Ok(())
     }

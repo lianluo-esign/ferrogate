@@ -273,11 +273,19 @@ authorized download URL encapsulates final-object access.
 
 `[asset_bucket]` in the gateway config:
 
-- `presign_ttl_secs` — TTL for issued URLs. Bounded to `[1, 604800]` (S3's
-  7-day max); defaults to `900` (15 min).
+- `presign_ttl_secs` — TTL for issued URLs. Must be within `[1, 604800]`
+  (SigV4's 7-day `X-Amz-Expires` max); defaults to `900` (15 min). A declared
+  value outside that range is **rejected at config load**, not rounded — a URL
+  signed with an unsignable expiry would simply be refused by the bucket, and
+  an operator who asks for a year-long URL must not be told they got one.
 - `presign_max_object_bytes` — per-object size ceiling for the presigned
   path; defaults to 5 GiB. Independent of the tenant-wide
-  `asset_storage_quota_bytes`.
+  `asset_storage_quota_bytes`. Must be within `[1, 5368709120]` (5 GiB) and is
+  **rejected at config load** otherwise: the presigned upload protocol is a
+  single `PUT` (`upload_protocol: "single_put"`), multipart is deliberately
+  unsupported, and 5 GiB is the largest object one `PUT` can carry. A larger
+  ceiling would approve upload intents — and reserve tenant quota headroom for
+  them — that no S3-compatible bucket could accept in one request.
 - `max_gateway_buffer_bytes` — the largest object the gateway will hold in
   memory for a **single** asset operation; defaults to 10 MiB (the inline-push
   cap, so an inline-stored asset is never affected). This is the bound

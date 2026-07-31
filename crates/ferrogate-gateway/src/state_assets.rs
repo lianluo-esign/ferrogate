@@ -435,24 +435,39 @@ impl AppState {
     /// 604800]` (S3's 7-day maximum). Defaults to 900s (15 minutes).
     pub(crate) fn asset_presign_ttl_secs(&self) -> u64 {
         const DEFAULT_TTL_SECS: u64 = 900;
-        const MAX_TTL_SECS: u64 = 604_800;
         self.config
             .asset_bucket
             .presign_ttl_secs
             .unwrap_or(DEFAULT_TTL_SECS)
-            .clamp(1, MAX_TTL_SECS)
+            .clamp(
+                ferrogate_config::ASSET_PRESIGN_MIN_TTL_SECS,
+                ferrogate_config::ASSET_PRESIGN_MAX_TTL_SECS,
+            )
     }
 
     /// Per-object size ceiling (bytes) for the presigned large-file path
     /// (issue #259), read from `[asset_bucket].presign_max_object_bytes`.
     /// Defaults to 5 GiB. This is a per-object cap layered on top of the
     /// tenant-wide cumulative `asset_storage_quota_bytes`.
+    ///
+    /// #368: the result is additionally bounded by
+    /// [`ferrogate_config::ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES`], the
+    /// largest object a single presigned PUT can carry -- the presigned upload
+    /// protocol is `single_put` and multipart is unsupported, so approving an
+    /// intent above that ceiling would reserve tenant quota headroom for an
+    /// upload no S3-compatible bucket could accept in one request. Config load
+    /// (`validate_asset_presign_limits`) already rejects such a declaration;
+    /// this bound keeps the runtime honest for any config that reaches
+    /// `AppState` by another route (cluster snapshot, in-process construction).
     pub(crate) fn asset_presign_max_object_bytes(&self) -> u64 {
-        const DEFAULT_MAX_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
         self.config
             .asset_bucket
             .presign_max_object_bytes
-            .unwrap_or(DEFAULT_MAX_OBJECT_BYTES)
+            .unwrap_or(ferrogate_config::ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES)
+            .clamp(
+                1,
+                ferrogate_config::ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES,
+            )
     }
 
     /// The largest object the gateway will hold in memory for an asset

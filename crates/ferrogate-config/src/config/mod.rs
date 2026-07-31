@@ -62,5 +62,6 @@ pub use self::types::{
     RouteRule, SchedulerConfig, ShadowRoute, SkillPackage, SkillPackageCapability,
     SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
     StorageMigrationMode, TelemetryConfig, TenancyConfig, TlsAcmeConfig, TlsConfig, Upstream,
-    X402ReconcilerConfig, X402SweeperConfig,
+    X402ReconcilerConfig, X402SweeperConfig, ASSET_PRESIGN_MAX_TTL_SECS,
+    ASSET_PRESIGN_MIN_TTL_SECS, ASSET_PRESIGN_SINGLE_PUT_MAX_OBJECT_BYTES,
 };
