@@ -407,7 +407,7 @@ fn ensure_tenant_credentials_mints_token_even_when_bucket_already_exists() {
         // Bucket already exists (idempotent create -> AlreadyExists).
         ok(
             409,
-            r#"{ "success": false, "errors": [ { "code": 10004, "message": "already exists" } ] }"#,
+            r#"{ "success": false, "errors": [ { "code": 10073, "message": "BucketConflict" } ] }"#,
         ),
         // Token still minted.
         ok(

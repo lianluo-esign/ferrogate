@@ -24,14 +24,14 @@
 //! ## Idempotent create
 //!
 //! [`CloudflareClient::create_r2_bucket`] is idempotent: when the bucket already
-//! exists and is owned by this account, Cloudflare answers `success: false` with
-//! error code `10004` ("The bucket you tried to create already exists, and you
-//! own it."; the S3-compatible sibling is `10073`/`BucketConflict`, HTTP 409).
-//! That — and **only** that — is mapped to [`R2BucketCreation::AlreadyExists`]
-//! rather than an error, so onboarding can provision unconditionally. Any other
-//! conflict, including a 409 carrying no recognised code, surfaces as a typed
-//! error instead of a phantom "provisioned" bucket (issue #490). See
-//! [`R2_BUCKET_ALREADY_EXISTS_CODES`].
+//! exists and is owned by this account, Cloudflare answers `success: false`
+//! carrying error code `10073` / `BucketConflict` (documented at HTTP 409 in
+//! <https://developers.cloudflare.com/r2/api/error-codes/>). That — and
+//! **only** that — is mapped to [`R2BucketCreation::AlreadyExists`] rather than
+//! an error, so onboarding can provision unconditionally. Any other conflict,
+//! including a 409 carrying no recognised code (R2 also answers HTTP 409 for
+//! `10008`/`BucketNotEmpty`), surfaces as a typed error instead of a phantom
+//! "provisioned" bucket (issue #490). See [`R2_BUCKET_ALREADY_EXISTS_CODES`].
 //!
 //! ## Tenant bucket naming — isolation, not cosmetics (issue #490)
 //!
@@ -150,13 +150,23 @@ const R2_TENANT_BUCKET_SLUG_MAX_LEN: usize = 20;
 /// Cloudflare error codes that mean "the bucket you asked to create already
 /// exists and is owned by this account" — the idempotent-create success case.
 ///
-/// `10004` is what the account REST API (`client/v4`) returns on a duplicate
-/// `POST .../r2/buckets` ("The bucket you tried to create already exists, and
-/// you own it."). `10073` is the S3-compatible `BucketConflict` sibling
-/// (HTTP 409). One of these codes is what
-/// [`CloudflareClient::create_r2_bucket`] treats as success — the HTTP status
-/// alone is not sufficient (issue #490); see `is_bucket_already_exists`.
-pub const R2_BUCKET_ALREADY_EXISTS_CODES: &[i64] = &[10004, 10073];
+/// This list is **load-bearing, and only ever safely shrinks**: a code listed
+/// here turns a *failed* create into a reported provisioning success, and #462
+/// then mints a read+write credential scoped to that bucket name. Listing a
+/// code that does not really mean "already exists and you own it" therefore
+/// manufactures a phantom bucket; omitting a real one only costs a visible,
+/// retryable error. Do not add a code without a citation to Cloudflare's
+/// published R2 error table or a recorded live observation.
+///
+/// `10073` / `BucketConflict` is the only such code Cloudflare documents
+/// (<https://developers.cloudflare.com/r2/api/error-codes/>); the rest of the
+/// bucket family — `10005`, `10006`, `10008`, `10009` — are genuine failures.
+/// A previously listed `10004` was removed (issue #461 gate): it appears in no
+/// published Cloudflare R2 error table and was never observed live.
+///
+/// Matching is on the code alone, never the HTTP status; see
+/// `is_bucket_already_exists`.
+pub const R2_BUCKET_ALREADY_EXISTS_CODES: &[i64] = &[10073];
 
 /// Request body for `POST /accounts/{account_id}/r2/buckets`.
 #[derive(Debug, Clone, Serialize)]
@@ -373,9 +383,12 @@ impl CloudflareClient {
 /// without one of these codes now surfaces as
 /// [`CloudflareError::Api`]`{ status: 409, .. }`.
 ///
-/// The check is status-agnostic on purpose: Cloudflare also answers the
-/// duplicate-create with `success: false` and code `10004` under HTTP 200, and
-/// the code — not the status — is the idempotency signal.
+/// The check is status-agnostic on purpose. R2 does document a status for each
+/// code, but the status cannot *discriminate*: HTTP 409 covers both
+/// `10073`/`BucketConflict` (absorbable) and `10008`/`BucketNotEmpty` (not),
+/// so a status test either swallows too much or adds nothing. The code alone
+/// is the idempotency signal, which also keeps the mapping correct if
+/// Cloudflare ever re-envelopes the same code under a different status.
 fn is_bucket_already_exists(error: &CloudflareError) -> bool {
     matches!(
         error,
