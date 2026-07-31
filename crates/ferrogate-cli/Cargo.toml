@@ -70,6 +70,11 @@ tracing-subscriber.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# The presigned-asset E2E mock bucket (#259) verifies SigV4 signatures with an
+# independent implementation of AWS's published algorithm instead of calling the
+# gateway's own signer, so it needs the HMAC-SHA256 primitive directly. Using
+# `ferrogate-providers`' signer there would make the check tautological.
+hmac.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 

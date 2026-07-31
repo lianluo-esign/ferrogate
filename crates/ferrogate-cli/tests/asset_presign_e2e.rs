@@ -20,11 +20,9 @@ use std::{
     time::Duration,
 };
 
-use chrono::NaiveDateTime;
-use ferrogate_providers::{
-    presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_with_content_hash_header,
-    AwsCredentials, PresignBoundPayload, PresignRequest, SigningRequest,
-};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+
 use ferrogate_storage::sha256_hex;
 use support::{http_request, start_ready_gateway};
 
@@ -295,120 +293,358 @@ fn read_http_request(stream: &mut TcpStream) -> Option<RawHttpRequest> {
     })
 }
 
+/// Verifies the SigV4 signature on a request this mock bucket received.
+///
+/// #259 gate finding 4: this used to recompute the expected signature by
+/// calling the gateway's OWN signer (`presign_sigv4_query_bound` /
+/// `presign_sigv4_query` / `sign_sigv4_with_content_hash_header`) and comparing
+/// strings. That check was tautological -- it agreed with whatever the product
+/// produced, so a canonicalization defect (the #368 shape: a concrete payload
+/// hash on a line Supabase pins to `UNSIGNED-PAYLOAD`) could never turn it red.
+///
+/// Everything below therefore derives the signature from the AWS specification
+/// alone, the way a real S3-compatible bucket does: parse what arrived on the
+/// wire, rebuild the canonical request from the *received* query parameters and
+/// the *received* headers named in `X-Amz-SignedHeaders` / `SignedHeaders`,
+/// take the credential scope from the presented credential, and derive the
+/// signing key from the shared secret with local `hmac`/`sha2` primitives. No
+/// `ferrogate_providers` signing code is on this path.
 fn verify_sigv4(request: &RawHttpRequest, path: &str, query: Option<&str>) -> Result<(), String> {
-    let host = request
-        .headers
-        .get("host")
-        .ok_or_else(|| "missing Host header".to_string())?;
-    let credentials = AwsCredentials {
-        access_key_id: ACCESS_KEY_ID.to_string(),
-        secret_access_key: SECRET_ACCESS_KEY.to_string(),
-        session_token: None,
-    };
+    match query {
+        Some(query) => verify_presigned_query(request, path, query),
+        None => verify_signed_headers(request, path),
+    }
+}
 
-    if let Some(query) = query {
-        if request.headers.contains_key("authorization") {
-            return Err("presigned requests must not carry Authorization".to_string());
-        }
-        let timestamp = raw_query_value(query, "X-Amz-Date")
-            .and_then(parse_amz_timestamp)
-            .ok_or_else(|| "missing or invalid X-Amz-Date".to_string())?;
-        let expires_secs = raw_query_value(query, "X-Amz-Expires")
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| "missing or invalid X-Amz-Expires".to_string())?;
-        let presign_request = PresignRequest {
-            method: &request.method,
-            path,
-            host,
-            region: REGION,
-            service: "s3",
-            expires_secs,
-            timestamp_unix: timestamp,
-        };
-        let signed_headers = raw_query_value(query, "X-Amz-SignedHeaders")
-            .ok_or_else(|| "missing X-Amz-SignedHeaders".to_string())?;
-        let expected = match signed_headers {
-            // #368: a bound upload URL. The bucket recomputes the presigned
-            // signature over the headers the client ACTUALLY sent (with the
-            // canonical payload line left as UNSIGNED-PAYLOAD) and, like a
-            // checksum-enforcing bucket, verifies the received bytes against
-            // the declared hash + length. A request that omits a signed
-            // header, lies about size/checksum, or carries different bytes
-            // is refused before the gateway's commit-time checks run.
-            "content-length%3Bhost%3Bx-amz-content-sha256" => {
-                let declared_length = request
-                    .headers
-                    .get("content-length")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .ok_or_else(|| "bound upload missing content-length".to_string())?;
-                let declared_sha256 = request
-                    .headers
-                    .get("x-amz-content-sha256")
-                    .ok_or_else(|| "bound upload missing x-amz-content-sha256".to_string())?;
-                if request.body.len() as u64 != declared_length {
-                    return Err("bound upload body length mismatch".to_string());
-                }
-                if sha256_hex(&request.body) != *declared_sha256 {
-                    return Err("bound upload payload hash mismatch".to_string());
-                }
-                presign_sigv4_query_bound(
-                    &presign_request,
-                    &credentials,
-                    &PresignBoundPayload {
-                        content_length: declared_length,
-                        content_sha256_hex: declared_sha256,
-                    },
-                )
-                .query
-            }
-            "host" => presign_sigv4_query(&presign_request, &credentials),
-            other => return Err(format!("unexpected X-Amz-SignedHeaders: {other}")),
-        };
-        return (query == expected)
-            .then_some(())
-            .ok_or_else(|| "query signature mismatch".to_string());
+/// Query-string presigned verification (the direct upload/download URLs).
+///
+/// The canonical request's payload line is `UNSIGNED-PAYLOAD` -- the shape
+/// Supabase Storage accepts -- so the bytes are bound only through the signed
+/// `content-length` / `x-amz-content-sha256` headers, which this verifier also
+/// enforces against the body it actually received, like a checksum-enforcing
+/// backend.
+fn verify_presigned_query(request: &RawHttpRequest, path: &str, query: &str) -> Result<(), String> {
+    if request.headers.contains_key("authorization") {
+        return Err("presigned requests must not carry Authorization".to_string());
     }
 
-    let timestamp = request
+    let mut presented_signature = None;
+    let mut canonical_params: Vec<(String, String)> = Vec::new();
+    let mut signed_header_names = None;
+    let mut credential = None;
+    let mut amz_date = None;
+    for pair in query.split('&') {
+        let (name, value) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("malformed query parameter: {pair}"))?;
+        if name == "X-Amz-Signature" {
+            presented_signature = Some(value.to_string());
+            continue;
+        }
+        match name {
+            "X-Amz-SignedHeaders" => signed_header_names = Some(percent_decode(value)?),
+            "X-Amz-Credential" => credential = Some(percent_decode(value)?),
+            "X-Amz-Date" => amz_date = Some(value.to_string()),
+            _ => {}
+        }
+        canonical_params.push((name.to_string(), value.to_string()));
+    }
+    let presented_signature = presented_signature.ok_or("missing X-Amz-Signature")?;
+    let signed_header_names = signed_header_names.ok_or("missing X-Amz-SignedHeaders")?;
+    let amz_date = amz_date.ok_or("missing X-Amz-Date")?;
+    if !canonical_params
+        .iter()
+        .any(|(name, _)| name == "X-Amz-Expires")
+    {
+        return Err("missing X-Amz-Expires".to_string());
+    }
+    if !canonical_params
+        .iter()
+        .any(|(name, value)| name == "X-Amz-Algorithm" && value == "AWS4-HMAC-SHA256")
+    {
+        return Err("missing or unsupported X-Amz-Algorithm".to_string());
+    }
+    // A real verifier re-sorts the presented parameters by encoded name rather
+    // than trusting the order they arrived in.
+    canonical_params.sort();
+    let canonical_query = canonical_params
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let scope = CredentialScope::parse(credential.as_deref().ok_or("missing X-Amz-Credential")?)?;
+    let (canonical_headers, declared_content_sha256) =
+        canonical_headers_from_request(request, &signed_header_names)?;
+
+    // Checksum-enforcing backends compare the received bytes to the signed
+    // `x-amz-content-sha256`; the presigned canonical request itself keeps the
+    // `UNSIGNED-PAYLOAD` payload line.
+    if let Some(declared) = declared_content_sha256 {
+        let actual = hex_sha256(&request.body);
+        if actual != declared {
+            return Err(format!(
+                "payload checksum mismatch: signed {declared}, received {actual}"
+            ));
+        }
+    }
+    if let Some(declared_length) = request
+        .headers
+        .get("content-length")
+        .map(|value| value.trim().to_string())
+    {
+        if declared_length != request.body.len().to_string() {
+            return Err(format!(
+                "body length mismatch: declared {declared_length}, received {}",
+                request.body.len()
+            ));
+        }
+    }
+
+    let signature = derive_signature(
+        &request.method,
+        path,
+        &canonical_query,
+        &canonical_headers,
+        &signed_header_names,
+        "UNSIGNED-PAYLOAD",
+        &amz_date,
+        &scope,
+    )?;
+    (signature == presented_signature)
+        .then_some(())
+        .ok_or_else(|| "query signature mismatch".to_string())
+}
+
+/// Header-auth (`Authorization: AWS4-HMAC-SHA256 ...`) verification -- the
+/// gateway's own server-side HEAD/GET/PUT/DELETE calls. Here the canonical
+/// payload line IS the hex SHA-256 of the body, which S3 also requires as a
+/// literal `x-amz-content-sha256` header, so this verifier re-hashes the bytes
+/// it received and refuses a header that does not describe them.
+fn verify_signed_headers(request: &RawHttpRequest, path: &str) -> Result<(), String> {
+    let authorization = request
+        .headers
+        .get("authorization")
+        .ok_or("missing Authorization")?;
+    let rest = authorization
+        .strip_prefix("AWS4-HMAC-SHA256 ")
+        .ok_or("unsupported Authorization algorithm")?;
+    let mut credential = None;
+    let mut signed_header_names = None;
+    let mut presented_signature = None;
+    for part in rest.split(',') {
+        let (name, value) = part
+            .trim()
+            .split_once('=')
+            .ok_or_else(|| format!("malformed Authorization component: {part}"))?;
+        match name {
+            "Credential" => credential = Some(value.to_string()),
+            "SignedHeaders" => signed_header_names = Some(value.to_string()),
+            "Signature" => presented_signature = Some(value.to_string()),
+            other => return Err(format!("unexpected Authorization component: {other}")),
+        }
+    }
+    let scope = CredentialScope::parse(credential.as_deref().ok_or("missing Credential")?)?;
+    let signed_header_names = signed_header_names.ok_or("missing SignedHeaders")?;
+    let presented_signature = presented_signature.ok_or("missing Signature")?;
+    let amz_date = request
         .headers
         .get("x-amz-date")
-        .and_then(|value| parse_amz_timestamp(value))
-        .ok_or_else(|| "missing or invalid x-amz-date".to_string())?;
-    let expected = sign_sigv4_with_content_hash_header(
-        &SigningRequest {
-            method: &request.method,
-            path,
-            host,
-            region: REGION,
-            service: "s3",
-            body: &request.body,
-            timestamp_unix: timestamp,
-        },
-        &credentials,
-    );
-    let authorization_matches =
-        request.headers.get("authorization") == Some(&expected.authorization);
-    let hash_matches =
-        request.headers.get("x-amz-content-sha256") == expected.x_amz_content_sha256.as_ref();
-    (authorization_matches && hash_matches)
+        .ok_or("missing x-amz-date")?
+        .clone();
+
+    let (canonical_headers, declared_content_sha256) =
+        canonical_headers_from_request(request, &signed_header_names)?;
+    let payload_hash = declared_content_sha256.ok_or("missing signed x-amz-content-sha256")?;
+    let actual = hex_sha256(&request.body);
+    if payload_hash != actual {
+        return Err(format!(
+            "payload checksum mismatch: signed {payload_hash}, received {actual}"
+        ));
+    }
+
+    let signature = derive_signature(
+        &request.method,
+        path,
+        "",
+        &canonical_headers,
+        &signed_header_names,
+        &payload_hash,
+        &amz_date,
+        &scope,
+    )?;
+    (signature == presented_signature)
         .then_some(())
         .ok_or_else(|| "header signature mismatch".to_string())
 }
 
-fn raw_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    query.split('&').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        (name == key).then_some(value)
-    })
+/// The credential-scope fields a bucket parses out of the presented
+/// `<access-key>/<date>/<region>/<service>/aws4_request` credential. Nothing
+/// here is taken from the gateway's config -- only the shared secret is, which
+/// is the one thing a real bucket also knows out of band.
+struct CredentialScope {
+    date_stamp: String,
+    region: String,
+    service: String,
 }
 
-fn parse_amz_timestamp(value: &str) -> Option<u64> {
-    NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
-        .ok()?
-        .and_utc()
-        .timestamp()
-        .try_into()
-        .ok()
+impl CredentialScope {
+    fn parse(credential: &str) -> Result<Self, String> {
+        let mut parts = credential.split('/');
+        let access_key_id = parts.next().ok_or("empty credential")?;
+        if access_key_id != ACCESS_KEY_ID {
+            return Err(format!("unknown access key id: {access_key_id}"));
+        }
+        let date_stamp = parts.next().ok_or("credential missing date")?.to_string();
+        let region = parts.next().ok_or("credential missing region")?.to_string();
+        let service = parts
+            .next()
+            .ok_or("credential missing service")?
+            .to_string();
+        if parts.next() != Some("aws4_request") {
+            return Err("credential missing aws4_request terminator".to_string());
+        }
+        if region != REGION || service != "s3" {
+            return Err(format!("credential scoped to {region}/{service}"));
+        }
+        Ok(Self {
+            date_stamp,
+            region,
+            service,
+        })
+    }
+}
+
+/// Builds the canonical-headers block from the headers the client ACTUALLY
+/// sent, in the order named by the signed-header list. A signed header that was
+/// not sent is an immediate rejection: the canonical request cannot even be
+/// reconstructed. Also returns the signed `x-amz-content-sha256` value when the
+/// set contains one.
+fn canonical_headers_from_request(
+    request: &RawHttpRequest,
+    signed_header_names: &str,
+) -> Result<(String, Option<String>), String> {
+    let mut canonical_headers = String::new();
+    let mut content_sha256 = None;
+    let mut previous: Option<&str> = None;
+    for name in signed_header_names.split(';') {
+        if previous.is_some_and(|previous| previous >= name) {
+            return Err(format!("signed headers are not sorted at {name}"));
+        }
+        previous = Some(name);
+        let value = request
+            .headers
+            .get(name)
+            .ok_or_else(|| format!("required signed header {name} was not sent"))?
+            .trim()
+            .to_string();
+        if name == "x-amz-content-sha256" {
+            content_sha256 = Some(value.clone());
+        }
+        canonical_headers.push_str(&format!("{name}:{value}\n"));
+    }
+    Ok((canonical_headers, content_sha256))
+}
+
+/// The AWS SigV4 derivation itself: canonical request -> string to sign ->
+/// signing key -> signature, implemented straight from the published algorithm
+/// (<https://docs.aws.amazon.com/IAM/latest/UserGuide/create-signed-request.html>).
+#[allow(clippy::too_many_arguments)]
+fn derive_signature(
+    method: &str,
+    path: &str,
+    canonical_query: &str,
+    canonical_headers: &str,
+    signed_header_names: &str,
+    payload_hash: &str,
+    amz_date: &str,
+    scope: &CredentialScope,
+) -> Result<String, String> {
+    let canonical_request = format!(
+        "{method}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_header_names}\n{payload_hash}",
+        canonical_uri(path)?
+    );
+    let credential_scope = format!(
+        "{}/{}/{}/aws4_request",
+        scope.date_stamp, scope.region, scope.service
+    );
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        hex_sha256(canonical_request.as_bytes())
+    );
+
+    let k_date = hmac_sha256(
+        format!("AWS4{SECRET_ACCESS_KEY}").as_bytes(),
+        scope.date_stamp.as_bytes(),
+    );
+    let k_region = hmac_sha256(&k_date, scope.region.as_bytes());
+    let k_service = hmac_sha256(&k_region, scope.service.as_bytes());
+    let signing_key = hmac_sha256(&k_service, b"aws4_request");
+    Ok(hex_encode(&hmac_sha256(
+        &signing_key,
+        string_to_sign.as_bytes(),
+    )))
+}
+
+/// SigV4 canonical URI, derived the way a real bucket derives it: decode the
+/// request target the client actually put on the wire back to the object key,
+/// then percent-encode that key once per AWS's unreserved-set rule, preserving
+/// `/` as the path separator.
+///
+/// Decoding first is what keeps this independent of the gateway. Re-encoding
+/// the wire bytes directly would turn an already-escaped `%3A` into `%253A`
+/// (a double encoding AWS forbids), and copying the gateway's
+/// "pass a well-formed `%XY` through verbatim" rule would import the very
+/// implementation this verifier exists to check. A malformed escape is a
+/// rejection, as it is on a real server.
+fn canonical_uri(path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Ok("/".to_string());
+    }
+    let key = percent_decode(path)?;
+    let mut out = String::with_capacity(key.len());
+    for byte in key.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~' | '/') {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Ok(out)
+}
+
+fn percent_decode(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = value
+                .get(index + 1..index + 3)
+                .ok_or("truncated percent escape")?;
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| "invalid percent escape")?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "non-UTF8 decoded value".to_string())
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(message);
+    mac.finalize().into_bytes().into()
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    hex_encode(&Sha256::digest(bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn write_http_response(
