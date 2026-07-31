@@ -190,6 +190,15 @@ const REGISTERED: readonly RegisteredRoute[] = CONTROL_PLANE_OPERATIONS.map(
   }),
 );
 
+/**
+ * The routes this module *intends* to mount, derived from the contract.
+ *
+ * NOTE for anyone writing an anti-drift assertion: this is a projection of the
+ * contract, so comparing it against the contract is a tautology and proves
+ * nothing about the app the Worker exports. The honest record is the value
+ * {@link registerRoutes} RETURNS — it is appended one entry per actual
+ * `app.on(...)` call — which `src/index.ts` re-exports as `MOUNTED_ROUTES`.
+ */
 export function registeredRoutes(): readonly RegisteredRoute[] {
   return REGISTERED;
 }
@@ -198,8 +207,15 @@ export function registeredRoutes(): readonly RegisteredRoute[] {
  * Mount every owned operation. Hono is given the contract's own path template
  * (translated to `:param` syntax by `contract.ts`), so the router and the guard
  * agree on the shape of every route by construction.
+ *
+ * Returns the routes it actually mounted, recorded inside the loop next to the
+ * `app.on` call. A test can therefore assert against what the composition root
+ * DID rather than against what the contract says it should have done: skip the
+ * call, mount a subset, or hand it a different app, and the returned record
+ * changes with it.
  */
-export function registerRoutes(app: Hono<ControlPlaneEnv>): void {
+export function registerRoutes(app: Hono<ControlPlaneEnv>): readonly RegisteredRoute[] {
+  const mounted: RegisteredRoute[] = [];
   for (const operation of CONTROL_PLANE_OPERATIONS) {
     const handler = HANDLERS.get(operation.operationId);
     if (handler === undefined) {
@@ -208,5 +224,12 @@ export function registerRoutes(app: Hono<ControlPlaneEnv>): void {
       throw new Error(`no handler for contract operation ${operation.operationId}`);
     }
     app.on(operation.method, operation.honoPath, handler);
+    mounted.push({
+      operationId: operation.operationId,
+      method: operation.method,
+      honoPath: operation.honoPath,
+      group: operation.group,
+    });
   }
+  return mounted;
 }

@@ -8,23 +8,39 @@
  * agent-run, and A2A surfaces — without it, an MCP action is unjoinable and an
  * investigator cannot reconstruct what an agent did.
  *
- * Each test drives the REAL Worker over HTTP and asserts BOTH legs the id has
- * to travel:
+ * Every test drives the DEPLOYED Worker over HTTP — `SELF.fetch` against the
+ * real `export default app` from `src/index.ts`, in real `workerd`. There is no
+ * bespoke harness router anywhere in this file: the "unreachable in production,
+ * green in test" failure mode that hit `apps/gateway` cannot hide this
+ * invariant, and the guard below pins that (the two surfaces exercised here are
+ * asserted to be the ones the production registry actually mounted).
+ *
+ * Each test asserts BOTH legs the id has to travel:
  *   1. the DISPATCH leg — the id reaches the upstream MCP call's context;
  *   2. the AUDIT leg     — the id is stamped on the rows the ingress and the
  *                          governed chokepoint record.
  *
- * Mutation checks (each reds at least one assertion below):
- *   - drop `event.agent_run_id` from `auditEvent` in `src/tools.ts`;
- *   - drop `context.agentRunId` from `authenticateRequest` in `src/http.ts`;
- *   - stop passing `context` into `ports.upstreams.callTool` in `src/tools.ts`;
- *   - make `declaredAgentRunId` fabricate an id when the header is absent.
+ * Mutation checks — each was RUN against this suite and each turned it RED, so
+ * none of the assertions below is vacuous:
+ *   - drop `event.agent_run_id` from `auditEvent` (`src/tools.ts`)
+ *     → 7 failed / 6 passed — every AUDIT-leg assertion;
+ *   - drop `context.agentRunId` from `authenticateRequest` (`src/http.ts`)
+ *     → 7 failed / 6 passed — the context is where the id enters, so both legs
+ *       go dark at once;
+ *   - strip `agentRunId` from the context handed to `ports.upstreams.callTool`
+ *     (`src/tools.ts`) → 2 failed / 11 passed — isolates the DISPATCH leg,
+ *     proving it is asserted independently of the audit rows;
+ *   - make `declaredAgentRunId` fabricate an id when the header is absent
+ *     (`src/protocol.ts`) → 1 failed / 12 passed — the "never a fabrication"
+ *     block is the only thing standing between an unjoinable action and a
+ *     plausible-looking but invented correlation id.
  */
 import { SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { mcpRouter } from "../src/index.js";
 import { AGENT_RUN_ID_HEADER } from "../src/protocol.js";
-import { EXEC_KEY, READ_KEY, rpcRequest, seedFixture, TENANT, type Fixture } from "./fixtures.js";
+import { EXEC_KEY, type Fixture, READ_KEY, TENANT, rpcRequest, seedFixture } from "./fixtures.js";
 
 const RUN = "run-mcp-call-1";
 
@@ -50,6 +66,17 @@ beforeEach(() => {
 function rowFor(action: string) {
   return fixture.ports.audit.events().find((event) => event.action === action);
 }
+
+describe("this suite exercises the DEPLOYED surfaces, not a harness", () => {
+  it("drives the two operations the production registry mounted", () => {
+    // `SELF.fetch` already guarantees the real Worker answers; this pins WHICH
+    // contract operations the requests below land on, so the invariant cannot
+    // survive by being re-tested against a route the Worker no longer exports.
+    const registered = new Set(mcpRouter.registeredOperationIds());
+    expect(registered.has("mcpJsonRpc")).toBe(true);
+    expect(registered.has("executeMcpTool")).toBe(true);
+  });
+});
 
 describe("tools/call threads the declared agent_run_id end to end", () => {
   it("reaches the upstream dispatch context AND the tool.execute audit row", async () => {

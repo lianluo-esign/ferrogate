@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // This code runs in NODE (the Playwright runner), never in a Worker, so the
+    // Cloudflare ambient types from the base config are deliberately dropped:
+    // pulling them in here would let a spec reference a Worker-only global that
+    // does not exist in the process actually executing it.
+    "types": ["node"],
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["playwright.config.ts", "fixtures.ts", "tests"]
+}

@@ -40,6 +40,75 @@ export const INTERNAL_ROUTES = [
   "/v1/self-hosted-workers/runs/ack",
 ] as const;
 
+/**
+ * A worker-plane body that WOULD be accepted if the caller were an authorized
+ * worker, for each of the six internal callbacks.
+ *
+ * Shared so the two suites that need it cannot drift apart:
+ * `internal-auth.test.ts` posts it with a TENANT credential (and must be
+ * refused), `contract.test.ts` posts it with the WORKER credential (and must be
+ * served). Both directions have to be about the same request for the pair to
+ * mean anything.
+ */
+export function workerEnvelopeFor(
+  path: string,
+  identity: typeof WORKER_A | typeof WORKER_B = WORKER_A,
+): Record<string, unknown> {
+  const base = { protocol_version: 1, identity };
+  switch (path) {
+    case "/v1/self-hosted-workers/heartbeat":
+      return { ...base, status: "idle", reported_at_unix: 1_800_000_000 };
+    case "/v1/self-hosted-workers/events":
+      return {
+        ...base,
+        session_id: "s1",
+        run_id: "r1",
+        event_id: "e1",
+        kind: "lifecycle",
+        event_json: { state: "running" },
+        reported_at_unix: 1_800_000_000,
+      };
+    case "/v1/self-hosted-workers/artifacts":
+      return {
+        ...base,
+        session_id: "s1",
+        run_id: "r1",
+        artifact_id: "a1",
+        name: "patch.diff",
+        media_type: "text/x-diff",
+        byte_len: 10,
+        reported_at_unix: 1_800_000_000,
+      };
+    case "/v1/self-hosted-workers/checkpoints":
+      return {
+        ...base,
+        session_id: "s1",
+        run_id: "r1",
+        checkpoint_id: "c1",
+        created_at_unix: 1_800_000_000,
+      };
+    case "/v1/self-hosted-workers/runs/poll":
+      return {
+        ...base,
+        supported_capabilities: [],
+        now_unix: 1_800_000_000,
+        lease_duration_secs: 60,
+      };
+    case "/v1/self-hosted-workers/runs/ack":
+      return {
+        ...base,
+        dispatch_id: "d1",
+        action: "start_run",
+        lease_id: "l1",
+        run_id: "r1",
+        status: "completed",
+        reported_at_unix: 1_800_000_000,
+      };
+    default:
+      return base;
+  }
+}
+
 export function bearer(key: string): Record<string, string> {
   return { authorization: `Bearer ${key}`, "content-type": "application/json" };
 }

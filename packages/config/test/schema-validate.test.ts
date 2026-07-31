@@ -12,6 +12,7 @@ import {
   apiKeysWithoutTenantIdentity,
   ensureApiKeyDeclaresTenantIdentity,
   validateConfig,
+  warnUndeclaredControlPlaneApiKeys,
 } from "../src/validate.js";
 import { loadConfigFromObject, migrateControlPlaneAliases } from "../src/loader.js";
 import { apiKeySchema } from "../src/schema/entities.js";
@@ -51,7 +52,11 @@ describe("Config schema defaults", () => {
 });
 
 describe("validateConfig — tenant identity (security invariant #7)", () => {
-  const key = (extra: Record<string, unknown>) => apiKeySchema.parse({ id: "k", name: "k", ...extra });
+  // `key_env` is part of the minimum viable key (`validate_api_keys` requires one
+  // of key_env/key/key_hash); without it the config now fails BEFORE the
+  // tenant-identity gate these cases are about.
+  const key = (extra: Record<string, unknown>) =>
+    apiKeySchema.parse({ id: "k", name: "k", key_env: "FERROGATE_KEY", ...extra });
 
   test("refuses a document key that declares neither identity", () => {
     const config = configSchema.parse({ api_keys: [key({})] });
@@ -75,6 +80,12 @@ describe("validateConfig — tenant identity (security invariant #7)", () => {
   test("durable control-plane keys are reported, not refused", () => {
     const config = configSchema.parse({ api_keys: [key({})] });
     expect(() => validateConfig(config, { apiKeysAreControlPlaneDocuments: true })).not.toThrow();
+    // The relaxation's compensating control names the ids it let through.
+    expect(warnUndeclaredControlPlaneApiKeys(config, { apiKeysAreControlPlaneDocuments: true })).toEqual([
+      "k",
+    ]);
+    // ...and reports nothing for a config document (which is refused outright).
+    expect(warnUndeclaredControlPlaneApiKeys(config)).toEqual([]);
   });
 
   test("platform_operator=false with no org authorizes nothing (warn-only)", () => {

@@ -47,7 +47,8 @@ import {
   requestId,
 } from "./middleware/errors.js";
 import type { ControlPlaneEnv } from "./ports.js";
-import { registerRoutes } from "./routes/index.js";
+import { GROUP_MODULES, type RegisteredRoute, registerRoutes } from "./routes/index.js";
+import type { GroupModule } from "./routes/resource.js";
 
 export const app = new Hono<ControlPlaneEnv>();
 
@@ -66,7 +67,28 @@ app.use("*", corsResponseHeaders);
 app.use("*", adminCorsPreflight);
 app.use("*", contractAuth());
 
-registerRoutes(app);
+/**
+ * THE mount. `MOUNTED_ROUTES` is the value `registerRoutes` returned for THIS
+ * app — one entry per `app.on(...)` it actually performed — so it is a record
+ * of what the composition root did, not a restatement of the contract.
+ *
+ * It is exported so the anti-drift gate (`test/wiring.test.ts`) inspects the
+ * REAL registry of the app below `export default`. Building a bespoke app in a
+ * test and asserting against that is exactly how `apps/gateway` shipped with 24
+ * of its 31 operations unreachable while every suite stayed green.
+ */
+export const MOUNTED_ROUTES: readonly RegisteredRoute[] = registerRoutes(app);
+
+/** Every operation id mounted on the exported app, in mount order. */
+export const MOUNTED_OPERATION_IDS: readonly string[] = MOUNTED_ROUTES.map(
+  (route) => route.operationId,
+);
+
+/**
+ * The production module list — the same array the route registry composed the
+ * handler table from. Exported for the gate; nothing else should import it.
+ */
+export const CONTROL_PLANE_ROUTE_MODULES: readonly GroupModule[] = GROUP_MODULES;
 
 /**
  * Liveness / build introspection. `/health` and `/version` are NOT contract

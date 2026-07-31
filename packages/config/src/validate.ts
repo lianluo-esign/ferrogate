@@ -1,23 +1,78 @@
 /**
- * Port of the load-bearing invariants of `ferrogate-config`'s `validate.rs`
- * (inventory §5.4, `Config::validate`). The Rust gate is ~1800 lines / 98
- * helper fns; the security- and money-critical invariants the inventory and
- * the security appendix call out are ported here with fidelity, and the long
- * tail of per-field cross-reference checks is flagged.
+ * Port of `ferrogate-config`'s `Config::validate()` (inventory §5.4,
+ * `config/validate.rs`) — the load-time gate. The Rust gate is ~4000 lines /
+ * ~98 helper fns; every one of them is now either ported (here and in
+ * `./validate/*`) or explicitly REMOVED as N/A on Cloudflare with the reason
+ * written down next to where it used to run.
  *
- * PORT-TODO(inventory §5.4): the remaining ~90 helper validators (provider/model
- * name uniqueness + cross-references, header name/value validity via `http`
- * types, plugin/skill-package manifest + permission checks, prompt-template
- * placeholder checks, managed-worker action lists, storage DSN/identifier
- * checks, TLS file presence, MCP server config) are mechanical Zod
- * `superRefine` ports and are staged incrementally; the Zod schema already
- * rejects the structural/type errors. What is ported below is every invariant
- * whose omission would change a security or money outcome.
+ * Shape note: the Rust gate `bail!`s the FIRST `field <path>: <reason>` it
+ * meets, and the order of the checks is itself observable (it is what an
+ * operator sees when several things are wrong). This port therefore keeps the
+ * imperative first-failure form and the exact Rust call order rather than
+ * collecting Zod issues — the Zod schema already owns the structural/type
+ * errors, this owns the cross-field/semantic ones.
+ *
+ * REMOVED AS N/A ON CLOUDFLARE (see `./validate/sections.ts` for the full
+ * rationale): `validate_tls`, `validate_acme_tls`, `validate_acme_dns01_tls`,
+ * `validate_acme_http01_tls` and `validate_manual_tls_files` — Cloudflare
+ * terminates TLS in front of the Worker, there is no cert/key file to load
+ * (the Rust pre-flight is pingora's `load_certs_and_key_files`), no `:80`
+ * HTTP-01 challenge listener a Worker can own, and no ACME storage directory.
  */
 import { parseEndpoint, endpointTargetsR2, parseR2Endpoint, R2_REGION } from "./asset-endpoint.js";
 import { x402ConfirmationWindowSecs, x402HoldTtlFloorSecs } from "./x402-hold.js";
 import { buildsS3Client } from "./schema/sections.js";
+import { buildSnapshotCrypto } from "./signed-snapshot.js";
 import type { ApiKey, Config } from "./schema/index.js";
+import { isValidSocketAddr } from "./validate/helpers.js";
+import {
+  addMcpPolicyTargets,
+  validateAgentUpstreams,
+  validateApiKeys,
+  validateGatewayConfigs,
+  validateMcpServers,
+  validateModels,
+  validatePolicies,
+  validateProviders,
+  validateRoutes,
+  validateUpstreams,
+} from "./validate/entities.js";
+import {
+  validateAdminApi,
+  validateAgentRuntime,
+  validateAnalytics,
+  validateAuthService,
+  validateBillingAlerts,
+  validateCache,
+  validateCloudflareAiGatewayProviders,
+  validateCluster,
+  validateLimits,
+  validateMetering,
+  validateNetworkAccess,
+  validateObservability,
+  validateReliability,
+  validateStorage,
+  validateTelemetry,
+  validateX402SpendPolicies,
+} from "./validate/sections.js";
+import { validatePlugins } from "./validate/plugins.js";
+import {
+  validateAgentWorkflows,
+  validateGuardrails,
+  validatePromptTemplates,
+  validateSkillPackages,
+  workflowToolNames,
+} from "./validate/policies.js";
+
+// Re-exported so `@ferrogate/config` keeps ONE validation surface (the Rust
+// `Config::validate` + its `pub` helpers), whichever module implements it.
+// `./validate/helpers.js` is deliberately NOT re-exported: those mirror the
+// PRIVATE free functions at the bottom of `validate.rs` (`fail`, `is_blank`,
+// `version_parts`, ...) and their names are too generic for a package surface.
+export * from "./validate/entities.js";
+export * from "./validate/sections.js";
+export * from "./validate/plugins.js";
+export * from "./validate/policies.js";
 
 /** Options controlling the tenant-identity gate (mirrors the `#[serde(skip)]` flag). */
 export interface ValidateOptions {
@@ -99,8 +154,29 @@ export function ensureEveryKeyDeclaresTenantIdentity(config: Config, options: Va
   if (config.tenancy.implicit_platform_operator) return;
   const undeclared = apiKeysWithoutTenantIdentity(config);
   if (undeclared.length === 0) return;
-  if (options.apiKeysAreControlPlaneDocuments) return; // reported (warn), not refused
+  if (options.apiKeysAreControlPlaneDocuments) {
+    warnUndeclaredControlPlaneApiKeys(config, options); // reported (warn), not refused
+    return;
+  }
   throw new Error(undeclaredTenantIdentityRefusal(undeclared));
+}
+
+/**
+ * `Config::warn_undeclared_control_plane_api_keys` (#540 rework 2): the durable
+ * branch's ENTIRE compensating control, as a function that returns what it warned
+ * about — so relaxing the refusal for control-plane rows is itself assertable
+ * rather than a bare log line. Empty unless these keys really are durable rows: a
+ * config *document* in this state is refused outright, and the legacy opt-in
+ * short-circuits both.
+ */
+export function warnUndeclaredControlPlaneApiKeys(
+  config: Config,
+  options: ValidateOptions = {},
+): string[] {
+  if (config.tenancy.implicit_platform_operator || !options.apiKeysAreControlPlaneDocuments) {
+    return [];
+  }
+  return apiKeysWithoutTenantIdentity(config);
 }
 
 /** The same refusal aimed at one key, for the runtime mint path (`POST/PUT /admin/v1/api-keys`). */
@@ -282,28 +358,13 @@ function isCloudflareManagedMcpUrl(url: string): boolean {
   return false;
 }
 
-// --- listen address ---------------------------------------------------------
-
-function isValidSocketAddr(value: string): boolean {
-  let v = value;
-  if (v.startsWith("localhost:")) v = `127.0.0.1:${v.slice("localhost:".length)}`;
-  const lastColon = v.lastIndexOf(":");
-  if (lastColon === -1) return false;
-  const host = v.slice(0, lastColon);
-  const portStr = v.slice(lastColon + 1);
-  if (!/^\d+$/.test(portStr)) return false;
-  const port = Number.parseInt(portStr, 10);
-  if (port > 65535) return false;
-  return host.length > 0;
-}
-
 // --- entry point ------------------------------------------------------------
 
 /**
- * `Config::validate()` — the load-time gate. Runs the invariants that change a
- * security/money/binding outcome (the structural/type invariants are enforced
- * by the Zod schema). Throws the first `field ...: ...` error, mirroring the
- * Rust `anyhow` chain.
+ * `Config::validate()` — the load-time gate, in the Rust call order (which is
+ * observable: it decides WHICH of several problems an operator is told about
+ * first). Throws the first `field ...: ...` error, mirroring the Rust `anyhow`
+ * chain.
  */
 export function validateConfig(config: Config, options: ValidateOptions = {}): void {
   if (!isValidSocketAddr(config.listen)) {
@@ -312,12 +373,66 @@ export function validateConfig(config: Config, options: ValidateOptions = {}): v
   if (config.admin.listen !== null && !isValidSocketAddr(config.admin.listen)) {
     throw new Error(`field admin.listen: invalid admin listen address ${config.admin.listen}`);
   }
+
+  const providerNames = validateProviders(config);
+  const modelNames = validateModels(config, providerNames);
+  validateMcpServers(config);
+  validateAuthService(config);
+  validateAdminApi(config);
+  // MCP tools/servers become addressable policy targets BEFORE the api-key,
+  // policy and guardrail cross-reference checks run against those sets.
+  addMcpPolicyTargets(config, modelNames, providerNames);
+  const apiKeyIds = validateApiKeys(config, modelNames, providerNames);
   ensureEveryKeyDeclaresTenantIdentity(config, options);
   warnImplicitPlatformOperators(config);
+  validatePolicies(config, apiKeyIds, modelNames, providerNames);
+  validateGatewayConfigs(config, apiKeyIds);
+  validatePlugins(config);
+  const toolNames = workflowToolNames(config);
+  validateAgentWorkflows(config, apiKeyIds, modelNames, providerNames, toolNames);
+  validatePromptTemplates(config, modelNames);
+  validateSkillPackages(config, apiKeyIds, toolNames);
+  validateAgentUpstreams(config);
+  validateGuardrails(config, apiKeyIds, modelNames, providerNames);
+  // `self.validate_tls()` ran here in Rust — REMOVED as N/A on Cloudflare (CF
+  // terminates TLS; see the module header).
+  validateTelemetry(config);
+  validateBillingAlerts(config);
+  validateObservability(config);
+  validateAnalytics(config);
+  validateMetering(config);
+  validateCache(config);
+  validateStorage(config);
+  validateReliability(config);
+  validateLimits(config);
+  validateAgentRuntime(config);
+  validateCluster(config);
+  validateNetworkAccess(config);
+  const upstreamNames = validateUpstreams(config);
+  validateRoutes(config, upstreamNames);
   validateAssetBucket(config);
   validateX402Reconciler(config);
+  validateX402SpendPolicies(config);
   validateCloudflare(config);
   validateAssetBucketR2(config);
+  validateCloudflareAiGatewayProviders(config);
   validateCloudflareMcpServers(config);
   validateAssetBucketBackend(config);
+}
+
+/**
+ * `validateConfig` plus the one leg that cannot be synchronous on Workers: the
+ * signed-snapshot key material (#206). Rust runs the SAME builder the runtime
+ * uses (`build_snapshot_crypto`) inside `validate_cluster`, so a config that
+ * validates is one that constructs; WebCrypto's `importKey` is async, so the
+ * structural half runs in `validateCluster` and the key parse runs here.
+ *
+ * Callers that can await SHOULD prefer this over `validateConfig`.
+ */
+export async function validateConfigAsync(
+  config: Config,
+  options: ValidateOptions = {},
+): Promise<void> {
+  validateConfig(config, options);
+  if (config.cluster.enabled) await buildSnapshotCrypto(config.cluster);
 }

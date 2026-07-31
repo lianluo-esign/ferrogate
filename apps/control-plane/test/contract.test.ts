@@ -9,6 +9,16 @@
  *
  * It fails LISTING the offending operation ids, because "197 !== 196" tells you
  * nothing at 3am.
+ *
+ * SCOPE, precisely: this file proves every contract operation has a HANDLER,
+ * and that the handler table and the contract agree. It does NOT prove those
+ * handlers are MOUNTED on the app `src/index.ts` puts under `export default` —
+ * `registeredRoutes()` is a projection of the contract, and the handler table is
+ * built at module load whether or not `registerRoutes(app)` is ever called.
+ * That second half — the `apps/gateway` empty-module-list defect — is
+ * `test/wiring.test.ts`, which reads Hono's own `app.routes` and drives the
+ * deployed Worker through `SELF.fetch`. Both are required; neither subsumes the
+ * other.
  */
 import { describe, expect, it } from "vitest";
 import contractDocument from "../../../docs/openapi/runtime-api-contract.json";

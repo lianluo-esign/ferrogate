@@ -8,5 +8,14 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "dependencies": { "hono": "^4.6.0", "zod": "^3.25.76", "@ferrogate/core": "workspace:*", "@ferrogate/schemas": "workspace:*", "@ferrogate/config": "workspace:*", "@ferrogate/storage": "workspace:*", "@ferrogate/secrets": "workspace:*", "@ferrogate/observability": "workspace:*" }
+  "dependencies": {
+    "hono": "^4.6.0",
+    "zod": "^3.25.76",
+    "@ferrogate/core": "workspace:*",
+    "@ferrogate/schemas": "workspace:*",
+    "@ferrogate/config": "workspace:*",
+    "@ferrogate/storage": "workspace:*",
+    "@ferrogate/secrets": "workspace:*",
+    "@ferrogate/observability": "workspace:*"
+  }
 }

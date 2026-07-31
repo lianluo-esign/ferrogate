@@ -23,6 +23,9 @@ dist-ssr/
 .wrangler/
 playwright-report/
 test-results/
+# `outputDir` in e2e/playwright.config.ts — per-run traces/screenshots and
+# .last-run.json. Not `playwright-report/`, so it needs its own entry.
+.playwright/
 
 # Wiki build outputs
 ferrogate-wiki/wiki-site/node_modules/

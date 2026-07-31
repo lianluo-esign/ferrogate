@@ -978,6 +978,29 @@ export interface McpEnv {
    * authentication returns 503 until real ports are bound.
    */
   FG_DEV_IN_MEMORY_PORTS?: string;
+
+  /**
+   * KV namespace holding in-flight per-user MCP OAuth flows
+   * ({@link StoredMcpOauthFlow}). Declared in `wrangler.toml`; OPTIONAL here
+   * because nothing dereferences it yet.
+   *
+   * PORT-TODO(inventory-edge-control §MCP): back the flow half of
+   * {@link McpCredentialStorePort} with this namespace — KV's per-key
+   * `expirationTtl` is what makes the anonymous OAuth callback's `state`
+   * time-bounded, and `delete()` is what makes it single-use.
+   */
+  MCP_OAUTH_KV?: KVNamespace;
+
+  /**
+   * D1 database holding the sealed per-user identity grants
+   * (`mcp_oauth_credentials`) and the tenant's upstream MCP server catalog
+   * (`mcp_servers`). Declared in `wrangler.toml`; OPTIONAL here because
+   * nothing dereferences it yet.
+   *
+   * PORT-TODO(inventory-edge-control §MCP): a revoked grant must not come back
+   * when the isolate recycles, which `InMemoryCredentialStore` cannot promise.
+   */
+  DB?: D1Database;
 }
 
 let devPorts: InMemoryMcpPorts | undefined;
@@ -1130,11 +1153,27 @@ function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
 }
 
 /**
+ * Whether this Worker has a usable port bundle for authenticated traffic.
+ *
+ * This is the single source of truth {@link resolvePorts} branches on, so
+ * `/readyz` cannot claim readiness on an isolate whose auth port is
+ * {@link UnboundAuth} — the Workers equivalent of the Rust readiness probe
+ * reporting `not_ready` while the cluster has no healthy peer.
+ *
+ * PORT-TODO(inventory-edge-control §MCP): once the D1/KV/Secrets-Store-backed
+ * ports land this becomes a real binding check (`env.DB !== undefined`, …)
+ * rather than the dev-bundle flag.
+ */
+export function portsBound(env: McpEnv): boolean {
+  return env.FG_DEV_IN_MEMORY_PORTS === "1";
+}
+
+/**
  * Resolve the port bundle for a request. Fails closed unless the Worker is
  * explicitly running with the in-memory dev bundle.
  */
 export function resolvePorts(env: McpEnv): McpPorts {
-  if (env.FG_DEV_IN_MEMORY_PORTS === "1") return inMemoryPorts();
+  if (portsBound(env)) return inMemoryPorts();
   // PORT-TODO(inventory-edge-control §MCP): bind D1/KV/Secrets-Store-backed
   // implementations here once the wave-2 packages land. Until then every
   // authenticated surface fails closed with 503 rather than defaulting open.

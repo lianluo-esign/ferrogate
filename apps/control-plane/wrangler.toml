@@ -1,5 +1,5 @@
 name = "ferrogate-control-plane"
-main = "src/index.ts"
+main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -19,9 +19,51 @@ TENANCY_LIFECYCLE = "{}"
 TENANT_RBAC_ACTIONS = "{}"
 CONTROL_PLANE_SEED = "{}"
 
-# TODO(bindings): configure per this app's inventory before first deploy.
-# Do NOT commit real resource IDs — these are placeholders only.
-#   [[d1_databases]]        name = "DB"          -> control-plane store (D1 batch/RETURNING)
+# ---------------------------------------------------------------------------
+# D1: the control database
+# ---------------------------------------------------------------------------
+#
+# `env.DB` is the native binding that replaces BOTH legacy paths at once
+# (`docs/legacy/inventory-edge-control.md` §7 "Inside a Worker most of this
+# collapses to native bindings", §9.3):
+#
+#   * the D1 REST client (`ferrogate-cloudflare::d1`) — admin/low-volume
+#     create/list/query, which had no transactions and no `RETURNING`; and
+#   * the `workers/d1-proxy` Worker (#450/#455) — the atomic hot path, a
+#     bearer-gated HTTP front over `env.DB.batch([...])` and
+#     `prepare().bind().all()` with `RETURNING`.
+#
+# Both become direct `env.DB` calls here, so `D1_PROXY_TOKEN` and the proxy's
+# base URL disappear with it — there is no longer an HTTP hop to authenticate.
+#
+# The schema is the Postgres control-plane store's D1 twin
+# (`control_plane_store_d1`, PORT-PLAN.md "Postgres→D1"): providers, models,
+# api-keys, tenants/projects/workspaces, virtual-keys, quota-policies, plans,
+# wallets + ledger, guardrail policy revisions and the CAS-guarded binding row,
+# site-domains, agent schedules/workflows/upstreams, prompt templates,
+# skill packages, request logs, billing outbox, RBAC roles/permissions and the
+# self-hosted-worker records — i.e. the collections `src/store/memory.ts` serves
+# today from `CONTROL_PLANE_SEED`.
+#
+# `database_id` is a DOCUMENTED PLACEHOLDER, not a real resource. `wrangler
+# deploy` will refuse it, which is deliberate: the id must be supplied by
+# whoever provisions the database (`wrangler d1 create ferrogate-control`),
+# never invented and committed here.
+#
+# PORT-TODO(inventory-edge-control §5.2): swap `MemoryControlPlaneStore` in
+# `src/adapters.ts` for the D1-backed store that reads this binding, and drop
+# the `CONTROL_PLANE_*_API_KEYS` / `CONTROL_PLANE_SEED` vars above with it.
+[[d1_databases]]
+binding = "DB"
+database_name = "ferrogate-control"
+database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# TODO(bindings): the remaining bindings, configured per this app's inventory
+# before first deploy. Do NOT commit real resource IDs — placeholders only.
+#   [[d1_databases]]  binding = "TENANT_DB_<slug>" -> per-tenant database, the
+#       `database` binding selector the d1-proxy took per request
+#       (inventory-edge-control §7). One block per provisioned tenant; they are
+#       created by the provisioning flow, so they cannot be enumerated here.
 #   [[kv_namespaces]]       binding = "SESSIONS" -> console/refresh tokens
 #   [[secrets_store]]       admin JWT + provider creds (deploy-time binding)
 #   [[analytics_engine_datasets]] audit/evidence sink

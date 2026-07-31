@@ -120,8 +120,15 @@ export type {
 export { evaluateSchema, isValidSchema, jsonPointerExists, resolveJsonPointer } from "./jsonschema.js";
 
 // Net (SSRF).
-export { filterResolvedDetectorAddresses, isDisallowedDetectorIp } from "./net.js";
-export type { DetectorAddress } from "./net.js";
+export {
+  ALLOWED_DETECTOR_ENDPOINT_SCHEMES,
+  detectorEndpointRejection,
+  filterResolvedDetectorAddresses,
+  isDisallowedDetectorHost,
+  isDisallowedDetectorIp,
+  parseLooseIpv4,
+} from "./net.js";
+export type { DetectorAddress, DetectorEndpointRejection } from "./net.js";
 
 // Async primitives.
 export { Semaphore, TIMED_OUT, sleep, withTimeout } from "./async.js";
@@ -157,14 +164,18 @@ export {
   DEFAULT_MODEL as WORKERS_AI_LLAMA_GUARD_DEFAULT_MODEL,
   WorkersAiLlamaGuardDetector,
   classifyCloudflareError,
+  cloudflareRestWorkersAiClient,
   hazardName,
   interpretResponse,
   normalizeHazardCode,
+  workersAiBindingClient,
 } from "./adapters/workers_ai_llama_guard.js";
 export type {
   CloudflareClient,
   CloudflareErrorKind,
   LlamaGuardVerdict,
+  WorkersAiBinding,
+  WorkersAiClient,
   WorkersAiLlamaGuardConfig,
 } from "./adapters/workers_ai_llama_guard.js";
 export { FixtureTransport } from "./adapters/fixture.js";

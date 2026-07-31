@@ -6,7 +6,7 @@
  * are `.strict()`.
  */
 import { z } from "zod";
-import { approvalPolicySchema } from "@ferrogate/core";
+import { approvalPolicySchema, DEFAULT_APPROVAL_POLICY } from "@ferrogate/core";
 import {
   agentUpstreamCapabilitySchema,
   agentUpstreamProtocolSchema,
@@ -332,7 +332,9 @@ export const extensionConfigSchema = z.object({
   enabled: z.boolean().default(true),
   source: z.string().default("builtin"),
   order: z.number().int().default(100),
-  approval_policy: approvalPolicySchema,
+  // Rust: `#[serde(default)] approval_policy: ApprovalPolicy` with `#[default] Never`,
+  // so an omitted key is `never`, not a deserialization error.
+  approval_policy: approvalPolicySchema.default(DEFAULT_APPROVAL_POLICY),
   permissions: sectionDefault(extensionPermissionsSchema),
   config: z.record(z.string(), z.unknown()).default({}),
 });
@@ -354,14 +356,21 @@ export const skillPackageCapabilitySchema = z.object({
 export type SkillPackageCapability = z.infer<typeof skillPackageCapabilitySchema>;
 
 // PORT-TODO(inventory §5.3): McpServerConfig is owned by `@ferrogate/mcp` (wave 2);
-// the load-time guards only read name/url/transport/auth_type, so the rest is
-// accepted via passthrough until that crate is ported.
+// the load-time guards read name/url/transport/auth_type/tools_to_execute, so the
+// rest is accepted via passthrough until that crate is ported.
 export const mcpServerConfigSchema = z
   .object({
     name: z.string(),
     url: optString,
     transport: mcpTransportSchema,
     auth_type: mcpAuthTypeSchema,
+    /**
+     * `McpServerConfig::tools_to_execute` (`#[serde(default)]`). Execution is
+     * deny-by-default, and this list is also what names a workflow `tool` node's
+     * target (`<server>-<tool>`) and the `mcp_tool:`/`mcp:` policy targets, so it
+     * is modeled here rather than left to the passthrough.
+     */
+    tools_to_execute: z.array(z.string()).default([]),
   })
   .passthrough();
 export type McpServerConfig = z.infer<typeof mcpServerConfigSchema>;

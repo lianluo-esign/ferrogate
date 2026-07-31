@@ -2,16 +2,58 @@
  * SSRF-safe networking helpers — port of `ferrogate-guardrails::net`.
  *
  * `isDisallowedDetectorIp` is the private/reserved-address denylist, ported
- * verbatim (v4 + v6). It is used to validate a detector *endpoint config* value
- * (reject `localhost`/private-range literals in the URL host).
+ * verbatim (v4 + v6) from `net.rs`. `isDisallowedDetectorHost` and
+ * {@link detectorEndpointRejection} lift it to the endpoint-URL layer, which is
+ * where the whole SSRF defense has to live on workerd.
  *
- * PORT-TODO(inventory §3.4d / §3.8 — "no clean CF equivalent"): the Rust crate
- * additionally installs a custom reqwest DNS resolver
- * (`GuardrailDnsResolver`) that filters resolved IPs *before connecting*.
- * Workers `fetch` exposes no DNS-resolution seam and cannot reach RFC1918/
- * loopback anyway, so DNS-level filtering is dropped; host/IP-literal validation
- * plus the Worker egress boundary stand in. `filterResolvedDetectorAddresses` is
- * ported for parity/testing but is not wired into the request path.
+ * ## What the Rust did, and what this can and cannot do
+ *
+ * The Rust crate defended detector egress in TWO places:
+ *
+ *  1. `validate_custom_http_endpoint` — a *config-time* check on the endpoint
+ *     URL (http(s) only, host required, no userinfo/password/query/fragment;
+ *     unless `allow_private_network`, reject `localhost` and IP literals in the
+ *     denylist). That check is ported here in full.
+ *  2. `GuardrailDnsResolver` — a custom reqwest DNS resolver that resolved the
+ *     hostname and dropped every disallowed address *before the socket was
+ *     opened*, so `evil.example.com. A 127.0.0.1` was refused at connect time.
+ *
+ * PORT-TODO(inventory-policy-core §guardrails/net): workerd exposes no DNS
+ * resolver hook, so a hostname that RESOLVES to a private IP cannot be blocked
+ * pre-connect; this relies on the Worker egress boundary.
+ *
+ * That residual gap is REAL and is not closed by anything in this file. What is
+ * closed is the whole *literal* surface, which is the part an operator (or an
+ * attacker who can write a detector config) actually controls:
+ *
+ *  - scheme allowlist (`http:`/`https:` only — no `file:`, `data:`, `gopher:`,
+ *    `blob:`, `ftp:`, ...);
+ *  - credentials-in-URL rejected (`http://user:pass@host/`), plus query and
+ *    fragment, exactly as the Rust did;
+ *  - IP literals in the denylist rejected for BOTH families, including
+ *    IPv4-mapped IPv6 (`::ffff:127.0.0.1`) and the `inet_aton`-style IPv4
+ *    obfuscations (`0177.0.0.1` octal, `0x7f.0.0.1` hex, `2130706433` integer,
+ *    `127.1` short form). The Rust never had to parse those itself — its
+ *    `Ipv4Addr::from_str` rejects them, but `getaddrinfo` inside the resolver
+ *    accepted them and the resolver then filtered the resulting `127.0.0.1`.
+ *    With the resolver gone, parsing them HERE is what preserves that behavior.
+ *
+ * Two deliberate deltas from the Rust, both strictly tightening, both
+ * compensating for the missing resolver:
+ *
+ *  - `*.localhost` and a trailing-root-dot `localhost.` are rejected as well as
+ *    the bare `localhost` the Rust matched (RFC 6761 reserves the whole zone to
+ *    loopback, and the Rust resolver would have filtered them at connect time).
+ *  - the host is checked in both its raw and its WHATWG-canonicalized form, so
+ *    an obfuscation that only one of the two normalizes is still caught.
+ *
+ * NON-delta, called out because it is easy to "harden" by mistake: the Rust
+ * placed NO restriction on the endpoint port, so neither does this. A detector
+ * on `https://guard.example.com:8443/analyze` is legal, and adding a
+ * standard-ports-only rule here would be a behavior change, not a port.
+ *
+ * `filterResolvedDetectorAddresses` is ported for parity/testing but is NOT
+ * wired into the request path — there is no resolved-address list to filter.
  */
 
 /** A resolved socket address (host IP + port), the twin of Rust `SocketAddr`. */
@@ -139,6 +181,184 @@ function parseIpv6(ip: string): number[] | undefined {
     segments = [...segments.slice(0, 6), ...tailSegments];
   }
   return segments.length === 8 ? segments : undefined;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Endpoint-URL validation (the workerd stand-in for the Rust DNS resolver).
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The only schemes a guardrail detector endpoint may use, matching the Rust
+ * `matches!(endpoint.scheme(), "http" | "https")`.
+ */
+export const ALLOWED_DETECTOR_ENDPOINT_SCHEMES: readonly string[] = ["http:", "https:"];
+
+/** Why an endpoint URL was refused. `undefined` from the checker means "accepted". */
+export type DetectorEndpointRejection =
+  | "invalid_url"
+  | "scheme_not_allowed"
+  | "missing_host"
+  | "credentials_in_url"
+  | "query_or_fragment"
+  | "private_network_host";
+
+/**
+ * Validate a detector endpoint and return the rejection reason, or `undefined`
+ * when it is acceptable. Callers map the reason onto their own error type (see
+ * `custom_http.validateCustomHttpEndpoint`, which owns the ported messages).
+ *
+ * Accepts a `URL` or a raw string; a string that does not parse yields
+ * `"invalid_url"` rather than throwing.
+ */
+export function detectorEndpointRejection(
+  endpoint: string | URL,
+  allowPrivateNetwork: boolean,
+): DetectorEndpointRejection | undefined {
+  let url: URL;
+  if (endpoint instanceof URL) {
+    url = endpoint;
+  } else {
+    try {
+      url = new URL(endpoint);
+    } catch {
+      return "invalid_url";
+    }
+  }
+  if (!ALLOWED_DETECTOR_ENDPOINT_SCHEMES.includes(url.protocol)) {
+    return "scheme_not_allowed";
+  }
+  if (url.hostname === "") {
+    return "missing_host";
+  }
+  if (url.username !== "" || url.password !== "") {
+    return "credentials_in_url";
+  }
+  if (url.search !== "" || url.hash !== "") {
+    return "query_or_fragment";
+  }
+  // NOTE: no port restriction — the Rust had none. See the module doc.
+  if (!allowPrivateNetwork && isDisallowedDetectorHost(url.hostname)) {
+    return "private_network_host";
+  }
+  return undefined;
+}
+
+/**
+ * Whether a URL *host* must be refused as a detector endpoint: `localhost`
+ * (and its RFC 6761 zone), or an IP literal in the denylist written in any
+ * form a resolver would have accepted.
+ */
+export function isDisallowedDetectorHost(host: string): boolean {
+  for (const candidate of hostCandidates(host)) {
+    const bare = stripBrackets(candidate).toLowerCase();
+    if (bare === "") {
+      return true;
+    }
+    const withoutRootDot = bare.endsWith(".") ? bare.slice(0, -1) : bare;
+    if (withoutRootDot === "localhost" || withoutRootDot.endsWith(".localhost")) {
+      return true;
+    }
+    if (isDisallowedDetectorIp(bare)) {
+      return true;
+    }
+    const loose = parseLooseIpv4(withoutRootDot);
+    if (loose && isDisallowedV4(loose)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The host as written, plus — for a non-ASCII host only — its WHATWG-
+ * canonicalized form.
+ *
+ * The denylist decision is deliberately made by OUR OWN parsers
+ * (`parseIpv6` + `parseLooseIpv4` + the `localhost` zone), not by the runtime's
+ * URL implementation. Today `new URL()` happens to fold every `inet_aton`
+ * spelling, but that is an implementation detail of ada/workerd, not a security
+ * contract — leaning on it would make this check silently evaporate if the
+ * parser changed, and would leave the raw-string entry point unguarded.
+ *
+ * The one thing our parsers genuinely cannot do is Unicode host folding
+ * (IDNA/NFKC, e.g. the fullwidth digits in `１２７.0.0.1`), so the URL parser is
+ * borrowed for exactly that case and nothing else.
+ */
+function hostCandidates(host: string): string[] {
+  const candidates = [host];
+  const hasNonAscii = [...host].some((ch) => (ch.codePointAt(0) ?? 0) > 0x7f);
+  if (hasNonAscii && !/[/\\?#@\s]/.test(host)) {
+    try {
+      const canonical = new URL(`http://${host}`).hostname;
+      if (canonical !== host) {
+        candidates.push(canonical);
+      }
+    } catch {
+      // Not canonicalizable: the raw form is all we have.
+    }
+  }
+  return candidates;
+}
+
+function stripBrackets(host: string): string {
+  return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+}
+
+/**
+ * Parse an IPv4 host the permissive `inet_aton`/`getaddrinfo` way: 1–4 parts,
+ * each decimal, octal (`0` prefix) or hex (`0x` prefix), with the final part
+ * absorbing the remaining low-order bytes. `2130706433`, `0177.0.0.1`,
+ * `0x7f.0.0.1` and `127.1` all yield `127.0.0.1` here.
+ *
+ * This is deliberately NOT what `isDisallowedDetectorIp` uses — that one keeps
+ * Rust `Ipv4Addr::from_str` semantics (strict dotted-quad). This looser parse
+ * exists only for host validation, standing in for the resolver the Rust had.
+ */
+export function parseLooseIpv4(host: string): [number, number, number, number] | undefined {
+  if (host === "" || !/^[0-9a-zA-Z.]+$/.test(host)) {
+    return undefined;
+  }
+  const text = host.endsWith(".") ? host.slice(0, -1) : host;
+  const parts = text.split(".");
+  if (parts.length === 0 || parts.length > 4) {
+    return undefined;
+  }
+  const numbers: number[] = [];
+  for (const part of parts) {
+    const value = parseLooseIpv4Part(part);
+    if (value === undefined) {
+      return undefined;
+    }
+    numbers.push(value);
+  }
+  const last = numbers.pop() as number;
+  if (numbers.some((n) => n > 0xff)) {
+    return undefined;
+  }
+  if (last >= 256 ** (4 - numbers.length)) {
+    return undefined;
+  }
+  let value = last;
+  numbers.forEach((n, index) => {
+    value += n * 256 ** (3 - index);
+  });
+  return [(value / 0x1000000) & 0xff, (value / 0x10000) & 0xff, (value / 0x100) & 0xff, value & 0xff];
+}
+
+function parseLooseIpv4Part(part: string): number | undefined {
+  if (/^0[xX][0-9a-fA-F]+$/.test(part)) {
+    return Number.parseInt(part.slice(2), 16);
+  }
+  if (/^0[xX]$/.test(part)) {
+    return 0;
+  }
+  if (/^0[0-7]+$/.test(part)) {
+    return Number.parseInt(part, 8);
+  }
+  if (/^(?:0|[1-9]\d*)$/.test(part)) {
+    return Number.parseInt(part, 10);
+  }
+  return undefined;
 }
 
 function isDisallowedV6(segments: number[]): boolean {

@@ -1,22 +1,132 @@
 name = "ferrogate-mcp"
-main = "src/index.ts"
+main = "src/worker.ts"
+
+# Nothing declared below needs a newer runtime. `nodejs_compat` is what `hono`
+# and the WebCrypto code in `src/ports.ts` (`webCryptoIdentityCipher`) expect.
+# Raise the date only for a binding that demands it — this Worker uses no
+# containers and no `enable_ctx_exports`.
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# ===========================================================================
+# Bindings for `ferrogate-mcp`
+#
+# The rule this file follows (same as `apps/gateway/wrangler.toml`): declare
+# what the Worker reads or is about to read, and nothing else. An undeclared
+# binding the code reads is a production failure no test sees; a declared
+# binding nothing will ever read is dead configuration that drifts. Anything
+# deliberately WITHHELD is written out at the bottom with the reason.
+#
+# Values that identify an ACCOUNT RESOURCE (`id`, `database_id`, …) are
+# PLACEHOLDERS. `wrangler deploy` will refuse them, which is intentional: the
+# real ids come from whoever provisions the resources and are never invented
+# and committed here.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# [vars]
+# ---------------------------------------------------------------------------
+[vars]
+
 # DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`
 # (including a static API-key table). Production MUST NOT set this: without it
-# the Worker fails CLOSED — every authenticated surface answers
-# `503 mcp_auth_unavailable` until real ports are bound below.
-[vars]
+# `resolvePorts` binds `UnboundAuth` and the Worker fails CLOSED — every
+# authenticated surface answers `503 mcp_auth_unavailable`, and `GET /readyz`
+# answers `503 not_ready` (`portsBound` in `src/ports.ts` is the single source
+# of truth both branch on), while `/healthz` still answers 200.
 FG_DEV_IN_MEMORY_PORTS = "1"
 
-# TODO(bindings): configure per this app's inventory before first deploy.
-# Do NOT commit real resource IDs — these are placeholders only.
-#   [[durable_objects]]  bindings = ["FerroGateMcpSession"]
-#                        one DO per long-lived upstream MCP session, replacing
-#                        the Rust `McpManager` HashMap + health-check/reconnect.
-#   [[migrations]]       new_sqlite_classes = ["FerroGateMcpSession"]
-#   [[kv_namespaces]]    binding = "MCP_OAUTH_KV" -> per-user OAuth flows/grants
-#   [[d1_databases]]     binding = "DB" -> mcp_oauth_flows / mcp_oauth_credentials
-#   secrets              FERROGATE_MCP_IDENTITY_KEY (Secrets Store, deploy-time
-#                        binding) seals stored grants; see `webCryptoIdentityCipher`.
+# ---------------------------------------------------------------------------
+# KV — per-user MCP OAuth flow state
+#
+# Read as `env.MCP_OAUTH_KV`. This is the durable home of `StoredMcpOauthFlow`
+# (`src/ports.ts`), the in-flight authorization records `startMcpOauth` writes
+# and `completeMcpOauth` consumes. KV is the right primitive precisely because
+# the security property of the ANONYMOUS `GET /v1/mcp/identity/callback` is
+# carried by that record: a single-use, TIME-BOUNDED, sha256-keyed `state`.
+# KV's native per-key `expirationTtl` enforces the time bound, and `delete()`
+# after a successful exchange enforces single use.
+#
+# WIRING STATE — read this before assuming the binding is live. Nothing in
+# `src/**` dereferences `env.MCP_OAUTH_KV` yet: `resolvePorts` still returns
+# `InMemoryCredentialStore`, whose flow records die with the isolate, so a
+# browser redirected back to a DIFFERENT isolate than the one that started the
+# flow is refused. The binding is declared here because it is the deploy-time
+# half of that wiring and must exist in the account before the composition root
+# can pass it.
+#
+# PORT-TODO(inventory-edge-control §MCP): implement `McpCredentialStorePort`'s
+# flow half over this namespace and bind it in `resolvePorts`.
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "MCP_OAUTH_KV"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
+# D1 — per-user MCP identity grants + the upstream server catalog
+#
+# Read as `env.DB`. The D1 twin of the Postgres tables the Rust
+# `McpCredentialRepository` owns (PORT-PLAN.md "Postgres→D1"):
+#
+#   mcp_oauth_credentials  the sealed per-(tenant, workspace, user, server)
+#                          grant — refresh/access token ciphertext + nonce +
+#                          the bound OIDC `sub`. It MUST outlive the isolate:
+#                          a revoked grant that "comes back" on the next
+#                          isolate is a security regression, and today it does
+#                          exactly that (`InMemoryCredentialStore`).
+#   mcp_servers            the tenant's upstream MCP server configs and tool
+#                          allowlists (`McpServerConfig`), today reachable only
+#                          through `InMemoryUpstreams.register`.
+#
+# Same WIRING STATE caveat as the KV namespace above: declared, not yet
+# dereferenced. `database_id` is a documented placeholder.
+#
+# PORT-TODO(inventory-edge-control §MCP): D1-backed `McpCredentialStorePort` +
+# server catalog, bound in `resolvePorts`.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "ferrogate-control"
+database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ===========================================================================
+# NOT DECLARED — and why
+#
+# * DURABLE OBJECTS. `[[durable_objects.bindings]]` REFERENCES AN EXPORTED
+#   CLASS, and `apps/mcp/src/**` exports none — `src/index.ts` exports the Hono
+#   app and nothing else. Declaring `FerroGateMcpSession` (or an Agents-SDK
+#   `McpAgent`) now would fail the Worker at startup, INCLUDING under
+#   `@cloudflare/vitest-pool-workers`, turning a green suite red for a class
+#   that does not exist. It arrives with the code that exports it:
+#
+#     [[durable_objects.bindings]] name = "MCP_SESSION",
+#                                  class_name = "FerroGateMcpSession"
+#     [[migrations]]               tag = "v1",
+#                                  new_sqlite_classes = ["FerroGateMcpSession"]
+#
+#   One DO per long-lived upstream MCP session, replacing the Rust
+#   `McpManager` HashMap plus its health-check/reconnect loop, and giving the
+#   SSE transport in `src/transport.ts` (see its module docs) somewhere durable
+#   to hold a session. PORT-TODO(inventory-edge-control §MCP "session manager").
+#
+# * SECRETS STORE — `FERROGATE_MCP_IDENTITY_KEY`, the 32-byte AEAD key
+#   `webCryptoIdentityCipher` seals stored grants under, and the OAuth client
+#   secrets `SecretResolverPort.resolve` dereferences. Secret VALUES never
+#   belong in this file. Until the store binding lands they are seeded
+#   out-of-band per environment (`wrangler secret put`), and the ephemeral
+#   fallback in `src/ports.ts` deliberately loses every stored grant when the
+#   isolate recycles rather than persisting a weak key.
+#   PORT-TODO(inventory-edge-control §MCP): bind via Secrets Store at deploy
+#   time and pass the material into `webCryptoIdentityCipher(rawKey)`.
+#
+# * ANALYTICS ENGINE. `InMemoryAuditSink` keeps the `tool.execute` /
+#   `mcp.identity.*` rows — including the `agent_run_id` correlation column
+#   (#522) — only for the life of the isolate, so audit evidence does not
+#   survive eviction. The durable sink is `apps/telemetry`, reached by a
+#   service binding or an Analytics Engine dataset.
+#   PORT-TODO(inventory-edge-control §MCP "audit").
+#
+# * SERVICE BINDINGS. `[[services]]` names another deployed Worker; an
+#   unimplemented target turns every call into a runtime error instead of a
+#   clean 503, so the gateway / control-plane hops stay `fetch()` for now.
+# ===========================================================================

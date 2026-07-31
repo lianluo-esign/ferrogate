@@ -19,65 +19,23 @@ import {
   WORKER_A,
   WORKER_B,
   bearer,
+  drainPlane,
+  pollLease,
   post,
+  submitJob,
+  workerEnvelopeFor,
   workerHeaders,
 } from "./fixtures.js";
 
-/** A body that WOULD be valid if the caller were an authorized worker. */
+/**
+ * A body that WOULD be valid if the caller were an authorized worker.
+ *
+ * The SAME builder `contract.test.ts` uses for its positive reachability probe,
+ * so "a tenant key is refused here" and "a worker credential is served here" are
+ * statements about one request rather than two unrelated ones.
+ */
 function wellFormedBodyFor(path: string): Record<string, unknown> {
-  const base = { protocol_version: 1, identity: WORKER_A };
-  switch (path) {
-    case "/v1/self-hosted-workers/heartbeat":
-      return { ...base, status: "idle", reported_at_unix: 1_800_000_000 };
-    case "/v1/self-hosted-workers/events":
-      return {
-        ...base,
-        session_id: "s1",
-        run_id: "r1",
-        event_id: "e1",
-        kind: "lifecycle",
-        event_json: { state: "running" },
-        reported_at_unix: 1_800_000_000,
-      };
-    case "/v1/self-hosted-workers/artifacts":
-      return {
-        ...base,
-        session_id: "s1",
-        run_id: "r1",
-        artifact_id: "a1",
-        name: "patch.diff",
-        media_type: "text/x-diff",
-        byte_len: 10,
-        reported_at_unix: 1_800_000_000,
-      };
-    case "/v1/self-hosted-workers/checkpoints":
-      return {
-        ...base,
-        session_id: "s1",
-        run_id: "r1",
-        checkpoint_id: "c1",
-        created_at_unix: 1_800_000_000,
-      };
-    case "/v1/self-hosted-workers/runs/poll":
-      return {
-        ...base,
-        supported_capabilities: [],
-        now_unix: 1_800_000_000,
-        lease_duration_secs: 60,
-      };
-    case "/v1/self-hosted-workers/runs/ack":
-      return {
-        ...base,
-        dispatch_id: "d1",
-        action: "start_run",
-        lease_id: "l1",
-        run_id: "r1",
-        status: "completed",
-        reported_at_unix: 1_800_000_000,
-      };
-    default:
-      return base;
-  }
+  return workerEnvelopeFor(path, WORKER_A);
 }
 
 describe("internal worker-plane callbacks reject tenant credentials", () => {
@@ -135,7 +93,92 @@ describe("internal worker-plane callbacks reject tenant credentials", () => {
       );
       expect(response.status).toBe(401);
     });
+
+    it(`${path} DOES admit a registered worker credential`, async () => {
+      // The positive half of the invariant, asserted for ALL SIX rather than
+      // for heartbeat alone. Without it every refusal above would still hold on
+      // a build that refused EVERY caller — which is a different, useless
+      // property. `workerEnvelopeFor` is the same builder the tenant-key
+      // refusals use, so the pair differs ONLY in the credential presented.
+      const response = await post(path, workerHeaders(), wellFormedBodyFor(path));
+      const text = await response.text();
+
+      // No credential gate refused this caller...
+      expect(response.status, `${path} -> ${text}`).not.toBe(401);
+      expect(response.status, `${path} -> ${text}`).not.toBe(403);
+      // ...and the answer came from the callback handler itself.
+      expect([200, 201, 204, 400], `${path} -> ${text}`).toContain(response.status);
+      if (response.status === 400) {
+        // Only `runs/ack` can land here: the envelope is well-formed, so the
+        // auth leg cannot 400 it — this is the queue refusing an unknown lease,
+        // which is reached ONLY after the worker was admitted. The full
+        // admitted-and-settled path is exercised below.
+        expect(path).toBe("/v1/self-hosted-workers/runs/ack");
+        expect((JSON.parse(text) as { error: { code: string } }).error.code).toBe(
+          "invalid_self_hosted_worker_transport",
+        );
+      }
+    });
   }
+
+  it("the two queue callbacks admit a worker all the way through a real lease", async () => {
+    // `runs/poll` and `runs/ack` are the only two whose success needs state, so
+    // they get the end-to-end proof the per-path check above cannot give: a
+    // worker credential leases real work and settles it.
+    await drainPlane(WORKER_A);
+    await submitJob(TENANT_A_KEY);
+
+    const poll = await post("/v1/self-hosted-workers/runs/poll", workerHeaders(), {
+      protocol_version: 1,
+      identity: WORKER_A,
+      supported_capabilities: ["coding"],
+      now_unix: 1_800_000_000,
+      lease_duration_secs: 300,
+    });
+    expect(poll.status).toBe(200);
+    const leased = (await poll.json()) as { object: string; lease: Record<string, unknown> };
+    expect(leased.object).toBe("self_hosted_run_lease");
+
+    const ack = await post("/v1/self-hosted-workers/runs/ack", workerHeaders(), {
+      protocol_version: 1,
+      identity: WORKER_A,
+      dispatch_id: leased.lease.dispatch_id,
+      action: leased.lease.action,
+      lease_id: leased.lease.lease_id,
+      run_id: leased.lease.run_id,
+      status: "completed",
+      reported_at_unix: 1_800_000_100,
+    });
+    expect(ack.status).toBe(200);
+    expect((await ack.json()) as { object: string }).toMatchObject({
+      object: "self_hosted_run_ack",
+    });
+  });
+
+  it("a tenant bearer key cannot lease work even when work is queued", async () => {
+    // The refusals above post to an empty queue, so a reader could argue they
+    // prove nothing about a build that leaks work. Queue REAL work first, then
+    // present the strongest tenant credential: it must still be refused, and
+    // the work must still be there for the worker afterwards.
+    await drainPlane(WORKER_A);
+    await submitJob(TENANT_A_KEY);
+
+    const stolen = await post("/v1/self-hosted-workers/runs/poll", bearer(TENANT_A_KEY), {
+      protocol_version: 1,
+      identity: WORKER_A,
+      supported_capabilities: ["coding"],
+      now_unix: 1_800_000_000,
+      lease_duration_secs: 300,
+    });
+    expect(stolen.status).toBe(401);
+    expect(((await stolen.json()) as { error: { code: string } }).error.code).toBe(
+      "invalid_self_hosted_worker_transport_security",
+    );
+
+    // Nothing was leased away by the refused caller.
+    const lease = await pollLease(WORKER_A);
+    expect(lease).not.toBeNull();
+  });
 
   it("a suspended tenant key is refused on internal routes too", async () => {
     const response = await post(

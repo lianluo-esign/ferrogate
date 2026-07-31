@@ -25,6 +25,7 @@
  */
 import type { JsonValue } from "@ferrogate/core";
 
+import { mcpJsonRpcMethodScopes } from "./contract.js";
 import {
   decodeMcpRequest,
   jsonRpcError,
@@ -59,22 +60,17 @@ import {
 } from "./tools.js";
 
 /**
- * The method→scope map from the runtime API contract
- * (`operations[/v1/mcp].auth.scope_discriminator`). `method_dependent` auth
- * means the required scope is a function of the JSON-RPC method, resolved
+ * The method→scope map, read STRAIGHT from the runtime API contract
+ * (`operations[POST /v1/mcp].auth.scope_discriminator`). `method_dependent`
+ * auth means the required scope is a function of the JSON-RPC method, resolved
  * BEFORE authentication so a caller is gated on the operation it actually
- * requested.
+ * requested — ROUTE-MAP.md invariant 4: read the contract, never restate it.
+ *
+ * It is a `Map`, not an object literal, so an inherited `Object.prototype` key
+ * (`toString`, `constructor`, `__proto__`) can never masquerade as a mapped
+ * method with a non-`undefined` "scope".
  */
-export const MCP_METHOD_SCOPES: Readonly<Record<string, string>> = {
-  initialize: "tools.read",
-  "notifications/initialized": "tools.read",
-  ping: "tools.read",
-  "resources/list": "assets.read",
-  "resources/read": "assets.read",
-  "server/discover": "tools.read",
-  "tools/list": "tools.read",
-  "tools/call": "tools.execute",
-};
+export const MCP_METHOD_SCOPES: ReadonlyMap<string, string> = mcpJsonRpcMethodScopes();
 
 /**
  * Required scope for a method, or `undefined` when the contract has no mapping.
@@ -83,7 +79,7 @@ export const MCP_METHOD_SCOPES: Readonly<Record<string, string>> = {
  * on that branch (no handler or governed action runs there).
  */
 export function requiredScope(method: string): string | undefined {
-  return MCP_METHOD_SCOPES[method];
+  return MCP_METHOD_SCOPES.get(method);
 }
 
 /** The ingress decision for one parsed request, before authentication. */

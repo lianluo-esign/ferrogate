@@ -10,7 +10,7 @@
 import { z } from "zod";
 import { byteLen, encodeUtf8, isCharBoundary } from "./bytes.js";
 import { Semaphore, TIMED_OUT, withTimeout } from "./async.js";
-import { isDisallowedDetectorIp } from "./net.js";
+import { detectorEndpointRejection } from "./net.js";
 import { validateContentPatchesForSegments } from "./envelope.js";
 import {
   CONTRACT_VERSION,
@@ -435,30 +435,33 @@ function validateConfig(config: CustomHttpDetectorConfig): void {
   }
 }
 
-/** Validate a detector endpoint URL: http(s), host, no userinfo/query/fragment. */
-export function validateCustomHttpEndpoint(endpoint: URL, allowPrivateNetwork: boolean): void {
-  if (
-    (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") ||
-    endpoint.hostname === "" ||
-    endpoint.username !== "" ||
-    endpoint.password !== "" ||
-    endpoint.search !== "" ||
-    endpoint.hash !== ""
-  ) {
+/**
+ * Validate a detector endpoint URL: http(s), host, no userinfo/query/fragment,
+ * and — unless private networking is explicitly allowed — no `localhost` or
+ * denylisted IP literal in any resolver-accepted spelling.
+ *
+ * The rules live in `./net` (`detectorEndpointRejection`); this function owns
+ * only the mapping onto the two ported Rust messages. Accepts a raw string as
+ * well as a `URL` so callers that have not parsed yet get the same checks.
+ */
+export function validateCustomHttpEndpoint(endpoint: URL | string, allowPrivateNetwork: boolean): void {
+  const rejection = detectorEndpointRejection(endpoint, allowPrivateNetwork);
+  if (rejection === undefined) {
+    return;
+  }
+  if (rejection === "invalid_url") {
+    throw DetectorError.new("invalid_configuration", "guardrail detector endpoint is not a valid URL");
+  }
+  if (rejection === "private_network_host") {
     throw DetectorError.new(
       "invalid_configuration",
-      "guardrail detector endpoint must be an http(s) URL without credentials, query, or fragment",
+      "guardrail detector private-network endpoint requires explicit allow_private_network",
     );
   }
-  if (!allowPrivateNetwork) {
-    const host = endpoint.hostname.replace(/^\[|\]$/g, "");
-    if (host.toLowerCase() === "localhost" || isDisallowedDetectorIp(host)) {
-      throw DetectorError.new(
-        "invalid_configuration",
-        "guardrail detector private-network endpoint requires explicit allow_private_network",
-      );
-    }
-  }
+  throw DetectorError.new(
+    "invalid_configuration",
+    "guardrail detector endpoint must be an http(s) URL without credentials, query, or fragment",
+  );
 }
 
 /** Classify a `fetch` rejection into the detector error taxonomy. */

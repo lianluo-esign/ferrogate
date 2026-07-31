@@ -1,15 +1,176 @@
 name = "ferrogate-gateway"
-main = "src/index.ts"
+main = "src/worker.ts"
+
+# Unchanged from the scaffold: nothing declared below needs a newer runtime.
+# R2 bucket bindings and plain vars have been stable since long before this
+# date, and `nodejs_compat` is what `hono` + the WebCrypto/SigV4 code in
+# `src/assets/sigv4.ts` expect. Raise the date only for a binding that demands
+# it (e.g. containers / `enable_ctx_exports`, which this Worker does not use).
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
-# TODO(bindings): configure per this app's inventory before first deploy.
-# Do NOT commit real resource IDs — these are placeholders only.
-#   [[d1_databases]]        name = "DB"          -> control-plane store (per-tenant TENANT_DB_*)
-#   [[kv_namespaces]]       binding = "CACHE"    -> config / key cache
-#   [[r2_buckets]]          binding = "ASSETS"   -> asset hosting
-#   [[durable_objects]]     RATE_LIMIT, SESSION  -> rate-limit + streaming session state
-#   [[queues]]              billing usage/ledger fan-out
-#   [ai] / [[ai_gateway]]   Workers AI + AI Gateway (provider egress, guardrails)
-#   [[secrets_store]]       provider API keys (deploy-time binding)
-#   [[analytics_engine_datasets]] metrics/logs sink
+# ===========================================================================
+# Bindings for `ferrogate-gateway`
+#
+# Every entry below is read by code in `src/**`. The rule this file follows is
+# "declare what the Worker reads, and nothing else": an undeclared binding the
+# code reads is a runtime failure in production that no test sees, and a
+# declared binding nothing reads is dead configuration that drifts. The
+# not-yet-declared set is written out at the bottom, with the PORT-TODO that
+# will introduce each one, so neither mistake is possible silently.
+#
+# Values that identify an ACCOUNT RESOURCE (`bucket_name`, `id`,
+# `database_id`, …) are PLACEHOLDERS. The deploy step fills them from the real
+# Cloudflare account — do not commit real resource ids here.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# [vars] — the bootstrap identity/tenancy tables
+#
+# `src/adapters.ts` implements every port in `src/ports.ts` on top of these
+# five JSON strings, so the entire 401-vs-403 auth taxonomy runs in `workerd`
+# with no account resources at all. Each is parsed with `parseJsonVar`, which
+# falls back to "nothing configured" on absent OR malformed JSON — a typo can
+# never widen access, only close it.
+#
+# The values here are the FAIL-CLOSED empties. A real deployment overrides them
+# (a `[env.<name>.vars]` section, or — for anything secret — `wrangler secret
+# put`, which lands in the same `env` namespace and wins over a var).
+#
+# PORT-TODO(inventory-edge-control §5.2): all five disappear when
+# `@ferrogate/storage` (D1) and `@ferrogate/secrets` (Secrets Store) land; see
+# the PORT-TODOs at the top of `src/adapters.ts`.
+# ---------------------------------------------------------------------------
+[vars]
+
+# Read by `ConfiguredApiKeyAuthenticator.fromEnv` (src/adapters.ts).
+# JSON array of durable/native virtual keys. Empty ⇒ no native key resolves,
+# so every bearer credential falls through to the static table and then to
+# `401 invalid_api_key`. The Worker still serves `/healthz`, `/readyz` and the
+# other anonymous operations.
+GATEWAY_NATIVE_API_KEYS = "[]"
+
+# Read by `ConfiguredApiKeyAuthenticator.fromEnv` (src/adapters.ts).
+# JSON array of operator-authored static config keys. Note the asymmetry this
+# table carries: a static key with no `scopes` means ALL access (wildcard),
+# while a native key with no scopes means data-plane scopes only. Leaving this
+# empty is the safe default — a populated entry is effectively a root
+# credential and belongs in `wrangler secret put`, not in this file.
+GATEWAY_STATIC_API_KEYS = "[]"
+
+# Read by `ConfiguredInternalTransport.fromEnv` (src/adapters.ts).
+# JSON array of self-hosted worker registrations (`worker_id`, `tenant_id`,
+# `workspace_id`, `identity_fingerprint`, `transport_secret`). This is the ONLY
+# credential source for `auth.kind: "internal"` operations, so an empty table
+# means every worker-plane callback answers
+# `401 invalid_self_hosted_worker_identity` — it is never reachable with a
+# tenant bearer key (ROUTE-MAP invariant 2).
+# It carries real transport secrets: set it with `wrangler secret put`, never
+# as a plaintext var, in any deployment that registers workers.
+SELF_HOSTED_WORKER_REGISTRY = "[]"
+
+# Read by `ConfiguredTenancyLifecycleGate.fromEnv` (src/adapters.ts).
+# JSON map tenant id → "active" | "suspended" | "deleted" | "disabled". Absent
+# entries admit. Without it a suspended tenant keeps serving traffic: the
+# `403 tenancy_suspended` / `tenancy_deleted` refusals have no source.
+TENANCY_LIFECYCLE = "{}"
+
+# Read by `ConfiguredRbacAuthorizer.fromEnv` (src/adapters.ts).
+# JSON map tenant id → granted `rbac_action` list (`"*"` grants all). Empty ⇒
+# every operation carrying an `rbac_action` answers `403 rbac_denied` for a
+# tenant credential. Platform-operator credentials are waved through
+# regardless, so an empty map cannot lock the operator out.
+TENANT_RBAC_ACTIONS = "{}"
+
+# Read by `entitlementsFromEnv` (src/assets/handlers.ts).
+# JSON map tenant id → { asset_hosting_enabled, asset_storage_quota_bytes,
+# asset_max_object_bytes }. Fail-closed: a tenant with no row may NOT publish
+# assets (`NO_ASSET_HOSTING`), though what it already published stays readable.
+# Without it every `assets.write` push is refused for lack of a hosting grant.
+# PORT-TODO(inventory-request-path.md §1.6 "Asset hosting"): moves to D1
+# (`StoredPlan` + role bindings) via `@ferrogate/storage`.
+ASSET_ENTITLEMENTS = "{}"
+
+# ---------------------------------------------------------------------------
+# R2 — asset object storage
+#
+# Read as `env.ASSETS`, the production `AssetObjectStore` (src/assets/ports.ts:
+# that port is deliberately R2-SHAPED, so a live `R2Bucket` satisfies it
+# structurally). It holds the bytes of every hosted asset — the object a
+# presigned upload stages, the committed object under
+# `assets/v1/t/{tenant}/obj/…`, and the source of every inline pull.
+#
+# What breaks without it: `src/assets/handlers.ts` falls back to
+# `InMemoryAssetObjectStore`, whose contents vanish with the isolate, so a push
+# appears to succeed and a later read 404s. The presign family additionally
+# answers `503 asset_bucket_unavailable` (`AssetLimits.presignEnabled` is
+# `false` by default) — the correct unconfigured posture, and the reason the
+# gateway never silently routes large object bytes through the Worker.
+#
+# WIRING STATE — read this before assuming the binding is live. `src/index.ts`
+# currently builds `assetRouteModule()` with its offline defaults, so nothing
+# dereferences `env.ASSETS` yet. The binding is declared here because it is the
+# deploy-time half of that wiring and must exist in the account before the
+# composition root can pass it. The other half is
+# `assetRouteModule({ deps: { objects: env.ASSETS, presigner: new
+# SigV4Presigner({...}), limits: { presignEnabled: true } } })` —
+# PORT-TODO(inventory-request-path.md §1.6 "Object storage").
+#
+# `bucket_name` / `preview_bucket_name` are PLACEHOLDERS; the deploy step
+# substitutes the account's real buckets. R2 names are lowercase alphanumerics
+# and hyphens, 3–63 chars.
+# ---------------------------------------------------------------------------
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "replace-at-deploy-ferrogate-assets"
+preview_bucket_name = "replace-at-deploy-ferrogate-assets-preview"
+
+# ===========================================================================
+# NOT DECLARED — and why
+#
+# The scaffold's `TODO(bindings)` block listed D1, KV, Durable Objects, Queues,
+# Workers AI / AI Gateway, Secrets Store and Analytics Engine. As of this
+# commit NOTHING in `apps/gateway/src/**` reads any of them: the auth ports are
+# backed by the `[vars]` above, asset metadata/audit by the in-memory stores in
+# `src/assets/ports.ts`, and inference resolves models from an in-memory
+# registry (`src/inference/defaults.ts`). Declaring them now would be dead
+# configuration, and in two cases actively harmful:
+#
+#   * `[[durable_objects.bindings]]` REFERENCES AN EXPORTED CLASS. This Worker
+#     exports none, so a `RATE_LIMIT` / `SESSION` binding would fail the Worker
+#     at startup — including under `@cloudflare/vitest-pool-workers`.
+#   * `[[services]]` names another deployed Worker; an unimplemented target
+#     turns every call into a runtime error instead of a clean 503.
+#
+# Each is introduced by the slice that first reads it, together with its code:
+#
+#   [[d1_databases]]  binding = "DB", database_id = <deploy-time placeholder>
+#       asset metadata (`AssetMetadataStore`, src/assets/ports.ts) plus the
+#       durable api-key / RBAC / lifecycle tables now served from `[vars]`.
+#       PORT-TODO(inventory-edge-control §5.2) + (inventory-request-path §1.6).
+#   [[kv_namespaces]]  binding = "CACHE", id = <deploy-time placeholder>
+#       resolved-config and key-lookup cache (Rust `resolved_provider_secrets`,
+#       `response_cache`). PORT-TODO(inventory-request-path §1.7).
+#   [[durable_objects.bindings]] + [[migrations]]  RATE_LIMIT, SESSION
+#       the Rust `ClusterCounterBackend` RPM/TPM/token sliding windows and
+#       streaming-session state — one DO per counter key replaces Redis.
+#       PORT-TODO(inventory-request-path §1.7 "Counters").
+#   [[queues]]
+#       metering / ledger fan-out (Rust `metering_events`, `evidence_writer`).
+#       PORT-TODO(inventory-data-billing §metering).
+#   [ai] / AI Gateway
+#       Workers AI Llama Guard guardrail detector + governed provider egress.
+#       PORT-TODO(inventory-request-path §1.6 "Workers AI Llama Guard").
+#   [[analytics_engine_datasets]]  binding = "TELEMETRY"
+#       the durable sink behind `AssetAuditSink` / request logs. Today
+#       `InMemoryAssetAuditSink` keeps a bounded 1000-event ring per isolate,
+#       so audit evidence does not survive eviction.
+#       PORT-TODO(inventory-request-path §1.6); see also `apps/telemetry`.
+#   secrets (Secrets Store, deploy-time binding)
+#       provider API keys, and the R2 **S3** credentials `SigV4Presigner` needs
+#       (`endpoint` / `bucket` / `region` / `accessKeyId` / `secretAccessKey`,
+#       src/assets/sigv4.ts). The `R2Bucket` binding above cannot presign —
+#       presigned URLs are an S3-API feature over
+#       `https://<account_id>.r2.cloudflarestorage.com` — so the presign family
+#       stays `503 asset_bucket_unavailable` until these are bound.
+# ===========================================================================

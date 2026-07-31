@@ -27,22 +27,10 @@ export {
 } from "./loader.js";
 export type { AliasMigration } from "./loader.js";
 
-// Validation (load-time gate + the security/money invariants).
-export {
-  validateConfig,
-  apiKeysWithoutTenantIdentity,
-  apiKeysThatAuthorizeNothing,
-  warnImplicitPlatformOperators,
-  tenancyPostureWarnings,
-  ensureEveryKeyDeclaresTenantIdentity,
-  ensureApiKeyDeclaresTenantIdentity,
-  validateX402Reconciler,
-  validateAssetBucket,
-  validateAssetBucketR2,
-  validateAssetBucketBackend,
-  validateCloudflare,
-  validateCloudflareMcpServers,
-} from "./validate.js";
+// Validation: the whole `Config::validate()` surface — the entry point, every
+// per-section/per-entity validator, and the shared helpers (`./validate.ts`
+// re-exports `./validate/*`, so this is one module's worth of exports).
+export * from "./validate.js";
 export type { ValidateOptions } from "./validate.js";
 
 // Caddyfile compatibility layer.

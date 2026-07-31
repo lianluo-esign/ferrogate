@@ -1,11 +1,24 @@
 name = "ferrogate-agent-runtime"
-main = "src/index.ts"
+main = "src/worker.ts"
 
 # `enable_ctx_exports` (#471) is REQUIRED for the governed-egress path:
 # `@cloudflare/containers` resolves the outbound interceptor through
-# `ctx.exports.ContainerProxy`. It became the DEFAULT at compatibility date
-# 2025-11-17, and workerd now REJECTS the flag as redundant, so the date carries
-# it instead of the flag list. Do not lower this date without re-adding the flag.
+# `ctx.exports.ContainerProxy`. It is ENABLED here — by the compatibility DATE,
+# which is the only way to enable it at 2025-11-17.
+#
+# `enable_ctx_exports` and `compatibility_date = "2025-11-17"` are MUTUALLY
+# EXCLUSIVE, verified empirically rather than assumed: listing the flag makes
+# workerd refuse to boot, so the Worker is not merely misconfigured, it does not
+# start at all (and every test errors before collection):
+#
+#   service core:user:...: The compatibility flag enable_ctx_exports became the
+#   default as of 2025-11-17 so does not need to be specified anymore.
+#   MiniflareCoreError [ERR_RUNTIME_FAILURE]: The Workers runtime failed to start.
+#
+# So the date carries the flag's behaviour and the flag list must NOT repeat it.
+# If this date is ever LOWERED below 2025-11-17, `enable_ctx_exports` must be
+# added back to `compatibility_flags` in the same edit or container egress
+# breaks silently.
 compatibility_date = "2025-11-17"
 compatibility_flags = ["nodejs_compat"]
 

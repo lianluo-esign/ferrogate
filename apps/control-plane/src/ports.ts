@@ -334,6 +334,19 @@ export interface ControlPlaneBindings {
   readonly CONTROL_PLANE_SEED?: string;
   readonly ADMIN_LIST_DEFAULT_LIMIT?: string;
   readonly ADMIN_LIST_MAX_LIMIT?: string;
+  /**
+   * The control database (`[[d1_databases]] binding = "DB"` in
+   * `wrangler.toml`) — the native replacement for BOTH the D1 REST client and
+   * the `workers/d1-proxy` batch/`RETURNING` hot path.
+   *
+   * Optional because `resolveDeps` still builds `MemoryControlPlaneStore` from
+   * `CONTROL_PLANE_SEED`; typed here so the code and the deployment manifest
+   * agree on the binding's name today rather than after the swap.
+   *
+   * PORT-TODO(inventory-edge-control §5.2 / §9.3): back `ControlPlaneStore`
+   * with this binding and make it required.
+   */
+  readonly DB?: D1Database;
 }
 
 /** Per-request context values set by the middleware chain. */

@@ -116,7 +116,7 @@ const DEV_AGENT_UPSTREAMS = [
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      main: "./src/index.ts",
+      main: "./src/worker.ts",
       wrangler: { configPath: "./wrangler.toml" },
       miniflare: {
         bindings: {

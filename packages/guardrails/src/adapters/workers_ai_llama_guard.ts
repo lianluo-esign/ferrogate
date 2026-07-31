@@ -4,17 +4,44 @@
  *
  * Projects content to `@cf/meta/llama-guard-*` and turns its `safe`/`unsafe` +
  * hazard-category verdict into a `DetectorResult`. Content-moderation (NOT
- * prompt-injection), detect-only, ProviderSaas. Only constructible with a live
- * `CloudflareClient` (graceful disable when Cloudflare is unconfigured). On a CF
- * error it surfaces a typed `DetectorError` — the policy `on_error` owns
- * fail-open/closed.
+ * prompt-injection), detect-only, ProviderSaas.
  *
- * PORT-TODO(inventory §3.4c / §3.8): the Rust `ferrogate_cloudflare::CloudflareClient`
- * is a shared REST/Workers-AI client. On CF this maps to the native
- * `env.AI.run("@cf/meta/llama-guard-*")` binding. Here we depend on a small
- * {@link CloudflareClient} interface so the app layer can inject either an
- * `env.AI`-backed client or a REST client; the adapter logic (interpret,
- * hazard table, category allow-list, error mapping) is fully ported.
+ * ## The client seam (was: "blocked on ferrogate_cloudflare")
+ *
+ * The Rust adapter held an `Arc<ferrogate_cloudflare::CloudflareClient>` and
+ * POSTed `accounts/{account_id}/ai/run/{model}`. Porting that whole REST client
+ * is neither necessary nor correct on Workers: inventory-policy-core §3.8 says
+ * this adapter "maps directly to Workers AI (`env.AI.run(...)`) — no external
+ * client needed". So the seam is defined LOCALLY and narrowly, as the one call
+ * the adapter actually makes: {@link WorkersAiClient}.`run(model, input)`.
+ *
+ *  - On Cloudflare, {@link workersAiBindingClient} satisfies it directly from
+ *    the native `env.AI` binding — zero REST, zero token plumbing.
+ *  - Off-binding (or for a per-tenant token override, which the binding has no
+ *    equivalent for), {@link cloudflareRestWorkersAiClient} satisfies it from
+ *    the small {@link CloudflareClient} REST interface, preserving the Rust
+ *    path byte-for-byte on the wire.
+ *
+ * Both funnel into ONE `evaluate` implementation, so the interpretation, hazard
+ * table, category allow-list and error mapping are exercised identically
+ * whichever transport is wired in.
+ *
+ * ## Graceful disable
+ *
+ * The Rust detector "simply cannot exist unless the operator has configured
+ * Cloudflare". Same here: a client is a required constructor argument, so the
+ * detector cannot be built when Workers AI is unconfigured (no `env.AI` binding
+ * and no REST credentials ⇒ nothing to pass).
+ *
+ * ## Failure posture: FAIL-CLOSED at the adapter
+ *
+ * Verified against `crates/ferrogate-guardrails/src/adapters/workers_ai_llama_guard.rs`:
+ * "On a Cloudflare/Workers-AI error the detector returns a typed `DetectorError`
+ * (it does NOT silently pass)". This port matches exactly — an upstream error,
+ * an absent `response`, or output that cannot be interpreted all raise a
+ * `DetectorError` and NEVER degrade to a `pass` verdict. Choosing whether that
+ * error allows or blocks the request is the policy's `on_error`, not the
+ * detector's.
  */
 import { TIMED_OUT, withTimeout } from "../async.js";
 import {
@@ -63,7 +90,11 @@ export class CloudflareError extends Error {
   }
 }
 
-/** Minimal shared Cloudflare client seam the adapter needs (see PORT-TODO). */
+/**
+ * The REST slice of `ferrogate_cloudflare::CloudflareClient` needed to reach
+ * Workers AI off-binding. Adapt it to the adapter's seam with
+ * {@link cloudflareRestWorkersAiClient}.
+ */
 export interface CloudflareClient {
   /**
    * POST/GET `path` (with `{account_id}` templated by the client) and decode the
@@ -78,6 +109,59 @@ export interface CloudflareClient {
   ): Promise<T>;
 }
 
+/**
+ * The narrow port seam this adapter is written against: run one Workers AI
+ * model with one input, get the (already envelope-unwrapped) result back.
+ *
+ * `tenant` is the calling organization id, carried only so a REST-backed client
+ * can pick a per-tenant token override — the native binding ignores it.
+ * Implementations SHOULD reject with a {@link CloudflareError} so the adapter
+ * can classify precisely; anything else is treated as a transport failure.
+ */
+export interface WorkersAiClient {
+  run(model: string, input: unknown, tenant?: string): Promise<unknown>;
+}
+
+/**
+ * The slice of the native Workers AI binding (`env.AI`) this adapter uses.
+ * Declared locally so the package stays free of a `@cloudflare/workers-types`
+ * dependency; the real binding is structurally assignable to it.
+ */
+export interface WorkersAiBinding {
+  run(model: string, input: unknown, options?: unknown): Promise<unknown>;
+}
+
+/**
+ * Satisfy {@link WorkersAiClient} from the native `env.AI` binding — the
+ * production wiring on Cloudflare.
+ */
+export function workersAiBindingClient(ai: WorkersAiBinding): WorkersAiClient {
+  return {
+    async run(model: string, input: unknown): Promise<unknown> {
+      return ai.run(model, input);
+    },
+  };
+}
+
+/**
+ * Satisfy {@link WorkersAiClient} from the REST {@link CloudflareClient}, on the
+ * exact path and body the Rust used (`accounts/{account_id}/ai/run/{model}`,
+ * `{ messages: [...] }`), for deployments that are not on the binding.
+ */
+export function cloudflareRestWorkersAiClient(client: CloudflareClient): WorkersAiClient {
+  return {
+    async run(model: string, input: unknown, tenant?: string): Promise<unknown> {
+      const body = new TextEncoder().encode(JSON.stringify(input));
+      return client.requestJson<unknown>(
+        "POST",
+        `accounts/{account_id}/ai/run/${model}`,
+        body,
+        tenant,
+      );
+    },
+  };
+}
+
 export interface WorkersAiLlamaGuardConfig {
   id: string;
   model: string;
@@ -88,8 +172,38 @@ export interface WorkersAiLlamaGuardConfig {
   fingerprintKey: DetectorSecret;
 }
 
-interface RunResult {
-  response?: JsonValue | null;
+/**
+ * The Workers AI `/ai/run` request contract for Llama Guard (Rust `wire`
+ * module): a chat-style `messages` array. Isolated so a vendor contract drift
+ * is a one-place fix.
+ */
+interface RunRequest {
+  messages: { role: string; content: string }[];
+}
+
+/**
+ * Pull the model output out of a Workers AI result (the Rust `wire::RunResult`,
+ * with the `{ success, errors, result }` envelope already stripped by the
+ * client or absent on the binding).
+ *
+ * Anything that is not an object carrying a usable `response` is an
+ * `invalid_response` DetectorError — never a silent pass.
+ */
+function extractRunResponse(raw: unknown): JsonValue {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw DetectorError.new(
+      "invalid_response",
+      "workers-ai llama-guard response is missing the model output",
+    );
+  }
+  const response = (raw as { response?: unknown }).response;
+  if (response === undefined || response === null) {
+    throw DetectorError.new(
+      "invalid_response",
+      "workers-ai llama-guard response is missing the model output",
+    );
+  }
+  return response as JsonValue;
 }
 
 function validateConfig(config: WorkersAiLlamaGuardConfig): void {
@@ -126,33 +240,44 @@ function validateConfig(config: WorkersAiLlamaGuardConfig): void {
 
 export class WorkersAiLlamaGuardDetector implements GuardrailDetector {
   private config: WorkersAiLlamaGuardConfig;
-  private client: CloudflareClient;
-  private path: string;
+  private client: WorkersAiClient;
+  private model: string;
   private version: string;
   private counters = new AdapterCounters();
 
   private constructor(
     config: WorkersAiLlamaGuardConfig,
-    client: CloudflareClient,
-    path: string,
+    client: WorkersAiClient,
+    model: string,
     version: string,
   ) {
     this.config = config;
     this.client = client;
-    this.path = path;
+    this.model = model;
     this.version = version;
   }
 
-  static new(config: WorkersAiLlamaGuardConfig, client: CloudflareClient): WorkersAiLlamaGuardDetector {
+  /**
+   * Build against the {@link WorkersAiClient} seam — the native `env.AI`
+   * binding via {@link workersAiBindingClient}, or any fake in tests.
+   */
+  static withWorkersAi(
+    config: WorkersAiLlamaGuardConfig,
+    client: WorkersAiClient,
+  ): WorkersAiLlamaGuardDetector {
     validateConfig(config);
     const digest = configDigest([config.model, config.categories ? config.categories.join(",") : ""]);
-    const path = `accounts/{account_id}/ai/run/${config.model.trim()}`;
     return new WorkersAiLlamaGuardDetector(
       config,
       client,
-      path,
+      config.model.trim(),
       `${WORKERS_AI_LLAMA_GUARD_VERSION}+cfg.${digest}`,
     );
+  }
+
+  /** Build against the REST {@link CloudflareClient}, as the Rust constructor did. */
+  static new(config: WorkersAiLlamaGuardConfig, client: CloudflareClient): WorkersAiLlamaGuardDetector {
+    return WorkersAiLlamaGuardDetector.withWorkersAi(config, cloudflareRestWorkersAiClient(client));
   }
 
   private passResult(): DetectorResult {
@@ -219,32 +344,25 @@ export class WorkersAiLlamaGuardDetector implements GuardrailDetector {
     if (projected.length === 0) {
       return this.passResult();
     }
-    const body = new TextEncoder().encode(
-      JSON.stringify({ messages: [{ role: "user", content: projected }] }),
-    );
+    const runInput: RunRequest = { messages: [{ role: "user", content: projected }] };
     const remaining = deadlineMs - Date.now();
     if (remaining <= 0) {
       throw DetectorError.new("timeout", "workers-ai llama-guard detector deadline expired");
     }
     const attemptTimeout = Math.min(remaining, this.config.timeoutMs);
-    const call = this.client
-      .requestJson<RunResult>("POST", this.path, body, input.tenant.organization_id)
-      .catch((error) => {
+    // FAIL-CLOSED: any upstream rejection becomes a typed DetectorError; there
+    // is no path from here to a `pass` verdict (see the module doc).
+    const call = Promise.resolve()
+      .then(() => this.client.run(this.model, runInput, input.tenant.organization_id))
+      .catch((error: unknown) => {
         throw classifyCloudflareError(error);
       });
     const raced = await withTimeout(call, attemptTimeout);
     if (raced === TIMED_OUT) {
       throw DetectorError.new("timeout", "workers-ai llama-guard detector request timed out");
     }
-    const result = raced;
 
-    const response = result.response;
-    if (response === undefined || response === null) {
-      throw DetectorError.new(
-        "invalid_response",
-        "workers-ai llama-guard response is missing the model output",
-      );
-    }
+    const response = extractRunResponse(raced);
     const verdict = interpretResponse(response);
     if (verdict === undefined) {
       throw DetectorError.new(
@@ -385,6 +503,20 @@ export function normalizeHazardCode(token: string): string | undefined {
   return n >= 1 && n <= 14 ? `S${n}` : undefined;
 }
 
+/** Best-effort HTTP status carried by a Workers AI binding rejection. */
+function upstreamStatus(error: unknown): number | undefined {
+  if (error === null || typeof error !== "object") {
+    return undefined;
+  }
+  const bag = error as { status?: unknown; statusCode?: unknown };
+  for (const value of [bag.status, bag.statusCode]) {
+    if (typeof value === "number" && Number.isInteger(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 /** Human-readable name for an MLCommons/Llama-Guard-3 hazard S-code. */
 export function hazardName(code: string): string {
   const table: Record<string, string> = {
@@ -406,8 +538,33 @@ export function hazardName(code: string): string {
   return table[code] ?? "Unknown Hazard Category";
 }
 
-/** Map a `CloudflareError` onto the guardrail detector error taxonomy. */
+/**
+ * Map an upstream failure onto the guardrail detector error taxonomy.
+ *
+ * Handles the three shapes the seam can produce: a {@link CloudflareError} from
+ * a REST client (the Rust taxonomy, mapped 1:1), a `DetectorError` a client
+ * already classified, and the native binding's `InferenceUpstreamError`-style
+ * rejection, which carries an HTTP `status`/`statusCode` and no kind.
+ *
+ * Every branch yields a `DetectorError`. There is no branch that yields a pass:
+ * the adapter is fail-closed and the policy `on_error` decides the rest.
+ */
 export function classifyCloudflareError(error: unknown): DetectorError {
+  if (error instanceof DetectorError) {
+    return error;
+  }
+  if (!(error instanceof CloudflareError)) {
+    const status = upstreamStatus(error);
+    if (status === 401 || status === 403) {
+      return DetectorError.new(
+        "unauthorized",
+        "workers-ai llama-guard token is invalid or missing the Workers AI scope",
+      );
+    }
+    if (status === 429) {
+      return DetectorError.new("overloaded", "workers-ai llama-guard is rate limited");
+    }
+  }
   const kind = error instanceof CloudflareError ? error.kind : "transport";
   let mapped: DetectorErrorKind;
   let message: string;
