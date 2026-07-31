@@ -4830,7 +4830,7 @@ Subcommands:
 - `manifest` — Show an asset's resolved manifest
 - `storage-summary` — Show asset storage/retention summary
 - `withheld` — List withheld (pending_scan/quarantined) assets
-- `promote-visibility` — Promote an asset version's visibility
+- `promote-visibility` — Apply a completed out-of-band scan verdict to a withheld (pending_scan) asset version. IRREVERSIBLE and one-shot: scan_outcome=clean publishes, scan_outcome=quarantined withholds the version permanently, and a repeat attempt returns 409. Requires --data '{"scan_outcome":"clean|quarantined","evidence":"<scanner id or ticket>"}'; missing or unknown values are rejected and never promote.
 - `yank` — Yank an asset version
 - `unyank` — Reverse a yank on an asset version
 
@@ -5076,7 +5076,7 @@ Options:
 
 ##### `ferrogate ctl assets promote-visibility`
 
-Promote an asset version's visibility
+Apply a completed out-of-band scan verdict to a withheld (pending_scan) asset version. IRREVERSIBLE and one-shot: scan_outcome=clean publishes, scan_outcome=quarantined withholds the version permanently, and a repeat attempt returns 409. Requires --data '{"scan_outcome":"clean|quarantined","evidence":"<scanner id or ticket>"}'; missing or unknown values are rejected and never promote.
 
 Arguments:
 
@@ -5102,6 +5102,7 @@ Options:
 - `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
 - `--output <FORMAT>` — Output format: table or json
 - `--non-interactive` — Do not prompt. Commands requiring confirmation fail unless --yes is also supplied (for scripts/CI)
+- `--yes` — Acknowledge this guarded state-changing operation without prompting
 
 
 ##### `ferrogate ctl assets yank`

@@ -431,7 +431,28 @@ pub struct RawApiResponse {
     pub status: u16,
     pub request_id: Option<String>,
     pub trace_id: Option<String>,
+    /// Every response header, preserved verbatim.
+    ///
+    /// Load-bearing, not bookkeeping: on a raw export the body is opaque bytes,
+    /// so the headers are the ONLY channel carrying which version a channel or
+    /// semver reference resolved to (`x-ferrogate-asset-version`/`-resolved`/
+    /// `-variant`), whether that version is yanked, and the strong `ETag` the
+    /// bytes can be checksummed against. Dropping them — as this type did —
+    /// made a channel pull unable to report what it downloaded and left the
+    /// transfer unverifiable. [`crate::raw_transfer`] turns them into operator
+    /// evidence and an integrity verdict.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl RawApiResponse {
+    /// Value of a response header by case-insensitive name.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// Classify a [`RawResponse`] into either a decoded [`ApiResponse`] or a typed
@@ -521,6 +542,7 @@ fn classify_raw(response: RawResponse) -> Result<RawApiResponse, ApiError> {
         status: response.status,
         request_id: response.header("x-request-id").map(str::to_string),
         trace_id: response.header("x-trace-id").map(str::to_string),
+        headers: response.headers,
         body: response.body,
     })
 }

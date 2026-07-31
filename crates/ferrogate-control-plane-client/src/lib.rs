@@ -184,6 +184,7 @@ pub mod ops;
 pub mod organization;
 pub mod output;
 pub mod parity;
+pub mod raw_transfer;
 pub mod receipt;
 pub mod registry_helpers;
 pub mod resource;

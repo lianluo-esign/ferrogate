@@ -45,6 +45,7 @@ use ferrogate_control_plane_client::context::EffectiveContext;
 use ferrogate_control_plane_client::dispatch::{build_request, redact_response, secret_fields_for};
 use ferrogate_control_plane_client::error::{CliError, CliResult};
 use ferrogate_control_plane_client::output::{render_output, Table};
+use ferrogate_control_plane_client::raw_transfer;
 use ferrogate_control_plane_client::receipt::{
     BareRenderer, MutationPlan, MutationReport, ReceiptRenderer, RenderGate, VerbOutput,
 };
@@ -458,6 +459,17 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
                 "--all-pages does not apply to the raw '{group_name} {verb_name}' export"
             )));
         }
+        // The raw path returns before the render gate, which is where every
+        // other read refuses `--dry-run`. Without this the flag was accepted
+        // and silently ignored: the download ran for real while the operator
+        // believed nothing had happened.
+        if resource.dry_run {
+            return Err(CliError::usage(format!(
+                "--dry-run applies to mutating verbs; '{group_name} {verb_name}' is a \
+                 {} verb and changes nothing",
+                descriptor.effect.as_str()
+            )));
+        }
     }
 
     let credential = resolve_credential(&effective.auth, &ProcessSecretResolver)?;
@@ -570,6 +582,14 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
 
 /// Write an export response to stdout byte-for-byte. No renderer or implicit
 /// newline is allowed on this path because stdout is the durable artifact.
+///
+/// Everything the operator needs to *understand* those bytes therefore travels
+/// on stderr: the correlation ids, the contract's resolution evidence (which
+/// concrete version a channel or semver reference resolved to, which platform
+/// variant, whether it is yanked), and the integrity verdict. A checksum
+/// mismatch is decided BEFORE the first byte is written, so a corrupted or
+/// truncated transfer fails closed with a transport-class exit instead of
+/// landing damaged bytes in a file with exit 0.
 fn write_raw_output(
     spec: RequestSpec,
     effective: EffectiveContext,
@@ -589,6 +609,44 @@ fn write_raw_output(
     }
     if let Some(trace_id) = &response.trace_id {
         eprintln!("trace-id: {trace_id}");
+    }
+    for (name, value) in raw_transfer::transfer_evidence(&response.headers) {
+        eprintln!("{name}: {value}");
+    }
+
+    // Verified before the write, not after: once the bytes are on stdout they
+    // are usually already in a file or a pipe, and a diagnostic that arrives
+    // afterwards cannot un-publish them.
+    match raw_transfer::verify_checksum(response.status, &response.headers, &response.body) {
+        raw_transfer::ChecksumVerdict::Verified { sha256 } => {
+            eprintln!("checksum: sha256 {sha256} verified against the server's ETag");
+        }
+        raw_transfer::ChecksumVerdict::Unverifiable { reason } => {
+            eprintln!(
+                "note: transferred bytes were NOT checksum-verified ({reason}); \
+                 sha256 of what arrived is {}",
+                raw_transfer::sha256_hex(&response.body)
+            );
+        }
+        raw_transfer::ChecksumVerdict::Mismatch { expected, actual } => {
+            let evidence = response
+                .request_id
+                .as_deref()
+                .map(|id| format!(" [request_id={id}]"))
+                .unwrap_or_default();
+            return Err(CliError::transport(format!(
+                "checksum mismatch: the server's ETag declares sha256 {expected} but the \
+                 {} transferred bytes hash to {actual}. Refusing to write a corrupted or \
+                 truncated export to stdout; re-run the download{evidence}",
+                response.body.len()
+            )));
+        }
+    }
+
+    // A yanked release stays downloadable by contract, so this is a warning and
+    // not a refusal -- but it must be impossible to pull one without being told.
+    if let Some(warning) = raw_transfer::yank_warning(&response.headers) {
+        eprintln!("{warning}");
     }
 
     let mut stdout = std::io::stdout().lock();

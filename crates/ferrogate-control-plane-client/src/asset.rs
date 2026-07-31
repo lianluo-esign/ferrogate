@@ -28,8 +28,12 @@
 //!   read the collection and per-type views, `manifest` reads the immutable
 //!   resolved manifest, `storage-summary` exposes retention/GC visibility,
 //!   `withheld` reads the operator view of assets held back by the scan pipeline
-//!   (`pending_scan`/`quarantined`), `promote-visibility` posts the scan
-//!   outcome and evidence that moves a version's visibility, and
+//!   (`pending_scan`/`quarantined`), `promote-visibility` posts the completed
+//!   out-of-band scan verdict (`{scan_outcome, evidence}`) that moves a
+//!   withheld version to its **terminal** visibility — it is a one-shot,
+//!   fail-closed compare-and-swap out of `pending_scan`, `quarantined`
+//!   withholds the version permanently, and a repeat attempt returns 409, so
+//!   the verb is confirmation-guarded — and
 //!   `yank`/`unyank` are first-class lifecycle actions (`POST`/`DELETE` on the
 //!   `.../yank` sub-path) so an operator's intent and the audit trail stay
 //!   precise instead of collapsing into a generic update.
@@ -191,9 +195,24 @@ impl CommandGroup for AssetsGroup {
                     "List withheld (pending_scan/quarantined) assets",
                     "listWithheldAssets",
                 ),
-                VerbDescriptor::mutating(
+                // Guarded, and the help text states the body it needs.
+                // `promoteAssetVisibility` is a one-shot fail-closed CAS out of
+                // `pending_scan`: `clean` publishes the version and
+                // `quarantined` withholds it PERMANENTLY, and either way a
+                // second attempt returns 409. Declaring it a plain `mutating`
+                // verb whose about-line said "Promote an asset version's
+                // visibility" hid both facts — an operator could quarantine a
+                // release for good with no prompt, and had nothing telling them
+                // the required `{scan_outcome, evidence}` document exists, so
+                // the obvious invocation returned a 400 from the server.
+                VerbDescriptor::mutating_with_confirmation(
                     "promote-visibility",
-                    "Promote an asset version's visibility",
+                    "Apply a completed out-of-band scan verdict to a withheld (pending_scan) \
+                     asset version. IRREVERSIBLE and one-shot: scan_outcome=clean publishes, \
+                     scan_outcome=quarantined withholds the version permanently, and a repeat \
+                     attempt returns 409. Requires --data \
+                     '{\"scan_outcome\":\"clean|quarantined\",\"evidence\":\"<scanner id or \
+                     ticket>\"}'; missing or unknown values are rejected and never promote.",
                     "promoteAssetVisibility",
                 ),
                 VerbDescriptor::mutating("yank", "Yank an asset version", "yankAssetVersion"),
