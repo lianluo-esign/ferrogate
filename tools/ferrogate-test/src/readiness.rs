@@ -8,6 +8,7 @@ use crate::http::{http_request_addr, HttpResponse};
 use anyhow::{bail, Result};
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     path::Path,
     process::Child,
     thread,
@@ -160,6 +161,164 @@ fn response_is_from_service(identity: ServiceIdentity, response: &HttpResponse) 
         || response_claims_service(identity, response)
 }
 
+/// Who holds the listening socket on the probed port.
+///
+/// Service identity answers "is that FerroGate?" but not "is that *my*
+/// FerroGate". Under heavy parallel load the process that wins a released
+/// `free_addr()` port is at least as likely to be ANOTHER harness's gateway as
+/// it is to be a mock, and that squatter answers a perfectly valid
+/// `{"service":"ferrogate","status":"ok"}` with the runtime stamp -- then serves
+/// the scenario ITS models, which is exactly `GET /v1/models` missing
+/// `fast-chat` (#444). Socket ownership is the evidence identity cannot give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortOwnership {
+    /// A listening socket on the port belongs to this harness process or one of
+    /// its descendants (the `ferrogate` child it spawned, or an in-process test
+    /// stub). This is our own service.
+    OurProcessTree,
+    /// The port has a listening socket and none of it is ours: another process
+    /// tree holds it. It will not yield the port, so polling can never succeed.
+    Foreign,
+    /// Ownership could not be observed -- no `/proc` (non-Linux), an unreadable
+    /// or racing `/proc` entry, or no listening socket found for the port. Never
+    /// used to accuse: readiness falls back to identity evidence alone, i.e. the
+    /// behaviour before this check existed.
+    Unknown,
+}
+
+/// Pure decision over observed inode sets, so the accusation is testable without
+/// a live port race. Ownership is only ever concluded from an inode that exists:
+/// an empty `listening` set is `Unknown`, never `Foreign`.
+fn classify_port_ownership(listening: &BTreeSet<u64>, ours: &BTreeSet<u64>) -> PortOwnership {
+    if listening.is_empty() {
+        return PortOwnership::Unknown;
+    }
+    if listening.iter().any(|inode| ours.contains(inode)) {
+        return PortOwnership::OurProcessTree;
+    }
+    PortOwnership::Foreign
+}
+
+/// Inodes of every `LISTEN` socket bound to `port` in a `/proc/net/tcp[6]`
+/// table. Address is deliberately not matched: a listener on `0.0.0.0:port`
+/// serves `127.0.0.1:port` too, and over-collecting can only make the decision
+/// more conservative (an inode of ours in the set still wins).
+fn parse_listening_inodes(proc_net_tcp: &str, port: u16) -> BTreeSet<u64> {
+    const TCP_LISTEN: &str = "0A";
+    proc_net_tcp
+        .lines()
+        .skip(1) // column header
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (local, state, inode) = (fields.get(1)?, fields.get(3)?, fields.get(9)?);
+            if !state.eq_ignore_ascii_case(TCP_LISTEN) {
+                return None;
+            }
+            let (_, local_port) = local.rsplit_once(':')?;
+            if u16::from_str_radix(local_port, 16).ok()? != port {
+                return None;
+            }
+            inode.parse::<u64>().ok()
+        })
+        .collect()
+}
+
+/// The inode behind a `/proc/<pid>/fd/<n>` symlink target, when that fd is a
+/// socket (`socket:[12345]`).
+fn parse_socket_inode(fd_link_target: &str) -> Option<u64> {
+    fd_link_target
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
+/// `PPid` from a `/proc/<pid>/status` table.
+fn parse_ppid(proc_status: &str) -> Option<u32> {
+    proc_status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The port a `host:port` harness address names.
+fn port_of(addr: &str) -> Option<u16> {
+    addr.rsplit_once(':')?.1.parse().ok()
+}
+
+/// Every pid in this harness process's tree that could hold the listener: this
+/// process (in-process mocks and test stubs) plus `child` and its descendants
+/// (the spawned service, and anything it forks).
+fn our_process_tree(child_pid: u32) -> Vec<u32> {
+    let mut tree = vec![std::process::id(), child_pid];
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return tree;
+    };
+    let pids: Vec<(u32, u32)> = entries
+        .filter_map(|entry| {
+            let pid: u32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+            Some((pid, parse_ppid(&status)?))
+        })
+        .collect();
+    // Bounded relaxation over a snapshot: each pass can only adopt children of
+    // pids already in the tree, so it settles in at most `pids.len()` passes and
+    // a /proc that raced us simply yields a smaller tree (=> Unknown, not blame).
+    loop {
+        let before = tree.len();
+        for (pid, ppid) in &pids {
+            if tree.contains(ppid) && !tree.contains(pid) {
+                tree.push(*pid);
+            }
+        }
+        if tree.len() == before {
+            return tree;
+        }
+    }
+}
+
+/// Socket inodes held by our process tree.
+fn our_socket_inodes(child_pid: u32) -> BTreeSet<u64> {
+    our_process_tree(child_pid)
+        .into_iter()
+        .filter_map(|pid| std::fs::read_dir(format!("/proc/{pid}/fd")).ok())
+        .flatten()
+        .filter_map(|fd| {
+            let target = std::fs::read_link(fd.ok()?.path()).ok()?;
+            parse_socket_inode(target.to_str()?)
+        })
+        .collect()
+}
+
+/// Observe who holds the listening socket on `addr`. Reads only `/proc` tables
+/// and our own tree's fds -- no blocking network work, and it runs once per
+/// start decision (never on the per-poll path) so it costs nothing in a loop.
+fn observe_port_ownership(addr: &str, child_pid: u32) -> PortOwnership {
+    let Some(port) = port_of(addr) else {
+        return PortOwnership::Unknown;
+    };
+    let mut listening = BTreeSet::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(contents) = std::fs::read_to_string(table) {
+            listening.extend(parse_listening_inodes(&contents, port));
+        }
+    }
+    classify_port_ownership(&listening, &our_socket_inodes(child_pid))
+}
+
+/// What an otherwise-ready answer means once ownership of the port is known.
+/// Kept as its own decision so the refusal is assertable without staging a live
+/// cross-process port race: `Foreign` is a hijack even though the responder
+/// passed every identity check, because it is not our process.
+fn ready_outcome_for_owner(ownership: PortOwnership) -> ServiceStartOutcome {
+    match ownership {
+        PortOwnership::Foreign => ServiceStartOutcome::PortHijacked,
+        PortOwnership::OurProcessTree | PortOwnership::Unknown => ServiceStartOutcome::Ready,
+    }
+}
+
 /// The single per-probe readiness decision for a `/healthz` response, shared by
 /// every harness that starts a FerroGate child. [`wait_for_service_start`] acts
 /// only on this value, so no scenario can regress to status-only acceptance
@@ -236,7 +395,16 @@ pub(crate) fn wait_for_service_start(
         }
         let probe = http_request_addr(addr, "GET", "/healthz", &[], "");
         match classify_readiness(identity, &probe) {
-            ServiceReadiness::Ready => return Ok(ServiceStartOutcome::Ready),
+            // A ready answer with the right identity still has to come from OUR
+            // process: another harness's FerroGate that won this released port
+            // answers an identical healthz and would otherwise serve the whole
+            // scenario its own config (#444).
+            ServiceReadiness::Ready => {
+                return Ok(ready_outcome_for_owner(observe_port_ownership(
+                    addr,
+                    child.id(),
+                )))
+            }
             // A squatter holds the port and will not yield it; stop polling now
             // and let the caller decide (rotate, or fail by name).
             ServiceReadiness::PortHijacked => return Ok(ServiceStartOutcome::PortHijacked),
@@ -278,9 +446,9 @@ pub(crate) fn require_service_ready(
     match wait_for_service_start(identity, child, addr, label, timeout)? {
         ServiceStartOutcome::Ready => Ok(()),
         ServiceStartOutcome::PortHijacked => bail!(
-            "{label}: {addr} is answering HTTP but is not {binary}, so a foreign \
-             process (typically a parallel harness mock that won the released ephemeral \
-             port) holds the port; refusing to run the scenario against it (#444)"
+            "{label}: {addr} is answering HTTP but is not this harness's {binary} -- a foreign \
+             process (a parallel harness's mock, or another harness's own service) won the \
+             released ephemeral port and holds it; refusing to run the scenario against it (#444)"
         ),
     }
 }

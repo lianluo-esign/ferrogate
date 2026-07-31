@@ -470,3 +470,104 @@ fn readiness_treats_our_own_gateway_answering_not_ready_as_pending_not_hijack() 
         ServiceReadiness::Pending
     );
 }
+
+#[test]
+fn a_ready_answer_from_a_foreign_process_tree_is_a_hijack_not_readiness() {
+    // The residual #444 left open: identity proves "that is a FerroGate", not
+    // "that is MY FerroGate". Another harness's gateway that won this released
+    // ephemeral port answers a byte-identical stamped `/healthz` and would then
+    // serve the scenario ITS models -- which is exactly `GET /v1/models` missing
+    // `fast-chat`. Ownership is what separates the two, so a foreign owner of an
+    // otherwise-ready port must terminate the wait as a hijack.
+    assert_eq!(
+        ready_outcome_for_owner(PortOwnership::Foreign),
+        ServiceStartOutcome::PortHijacked
+    );
+    // ...and must stay conditional on ownership being *proven*: our own service,
+    // and any host where ownership cannot be observed at all, still start.
+    assert_eq!(
+        ready_outcome_for_owner(PortOwnership::OurProcessTree),
+        ServiceStartOutcome::Ready
+    );
+    assert_eq!(
+        ready_outcome_for_owner(PortOwnership::Unknown),
+        ServiceStartOutcome::Ready
+    );
+}
+
+#[test]
+fn port_ownership_never_accuses_without_an_observed_listening_socket() {
+    // No listening inode means nothing was observed -- a non-Linux host, an
+    // unreadable /proc, or a racing read. That is Unknown, never Foreign: the
+    // check may only ever add a refusal it can prove.
+    let ours = BTreeSet::from([41_u64]);
+
+    assert_eq!(
+        classify_port_ownership(&BTreeSet::new(), &ours),
+        PortOwnership::Unknown
+    );
+    assert_eq!(
+        classify_port_ownership(&BTreeSet::from([99]), &ours),
+        PortOwnership::Foreign
+    );
+    assert_eq!(
+        classify_port_ownership(&BTreeSet::from([99, 41]), &ours),
+        PortOwnership::OurProcessTree
+    );
+}
+
+#[test]
+fn listening_inodes_are_read_only_for_listening_sockets_on_the_probed_port() {
+    // Real `/proc/net/tcp` shape. Only state 0A (LISTEN) on the probed port
+    // counts: an ESTABLISHED connection *to* that port, and a listener on any
+    // other port, are not evidence about who holds it.
+    let table = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000   0 424242 1 x
+   1: 0100007F:1F90 0100007F:C000 01 00000000:00000000 00:00000000 00000000  1000   0 515151 1 x
+   2: 00000000:1F91 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000   0 616161 1 x
+";
+
+    assert_eq!(
+        parse_listening_inodes(table, 0x1F90),
+        BTreeSet::from([424_242])
+    );
+    // A wildcard listener on 0.0.0.0 serves 127.0.0.1 too, so it is collected.
+    assert_eq!(
+        parse_listening_inodes(table, 0x1F91),
+        BTreeSet::from([616_161])
+    );
+    assert!(parse_listening_inodes(table, 0x0050).is_empty());
+}
+
+#[test]
+fn a_listener_this_process_holds_is_observed_as_ours_through_real_proc() {
+    // The plumbing above the pure decisions, against the real kernel tables: a
+    // socket this test process actually holds must resolve to our process tree.
+    // Without this, `observe_port_ownership` could return Unknown for everything
+    // and the refusal would never fire in production.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind an owned listener");
+    let addr = listener
+        .local_addr()
+        .expect("owned listener address")
+        .to_string();
+    let child = LiveChild::spawn();
+
+    assert_eq!(
+        observe_port_ownership(&addr, child.child.id()),
+        PortOwnership::OurProcessTree,
+        "a socket held by this process must not be reported as a foreign squatter"
+    );
+
+    drop(listener);
+    assert_eq!(
+        parse_socket_inode("socket:[424242]"),
+        Some(424_242),
+        "fd links are how a pid's sockets are enumerated"
+    );
+    assert_eq!(parse_socket_inode("/dev/null"), None);
+    assert_eq!(
+        parse_ppid("Name:\tsleep\nPPid:\t1234\nState:\tS\n"),
+        Some(1234)
+    );
+}
