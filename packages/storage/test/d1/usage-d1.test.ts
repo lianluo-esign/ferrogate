@@ -187,3 +187,71 @@ describe("D1UsageLedger — the cross-database platform limit", () => {
     expect(rollup?.requestCount).toBe(2);
   });
 });
+
+/**
+ * `sum_api_key_committed_tokens` (#330) — the `committed` operand of
+ * `RateLimiter.reserveTokenBudget`, which enforces
+ * `api_keys.monthly_token_budget`.
+ *
+ * The number has to be RIGHT in a specific way: it must include every model and
+ * provider the key spent through, exclude other keys, and answer `0` (not
+ * `undefined`) for a key with no usage. A caller that had to tell "no rows"
+ * from "no tokens" apart would eventually read the absent case as unlimited.
+ */
+describe("D1UsageLedger — sumApiKeyCommittedTokens", () => {
+  test("answers 0 for a key with no usage at all", async () => {
+    expect(await new D1UsageLedger(handleA).sumApiKeyCommittedTokens("key_never_used")).toBe(0);
+  });
+
+  test("sums every (model, provider) aggregate attributed to the key", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call());
+    await ledger.persistUsageAggregate(
+      call({ logicalModel: "fast-chat", provider: "openai", totalTokens: 60 }),
+    );
+    // 140 + 60. A per-(context, model, provider) breakdown that summed only one
+    // row would answer 140 and silently under-charge the budget.
+    expect(await ledger.sumApiKeyCommittedTokens("key_1")).toBe(200);
+  });
+
+  test("accumulates across repeated calls on the same aggregate row", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call());
+    await ledger.persistUsageAggregate(call());
+    expect(await ledger.sumApiKeyCommittedTokens("key_1")).toBe(280);
+  });
+
+  test("excludes another API key's spend in the same tenant database", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call());
+    await ledger.persistUsageAggregate(
+      call({
+        context: { id: "ctx_2", organizationId: "org_1", apiKeyId: "key_2" },
+        totalTokens: 999,
+        scopes: [{ scopeType: "key", scopeId: "key_2" }],
+      }),
+    );
+    // The control that makes the join meaningful: `key_2`'s 999 tokens are in
+    // the SAME table and are excluded purely by `tenant_contexts.api_key_id`.
+    expect(await ledger.sumApiKeyCommittedTokens("key_1")).toBe(140);
+    expect(await ledger.sumApiKeyCommittedTokens("key_2")).toBe(999);
+  });
+
+  test("is scoped to the tenant's own database", async () => {
+    await new D1UsageLedger(handleA).persistUsageAggregate(call());
+    expect(await new D1UsageLedger(handleB).sumApiKeyCommittedTokens("key_1")).toBe(0);
+  });
+
+  test("ignores an aggregate whose context carries no api key", async () => {
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(
+      call({
+        context: { id: "ctx_anon", organizationId: "org_1" },
+        totalTokens: 500,
+        scopes: [{ scopeType: "tenant", scopeId: TENANT_A }],
+      }),
+    );
+    await ledger.persistUsageAggregate(call());
+    expect(await ledger.sumApiKeyCommittedTokens("key_1")).toBe(140);
+  });
+});

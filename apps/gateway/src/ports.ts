@@ -235,6 +235,17 @@ export interface GatewayBindings {
   readonly TENANCY_LIFECYCLE?: string;
   /** JSON map of tenant id → granted RBAC actions. */
   readonly TENANT_RBAC_ACTIONS?: string;
+
+  /**
+   * The pre-auth `[network_access]` gate (issue #166), read by
+   * `middleware/network.ts`. All four are inert when empty; a declared-but
+   * unusable value answers `503 network_access_misconfigured` rather than
+   * degrading to "no allowlist".
+   */
+  readonly GATEWAY_IP_ALLOWLIST?: string;
+  readonly GATEWAY_TRUST_FORWARDED_FOR?: string;
+  readonly GATEWAY_TRUSTED_PROXY_HOPS?: string;
+  readonly GATEWAY_UNAUTHENTICATED_RATE_LIMIT_PER_MINUTE?: string;
   /**
    * Local-development key gate. `"true"` — and nothing else — opens the
    * development credential path in `adapters.ts`; the value committed in
@@ -298,6 +309,15 @@ export interface GatewayBindings {
 /** Per-request context values set by the middleware chain. */
 export interface GatewayVariables {
   requestId: string;
+  /**
+   * W3C trace id adopted from a valid inbound `traceparent`, else the request
+   * id (`middleware/trace.ts`). This is what `x-trace-id` reports.
+   */
+  traceId: string;
+  /** The verbatim valid inbound `traceparent`, or `null`. */
+  traceparent: string | null;
+  /** The inbound `tracestate` carried with a valid `traceparent`, or `null`. */
+  tracestate: string | null;
   /** Canonicalized request path (`/control/v1/*` folded onto `/admin/v1/*`). */
   canonicalPath: string;
   operation: ApiOperation | null;

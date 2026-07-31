@@ -124,7 +124,38 @@ export const providerRecordSchema = z
   })
   .strict();
 
-/** One `[[models]]` row (the primary `ModelRoute` of a `ModelRegistryEntry`). */
+/**
+ * One `[[models]]` row (the primary `ModelRoute` of a `ModelRegistryEntry`).
+ *
+ * ## PORT-TODO(inventory-request-path §3.2 "Model registry", §"routing/failover")
+ *
+ * This schema can only express a `ModelRegistryEntry`'s PRIMARY route. Six
+ * fields of the Rust entry have no key here, and every one of them is load
+ * bearing for a behavior that is consequently unreachable:
+ *
+ *  - `fallbacks: Vec<ModelRoute>` — the candidate list `chat.rs:259` walks. No
+ *    fallbacks means no failover, whatever the dispatch loop later does.
+ *  - `ModelRoute.priority` / `.weight` — the Priority strategy's ordering AND
+ *    its weighted round-robin within a priority group (`model_route_counter`,
+ *    `weighted_start_index`, `total_weight`, `state_routing.rs:517-540`).
+ *  - `routing_strategy: RoutingStrategy` — `LowestCost` (needs the prices),
+ *    `LowestLatency` (needs `provider_routing_metrics`), `Balanced`. The enum is
+ *    declared in `@ferrogate/providers` (`models.ts:8`) and consumed by nothing.
+ *  - `input_price_per_1m` / `output_price_per_1m` — `route_estimated_cost`'s
+ *    only inputs, so `LowestCost` cannot even be scored.
+ *  - `context_window` — half of the `model_routing.rs` eligibility gate (see the
+ *    PORT-TODO on `ModelResolver` in `./ports.ts`).
+ *  - `cache_enabled` — the per-model leg of `AppState::ai_cache_enabled`.
+ *
+ * `packages/providers/src/models.ts` already ports `ModelRegistry` /
+ * `ModelRegistryEntry` / `ModelRoute` WITH all of these, and sorts fallbacks by
+ * priority→weight→provider→model exactly as Rust does. The gateway does not use
+ * it: `buildModelCatalog` flattens straight to {@link PhysicalRoute}. Closing
+ * the failover findings therefore starts HERE — the config vocabulary has to
+ * carry the routes before the dispatcher can choose between them. Not a
+ * platform limit; `GATEWAY_MODELS` is a plain JSON var and can hold a nested
+ * `fallbacks` array. See `docs/rewrite/parity-audit-request-path.md` F4/F6.
+ */
 export const modelRecordSchema = z
   .object({
     /** `ModelRegistryEntry.name` — the LOGICAL model a client asks for. */

@@ -121,6 +121,51 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  *
  * `createGatewayApp` mounts these after the auth guard and before every route,
  * so all 31 gateway operations are covered (see `CreateGatewayAppOptions`).
+ *
+ * ## The two PRE-AUTH ingress steps are NOT in this array — by construction
+ *
+ * Rust steps 3 and 5 run BEFORE `authenticate()`, so appending them here (this
+ * array is mounted AFTER `contractAuth`) would have been the wrong shape even
+ * though it would have passed a functional test. Both are now mounted by
+ * `createGatewayApp` itself, ahead of the auth guard:
+ *
+ *  - **step 5 — the network gate** (`AppState::check_network_access`,
+ *    `state.rs:5011`, issue #166) → `middleware/network.ts`. The CIDR IP
+ *    allowlist and the unauthenticated per-source-IP flood limit, answering
+ *    `403 ip_denied` / `429 unauthenticated_rate_limited`, reading the
+ *    `[network_access]` primitives `packages/config` has carried since wave 2
+ *    (`IpCidr`, `resolveClientIp`, `UnauthenticatedIpRateLimiter`) — which
+ *    until now NOTHING read, so an operator who set `ip_allowlist` got a green
+ *    `ferrogate check` and a gateway open to the world. Position is the point:
+ *    the Rust reason for the gate is that a flood or credential-stuffing scan
+ *    must never pay the virtual-key/storage lookup cost, and
+ *    `test/routes/network.test.ts` asserts an anonymous request from a denied
+ *    IP answers 403 `ip_denied` rather than 401 `missing_api_key`.
+ *  - **step 3 — W3C trace-context ingress** (`server/mod.rs:156
+ *    `ingress_trace_context`) → `middleware/trace.ts`, folded into the
+ *    `requestId` middleware because they answer one question between them.
+ *    A valid inbound `traceparent` donates its trace id to `x-trace-id` and to
+ *    every error envelope; `tracestate` rides along; anything malformed falls
+ *    back to the request id. The remaining half — INJECTING the pair toward an
+ *    upstream (`proxy.rs::apply_upstream_request_filter`) — belongs to the
+ *    operator reverse-proxy fall-through, which has its own marker in
+ *    `routes/index.ts`; the adopted values are parked on the request context
+ *    (`traceparent` / `tracestate` vars) for it.
+ *
+ * ## PORT-TODO(inventory-request-path §"Cross-crate architecture", steps 2/8)
+ *
+ * **`ClientActionTimeModule` and `run_pre_request_hooks`**
+ * (`handlers.rs:29-41`, `handlers.rs:124`): signed action-time tokens on CLI
+ * requests, rejected with the module's own status/code before anything else
+ * runs. Not a platform limit — ordinary Hono middleware — but a CROSS-APP
+ * boundary: the signing half lives in `apps/cli` and the token format
+ * (`ferrogate-core`'s action-time claim set) has no TS port yet, so a verifier
+ * here would have nothing to verify against and no way to be tested end to
+ * end. Opt-in posture in Rust, so the shipped behaviour matches an
+ * unconfigured Rust gateway: a CLI that signs an action-time token today has it
+ * ignored rather than verified. It belongs AHEAD of `contractAuth` when it
+ * lands, next to the network gate. See
+ * `docs/rewrite/parity-audit-request-path.md` F1/F2/F12.
  */
 export const GATEWAY_MIDDLEWARE = [
   // Durable metering, on `ctx.waitUntil`, after the response is flushed.

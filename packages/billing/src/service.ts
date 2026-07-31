@@ -169,6 +169,34 @@ export async function chargeAndRecord(
  * Build the billing service's Web Fetch handler. The returned function is a
  * `(request: Request) => Promise<Response>` that can be mounted directly or
  * wrapped by Hono.
+ *
+ * PORT-TODO(inventory-data-billing §2.4/§2.5) — MOUNTED ON NOTHING. RECORD A
+ * DECISION; this is the weakest of the audit's findings, not a proven defect.
+ *
+ * `grep -rn "createBillingService\|/v1/billing/charge" apps/` returns zero hits,
+ * so these four routes ship in no Worker. Unlike the `[[policies]]` engine and
+ * the workflow-run budget (see `@ferrogate/policy`'s markers), that is DEFENSIBLE
+ * here: in Rust this is a standalone process (`ferrogate-billing serve`, its own
+ * `TcpListener`), the committed 251-operation contract at
+ * `docs/openapi/runtime-api-contract.json` carries NO `/v1/billing/*` operation,
+ * and the gateway's own settlement path does not go through HTTP — it calls
+ * `charge()` directly via `apps/gateway/src/metering/*` and drains the
+ * `billing_report_outbox`, which IS mounted and tested.
+ *
+ * So the open question is a product one, and it should be answered in writing
+ * rather than left to `grep`: does `[billing_service] enabled = true` +
+ * `endpoint` (still in `@ferrogate/config`'s `billingServiceConfigSchema`, still
+ * validated by `validateAuthService`'s sibling `validateBillingAlerts` path)
+ * point at anything on Cloudflare? Either
+ *   (a) mount this handler as its own Worker (or a route group behind a service
+ *       binding) and add the four operations to the route contract, with a
+ *       wiring assertion that fails when it is unmounted; or
+ *   (b) declare the standalone billing service N/A on Cloudflare — the gateway
+ *       settles in-process — and say so where `billingServiceConfigSchema` is
+ *       defined, the way `[tls]`/`[tls.acme]` already announce that they are
+ *       inert.
+ * Leaving it as-is is the one option that keeps an operator's `billing_service`
+ * block looking honored while nothing answers on it.
  */
 export function createBillingService(
   config: BillingServiceConfig,

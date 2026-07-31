@@ -101,9 +101,43 @@ id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 name = "MCP_OAUTH_FLOWS"
 class_name = "McpOauthFlowClaim"
 
+# ---------------------------------------------------------------------------
+# DURABLE OBJECTS — the SHARED upstream-MCP session (the `McpManager` port)
+#
+# Read as `env.MCP_SESSION`. One instance per `(tenant, server)` upstream via
+# `idFromName(sessionKey(tenantId, serverName))`, so every isolate serving a
+# tenant observes the SAME negotiated protocol revision, tool list and
+# connection health instead of re-handshaking per cold isolate and discovering
+# an outage once per isolate. That closes
+# PORT-TODO(inventory-edge-control §MCP "session manager"), which was never a
+# platform limit — the primitive was always here.
+#
+# The tenant id being part of the DO NAME is the cross-tenant isolation
+# property: two tenants configuring an upstream called `search` address two
+# different objects by construction, not by a check that can be forgotten.
+#
+# `class_name` resolves against the ENTRY module, so `FerroGateMcpSession` is
+# re-exported from `src/worker.ts`. Dropping that re-export fails the Worker at
+# startup, including under `@cloudflare/vitest-pool-workers`.
+#
+# The binding is OPTIONAL to the code: `HttpMcpUpstreams` takes the store as an
+# option and falls back to its per-isolate map when none is supplied, so a
+# deployment without this namespace degrades to the previous behaviour rather
+# than failing closed on a session lookup.
+#
+# DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`).
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "MCP_SESSION"
+class_name = "FerroGateMcpSession"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["McpOauthFlowClaim"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["FerroGateMcpSession"]
 
 # ---------------------------------------------------------------------------
 # D1 — per-user MCP identity grants + the upstream server catalog
@@ -142,28 +176,6 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
 # ===========================================================================
 # NOT DECLARED — and why
-#
-# * `FerroGateMcpSession` — the UPSTREAM-session Durable Object. The OAuth-flow
-#   DO above is declared and live; this second one is not, and it is a
-#   deliberate deferral rather than a platform limit. `[[durable_objects.
-#   bindings]]` REFERENCES AN EXPORTED CLASS, and no such class exists yet, so
-#   declaring it now would fail the Worker at startup — including under
-#   `@cloudflare/vitest-pool-workers` — for a class that is not there. It
-#   arrives with the code that exports it:
-#
-#     [[durable_objects.bindings]] name = "MCP_SESSION",
-#                                  class_name = "FerroGateMcpSession"
-#     [[migrations]]               tag = "v2",
-#                                  new_sqlite_classes = ["FerroGateMcpSession"]
-#
-#   One DO per long-lived upstream MCP session, replacing the Rust
-#   `McpManager` HashMap plus its health-check/reconnect loop, and giving the
-#   SSE transport in `src/transport.ts` (see its module docs) somewhere durable
-#   to hold a session. PORT-TODO(inventory-edge-control §MCP "session manager"):
-#   NOT a CF limitation — the primitive exists and the OAuth-flow DO above
-#   proves the pattern in this very Worker. What is implemented today is a
-#   per-isolate session map with re-negotiation on every cold isolate, which is
-#   correct but re-handshakes more often than Rust's shared map did.
 #
 # * SECRETS STORE — `FERROGATE_MCP_IDENTITY_KEY`, the 32-byte AEAD key
 #   `webCryptoIdentityCipher` seals stored grants under, and the OAuth client

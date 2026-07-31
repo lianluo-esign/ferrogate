@@ -320,6 +320,121 @@ describe.each(BACKENDS)("ControlPlaneStore contract: $name", (backend) => {
     ).toBe(0);
   });
 
+  // -------------------------------------------------------------------------
+  // atomic
+  // -------------------------------------------------------------------------
+  //
+  // `atomic` is the ONE method a route uses to move money: `routes/wallets.ts`
+  // applies `[create(ledger entry), merge(wallet balance)]` as a unit, so a
+  // half-applied unit is a balance that moved with no ledger row explaining it.
+  // It was the only port method the contract below did not state, and the two
+  // stores had drifted apart underneath that hole in exactly that direction.
+
+  it("applies a create + merge pair and returns the records in mutation order", async () => {
+    await store.create("wallets", OPERATOR, { id: "w1", balance_cents: 100 });
+    const applied = await store.atomic(OPERATOR, [
+      { kind: "create", collection: "ledger", record: { id: "e1", amount_cents: 50 } },
+      { kind: "merge", collection: "wallets", id: "w1", patch: { balance_cents: 150 } },
+    ]);
+    expect(applied?.map((record) => record.id)).toEqual(["e1", "w1"]);
+    expect(await store.get("ledger", OPERATOR, "e1")).toMatchObject({ amount_cents: 50 });
+    expect(await store.get("wallets", OPERATOR, "w1")).toMatchObject({ balance_cents: 150 });
+  });
+
+  it("returns an empty result for an empty unit and writes nothing", async () => {
+    expect(await store.atomic(OPERATOR, [])).toEqual([]);
+  });
+
+  it("stamps a tenant caller's own tenant on every created row in the unit", async () => {
+    await store.create("wallets", TENANT_A, { id: "w1", balance_cents: 10 });
+    const applied = await store.atomic(TENANT_A, [
+      { kind: "create", collection: "ledger", record: { id: "e1", tenant_id: "tenant_b" } },
+      { kind: "merge", collection: "wallets", id: "w1", patch: { balance_cents: 20 } },
+    ]);
+    expect(applied?.[0]?.tenant_id).toBe("tenant_a");
+    expect(await store.get("ledger", TENANT_B, "e1")).toBeNull();
+  });
+
+  it("keeps id and tenant_id structural in a unit's merge patch", async () => {
+    await store.create("wallets", TENANT_A, { id: "w1", keep: true });
+    const applied = await store.atomic(TENANT_A, [
+      {
+        kind: "merge",
+        collection: "wallets",
+        id: "w1",
+        patch: { balance_cents: 5, id: "hijack", tenant_id: "tenant_b" },
+      },
+    ]);
+    expect(applied?.[0]).toMatchObject({ id: "w1", tenant_id: "tenant_a", keep: true });
+  });
+
+  /**
+   * THE half-apply. `ON CONFLICT … DO NOTHING` makes a colliding insert match
+   * zero rows without erroring, so before the batch guard covered `create` ids
+   * the D1 store COMMITTED the sibling merge (balance 999, no ledger entry) and
+   * reported a bare `Error`, while the in-memory reference rejected with
+   * `StoreConflictError` and wrote nothing. Both halves are asserted: the error
+   * IDENTITY and that the wallet is untouched.
+   */
+  it("rejects a taken create id with StoreConflictError and applies NOTHING", async () => {
+    await store.create("ledger", OPERATOR, { id: "e1", amount_cents: 1 });
+    await store.create("wallets", OPERATOR, { id: "w1", balance_cents: 100 });
+    await expect(
+      store.atomic(OPERATOR, [
+        { kind: "create", collection: "ledger", record: { id: "e1", amount_cents: 42 } },
+        { kind: "merge", collection: "wallets", id: "w1", patch: { balance_cents: 999 } },
+      ]),
+    ).rejects.toBeInstanceOf(StoreConflictError);
+    expect(await store.get("wallets", OPERATOR, "w1")).toMatchObject({ balance_cents: 100 });
+    expect(await store.get("ledger", OPERATOR, "e1")).toMatchObject({ amount_cents: 1 });
+  });
+
+  it("rejects the same create id twice in ONE unit and applies NOTHING", async () => {
+    await expect(
+      store.atomic(OPERATOR, [
+        { kind: "create", collection: "ledger", record: { id: "dup", amount_cents: 1 } },
+        { kind: "create", collection: "ledger", record: { id: "dup", amount_cents: 2 } },
+      ]),
+    ).rejects.toBeInstanceOf(StoreConflictError);
+    expect(await store.get("ledger", OPERATOR, "dup")).toBeNull();
+  });
+
+  it("answers null for a missing merge target and applies NOTHING", async () => {
+    const applied = await store.atomic(OPERATOR, [
+      { kind: "create", collection: "ledger", record: { id: "e1" } },
+      { kind: "merge", collection: "wallets", id: "ghost", patch: { balance_cents: 1 } },
+    ]);
+    expect(applied).toBeNull();
+    expect(await store.get("ledger", OPERATOR, "e1")).toBeNull();
+  });
+
+  it("answers null for another tenant's merge target and applies NOTHING", async () => {
+    await store.create("wallets", TENANT_A, { id: "w1", balance_cents: 100 });
+    const applied = await store.atomic(TENANT_B, [
+      { kind: "create", collection: "ledger", record: { id: "e1" } },
+      { kind: "merge", collection: "wallets", id: "w1", patch: { balance_cents: 0 } },
+    ]);
+    expect(applied).toBeNull();
+    expect(await store.get("ledger", OPERATOR, "e1")).toBeNull();
+    expect(await store.get("wallets", TENANT_A, "w1")).toMatchObject({ balance_cents: 100 });
+  });
+
+  /**
+   * Precedence, pinned so it cannot depend on which store is bound: an
+   * unresolvable merge target is `null` (→ 404) even when the SAME unit also
+   * carries a taken `create` id. The in-memory store used to decide this by
+   * mutation position and answered 409 here; D1 resolves every merge target
+   * before it can build a statement, so it answered 404.
+   */
+  it("prefers the missing-merge-target answer over a taken create id", async () => {
+    await store.create("ledger", OPERATOR, { id: "e1" });
+    const applied = await store.atomic(OPERATOR, [
+      { kind: "create", collection: "ledger", record: { id: "e1" } },
+      { kind: "merge", collection: "wallets", id: "ghost", patch: { balance_cents: 1 } },
+    ]);
+    expect(applied).toBeNull();
+  });
+
   it("combines search, filters, tenant scope and pagination", async () => {
     await store.create("plans", TENANT_A, { id: "a1", name: "nightly one", status: "active" });
     await store.create("plans", TENANT_A, { id: "a2", name: "nightly two", status: "active" });

@@ -45,8 +45,10 @@
  * therefore CANNOT be made atomic on this platform.
  */
 import {
+  type DeleteAssetVariantOutcome,
   type DeleteProjectOutcome,
   type DeleteWorkspaceOutcome,
+  assetVariantDeleteOutcomeFromReferences,
   projectDeleteOutcomeFromCounts,
   workspaceDeleteOutcomeFromCounts,
 } from "../references.js";
@@ -74,6 +76,38 @@ export const DELETE_WORKSPACE_IF_UNREFERENCED_SQL =
 export const WORKSPACE_REFERENCE_COUNTS_SQL =
   "SELECT (SELECT COUNT(*) FROM workspaces WHERE id = ?) AS present, " +
   "(SELECT COUNT(*) FROM api_keys WHERE workspace_id = ?) AS virtual_keys";
+
+/**
+ * The guarded asset-variant delete (§1.5.7, third of three).
+ *
+ * The correlated subquery matches a channel pointer to this exact variant by
+ * its `(tenant, asset_type, name, version)` identity — read off the row being
+ * deleted, NOT from caller-supplied parameters. Taking them from the caller
+ * would let a wrong tuple make the guard vacuously true and delete a version a
+ * channel still publishes; `stored_assets.id` is the only input.
+ *
+ * `variant` is deliberately NOT part of the match. `asset_channels` points at a
+ * `(name, channel) -> version` and carries no variant column, so a channel that
+ * resolves to a version blocks EVERY variant row of that version. That is the
+ * conservative direction: refusing a delete that might have been safe costs an
+ * operator one message, permitting one that was not costs a published 404.
+ */
+export const DELETE_ASSET_VARIANT_IF_UNREFERENCED_SQL =
+  "DELETE FROM stored_assets WHERE id = ? " +
+  "AND NOT EXISTS (SELECT 1 FROM asset_channels c " +
+  "                 JOIN stored_assets a ON a.id = stored_assets.id " +
+  "                WHERE c.tenant_id = a.tenant_id " +
+  "                  AND c.asset_type = a.asset_type " +
+  "                  AND c.name = a.name " +
+  "                  AND c.version = a.version)";
+
+/** The diagnostic read that NAMES the channels blocking a refused delete. */
+export const ASSET_VARIANT_CHANNELS_SQL =
+  "SELECT c.channel AS channel FROM stored_assets a " +
+  "LEFT JOIN asset_channels c " +
+  "  ON c.tenant_id = a.tenant_id AND c.asset_type = a.asset_type " +
+  " AND c.name = a.name AND c.version = a.version " +
+  "WHERE a.id = ? ORDER BY c.channel";
 
 function changes(result: D1Response): number {
   const meta = result.meta as { changes?: number } | undefined;
@@ -141,6 +175,43 @@ export class D1ReferenceGuardedDeletes {
       return outcome.kind === "deleted" ? { kind: "referenced", virtualKeys: 0 } : outcome;
     } catch (error) {
       throw d1Error("delete_workspace_if_unreferenced", error);
+    }
+  }
+
+  /**
+   * Delete an asset variant only while no `asset_channels` pointer resolves to
+   * its version (§1.5.7, third of three).
+   *
+   * Same shape as the two above, for the same reason: the check is INSIDE the
+   * DELETE, so a channel moved onto this version a microsecond earlier is seen
+   * by the guard. A `SELECT` then `DELETE` would let a publish land in the
+   * window and leave `latest` pointing at bytes that no longer exist.
+   */
+  async deleteAssetVariantIfUnreferenced(id: string): Promise<DeleteAssetVariantOutcome> {
+    try {
+      const guarded = await this.db
+        .prepare(DELETE_ASSET_VARIANT_IF_UNREFERENCED_SQL)
+        .bind(id)
+        .run();
+      if (changes(guarded) > 0) return { kind: "deleted" };
+
+      const rows = await this.db
+        .prepare(ASSET_VARIANT_CHANNELS_SQL)
+        .bind(id)
+        .all<{ channel: string | null }>();
+      // No rows at all means the variant itself is gone — the LEFT JOIN yields
+      // one row per existing variant even when it has no channel.
+      if (rows.results.length === 0) return { kind: "not_found" };
+      const channels = rows.results
+        .map((row) => row.channel)
+        .filter((channel): channel is string => channel !== null);
+      const outcome = assetVariantDeleteOutcomeFromReferences({ present: 1, channels });
+      // The guard already refused, so `deleted` cannot be the honest label: it
+      // would mean the last pointer moved away between the two statements, and
+      // reporting a deletion that did not happen is worse than a retry.
+      return outcome.kind === "deleted" ? { kind: "referenced", channels: [] } : outcome;
+    } catch (error) {
+      throw d1Error("delete_asset_variant_if_unreferenced", error);
     }
   }
 }

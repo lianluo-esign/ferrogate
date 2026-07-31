@@ -32,6 +32,25 @@
  * (`sql/d1-ts/tenant/0001_init_tenant.sql`), so the guard and its subqueries
  * are in one database and the atomicity is real — unlike the usage/billing
  * claim pair, which straddles control and tenant (see `./d1/usage-d1.ts`).
+ *
+ * §1.5.7 names THREE reference-guarded deletes and all three are now here. The
+ * third — "delete an asset variant only while no `asset_channels` pointer
+ * resolves to it" — is {@link assetVariantDeleteOutcomeFromReferences} with
+ * `D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced` as its durable
+ * half, in the same single-statement shape as the two above. Without it,
+ * deleting a variant that `latest` or `stable` still points at leaves a dangling
+ * channel, and every subsequent pull on that channel resolves to a version whose
+ * bytes are gone — a 404 on a name the operator believes is published.
+ *
+ * PORT-TODO(inventory-data-billing §1.4.6 `asset_channels` write path) — the
+ * guard exists; the thing it guards does not yet WRITE. Nothing in this package
+ * or in `apps/gateway` inserts an `asset_channels` row (see the marker on
+ * `ChannelMoveOutcome` in `./assets.ts`), so today the guard can only ever
+ * observe zero pointers and always permits the delete. That is the correct
+ * behaviour for the current data — a table with no rows references nothing —
+ * but it means the REFUSAL arm is exercised by tests that seed the table
+ * directly rather than by a production write path. It lands with the
+ * `D1AssetMetadataStore`.
  */
 
 /** Reference counts observed for a project id in one database. */
@@ -67,6 +86,44 @@ export type DeleteWorkspaceOutcome =
   | { kind: "deleted" }
   | { kind: "not_found" }
   | { kind: "referenced"; virtualKeys: number };
+
+/**
+ * Which channel pointers still resolve to one asset variant.
+ *
+ * `channels` carries the NAMES rather than a count because the caller renders
+ * them — "`latest` and `stable` still point at this version" is actionable,
+ * "2 references" is not.
+ */
+export interface AssetVariantReferences {
+  /** `1` when the variant row exists, `0` when it does not. */
+  present: number;
+  /** Channels (`latest`, `stable`, …) resolving to this exact version. */
+  channels: readonly string[];
+}
+
+/** Outcome of a reference-guarded asset-variant delete (`§1.5.7`). */
+export type DeleteAssetVariantOutcome =
+  | { kind: "deleted" }
+  | { kind: "not_found" }
+  | { kind: "referenced"; channels: readonly string[] };
+
+/**
+ * See {@link projectDeleteOutcomeFromCounts} — the same rule, third resource.
+ *
+ * A missing variant is `not_found` even when a channel still names its version,
+ * because there is nothing left to delete; reporting `referenced` would suggest
+ * a retry that can never succeed. That dangling pointer is a separate defect
+ * for the channel writer to resolve, not something this delete can fix.
+ */
+export function assetVariantDeleteOutcomeFromReferences(
+  references: AssetVariantReferences,
+): DeleteAssetVariantOutcome {
+  if (references.present <= 0) return { kind: "not_found" };
+  if (references.channels.length > 0) {
+    return { kind: "referenced", channels: [...references.channels] };
+  }
+  return { kind: "deleted" };
+}
 
 /**
  * The single copy of the decision rule, applied to counts read from one

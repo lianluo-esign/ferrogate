@@ -3,6 +3,31 @@
  *
  * `ModelRegistry.resolve` sorts fallback routes by priority → weight (desc) →
  * provider → provider_model, matching the Rust `resolve` tiebreak exactly.
+ *
+ * ## PORT-TODO(inventory-request-path §3.2, §"routing/failover") — NO CONSUMER
+ *
+ * `ModelRegistry` is not the registry `apps/gateway` dispatches on: the gateway
+ * declares its own `ModelResolver` port (`apps/gateway/src/inference/ports.ts`)
+ * returning ONE flattened `PhysicalRoute`, built from the `GATEWAY_MODELS` var
+ * by `apps/gateway/src/inference/catalog.ts`. So the `fallbacks` /
+ * `routingStrategy` / `contextWindow` / price fields modelled here reach no
+ * dispatcher, and {@link RoutingStrategy} in particular is a four-variant enum
+ * with **zero readers anywhere in the tree** — `LowestCost`, `LowestLatency`
+ * and `Balanced` are declared and never implemented.
+ *
+ * The Rust behavior they stand for lives in
+ * `crates/ferrogate-gateway/src/state_routing.rs:489 candidate_model_routes`,
+ * not in `models.rs`, and it is more than a sort: `LowestCost` scores routes
+ * through `route_estimated_cost` against the estimated usage, `LowestLatency`
+ * reads `provider_routing_metrics`, `Balanced` blends the two, and `Priority`
+ * does a WEIGHTED ROUND-ROBIN inside each priority group (`model_route_counter`
+ * / `weighted_start_index` / `total_weight`) rather than a plain sort. Porting
+ * the strategies therefore belongs with the gateway's dispatch loop, and this
+ * `resolve` covers only the `Priority` ordering.
+ *
+ * See the paired markers on `ModelResolver` (`inference/ports.ts`) and
+ * `modelRecordSchema` (`inference/catalog.ts`), and
+ * `docs/rewrite/parity-audit-request-path.md` F4/F5/F6.
  */
 
 export type RoutingStrategy = "Priority" | "LowestCost" | "LowestLatency" | "Balanced";

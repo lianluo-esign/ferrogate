@@ -21,6 +21,63 @@
  *
  * See the per-module `PORT-TODO(<inventory §>)` markers for the surfaces with no
  * clean CF equivalent (Postgres pool/RLS/FOR UPDATE, x402 payments, R2 blob move).
+ *
+ * ---------------------------------------------------------------------------
+ * PORT-TODO(inventory-data-billing §1.7 "Proposed CF/TS mapping") — THE DURABLE
+ * HALF OF THIS PACKAGE IS NOT MOUNTED ON ANY WORKER.
+ *
+ * Every class exported below `./tenant-router.js` — `D1WalletStore`,
+ * `D1WorkflowBudgetStore`, `D1UsageLedger`, `D1BillingEventLedger`,
+ * `D1ReferenceGuardedDeletes`, `TenantMonotonicUpserts`,
+ * `ControlMonotonicUpserts`, `R2AssetBlobStore`,
+ * `EnvBindingTenantDatabaseRouter`, `ControlDatabaseTenantRegistry` — plus every
+ * every `Memory…Store` above it, has ZERO importers under any app's `src`. A
+ * grep for `@ferrogate/storage` across the apps returns three call sites and all
+ * three take PURE helpers only: `periodMonthFromUnix` / `boolFromSqlite` /
+ * `optionalNumber` / `WALLET_RESERVATION_ACTIVE`
+ * (`apps/gateway/src/ratelimit/quota.ts`), `sha256Hex`
+ * (`apps/control-plane/src/site_domain_txt.ts`), and the site-domain value types
+ * (`apps/control-plane/src/routes/site_domain.ts`).
+ *
+ * Why it matters: this is precisely the repo's recurring defect — implemented,
+ * proven (104 pure + 152 D1 tests, mutation-tested per README §3), and DEAD in
+ * production. The no-oversell wallet guard is not protecting any money, because
+ * nothing calls `reserveWalletCredits`; the tenant router is not routing
+ * anything, so the database-per-tenant topology is not in effect on any deployed
+ * path. Neither the gateway nor the control plane holds a `TENANT_DB` handle:
+ * `apps/gateway/src/ratelimit/quota.ts` and `apps/control-plane/src/store/d1.ts`
+ * each hand-roll their own D1 access against the same migrations instead.
+ *
+ * The close is the composition roots, NOT this package: `apps/gateway` and
+ * `apps/control-plane` must construct `EnvBindingTenantDatabaseRouter(env,
+ * env.CONTROL_DB)` and route the money/usage paths through the stores here (see
+ * `packages/storage/README.md` §4 for the exact wiring). Whoever does it must
+ * add an assertion that FAILS when the store is unmounted — deleting the mount
+ * has to turn a test red, or this comment will be true again in a month.
+ * ---------------------------------------------------------------------------
+ *
+ * PORT-TODO(inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`,
+ * §1.2 `list_due_agent_schedules` / `insert_agent_schedule_fire`): the agent
+ * SCHEDULER has no module in this package at all — the family is absent, not
+ * partial. `crates/ferrogate-storage/src/agent_schedule.rs` (1017 lines) plus
+ * `control_plane_store_d1/agent_schedule.rs` (563 lines) carry: cron parsing via
+ * `croner` + IANA timezones via `chrono-tz`, interval specs, `next_fire_at`
+ * computation, `overlap_policy` (skip|allow), `catchup_policy`
+ * (skip_missed|fire_once), `jitter_secs`, the due-query over the partial index
+ * `(next_fire_at_unix) WHERE enabled AND next_fire_at_unix IS NOT NULL`, and the
+ * AT-MOST-ONCE fire gate (`UNIQUE (schedule_id, scheduled_fire_at_unix)` +
+ * `ON CONFLICT DO NOTHING`). Both tables and that UNIQUE exist in
+ * `sql/d1-ts/tenant/0001_init_tenant.sql`; no code writes either.
+ *
+ * What exists instead is CRUD only: `apps/control-plane/src/routes/admin_agent_schedule.ts`
+ * stores schedules as generic `control_plane_resources` documents, its `/fires`
+ * route lists a collection nothing appends to, and `run-now` merely sets
+ * `{ run_now: true }` on the document — no dispatch, no fire row. Why it
+ * matters: a schedule an operator creates NEVER FIRES, and if a firing loop is
+ * added later without the `ON CONFLICT DO NOTHING` gate, two Workers racing the
+ * same cron minute will each dispatch the slot — at-least-once delivery for
+ * agent runs that cost money. The natural CF home is a `[triggers] crons`
+ * handler plus a Durable Object alarm for sub-minute/jittered fires.
  */
 
 export * from "./errors.js";

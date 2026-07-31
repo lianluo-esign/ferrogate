@@ -149,17 +149,41 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
    * the conformance suite can hold both stores to one contract. The writes
    * themselves are then a synchronous loop with no `await` between them, which
    * on a single-threaded isolate no other request can interleave with.
+   *
+   * The two passes are in the order the D1 store is FORCED into (it resolves
+   * every merge target before it can build a single statement), so which of two
+   * simultaneous problems a caller is told about does not depend on which store
+   * is bound: an unresolvable merge target is `null` (→ 404) even when the unit
+   * also carries a taken `create` id. Deciding it per-mutation-position, as this
+   * did, made `[create(taken), merge(missing)]` a 409 here and a 404 on D1.
    */
   async atomic(
     scope: CallerScope,
     mutations: readonly StoreMutation[],
   ): Promise<readonly StoreRecord[] | null> {
+    // Pass 1 — resolve every merge target. A missing/invisible one aborts the
+    // whole unit before anything else is decided.
+    const resolved = new Map<number, StoreRecord>();
+    for (const [index, mutation] of mutations.entries()) {
+      if (mutation.kind !== "merge") continue;
+      const existing = await this.get(mutation.collection, scope, mutation.id);
+      if (existing === null) return null;
+      resolved.set(index, existing);
+    }
+
+    // Pass 2 — plan the writes. A `create` id is refused if it is already
+    // stored OR if this same unit already mints it: without the second check
+    // the later `Map.set` would silently overwrite the earlier one and the unit
+    // would report two records where one row exists.
     const planned: { collection: string; record: StoreRecord }[] = [];
-    for (const mutation of mutations) {
+    const mintedIds = new Set<string>();
+    for (const [index, mutation] of mutations.entries()) {
       if (mutation.kind === "create") {
-        if (this.#bucket(mutation.collection).has(mutation.record.id)) {
+        const key = `${mutation.collection} ${mutation.record.id}`;
+        if (this.#bucket(mutation.collection).has(mutation.record.id) || mintedIds.has(key)) {
           throw new StoreConflictError(mutation.collection, mutation.record.id);
         }
+        mintedIds.add(key);
         planned.push({
           collection: mutation.collection,
           record: {
@@ -170,8 +194,9 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
         });
         continue;
       }
-      const existing = await this.get(mutation.collection, scope, mutation.id);
-      if (existing === null) return null;
+      // Unreachable: every `merge` resolved in pass 1 or the unit returned.
+      const existing = resolved.get(index);
+      if (existing === undefined) throw new Error("atomic: unresolved merge target");
       const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = mutation.patch;
       planned.push({
         collection: mutation.collection,
@@ -183,6 +208,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
         },
       });
     }
+
     for (const { collection, record } of planned) {
       this.#bucket(collection).set(record.id, record);
     }

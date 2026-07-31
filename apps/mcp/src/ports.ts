@@ -36,6 +36,9 @@ import {
 import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
 import type { ParsedToolDef } from "./jsonrpc.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
+// TYPE-ONLY. `./session.js` imports `McpTool` back out of this module, also
+// type-only, so nothing is evaluated in either direction at module load.
+import type { FerroGateMcpSession } from "./session.js";
 
 // ---------------------------------------------------------------------------
 // Upstream MCP server configuration (port of `ferrogate-mcp/src/config.rs`)
@@ -1240,6 +1243,35 @@ export interface McpEnv {
    * as {@link MCP_OAUTH_KV}.
    */
   DB?: D1Database;
+
+  /**
+   * Durable Object namespace holding the SHARED upstream-MCP session — the
+   * Cloudflare shape of Rust's `McpManager` HashMap (`src/session.ts`). One
+   * instance per `(tenant, server)`, so the negotiated protocol revision, the
+   * discovered tool list and the connection health are fleet-wide facts rather
+   * than per-isolate ones.
+   *
+   * OPTIONAL, and its absence is a graceful degradation rather than a failure:
+   * {@link resolveUpstreams} builds `HttpMcpUpstreams` without a store, which
+   * falls back to the per-isolate session map — more handshakes, no shared
+   * health signal, same answers.
+   */
+  MCP_SESSION?: DurableObjectNamespace<FerroGateMcpSession>;
+
+  /**
+   * DEV/TEST ONLY. When `"1"`, the dev bundle resolves upstreams through the
+   * DURABLE path ({@link resolveUpstreams}) instead of the in-memory host.
+   *
+   * It exists because the two postures are otherwise mutually exclusive in a
+   * test: `FG_DEV_IN_MEMORY_PORTS` is what binds an authenticable API key, and
+   * without an authenticable key nothing reaches the tool chokepoint at all
+   * (see the AuthPort marker on {@link portsBound}). Without this var the
+   * production upstream path could only ever be tested through its own
+   * constructor — which is exactly the "implemented, tested, never mounted"
+   * defect, since a test that builds its own host proves nothing about the app
+   * the Worker exports.
+   */
+  FG_DEV_MCP_DURABLE_UPSTREAMS?: string;
 
   /**
    * 32-byte AEAD key (base64 or hex) the stored grants are sealed under —

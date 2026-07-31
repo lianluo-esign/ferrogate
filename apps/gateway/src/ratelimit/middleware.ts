@@ -16,13 +16,15 @@
  *
  *   5. `tpm_window()`            → 429 `tpm_limit_exceeded`
  *
- * Steps 1 and 4 are what {@link rateLimit} does — everything decidable from the
- * credential alone. Steps 2 and 3 need durable spend/balance reads that belong
- * to `@ferrogate/storage` + `@ferrogate/billing`; the counters they reserve
- * against are implemented (`RateLimiter.reserveTokenBudget` /
- * `reserveWalletCredits`) and the refusals are spelled out in
- * `RATE_LIMIT_REFUSALS`, but the *balance source* is not this slice's — see the
- * PORT-TODO below.
+ * Steps 1 THROUGH 4 are all what {@link rateLimit} does, in that order. Steps 2
+ * and 3 need durable spend/balance reads, which arrive through the
+ * {@link SpendSource} port in `./quota.ts`: `d1SpendSource` reads
+ * `usage_monthly_rollups` (the winning scope's aggregate spend for the current
+ * calendar month) and `wallets` minus the live `wallet_reservations` holds, all
+ * out of the TENANT database the `DB` binding already points at. A deployment
+ * with no `DB` bound gets `NO_SPEND_SOURCE`, which reports the same values an
+ * empty store would — 0 spent, no wallet — so binding the database can only
+ * tighten admission, never loosen it.
  *
  * Step 5 is NOT middleware, for the same reason it is not middleware in Rust: a
  * token estimate does not exist until the request body has been parsed and the
@@ -59,8 +61,13 @@ import {
   type QuotaBindings,
   type QuotaPolicySource,
   type QuotaSubject,
+  type SpendBindings,
+  type SpendSource,
+  currentPeriodMonth,
+  monthlyBudgetScope,
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
+  spendSourceFromEnv,
 } from "./quota.js";
 
 /**
@@ -72,7 +79,7 @@ import {
  * middleware; until then {@link rateLimit} reads it through this structural
  * type. See the WIRING block in `index.ts`.
  */
-export interface RateLimitBindings extends QuotaBindings {
+export interface RateLimitBindings extends QuotaBindings, SpendBindings {
   /** The `RateLimiterDurableObject` namespace. Absent ⇒ in-memory fallback. */
   readonly RATE_LIMIT?: RateLimiterNamespace | undefined;
 }
@@ -83,6 +90,17 @@ export interface RateLimitDeps extends RateLimitOptions {
   readonly limiter?: RateLimiter | ((env: RateLimitBindings) => RateLimiter);
   /** Override the policy source. Defaults to {@link quotaPolicySourceFromEnv}. */
   readonly quotas?: QuotaPolicySource | ((env: RateLimitBindings) => QuotaPolicySource);
+  /**
+   * Override the spend/wallet source behind admission steps 2 and 3. Defaults
+   * to {@link spendSourceFromEnv}, i.e. the tenant database when `DB` is bound.
+   */
+  readonly spend?: SpendSource | ((env: RateLimitBindings) => SpendSource);
+  /**
+   * The clock the monthly-budget period key is derived from
+   * (`AppState::current_period_month`). Injectable so a test can pin the
+   * calendar month it seeds a rollup row for.
+   */
+  readonly nowUnixSeconds?: () => number;
   /**
    * The TOK-12 per-credential `request_limit_per_minute`, which lives on the API
    * key row rather than in a quota policy. `AuthContext` in `src/ports.ts` does
@@ -198,6 +216,8 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       typeof deps.quotas === "function"
         ? deps.quotas(env)
         : (deps.quotas ?? quotaPolicySourceFromEnv(env));
+    const spend =
+      typeof deps.spend === "function" ? deps.spend(env) : (deps.spend ?? spendSourceFromEnv(env));
 
     const subject = subjectFor(c, deps.perKeyRequestLimit?.(auth));
     if (subject === null) {
@@ -222,30 +242,76 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       throw new HttpError(refusal.status, refusal.code, refusal.message(deniedBy));
     }
 
-    // PORT-TODO(inventory-request-path §1.6 "Budgets"): steps 2 and 3 of
-    // `finalize_auth` — `monthly_budget_exceeded` and `wallet_balance_exhausted`
-    // — are the ONLY two of the five Rust admission gates still open here.
+    // 2. The monthly USD budget, measured against the scope that WON the
+    //    chain's `min` (`finalize_auth` → `AppState::monthly_budget_exceeded`).
     //
-    // CROSS-PACKAGE, not cross-platform. Everything on THIS side is built: the
-    // counters (`RateLimiter.reserveTokenBudget` / `reserveWalletCredits`, both
-    // with a release path since JS has no `Drop`), the refusals
-    // (`RATE_LIMIT_REFUSALS.monthly_budget_exceeded` /
-    // `wallet_balance_exhausted`) and the estimate they would be charged with
-    // (`src/inference/estimate.ts`). What is missing is the BALANCE SOURCE:
-    // Rust reads `sum_scope_committed_spend(scope, month)` and the prepaid
-    // wallet row out of `ferrogate-storage`, and `@ferrogate/storage` has no
-    // adapter on this seam yet.
+    //    Both of the next two blocks run BEFORE the RPM check, in Rust's order:
+    //    a request refused for being over budget must not also spend a slot
+    //    from the RPM window, or a caller that is hard-denied anyway would burn
+    //    the budget of the requests that are still allowed.
+    const budgetUsd = resolution.quota.monthlyBudgetUsd;
+    if (budgetUsd !== undefined) {
+      const scope = monthlyBudgetScope(resolution.quota, subject.chain);
+      // `null` = no attribution at all to measure spend against. Rust returns
+      // `Ok(false)` there: nothing to compare, so nothing to refuse.
+      if (scope !== null) {
+        const spent = await spend.committedSpendUsd(
+          scope.kind,
+          scope.id,
+          currentPeriodMonth(deps.nowUnixSeconds?.()),
+        );
+        if (!spent.ok) {
+          // Rust: `Err` on the rollup read is 503, NOT a 429 — a storage
+          // outage has not proven the caller is over budget.
+          throw new HttpError(
+            503,
+            "quota_resolution_unavailable",
+            `monthly budget lookup failed: ${spent.detail}`,
+          );
+        }
+        // `>=`, not `>`: Rust refuses AT the cap (`spent >= budget_usd`).
+        if (spent.committedSpendUsd >= budgetUsd) {
+          const refusal = RATE_LIMIT_REFUSALS.monthly_budget_exceeded;
+          throw new HttpError(refusal.status, refusal.code, refusal.message());
+        }
+      }
+    }
+
+    // 3. Prepaid-credit wallet balance (issue #169) — enforced INDEPENDENTLY of
+    //    the budget above: a wallet tracks money actually paid, while
+    //    `monthly_budget_usd` is a configured throttle, so neither implies the
+    //    other and a tenant can be denied by either alone.
     //
-    // To close: add a `SpendSource` port next to `QuotaPolicySource` in
-    // `./quota.ts` returning `{ committedSpendUsd, walletBalanceCredits }` for
-    // the subject chain, back it with D1, and insert the two checks HERE — in
-    // this order, before the RPM check, because Rust refuses on budget before
-    // it spends a request from the window.
+    //    Opt-in per tenant: a tenant with no wallet row is never denied, which
+    //    is what keeps this purely additive for everyone who has not adopted
+    //    prepaid billing.
     //
-    // Consequence while it is open: a key over its monthly budget, or a tenant
-    // with an exhausted prepaid wallet, is NOT refused at admission. Step 5
-    // (TPM) below and step 4 (RPM) still bound it, and metering still records
-    // the spend — but the hard stop is absent.
+    //    COST, stated because it is on the hot path: this is one D1 `batch()`
+    //    per authenticated request that carries a tenant, whether or not that
+    //    tenant has a wallet. Rust pays the same point lookup unconditionally
+    //    in `finalize_auth` (issue #373 awaits `get_wallet` inline), so this is
+    //    parity rather than a regression — but if it ever needs to be cheaper,
+    //    the answer is a negative cache of "this tenant has no wallet" keyed on
+    //    the isolate (the same shape as `src/keys/cache.ts`), NOT skipping the
+    //    read, which would make the gate depend on request order.
+    const walletTenantId = subject.chain.tenantId;
+    if (walletTenantId !== undefined && walletTenantId !== "") {
+      const balance = await spend.walletBalanceCredits(walletTenantId);
+      if (!balance.ok) {
+        throw new HttpError(
+          503,
+          "quota_resolution_unavailable",
+          `wallet balance lookup failed: ${balance.detail}`,
+        );
+      }
+      // `<= 0` on the AVAILABLE balance (funded minus live holds), so a tenant
+      // whose in-flight requests have already committed the balance is refused
+      // here rather than admitted to race the ones already dispatched.
+      if (balance.availableCredits !== null && balance.availableCredits <= 0) {
+        const refusal = RATE_LIMIT_REFUSALS.wallet_balance_exhausted;
+        throw new HttpError(refusal.status, refusal.code, refusal.message());
+      }
+    }
 
     // 4. RPM.
     const outcome = await limiter.consumeRequest(resolution.rpm);

@@ -580,23 +580,29 @@ export interface AssetScreeningRequest {
  * Supply-chain screening gate — Rust `asset_security::screen_asset_push`
  * (issues #179/#261/#366).
  *
+ * The HTTP half of this seam is now PORTED and WIRED: `./scan.ts` carries
+ * `ScanVerdict` / `resolve_scan_outcome` / the hosted-scanner backend / the
+ * async-scan threshold, and `assetDepsFromEnv` builds it from the
+ * `ASSET_SCANNER*` vars. With those vars unset the deployment keeps
+ * {@link BuiltinEicarScreener} below, which is the Rust unconfigured posture.
+ *
  * PORT-TODO(inventory-request-path.md §1.6 "Clamd/HTTP malware scanner"): the
- * full Rust gate also ran detached minisign/Ed25519 signature verification, a
- * cross-tenant publish-approval check, and an out-of-process ClamAV/HTTP
- * scanner. This port keeps the *decision shape* (and the fail-closed default)
- * so the read-path withholding of #366 is real today — `test/assets/r2.test.ts`
- * pins it against the live R2 bucket: an EICAR push is STORED (202) and the
- * pull still answers 404, so "unproven" is indistinguishable from "absent" —
- * and the richer detectors drop in behind this same interface.
+ * full Rust gate ALSO ran detached minisign/Ed25519 signature verification, a
+ * cross-tenant publish-approval check, and an out-of-process ClamAV scanner.
+ * Those three are still unported. This port keeps the *decision shape* (and the
+ * fail-closed default) so the read-path withholding of #366 is real today —
+ * `test/assets/r2.test.ts` pins it against the live R2 bucket: an EICAR push is
+ * STORED (202) and the pull still answers 404, so "unproven" is
+ * indistinguishable from "absent" — and the richer detectors drop in behind
+ * this same interface.
  *
  * Only ONE of the three is platform-constrained, and it is not the one it looks
  * like:
  *  - Ed25519 verification is `crypto.subtle.verify("Ed25519", …)`, supported in
  *    workerd. The minisign CONTAINER format (its own base64 envelope + trusted
  *    comment + global-key store) is what is unwritten, not the primitive.
- *  - the HTTP scanner is a plain `fetch` to an operator-configured endpoint and
- *    is implementable today; `@ferrogate/guardrails` already has the
- *    `custom_http` detector shape to model it on.
+ *  - the cross-tenant publish approval needs an approval-record store; no D1
+ *    migration in this tree declares one (`sql/d1-ts/**` is not this app's).
  *  - the `clamd` DAEMON is the constrained one: a Worker cannot fork or exec, so
  *    the in-process/sidecar `clamscan` the Rust could use has no analogue. The
  *    closest reachable form is an INSTREAM client over `connect()` from
@@ -621,6 +627,12 @@ const EICAR_SIGNATURE = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-T
  * The offline default scanner, faithful to the Rust default posture: no
  * external scanner configured means the built-in EICAR detector runs, and a hit
  * is `quarantined` (withheld from every read surface), never a clean publish.
+ *
+ * The quarantine (rather than the Rust's outright `422` refusal) is this
+ * screener's own long-standing decision — `test/assets/r2.test.ts` pins the
+ * 202-then-404 it produces against the live bucket. A CONFIGURED backend does
+ * refuse: see `resolveScanOutcome` in `./scan.ts`, which ports the Rust
+ * `resolve_scan_outcome` unchanged.
  */
 export class BuiltinEicarScreener implements AssetScreener {
   async screen(request: AssetScreeningRequest): Promise<AssetScreeningVerdict> {

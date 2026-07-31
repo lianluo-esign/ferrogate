@@ -123,6 +123,51 @@ GATEWAY_DEV_AUTH = "false"
 # `tenant_local_dev` in code.
 
 # ---------------------------------------------------------------------------
+# [vars] — the PRE-AUTHENTICATION network gate (`[network_access]`, issue #166)
+#
+# Read by `networkAccessPolicyFromEnv` (src/middleware/network.ts), which
+# `createGatewayApp` mounts BEFORE the auth guard. All four are shipped EMPTY,
+# which is the Rust default: no allowlist, no unauthenticated flood limit, the
+# forwarded-for chain distrusted. An unconfigured deployment behaves exactly as
+# it did before the gate existed.
+#
+# Unlike every other var in this file, a MALFORMED value here does NOT degrade
+# to "nothing configured" — that would turn a typo in an allowlist into an open
+# gateway. A declared-but-unusable value answers `503
+# network_access_misconfigured` on every request, which is the Workers stand-in
+# for `ferrogate check` refusing to start the Rust process on the same input.
+# ---------------------------------------------------------------------------
+
+# JSON array of CIDR/IP entries (a bare comma-separated list is also accepted):
+#
+#   GATEWAY_IP_ALLOWLIST = '["203.0.113.0/24", "2001:db8::/32"]'
+#
+# Empty ⇒ no allowlist. Non-empty ⇒ every request whose client IP is outside
+# every entry answers `403 ip_denied`, INCLUDING one whose IP cannot be
+# resolved at all (fail closed, verbatim Rust).
+GATEWAY_IP_ALLOWLIST = ""
+
+# `"true"` — and nothing else — trusts `X-Forwarded-For` / `X-Real-IP` over the
+# edge-set `CF-Connecting-IP`. Leave it off unless a FURTHER operator proxy sits
+# in front of this Worker: `CF-Connecting-IP` is set by the Cloudflare edge and
+# strips any client copy, while a forwarded chain is client-writable.
+GATEWAY_TRUST_FORWARDED_FOR = "false"
+
+# How many hops from the RIGHT of `X-Forwarded-For` the real client sits, when
+# the chain is trusted. Selection is from the right (appending proxies) and
+# fails closed when the chain is shorter, so a spoofed leftmost entry can never
+# bypass the allowlist. Positive integer; defaults to 1.
+GATEWAY_TRUSTED_PROXY_HOPS = "1"
+
+# Fixed one-minute window per source IP, charged BEFORE any credential lookup.
+# Empty ⇒ unlimited. NOTE the platform caveat recorded in
+# `packages/config/src/network-access.ts`: the counter is ISOLATE-LOCAL, so N
+# isolates admit up to N x this number. It is a coarse flood gate; the
+# billing-accurate per-tenant limiter is the `RATE_LIMIT` Durable Object, which
+# runs after auth where a tenant identity exists to key on.
+GATEWAY_UNAUTHENTICATED_RATE_LIMIT_PER_MINUTE = ""
+
+# ---------------------------------------------------------------------------
 # [vars] — the provider table and the logical model registry
 #
 # Read by `modelCatalogFromEnv` (src/inference/catalog.ts), which is the port of
@@ -231,6 +276,23 @@ GATEWAY_API_KEY_CACHE_TTL_SECONDS = "0"
 # (`StoredPlan` + role bindings) via `@ferrogate/storage`.
 ASSET_ENTITLEMENTS = "{}"
 
+# Read by `tenantRequiresDeclaredActionId` (src/assets/handlers.ts) — the Rust
+# `FG_REQUIRE_AGENT_RUN_ID` operator switch (#522), name kept verbatim because
+# the Rust deliberately keeps it out of the config schema (it adds no OpenAPI
+# surface) and operator runbooks already name it.
+#
+#   ""                     ⇒ OFF for every tenant — the Rust default posture,
+#                            and what is shipped here
+#   "1"|"true"|"yes"|"on"|"all"|"*"
+#                          ⇒ ON for every tenant
+#   "tenant_a, tenant_b"   ⇒ ON only for those authenticated tenant keys
+#
+# ON means a governed asset request arriving with no `x-ferrogate-agent-run-id`
+# is refused `400 agent_run_id_required` instead of being recorded as an
+# unjoinable action. The tenant key is derived from the AUTHENTICATED identity
+# only (`governedActionTenantKey`), never from anything the client declares.
+FG_REQUIRE_AGENT_RUN_ID = ""
+
 # ---------------------------------------------------------------------------
 # R2 **S3 API** credentials — the PRESIGNED upload/download family only
 #
@@ -258,6 +320,40 @@ ASSET_ENTITLEMENTS = "{}"
 # ---------------------------------------------------------------------------
 ASSET_S3_ENDPOINT = ""
 ASSET_S3_BUCKET = ""
+
+# ---------------------------------------------------------------------------
+# Malware-scan backend for hosted assets (src/assets/scan.ts)
+#
+# Read by `assetScreenerFromEnv`, the port of the Rust
+# `AssetScanConfig::from_env` (`FERROGATE_ASSET_SCANNER*`). All four are OFF by
+# default and the unconfigured deployment keeps the offline builtin EICAR
+# screener, which is exactly the Rust default (`ScanBackend::Eicar`,
+# fail-closed, no async threshold).
+#
+#   ASSET_SCANNER                     "http" selects the hosted-scanner backend.
+#                                     Anything else — including "http" with no
+#                                     endpoint — keeps the builtin.
+#   ASSET_SCANNER_ENDPOINT            URL the raw bytes are POSTed to as
+#                                     application/octet-stream. The reply is
+#                                     {"verdict":"clean|infected",
+#                                      "signature":"…"}; anything else is
+#                                     UNAVAILABLE, never a pass.
+#   ASSET_SCANNER_TIMEOUT_SECS        per-scan deadline; default 30.
+#   ASSET_SCANNER_UNAVAILABLE         "quarantine" admits-and-withholds when the
+#                                     scanner is down; the default (and any
+#                                     other value) REFUSES the push.
+#   ASSET_SCANNER_ASYNC_THRESHOLD_BYTES
+#                                     objects strictly larger than this are
+#                                     stored `pending_scan` — invisible to every
+#                                     read surface until `promoteAssetVisibility`
+#                                     records an out-of-band clean scan. Works
+#                                     with the builtin backend too.
+#
+# The endpoint is a plain URL and is a VAR; a scanner that needs a credential
+# should be fronted by a Worker/Access, since this backend sends no bearer.
+# ---------------------------------------------------------------------------
+ASSET_SCANNER = ""
+ASSET_SCANNER_ENDPOINT = ""
 
 # ---------------------------------------------------------------------------
 # R2 — asset object storage

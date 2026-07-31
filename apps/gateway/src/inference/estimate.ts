@@ -29,9 +29,12 @@
  * NOT a platform limit — `js-tiktoken` / `gpt-tokenizer` run fine in workerd,
  * and the Rust vocabularies (`cl100k_base`, `o200k_base`) are embedded rather
  * than fetched, so nothing about Workers forbids it. What is missing is the
- * dependency: adding one is a `bun install` + a ~2 MB bundle decision that
- * belongs to whoever owns `apps/gateway`'s dependency list and its script-size
- * budget, not to this slice.
+ * DEPENDENCY, and precisely that: neither package is in `bun.lock` or
+ * `node_modules`, so closing this is a `bun install` + a ~2 MB script-size
+ * decision on `apps/gateway`'s dependency list — an owner's call, not a
+ * re-implementation. Re-checked: no tokenizer is vendored anywhere in the
+ * workspace, so there is nothing already paid for that this slice declined to
+ * use.
  *
  * The approximation implemented instead is the Rust tree's OWN documented
  * fallback — `crate::tokenizer::count_tokens` returns `None` for every model

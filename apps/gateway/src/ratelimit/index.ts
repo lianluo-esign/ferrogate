@@ -149,11 +149,20 @@ export {
   type QuotaPolicySource,
   type QuotaResolution,
   type QuotaSubject,
+  type MonthlySpendReading,
+  type SpendBindings,
+  type SpendSource,
+  type WalletBalanceReading,
   NO_QUOTA_POLICIES,
+  NO_SPEND_SOURCE,
+  currentPeriodMonth,
   d1QuotaPolicySource,
+  d1SpendSource,
+  monthlyBudgetScope,
   quotaPolicySourceFromEnv,
   quotaPolicySourceFromVars,
   resolveQuotaWindows,
+  spendSourceFromEnv,
 } from "./quota.js";
 
 export {

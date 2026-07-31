@@ -89,7 +89,38 @@ export interface PolicyEngine {
   ): PolicyDecision;
 }
 
-/** First-match-wins rule engine over an ordered rule list (Rust `BasicPolicyEngine`). */
+/**
+ * First-match-wins rule engine over an ordered rule list (Rust `BasicPolicyEngine`).
+ *
+ * PORT-TODO(inventory-policy-core §2.4a) — IMPLEMENTED BUT NEVER MOUNTED.
+ * REAL GAP: operator `[[policies]]` are VALIDATED at load and NEVER ENFORCED.
+ *
+ * The algorithm below is a 1:1 port and is covered by `test/policy-engine.test.ts`,
+ * but nothing constructs it. In Rust the composition root is
+ * `crates/ferrogate-gateway/src/state.rs::build_policy_engine(&config.policies)`
+ * (state.rs:7079), stored as `policy_engine: Arc<BasicPolicyEngine>` (state.rs:1516)
+ * and evaluated per request in `state_quota_and_policy.rs`. On the TS side
+ * `grep -rn "BasicPolicyEngine\|PolicyDecision\|PolicySubject" apps/` returns
+ * ZERO hits, while `packages/config` fully validates the `[[policies]]` section
+ * (`validatePolicies` cross-checks every rule's api-key / model / provider id).
+ *
+ * Consequence, stated plainly: an operator writes a deny rule, the config loads
+ * clean, the admin surface shows it, and every request it names is ALLOWED. This
+ * is the repo's recurring "fully implemented, fully tested, never mounted" defect
+ * — the config-driven deny path is not the same thing as the per-key
+ * `allowedModels`/`deniedModels` check in `apps/gateway/src/inference/ports.ts`,
+ * which is sourced from the D1 `api_keys` row and cannot express a
+ * `(subject × models × providers)` rule.
+ *
+ * TO CLOSE (gateway-owned, outside this package):
+ *   1. build the engine from `config.policies` in the gateway composition root;
+ *   2. evaluate it after auth + before dispatch, mapping `deny` → the rule's
+ *      `{code, message}`;
+ *   3. add a wiring assertion that FAILS when the engine is unmounted (a config
+ *      with one deny rule must produce a denied response), and prove it RED by
+ *      deleting the call — per the composition-root rule, a green suite with an
+ *      unmounted engine is the exact failure this marker exists to prevent.
+ */
 export class BasicPolicyEngine implements PolicyEngine {
   readonly rules: PolicyRule[];
 

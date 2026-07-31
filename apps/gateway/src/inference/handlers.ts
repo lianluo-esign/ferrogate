@@ -280,6 +280,36 @@ function planUpstream(
     );
   }
 
+  // PORT-TODO(inventory-request-path §1.5 "gateway config profiles", §1.7
+  // "Caches"): two Rust behaviors sit between the model gate above and the
+  // dispatch below, and neither exists anywhere in this tree.
+  //
+  //  1. **Gateway config profiles.** Rust reads the `x-ferrogate-config`
+  //     request header (`chat.rs:115 GATEWAY_CONFIG_HEADER`) and resolves it
+  //     through `AppState::resolve_gateway_config_profile`
+  //     (`state_routing.rs:262`) into a `GatewayConfigUse` that overrides
+  //     per-request cache and routing behavior, with a typed
+  //     `GatewayConfigResolveError::NotFound` for an unknown id. `packages/config`
+  //     ALREADY ports the `[[gateway_configs]]` table (schema + validation);
+  //     `grep -ri "x-ferrogate-config" apps packages` returns zero. A client
+  //     selecting a profile today is silently served the default one.
+  //  2. **Response caching.** `ai_cache_enabled` (`state_routing.rs:223` — a
+  //     four-level opt-out: global, profile, model, api-key),
+  //     `ai_response_cache_key` (tenant + project + user + api-key + logical
+  //     model + provider + provider model + body), `lookup_ai_response_cache` /
+  //     `store_ai_response_cache`, and the separate `SemanticResponseCache`
+  //     (`semantic_cache.rs`, feature-hashed embeddings + cosine threshold).
+  //     Neither exists. Note that `@ferrogate/observability` ALREADY exports
+  //     `semanticCacheHitsTotal` and renders
+  //     `ferrogate_ai_cache_requests_total{status="semantic_hit"}` — a metric
+  //     with no producer, which will read 0 forever and looks like "the cache is
+  //     cold" rather than "there is no cache". The exact-match half is
+  //     half-tracked as the `CACHE` KV binding note in `wrangler.toml`; the
+  //     semantic half is tracked nowhere else. CF maps both cleanly (KV or the
+  //     Cache API for exact, Vectorize + Workers AI for semantic), so neither is
+  //     a platform limit.
+  //
+  // See `docs/rewrite/parity-audit-request-path.md` F10/F11.
   const route = deps.models.resolve(logicalModel);
   if (route === null) {
     const known = deps.models

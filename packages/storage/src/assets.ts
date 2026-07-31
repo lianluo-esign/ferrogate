@@ -122,7 +122,30 @@ export function promoteAssetVisibility(
   return { kind: "promoted", to: assetPromotionTargetVisibility(target) };
 }
 
-/** Outcome of the atomic channel-move coordination mutation (#367). */
+/**
+ * Outcome of the atomic channel-move coordination mutation (#367).
+ *
+ * PORT-TODO(inventory-data-billing §1.4.6 `asset_channels` + §1.2
+ * `move_asset_channel_if_resolvable` / `set_asset_version_yank` /
+ * `list_withheld_assets` / `delete_asset_channel`): this type has NO producer.
+ * Nothing in `packages/storage` moves a channel, yanks a version, or lists
+ * withheld assets, and NOTHING anywhere writes the `asset_channels` table —
+ * `sql/d1-ts/tenant/0001_init_tenant.sql` creates it with its
+ * `UNIQUE (tenant_id, asset_type, name, channel)` pointer constraint and only
+ * `test/d1/schema.test.ts` ever mentions it. `apps/gateway/src/assets/ports.ts`
+ * declares the full `AssetMetadataStore` surface (`listAssetChannels`,
+ * `moveAssetChannel`, `deleteAssetChannel`) but its ONLY implementation is
+ * `InMemoryAssetMetadataStore`, so every asset row and channel pointer dies with
+ * the isolate. Why it matters: `latest`/`stable`/`canary` are resolved at pull
+ * time (`apps/gateway/src/assets/registry.ts`) from rows that never persist, so
+ * a published asset is unresolvable on the next request and the yank flag — the
+ * kill switch for a bad artifact — cannot survive a deploy. The close is a
+ * `D1AssetMetadataStore` on the tenant handle: the move is one guarded upsert
+ * ("resolve target version, refuse if unresolvable/yanked, then `INSERT ... ON
+ * CONFLICT (id) DO UPDATE`") in a single statement, mirroring
+ * `control_plane_store_d1/assets.rs`. {@link R2AssetBlobStore} already holds the
+ * bytes half; only the metadata half is missing.
+ */
 export type ChannelMoveOutcome =
   | { kind: "moved"; priorVersion?: string }
   | { kind: "target_not_resolvable" };

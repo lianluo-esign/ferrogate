@@ -288,6 +288,190 @@ describe("wallets on D1", () => {
     ]);
   });
 
+  /**
+   * The reachable half-apply: two concurrent charges on one wallet.
+   *
+   * Both read the wallet at revision `r` and both submit
+   * `[create(ledger entry), merge(balance)]`. The loser's ledger id is a fresh
+   * uuid, so its INSERT always succeeds; only its balance UPDATE is guarded on
+   * `r`. Before `atomic` guarded every statement on the revisions it expects AT
+   * ITS OWN POSITION in the batch, the loser therefore COMMITTED a ledger entry
+   * (with a `balance_after_cents` that never happened) while moving no balance,
+   * and reported a bare `Error` — a ledger permanently disagreeing with the
+   * balance it exists to explain.
+   *
+   * The race is staged rather than hoped for: `atomic` reads through the
+   * `D1Database` it was constructed with, so the store is handed a decorator
+   * that moves the wallet on ONCE, after the revisions were read and before the
+   * batch runs. That is exactly the window a second request occupies.
+   */
+  it("writes no ledger entry when the balance update loses its revision race", async () => {
+    await seedD1("wallets", [{ id: "tenant_a", tenant_id: null, balance_cents: 500 }]);
+
+    const real = db();
+    let interfered = false;
+    const racing = {
+      prepare: (sql: string) => real.prepare(sql),
+      batch: async <T>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> => {
+        if (!interfered) {
+          interfered = true;
+          // The other request commits first: the wallet moves to revision 2.
+          await real
+            .prepare(
+              "UPDATE control_plane_resources SET revision = revision + 1 WHERE resource_kind = ? AND resource_id = ?",
+            )
+            .bind("wallets", "tenant_a")
+            .run();
+        }
+        return real.batch<T>(statements);
+      },
+    } as unknown as D1Database;
+
+    const store = new D1ControlPlaneStore(racing, { requestId: "req_race" });
+    const applied = await store.atomic({ kind: "platform_operator" }, [
+      {
+        kind: "create",
+        collection: "wallet-ledger",
+        record: { id: "entry_1", wallet_id: "tenant_a", amount_cents: -100 },
+      },
+      { kind: "merge", collection: "wallets", id: "tenant_a", patch: { balance_cents: 400 } },
+    ]);
+
+    // The unit retried against the state the winner left and then applied.
+    expect(applied).not.toBeNull();
+    expect(interfered).toBe(true);
+    expect(await rawDocument("wallets", "tenant_a")).toMatchObject({ balance_cents: 400 });
+
+    // THE assertion: exactly ONE ledger entry. The losing attempt wrote none.
+    const ledger = await db()
+      .prepare(
+        "SELECT COUNT(*) AS total FROM control_plane_resources WHERE resource_kind = 'wallet-ledger'",
+      )
+      .first<{ total: number }>();
+    expect(ledger?.total).toBe(1);
+  });
+
+  /**
+   * The OTHER mid-flight change: a merge target DELETED between the load and
+   * the batch, rather than moved.
+   *
+   * This is the one case an UPDATE cannot turn into an error — there is no row
+   * left to violate a constraint on, so it matches zero rows silently. Two
+   * independent things then keep the unit whole, and mutating EITHER alone
+   * leaves this test green (mutating both together turns it red):
+   *
+   *  - the ledger INSERT's guard requires the wallet to EXIST, and it is a
+   *    `CASE … ELSE NULL` over a NOT NULL column, so it ABORTS the transaction
+   *    rather than inserting nothing;
+   *  - failing that, every statement matched zero rows, and the all-zero branch
+   *    re-reads instead of reporting success.
+   *
+   * Both routes end at the same answer a target that was already missing at
+   * load time gets: `null` (→ 404).
+   *
+   * Staged like the race above: a decorator deletes the wallet once, after
+   * `atomic` has read its revision and before the batch runs.
+   */
+  it("writes no ledger entry when the wallet is deleted mid-flight", async () => {
+    await seedD1("wallets", [{ id: "tenant_a", tenant_id: null, balance_cents: 500 }]);
+
+    const real = db();
+    let interfered = false;
+    const racing = {
+      prepare: (sql: string) => real.prepare(sql),
+      batch: async <T>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> => {
+        if (!interfered) {
+          interfered = true;
+          await real
+            .prepare(
+              "DELETE FROM control_plane_resources WHERE resource_kind = ? AND resource_id = ?",
+            )
+            .bind("wallets", "tenant_a")
+            .run();
+        }
+        return real.batch<T>(statements);
+      },
+    } as unknown as D1Database;
+
+    const store = new D1ControlPlaneStore(racing, { requestId: "req_vanish" });
+    const applied = await store.atomic({ kind: "platform_operator" }, [
+      {
+        kind: "create",
+        collection: "wallet-ledger",
+        record: { id: "entry_1", wallet_id: "tenant_a", amount_cents: -100 },
+      },
+      { kind: "merge", collection: "wallets", id: "tenant_a", patch: { balance_cents: 400 } },
+    ]);
+
+    // The target is gone, so the unit resolves the way a missing merge target
+    // always does — `null`, which the route turns into a 404.
+    expect(interfered).toBe(true);
+    expect(applied).toBeNull();
+
+    // THE assertion: no orphan ledger entry for a balance that never moved.
+    const ledger = await db()
+      .prepare(
+        "SELECT COUNT(*) AS total FROM control_plane_resources WHERE resource_kind = 'wallet-ledger'",
+      )
+      .first<{ total: number }>();
+    expect(ledger?.total).toBe(0);
+  });
+
+  /**
+   * What the CROSS-guard is for: a unit that moves TWO wallets, one of which is
+   * deleted mid-flight.
+   *
+   * The surviving wallet's own `revision = ?` guard is perfectly satisfied, so
+   * nothing about ITS statement objects — and the deleted one's UPDATE matches
+   * zero rows in silence. Without the clause that requires every OTHER merge
+   * target to still EXIST at the revision it should hold, the batch therefore
+   * commits half the unit: one balance moves, the other does not, and the
+   * caller is told only that "1 of 2 statements" applied, after the fact.
+   *
+   * With it, the surviving wallet's own statement fails its guard, which is a
+   * NOT NULL violation, which rolls the transaction back. The unit then
+   * resolves the deleted target the way every unresolvable target resolves —
+   * `null`.
+   */
+  it("moves NEITHER wallet when one of two merge targets is deleted mid-flight", async () => {
+    await seedD1("wallets", [
+      { id: "tenant_a", tenant_id: null, balance_cents: 500 },
+      { id: "tenant_b", tenant_id: null, balance_cents: 900 },
+    ]);
+
+    const real = db();
+    let interfered = false;
+    const racing = {
+      prepare: (sql: string) => real.prepare(sql),
+      batch: async <T>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> => {
+        if (!interfered) {
+          interfered = true;
+          await real
+            .prepare(
+              "DELETE FROM control_plane_resources WHERE resource_kind = ? AND resource_id = ?",
+            )
+            .bind("wallets", "tenant_b")
+            .run();
+        }
+        return real.batch<T>(statements);
+      },
+    } as unknown as D1Database;
+
+    const store = new D1ControlPlaneStore(racing, { requestId: "req_sibling" });
+    const applied = await store.atomic({ kind: "platform_operator" }, [
+      { kind: "merge", collection: "wallets", id: "tenant_a", patch: { balance_cents: 400 } },
+      { kind: "merge", collection: "wallets", id: "tenant_b", patch: { balance_cents: 800 } },
+    ]);
+
+    expect(interfered).toBe(true);
+    expect(applied).toBeNull();
+
+    // THE assertion: the wallet that COULD have been written was not. A unit
+    // that half-applied would leave 400 here.
+    expect(await rawDocument("wallets", "tenant_a")).toMatchObject({ balance_cents: 500 });
+    expect(await rawDocument("wallets", "tenant_b")).toBeNull();
+  });
+
   it("refuses an overdraft and leaves the stored balance untouched", async () => {
     await SELF.fetch(
       `${BASE}/admin/v1/wallets`,

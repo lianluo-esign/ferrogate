@@ -6,6 +6,22 @@
  * engine is FAIL-SAFE: on ANY doubt it KEEPS. Retention never prunes a
  * channel-pinned version or one inside the grace window; GC never deletes a blob a
  * row references, one whose age is unknown, or one inside the grace window.
+ *
+ * PORT-TODO(inventory-data-billing §1.4.6 `retention_policies` + §1.2
+ * `set_retention_limits` / `delete_request_logs` / `delete_audit_events`): the
+ * PLANNERS below are ported and tested; the STORAGE and the EXECUTOR are not.
+ * Nothing reads or writes the `retention_policies` table (it exists in
+ * `sql/d1-ts/tenant/0001_init_tenant.sql` and is asserted only by
+ * `test/d1/schema.test.ts`), and no caller feeds {@link planVersionRetention},
+ * {@link planLogRetention} or {@link planBlobGc} — `R2AssetBlobStore.deleteOrphans`
+ * is the one reclaim primitive that exists and it too has no caller. Why it
+ * matters: `request_logs`, `audit_events`, `agent_run_events` and R2 asset blobs
+ * are append-only on this platform and NOTHING prunes them, so storage grows
+ * without bound and the #263/#284 retention contract an operator configures has
+ * no effect. The close is a `[triggers] crons` sweeper on the composition root
+ * that reads the policies, runs these planners, and applies the deletes — the
+ * gateway already has a `scheduled` handler (`apps/gateway/src/worker.ts`) for
+ * the billing outbox to hang it off.
  */
 import type { StoredAsset, StoredAssetChannel } from "./assets.js";
 

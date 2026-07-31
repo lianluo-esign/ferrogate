@@ -42,7 +42,7 @@
 import type { Context } from "hono";
 import type { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import type { GatewayEnv } from "../ports.js";
+import type { AuthContext, GatewayEnv } from "../ports.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import {
   type AssetAuthFailure,
@@ -56,6 +56,7 @@ import {
   isAuthFailure,
 } from "./ports.js";
 import { D1AssetEntitlements } from "./entitlements.js";
+import { type AssetScannerBindings, assetScreenerFromEnv } from "./scan.js";
 import { SigV4Presigner } from "./sigv4.js";
 import {
   assetChannelParamsSchema,
@@ -116,6 +117,12 @@ export interface AssetEntitlementsPort {
 export interface AssetBindings {
   /** JSON map: tenant id → `AssetEntitlements` (snake_case keys). */
   readonly ASSET_ENTITLEMENTS?: string;
+  /**
+   * Rust `FG_REQUIRE_AGENT_RUN_ID` (#522): the per-tenant governed-action
+   * enforcement switch. Unset ⇒ OFF for every tenant, which is the Rust
+   * default posture. See {@link tenantRequiresDeclaredActionId}.
+   */
+  readonly FG_REQUIRE_AGENT_RUN_ID?: string;
 }
 
 type AssetEnv = {
@@ -220,6 +227,85 @@ export function defaultCallerResolver(entitlements?: AssetEntitlementsPort): Ass
 /** Rust `declared_agent_run_id` (#522): validated, optional correlation id. */
 const AGENT_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
 
+/**
+ * The per-tenant governed-action enforcement switch — Rust
+ * `REQUIRE_AGENT_RUN_ID_ENV` (`server/local.rs:10692`).
+ *
+ * The NAME is kept verbatim (no `GATEWAY_` prefix) because the Rust comment is
+ * explicit that this is an OPERATOR ENV SWITCH deliberately kept out of the
+ * config schema "so it adds no OpenAPI surface" — a Worker var of the same name
+ * is the same switch, and every operator runbook that mentions
+ * `FG_REQUIRE_AGENT_RUN_ID` keeps working.
+ */
+export const REQUIRE_AGENT_RUN_ID_VAR = "FG_REQUIRE_AGENT_RUN_ID";
+
+/**
+ * Rust `governed_action_tenant_key`: the low-cardinality key both the
+ * enforcement switch and the (still-deferred) unjoinable-action metric match
+ * on. Derived ONLY from the authenticated identity — never from a
+ * client-declared value — preferring the broadest stable scope down to the API
+ * key id, and empty when the credential carries no attribution at all.
+ *
+ * The Rust chain is `organization_id → project_id → team_id → workspace_id →
+ * user_id → api_key_id`. This tree's `Tenancy` has no separate organization or
+ * team tier (`tenantId` IS the broadest scope, and `AuthContext.subject` is the
+ * api-key id), so the chain collapses to the five below with the same ordering
+ * and the same "" fallback.
+ */
+export function governedActionTenantKey(auth: AuthContext | null | undefined): string {
+  if (auth === null || auth === undefined) return "";
+  const { tenantId, projectId, workspaceId, userId } = auth.tenancy;
+  return (tenantId || projectId || workspaceId || userId || auth.subject || "").trim();
+}
+
+/**
+ * Rust `tenant_requires_declared_action_id`, verbatim:
+ *
+ *   - unset / empty              → OFF for every tenant (the default posture)
+ *   - `1|true|yes|on|all|*`      → ON for every tenant
+ *   - comma/whitespace-separated → ON only for the listed tenant keys
+ *
+ * A tenant key that is empty is never matched by a LIST (there is nothing to
+ * match), but is still covered by the global forms — an unattributed credential
+ * is exactly the one an operator running `all` wants to refuse.
+ */
+export function tenantRequiresDeclaredActionId(
+  configured: string | undefined,
+  tenantKey: string,
+): boolean {
+  const config = configured?.trim();
+  if (config === undefined || config === "") return false;
+  if (["1", "true", "yes", "on", "all", "*"].includes(config.toLowerCase())) return true;
+  const key = tenantKey.trim();
+  if (key === "") return false;
+  return config
+    .split(/[,\s]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+    .some((entry) => entry === key);
+}
+
+/**
+ * Rust `resolve_asset_action_id` (#522) — the governed-action id for one asset
+ * request.
+ *
+ * Three outcomes, exactly the Rust `AssetActionIdOutcome`: a malformed header is
+ * `400 invalid_agent_run_id_header`; an absent id with per-tenant enforcement ON
+ * is `400 agent_run_id_required`; anything else proceeds with the (possibly
+ * absent) id. An id is NEVER fabricated — a synthesized correlation id would
+ * make an unjoinable action look joined, which is worse than admitting the gap.
+ *
+ * PORT-TODO(inventory-request-path.md §governed actions): the low-cardinality
+ * UNJOINABLE-ACTION METRIC (`record_unjoinable_action(tenant, surface)`) that
+ * Rust increments on the absent-id branch is still deferred. Not a platform
+ * limit — `@ferrogate/observability` already defines
+ * `UnjoinableActionMetricTotal` and miniflare really emulates
+ * `writeDataPoint` — but an OWNERSHIP one: it wants the single `TELEMETRY`
+ * Analytics Engine dataset that `apps/gateway/wrangler.toml`'s "NOT DECLARED"
+ * block reserves jointly for this sink, the metering sink and `apps/telemetry`,
+ * and there is no local read-back to assert a row against. The ENFORCEMENT half
+ * — the part with a wire-visible consequence — is ported here.
+ */
 function requestContext(c: Context<AssetEnv>): AssetRequestContext {
   const declared = c.req.header("x-ferrogate-agent-run-id")?.trim();
   if (declared !== undefined && declared !== "" && !AGENT_RUN_ID.test(declared)) {
@@ -229,22 +315,21 @@ function requestContext(c: Context<AssetEnv>): AssetRequestContext {
       "x-ferrogate-agent-run-id must be 1-128 characters of [A-Za-z0-9_:.-] starting alphanumeric",
     );
   }
-  return {
-    requestId: c.get("requestId") ?? "",
-    // PORT-TODO(inventory-request-path.md §governed actions): the per-tenant
-    // "require a declared run id" switch and the unjoinable-action metric.
-    // A SCOPE boundary, not a platform limit: the switch is a per-tenant policy
-    // row (`@ferrogate/policy`) and the metric is an Analytics Engine data
-    // point (`@ferrogate/observability`, and the same `TELEMETRY` dataset the
-    // metering marker defers on — see `src/metering/ports.ts`). Neither is
-    // reachable from this module.
-    // What IS ported: the header is VALIDATED (a malformed value is
-    // `400 invalid_agent_run_id_header`, above) and threaded onto every audit
-    // row, which is the whole correlation-join leg. Only the optional
-    // ENFORCEMENT — default OFF in Rust, so the shipped behaviour is identical
-    // to an unconfigured Rust gateway — is outstanding.
-    agentRunId: declared === "" ? undefined : declared,
-  };
+
+  const agentRunId = declared === undefined || declared === "" ? undefined : declared;
+  if (agentRunId === undefined) {
+    const configured = (c.env as { FG_REQUIRE_AGENT_RUN_ID?: string } | undefined)
+      ?.FG_REQUIRE_AGENT_RUN_ID;
+    if (tenantRequiresDeclaredActionId(configured, governedActionTenantKey(c.get("auth")))) {
+      throw new HttpError(
+        400,
+        "agent_run_id_required",
+        "this tenant requires a declared x-ferrogate-agent-run-id on governed agent traffic",
+      );
+    }
+  }
+
+  return { requestId: c.get("requestId") ?? "", agentRunId };
 }
 
 /** Zod-validate a path/query bag, or answer the Rust `400 invalid_request`. */
@@ -440,6 +525,13 @@ export function sigV4PresignerFromEnv(env: AssetObjectBindings): SigV4Presigner 
  *    step could never find, and a bucket with no signing credentials cannot
  *    issue one at all — so the flag tracks the conjunction, not either half.
  *
+ *  - the `ASSET_SCANNER*` vars ⇒ the configured malware-scan backend
+ *    (`./scan.ts`, the port of Rust `AssetScanConfig::from_env`). Absent ⇒ the
+ *    offline {@link BuiltinEicarScreener} `buildAssetService` already defaults
+ *    to, which is the Rust unconfigured posture. `assetScreenerFromEnv` returns
+ *    `null` for that case rather than re-supplying the default, so the
+ *    fallback stays in exactly one place.
+ *
  * `metadata` is deliberately NOT resolved here: the asset registry is still the
  * in-isolate `InMemoryAssetMetadataStore`. See the marker on that class.
  */
@@ -447,9 +539,11 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   const bindings = env as AssetObjectBindings;
   const objects = isAssetObjectStore(bindings.ASSETS) ? bindings.ASSETS : undefined;
   const presigner = sigV4PresignerFromEnv(bindings);
+  const screener = assetScreenerFromEnv(env as AssetScannerBindings);
   return {
     ...(objects !== undefined ? { objects } : {}),
     ...(presigner !== null ? { presigner } : {}),
+    ...(screener !== null ? { screener } : {}),
     ...(objects !== undefined && presigner !== null ? { limits: { presignEnabled: true } } : {}),
   };
 }

@@ -113,6 +113,34 @@ export class CfSecretBindings implements SecretResolver {
    * exact injected binding exists, because the variable such a name maps to is
    * shared with other distinct secrets; resolving it could serve a credential
    * the operator did not name.
+   *
+   * PORT-TODO(inventory-policy-core §4.8) — REAL GAP, NOT A PLATFORM LIMIT.
+   *
+   * Both paths below read a **plain string**. The CF-native read path the
+   * inventory names (`§4.8`: "a `secrets_store_secrets` binding in
+   * `wrangler.jsonc` exposes the value at runtime — `await env.MY_SECRET.get()`")
+   * is NOT implemented, here or anywhere in the repo: `grep -r secrets_store_secrets
+   * packages apps --include=*.ts` finds only prose. With a real stanza declared
+   * as `FERROGATE_CF_SECRET_OPENAI_API_KEY`, `env[...]` is a `SecretsStoreSecret`
+   * OBJECT, so `fromEnv.trim()` below throws `TypeError` instead of resolving —
+   * i.e. the one binding shape the whole `cf://` scheme exists to serve is the
+   * one shape this cannot read. Today `cf://` therefore works only from
+   * {@link fromMap}/{@link insert} or a `[vars]`/`wrangler secret put` STRING,
+   * both of which are `env://` by another name.
+   *
+   * TO CLOSE (no platform blocker; `SecretsStoreSecret` is GA):
+   *   1. widen {@link EnvLike} to `string | { get(): Promise<string> } | undefined`;
+   *   2. make {@link lookup} async (or add `lookupAsync`) and `await value.get()`
+   *      when the slot is an object with a callable `get` — the `resolve()` seam
+   *      is already `Promise`-valued, so only `lookup` changes shape;
+   *   3. keep the ambiguity guard AHEAD of the read, unchanged — a non-canonical
+   *      name must still refuse before touching any binding;
+   *   4. extend `test/platform-limits.test.ts` > "a PRE-BOUND name resolves" with
+   *      a stub `{ get: async () => "sk-bound" }` slot, and MUTATION-TEST it by
+   *      deleting the `await …get()` branch (must go RED, since the stub then
+   *      stringifies to `[object Object]`).
+   * The genuinely unclosable half stays exactly as written above: a name with NO
+   * deploy-time stanza is still unresolvable, and that is the platform limit.
    */
   lookup(secretName: string): string | null {
     // Injected map is keyed exactly (no collapsing) → consulted first, valid

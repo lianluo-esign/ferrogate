@@ -253,4 +253,54 @@ export class D1UsageLedger {
       throw d1Error("get_usage_monthly_rollup", error);
     }
   }
+
+  /**
+   * Total tokens already committed against one API key — Rust
+   * `sum_api_key_committed_tokens` (inventory-data-billing §1.2, #330).
+   *
+   * This is the `committed` operand of
+   * `RateLimiter.reserveTokenBudget(counterKey, committed, budget,
+   * estimatedTokens)` (`apps/gateway/src/ratelimit/ports.ts`), which enforces
+   * `api_keys.monthly_token_budget`. Until this existed there was no supplier
+   * for it at all, so that budget was unenforced for every durable key and only
+   * the degenerate `monthly_token_budget === 0` check on STATIC config keys
+   * survived — a key with a million-token budget could never exhaust it.
+   *
+   * Two properties are deliberate and both are pinned by
+   * `test/d1/usage-d1.test.ts`:
+   *
+   *  - The sum is pushed into SQL, exactly as Rust does. Reading the rows and
+   *    summing in the isolate would pull an unbounded result set through the D1
+   *    wire on every admission check.
+   *  - An API key with no usage yet answers `0`, from `COALESCE`, NOT
+   *    `undefined`. A caller that had to distinguish "no rows" from "no tokens"
+   *    would eventually treat the absent case as unlimited, which is the failure
+   *    direction that costs money.
+   *
+   * NOTE the scope: this is the key's LIFETIME committed total over
+   * `usage_aggregate_rollups`, which is what Rust's function sums. The
+   * period-scoped question is a different read — {@link getUsageMonthlyRollup}.
+   *
+   * PORT-TODO(inventory-data-billing §1.2, #330) — CROSS-SCOPE, NOT CLOSABLE
+   * HERE. What remains is the CALL: `apps/gateway/src/ratelimit/middleware.ts`
+   * enforces rpm/tpm and the monthly USD budget and still never invokes
+   * `reserveTokenBudget`, so the token budget is not yet enforced on a live
+   * request even though both halves now exist. That edit is in `apps/gateway`.
+   */
+  async sumApiKeyCommittedTokens(apiKeyId: string): Promise<number> {
+    try {
+      const row = await this.db
+        .prepare(
+          "SELECT COALESCE(SUM(r.total_tokens), 0) AS committed " +
+            "FROM usage_aggregate_rollups r " +
+            "JOIN tenant_contexts c ON c.id = r.tenant_context_id " +
+            "WHERE c.api_key_id = ?",
+        )
+        .bind(apiKeyId)
+        .first<{ committed: number }>();
+      return row?.committed ?? 0;
+    } catch (error) {
+      throw d1Error("sum_api_key_committed_tokens", error);
+    }
+  }
 }

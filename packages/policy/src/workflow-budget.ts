@@ -108,6 +108,35 @@ export type PreflightResult =
  * `(cost, tokens, tool_calls)` at `now` would breach any capped dimension —
  * WITHOUT mutating the ledger. The durable debit remains the authoritative,
  * atomic enforcement.
+ *
+ * PORT-TODO(inventory-policy-core §2.4d, issue #279) — IMPLEMENTED BUT NEVER
+ * MOUNTED. REAL GAP: workflow-run budgets are never enforced.
+ *
+ * This function, {@link resolveWorkflowBudgetEnvelope} and the durable half in
+ * `@ferrogate/storage` (`workflow-budget.ts` + `d1/workflow-budget-d1.ts`, incl.
+ * `dimensionExceededBy`) are all ported and tested, and NOTHING calls them:
+ * `grep -rn "preflightWorkflowBudget\|WorkflowRunBudget\|workflow_run_budget" apps/`
+ * returns zero hits. Rust's consumer is
+ * `crates/ferrogate-gateway/src/server/agent_runs.rs`, which calls
+ * `resolve_workflow_budget_envelope` + `preflight_workflow_budget` on the
+ * run-creating path; the TS `/v1/agent-runs` surface lives in
+ * `apps/agent-runtime/src/runs/lifecycle.ts`, which has an unrelated "open-job
+ * budget" and no cost/token/tool-call/wall-clock ledger.
+ *
+ * Consequence: a run opened with `cost_budget_credits`/`token_budget`/
+ * `tool_call_budget`/`wall_clock_deadline_unix` spends without limit, and the
+ * `status = 'exhausted'` flip never gates a subsequent step. The fail-closed
+ * guarantee in the security-invariant appendix ("exhausted workflow budget ⇒ deny
+ * every step") is currently vacuous end to end.
+ *
+ * TO CLOSE (agent-runtime/gateway-owned, outside this package): call
+ * {@link preflightWorkflowBudget} on the run-step path before dispatch, then the
+ * durable debit; add an assertion that a run at its cap is REFUSED, and prove it
+ * RED by removing the call.
+ *
+ * NOTE — {@link evaluateNodeDispatch} is NOT part of this gap: it has no consumer
+ * in the Rust tree either (only `ferrogate-policy`'s own tests), so its absence
+ * from `apps/` is parity, not regression.
  */
 export function preflightWorkflowBudget(
   budget: StoredWorkflowRunBudget,

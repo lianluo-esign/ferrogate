@@ -129,6 +129,19 @@ export function tenantScopeSql(scope: CallerScope): {
   };
 }
 
+/**
+ * The identity of one row, `(collection, id)`, as a single map/set key.
+ *
+ * The separator is an explicit `\u0000` ESCAPE, not a literal NUL byte: a raw
+ * NUL in the source makes every text tool (grep, diff, review) treat this file
+ * as binary and silently stop showing its contents. It is still the right
+ * separator — no collection name or resource id can contain it, so
+ * `("a", "b:c")` and `("a:b", "c")` cannot collide.
+ */
+function rowIdentity(collection: string, id: string): string {
+  return `${collection}\u0000${id}`;
+}
+
 interface ResourceRow {
   readonly document_json: string;
   readonly revision: number;
@@ -374,19 +387,63 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
    *
    * `D1Database.batch()` runs its statements in ONE implicit transaction, so
    * either every statement below commits or none of them does. That alone is
-   * not enough, though: a `DO NOTHING` insert and a revision-guarded update
-   * both "succeed" while matching zero rows, so a half-applied unit would look
-   * like a committed one. Two things close that:
+   * not enough, though, and the reason is the whole design of this method:
    *
-   *  1. EVERY statement in the batch — the inserts included — carries the SAME
-   *     `EXISTS (… AND revision = ?)` guard, one per merge target, at the
-   *     revision this call read. A concurrent writer moves the revision, so
-   *     either all the guards hold or none do; there is no interleaving in
-   *     which the ledger entry lands and the balance does not.
-   *  2. The per-statement `meta.changes` are checked afterwards. All-zero means
-   *     the guards lost the race → re-read and retry. Mixed would mean the
-   *     invariant above is broken, and is refused loudly rather than papered
-   *     over.
+   * > **A guard that FAILS QUIETLY cannot make a batch all-or-nothing.**
+   *
+   * A `DO NOTHING` insert and a `WHERE revision = ?` update both *succeed*
+   * while matching zero rows. The transaction then has nothing to roll back, so
+   * the statements that DID match commit — a half-applied unit that looks like
+   * a committed one. On `routes/wallets.ts` that is a ledger entry with no
+   * balance movement, or a balance movement with no ledger entry.
+   *
+   * So every guard here is expressed as
+   * `document_json = CASE WHEN <guard> THEN ? ELSE NULL END`, and
+   * `control_plane_resources.document_json` is `NOT NULL`. A failed guard is
+   * therefore a **constraint violation** — a real SQLite error, which rolls the
+   * whole transaction back and skips the statements after it. Four things
+   * follow:
+   *
+   *  1. **A taken `create` id ERRORS the batch.** The insert carries no
+   *     `ON CONFLICT … DO NOTHING`, so a colliding id is a UNIQUE violation; it
+   *     is translated back into the same `StoreConflictError` `create` raises.
+   *  2. **Every statement is guarded on the revisions it expects to see AT ITS
+   *     OWN POSITION in the batch.** The statements of a `batch()` run in one
+   *     transaction and therefore SEE EACH OTHER'S WRITES, so a single
+   *     "pre-state" guard replicated onto every statement is self-defeating.
+   *     The updates run first, in mutation order, and:
+   *
+   *       - update #p requires its own target at the revision that target holds
+   *         when #p runs, plus every OTHER merge target at the revision *it*
+   *         holds at that same moment (`rev + 1` once this batch has updated
+   *         it, `rev` before);
+   *       - every insert then requires EVERY merge target at its post-update
+   *         revision.
+   *
+   *     Because a failed guard now ABORTS, "the row sits at `rev + 1`" is
+   *     unambiguous by the time a later statement reads it: the only way to
+   *     REACH that statement is for this batch's own update to have applied.
+   *     Reading `rev + 1` as proof of the sibling write was the defect — a
+   *     CONCURRENT writer's `+ 1` satisfied it just as well, so the loser of a
+   *     two-charge wallet race committed its ledger entry (a fresh uuid, so the
+   *     insert always succeeded) while its balance update matched nothing: a
+   *     ledger permanently disagreeing with the balance it exists to explain,
+   *     reported to the operator as a 500.
+   *  3. A merge target DELETED between the load and the batch makes its own
+   *     UPDATE match zero rows WITHOUT erroring — there is no row left to
+   *     violate a constraint. Every sibling statement's cross-guard requires
+   *     that row to EXIST, so a sibling aborts the transaction. A unit whose
+   *     *only* statement is that update simply matches nothing, which is
+   *     already "wrote nothing", and the retry re-reads and answers `null`.
+   *  4. A `create` id repeated INSIDE one unit is refused before any statement
+   *     is built — the second insert would otherwise collide with the first
+   *     one's uncommitted row, which is a caller bug, not a lost race.
+   *
+   * A rolled-back batch is then explained by RE-READING state
+   * ({@link #explainRolledBackBatch}) rather than by parsing a driver message:
+   * a vanished target is `null`, a taken id is `StoreConflictError`, a moved
+   * revision is a lost race and retries, and anything else is re-thrown as the
+   * genuine fault it is.
    */
   async atomic(
     scope: CallerScope,
@@ -395,10 +452,32 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     if (mutations.length === 0) return [];
     const tenant = tenantScopeSql(scope);
 
+    // (4) above: two `create`s of the same id in one unit.
+    const mintedIds = new Set<string>();
+    for (const mutation of mutations) {
+      if (mutation.kind !== "create") continue;
+      if (mintedIds.has(rowIdentity(mutation.collection, mutation.record.id))) {
+        throw new StoreConflictError(mutation.collection, mutation.record.id);
+      }
+      mintedIds.add(rowIdentity(mutation.collection, mutation.record.id));
+    }
+
     for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
       // Resolve every merge target first, so the guard revisions are the ones
       // the computed documents were derived from.
       const loaded = new Map<number, LoadedRecord>();
+      /**
+       * The merge targets, in the order their UPDATEs will run — each already
+       * carrying the row it addresses and the revision it was read at, so the
+       * guard builders below never have to re-derive either from `mutations`.
+       */
+      const targets: {
+        readonly index: number;
+        readonly collection: string;
+        readonly id: string;
+        readonly key: string;
+        readonly revision: number;
+      }[] = [];
       for (const [index, mutation] of mutations.entries()) {
         if (mutation.kind !== "merge") continue;
         const existing = await this.#load(mutation.collection, scope, mutation.id);
@@ -407,24 +486,64 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
         // path too, not just on the transaction's.
         if (existing === null) return null;
         loaded.set(index, existing);
+        targets.push({
+          index,
+          collection: mutation.collection,
+          id: mutation.id,
+          // Two merges in ONE unit may address the same row; `key` is what makes
+          // that visible to the guards below.
+          key: rowIdentity(mutation.collection, mutation.id),
+          revision: existing.revision,
+        });
       }
 
-      // The shared guard: one `EXISTS` per merge target, at its read revision.
-      const guardClauses: string[] = [];
-      const guardParams: unknown[] = [];
-      for (const [index, mutation] of mutations.entries()) {
-        if (mutation.kind !== "merge") continue;
-        const existing = loaded.get(index);
-        if (existing === undefined) continue;
-        guardClauses.push(
-          `EXISTS (SELECT 1 FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ? AND revision = ?)`,
-        );
-        guardParams.push(mutation.collection, mutation.id, existing.revision);
-      }
-      const guardSql = guardClauses.length === 0 ? "" : ` WHERE ${guardClauses.join(" AND ")}`;
+      /**
+       * The revision the target at update-position `position` HOLDS when that
+       * statement runs: its loaded revision, plus one for every EARLIER update
+       * in this same batch that targets the same row. Normally none — but two
+       * merges of one row in a single unit is legal (the in-memory reference
+       * applies both), and assuming otherwise would guard the second one on a
+       * revision its own predecessor has already moved past.
+       */
+      const revisionAt = (target: { key: string; revision: number }, position: number): number => {
+        let applied = 0;
+        for (const [otherPosition, other] of targets.entries()) {
+          if (otherPosition < position && other.key === target.key) applied += 1;
+        }
+        return target.revision + applied;
+      };
+
+      /**
+       * The guard for the statement at update-position `position`
+       * (`targets.length` = "runs after every update", i.e. an insert),
+       * covering every merge target OTHER than the row `ownKey` names.
+       *
+       * Each is required to EXIST at the revision it will actually hold when
+       * this statement runs. Requiring EXISTENCE is what turns a
+       * concurrently-deleted sibling into an abort — see (3) on the method.
+       */
+      const crossGuard = (
+        position: number,
+        ownKey: string | null,
+      ): { readonly clauses: readonly string[]; readonly params: readonly unknown[] } => {
+        const clauses: string[] = [];
+        const params: unknown[] = [];
+        const seen = new Set<string>();
+        for (const target of targets) {
+          if (target.key === ownKey || seen.has(target.key)) continue;
+          seen.add(target.key);
+          clauses.push(
+            `EXISTS (SELECT 1 FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ? AND revision = ?)`,
+          );
+          params.push(target.collection, target.id, revisionAt(target, position));
+        }
+        return { clauses, params };
+      };
 
       const now = this.#now();
-      const statements: D1PreparedStatement[] = [];
+      /** Updates first (mutation order), then inserts — see {@link crossGuard}. */
+      const updateStatements: D1PreparedStatement[] = [];
+      const insertStatements: D1PreparedStatement[] = [];
       const next: StoreRecord[] = [];
       const audits: {
         action: AuditAction;
@@ -447,21 +566,30 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
             record: stored,
             revision: 1,
           });
-          statements.push(
+          // Runs after every update, so every merge target is expected at its
+          // post-update revision. The guard is a `CASE … ELSE NULL`, NOT a
+          // `WHERE`: a failed guard has to abort, not insert nothing. And no
+          // `ON CONFLICT` clause, so a taken id is a UNIQUE violation that
+          // rolls the transaction back (see (1) on the method).
+          const guard = crossGuard(targets.length, null);
+          insertStatements.push(
             this.#db
               .prepare(
                 `INSERT INTO ${RESOURCE_TABLE}
                    (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
-                 SELECT ?, ?, ?, 1, ?, ?${guardSql}
-                 ON CONFLICT (resource_kind, resource_id) DO NOTHING`,
+                 SELECT ?, ?, ${
+                   guard.clauses.length === 0
+                     ? "?"
+                     : `CASE WHEN ${guard.clauses.join(" AND ")} THEN ? ELSE NULL END`
+                 }, 1, ?, ?`,
               )
               .bind(
                 mutation.collection,
                 stored.id,
+                ...guard.params,
                 JSON.stringify(stored),
                 now,
                 now,
-                ...guardParams,
               ),
           );
           continue;
@@ -477,32 +605,63 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
           id: mutation.id,
           tenant_id: existing.record.tenant_id ?? null,
         };
+        const position = targets.findIndex((target) => target.index === index);
+        const own = targets[position];
+        // Unreachable for the same reason as `existing` above.
+        if (own === undefined) throw new Error("atomic: unplanned merge target");
+        const ownRevision = revisionAt(own, position);
         next.push(merged);
         audits.push({
           action: "merge",
           collection: mutation.collection,
           record: merged,
-          revision: existing.revision + 1,
+          revision: ownRevision + 1,
         });
-        statements.push(
+        const guard = crossGuard(position, own.key);
+        // The row is addressed by PRIMARY KEY alone and every predicate that
+        // can deny the write — the tenant fence included — sits in the `CASE`,
+        // so denying is an abort rather than a silent no-op. In an UPDATE's SET
+        // expressions a bare column reference is the row's PRE-update value,
+        // which is exactly what both `revision = ?` and the tenant fence mean.
+        updateStatements.push(
           this.#db
             .prepare(
               `UPDATE ${RESOURCE_TABLE}
-                 SET document_json = ?, revision = revision + 1, updated_at_unix = ?
-               WHERE resource_kind = ? AND resource_id = ? AND revision = ?${tenant.sql}`,
+                 SET document_json = CASE WHEN revision = ?${tenant.sql}${
+                   guard.clauses.length === 0 ? "" : ` AND ${guard.clauses.join(" AND ")}`
+                 } THEN ? ELSE NULL END,
+                     revision = revision + 1,
+                     updated_at_unix = ?
+               WHERE resource_kind = ? AND resource_id = ?`,
             )
             .bind(
+              ownRevision,
+              ...tenant.params,
+              ...guard.params,
               JSON.stringify(merged),
               now,
               mutation.collection,
               mutation.id,
-              existing.revision,
-              ...tenant.params,
             ),
         );
       }
 
-      const results = await this.#db.batch(statements);
+      const statements = [...updateStatements, ...insertStatements];
+      let results: D1Result[];
+      try {
+        results = await this.#db.batch(statements);
+      } catch (error) {
+        // The transaction rolled back, so NOTHING was written. Which of the
+        // answers this method owns applies is decided by re-reading state, not
+        // by the driver's opaque message.
+        const explained = await this.#explainRolledBackBatch(scope, mutations, loaded);
+        if (explained === "missing") return null;
+        if (explained === "race") continue;
+        if (explained !== "unknown") {
+          throw new StoreConflictError(explained.collection, explained.id);
+        }
+        throw error;
+      }
       const changes = results.map((result) => result.meta.changes ?? 0);
       if (changes.every((count) => count > 0)) {
         for (const entry of audits) {
@@ -511,29 +670,82 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
         return next;
       }
       if (changes.some((count) => count > 0)) {
-        // Cannot happen while every statement shares one guard; if it ever
-        // does, the unit is no longer all-or-nothing and saying so beats
-        // returning a half-written result as a success.
+        // Cannot happen: every way a statement can be DENIED is a constraint
+        // violation that aborts the transaction, and the only statement that
+        // can match zero rows without erroring (an update whose row was deleted
+        // concurrently) makes every sibling abort. If it ever does happen the
+        // unit is no longer all-or-nothing, and saying so beats returning a
+        // half-written result as a success.
         throw new Error(
           `control_plane_resources atomic unit applied ${changes.filter((c) => c > 0).length} of ${changes.length} statements`,
         );
       }
-      // Zero rows everywhere: either the guards lost a race (retry against the
-      // new state) or a `create` id is taken. Only the latter is terminal.
-      for (const mutation of mutations) {
-        if (mutation.kind !== "create") continue;
-        const taken = await this.#db
-          .prepare(
-            `SELECT 1 AS present FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?`,
-          )
-          .bind(mutation.collection, mutation.record.id)
-          .first<{ present: number }>();
-        if (taken !== null) throw new StoreConflictError(mutation.collection, mutation.record.id);
-      }
+      // Zero rows everywhere: every statement was an update whose row is gone.
+      // Re-read and retry; the next pass resolves it to `null`.
     }
     throw new Error(
       `control_plane_resources atomic unit lost ${UPDATE_ATTEMPTS} write races; retry`,
     );
+  }
+
+  /**
+   * Why a batch rolled back, decided by RE-READING state rather than by parsing
+   * the driver's error text (opaque, and version-dependent).
+   *
+   * Precedence matches the in-memory reference, which resolves every merge
+   * target BEFORE it looks at `create` ids: an unresolvable target answers
+   * `null` (→ 404) even when the same unit also carries a taken id.
+   *
+   *  - `"missing"` — a merge target is gone or invisible → `null`, exactly as
+   *    if it had been missing at load time;
+   *  - `{collection, id}` — a `create` id is taken → `StoreConflictError`;
+   *  - `"race"` — a merge target moved on underneath us → retry against the
+   *    state the winner left;
+   *  - `"unknown"` — none of the above, so the error is a genuine fault and the
+   *    caller re-throws it instead of dressing it up as a conflict.
+   */
+  async #explainRolledBackBatch(
+    scope: CallerScope,
+    mutations: readonly StoreMutation[],
+    loaded: ReadonlyMap<number, LoadedRecord>,
+  ): Promise<
+    "missing" | "race" | "unknown" | { readonly collection: string; readonly id: string }
+  > {
+    let raced = false;
+    for (const [index, mutation] of mutations.entries()) {
+      if (mutation.kind !== "merge") continue;
+      const current = await this.#load(mutation.collection, scope, mutation.id);
+      if (current === null) return "missing";
+      if (current.revision !== loaded.get(index)?.revision) raced = true;
+    }
+    const conflict = await this.#firstTakenCreateId(mutations);
+    if (conflict !== null) return conflict;
+    return raced ? "race" : "unknown";
+  }
+
+  /**
+   * The first `create` id in the unit that is already stored, or `null`.
+   *
+   * Used ONLY to explain a rolled-back batch: `INSERT` without `ON CONFLICT`
+   * raises a UNIQUE violation, and D1 reports that as an opaque error, so the
+   * offending id is read back rather than parsed out of a driver message.
+   * Deliberately unscoped by tenant, matching {@link create}: an id another
+   * tenant holds is a conflict, not an invisible row.
+   */
+  async #firstTakenCreateId(
+    mutations: readonly StoreMutation[],
+  ): Promise<{ readonly collection: string; readonly id: string } | null> {
+    for (const mutation of mutations) {
+      if (mutation.kind !== "create") continue;
+      const taken = await this.#db
+        .prepare(
+          `SELECT 1 AS present FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?`,
+        )
+        .bind(mutation.collection, mutation.record.id)
+        .first<{ present: number }>();
+      if (taken !== null) return { collection: mutation.collection, id: mutation.record.id };
+    }
+    return null;
   }
 
   /**

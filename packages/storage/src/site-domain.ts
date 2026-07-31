@@ -189,6 +189,25 @@ export function siteDomainVerificationAttemptIsAllowed(
  * first attempt (no prior check) is always allowed; otherwise a call inside the
  * cooldown is refused with a bounded, ≥1s `retryAfterSecs`. Every backend then
  * reserves the slot with an atomic conditional write on exactly this predicate.
+ *
+ * PORT-TODO(inventory-data-billing §1.4.6 `try_begin_site_domain_verification_attempt`):
+ * the ATOMIC half of that sentence is missing. Rust does not call this function
+ * to decide; it puts the predicate INSIDE the writing statement —
+ * `UPDATE site_domain_verifications SET last_checked_at_unix = ? WHERE tenant_id = ?
+ * AND hostname = ? AND (last_checked_at_unix IS NULL OR ? - last_checked_at_unix >= ?)`
+ * (`control_plane_store_d1/rbac_site_domain.rs`) — `changes() > 0` IS the grant,
+ * and this pure decision runs only afterwards to label a refusal. The only TS
+ * caller (`apps/control-plane/src/routes/site_domain.ts`) instead reads the
+ * verification document, calls this function, and THEN issues an unconditional
+ * `store.merge({ last_checked_at_unix: now })`. Why it matters: that is a
+ * read-decide-write with a window. Two concurrent `POST
+ * /admin/v1/site-domains/{hostname}/verify` calls both read the same
+ * `lastCheckedAtUnix`, both are told `allowed`, and both reach `lookupTxt` — the
+ * exact burst #576 exists to stop, since the whole point of the gate is that an
+ * `admin.write` credential cannot drive unbounded outbound DNS. The close is a
+ * guarded single-statement CAS against the durable row (needs the
+ * `site_domain_verifications` table rather than the generic
+ * `control_plane_resources` document store, or a `json_extract`-guarded UPDATE).
  */
 export function siteDomainVerificationAttemptDecision(
   lastCheckedAtUnix: number | undefined,

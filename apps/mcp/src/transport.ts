@@ -68,6 +68,14 @@ import {
   type McpTool,
   type McpUpstreamPort,
 } from "./ports.js";
+import {
+  DEFAULT_RECONNECT_POLICY,
+  statusOf,
+  type McpReconnectPolicy,
+  type McpServerStatus,
+  type McpSessionState,
+  type McpSessionStorePort,
+} from "./session.js";
 
 /** Hard cap on any single upstream response (Rust `MAX_MCP_RESPONSE_BYTES`). */
 export const MAX_MCP_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -411,30 +419,157 @@ interface UpstreamSession {
  * handshake), the deny-by-default `toolsToExecute` allowlist, and the
  * `{server}-{remote}` namespacing with longest-prefix resolution.
  *
- * Session state is per-isolate. PORT-TODO(inventory-edge-control §MCP "session
- * manager"): NOT a platform limit — Cloudflare has the primitive, and this
- * Worker already uses it (`src/oauth-flow.ts` runs a Durable Object). Rust's
- * `McpManager` holds a process-wide `HashMap<name, McpSession>` with a
- * health-check/reconnect loop; the CF shape is one DO per MCP session. It is
- * deferred, not impossible.
+ * ## Session state — the `McpManager` port (marker CLOSED)
  *
- * WHAT IS IMPLEMENTED, and why it is correct rather than merely cheaper: the
- * session map is per-isolate, and protocol negotiation is re-run on a cold
- * isolate. Nothing is lost but the handshake — the negotiated protocol version
- * and the tool list are DERIVED state, re-fetchable from the upstream at any
- * time, so a cold isolate produces the same answers as a warm one. The
- * observable difference is COST: more `server/discover` / `initialize` round
- * trips than the Rust manager made, and no cross-isolate health-check loop, so
- * an upstream's outage is discovered per isolate rather than once globally.
+ * Rust's `McpManager` holds a process-wide `HashMap<name, McpSession>` plus a
+ * `health_check_and_reconnect()` loop. A Worker has no process, and this class
+ * used to carry the map per ISOLATE, which was recorded as
+ * `PORT-TODO(inventory-edge-control §MCP "session manager")` — explicitly not a
+ * platform limit.
+ *
+ * That marker is now closed by `src/session.ts`: pass a
+ * {@link McpSessionStorePort} and the negotiated protocol, the discovered tool
+ * list and the connection health live in ONE `FerroGateMcpSession` Durable
+ * Object per `(tenant, server)`, so every isolate serving a tenant reads the
+ * same session and an upstream outage is recorded once globally rather than
+ * once per isolate. {@link HttpMcpUpstreams.healthCheckAndReconnect} is the
+ * port of the Rust loop, and {@link HttpMcpUpstreams.statuses} of
+ * `McpManager::statuses`.
+ *
+ * The per-isolate map is KEPT as the request-local cache in front of the DO (a
+ * DO round trip per `tools/list` would be a regression, not a port) and as the
+ * whole implementation when NO store is supplied — a deployment without the
+ * `MCP_SESSION` binding degrades to exactly the previous behaviour instead of
+ * failing. What that degraded mode costs is unchanged and still true: more
+ * `server/discover` / `initialize` round trips, and no cross-isolate health
+ * signal.
  */
 export class HttpMcpUpstreams implements McpUpstreamPort {
   readonly #sessions = new Map<string, UpstreamSession>();
   readonly #fetch: typeof fetch;
+  readonly #store: McpSessionStorePort | undefined;
+  readonly #policy: McpReconnectPolicy;
+  readonly #now: () => number;
 
-  constructor(configs: readonly McpServerConfig[], fetchImpl?: typeof fetch) {
+  constructor(
+    configs: readonly McpServerConfig[],
+    fetchImpl?: typeof fetch,
+    options: {
+      /** The shared session manager. Absent ⇒ per-isolate sessions only. */
+      readonly sessions?: McpSessionStorePort;
+      readonly policy?: McpReconnectPolicy;
+      /** Unix SECONDS, injectable so `lastConnectedAtUnix` is assertable. */
+      readonly nowUnix?: () => number;
+    } = {},
+  ) {
     this.#fetch = fetchImpl ?? fetch;
+    this.#store = options.sessions;
+    this.#policy = options.policy ?? DEFAULT_RECONNECT_POLICY;
+    this.#now = options.nowUnix ?? (() => Math.floor(Date.now() / 1000));
     for (const config of configs) {
       this.#sessions.set(config.name, { config, tools: [], nextId: 1 });
+    }
+  }
+
+  /**
+   * Rust `McpManager::statuses` — one row per configured upstream.
+   *
+   * Read from the SHARED store when one is bound, so an operator surface sees
+   * the fleet's view of an upstream rather than the isolate that happened to
+   * answer. Without a store the answer is this isolate's own view, which is
+   * exactly what it was before the session manager existed.
+   */
+  async statuses(): Promise<readonly McpServerStatus[]> {
+    const rows: McpServerStatus[] = [];
+    for (const session of this.#sessions.values()) {
+      rows.push(statusOf(session.config.name, await this.#state(session)));
+    }
+    return rows;
+  }
+
+  /**
+   * Rust `McpManager::health_check_and_reconnect`, driven by the caller (a
+   * `scheduled` handler or an operator route) rather than by a background
+   * thread — a Worker has none.
+   *
+   * Per session, faithfully: probe only a session the shared record says is
+   * CONNECTED; on a failed probe record `MCP health check failed` and fall
+   * through to reconnect; then attempt to re-negotiate up to
+   * `maxReconnectAttempts` times, stopping at the first success. A `stdio`
+   * upstream is skipped — it can never connect here at all.
+   */
+  async healthCheckAndReconnect(): Promise<readonly McpServerStatus[]> {
+    for (const session of this.#sessions.values()) {
+      if (session.config.transport === "stdio") continue;
+      const state = await this.#state(session);
+      if (state.connected && state.negotiation !== undefined) {
+        // Adopt the shared negotiation so the probe speaks the version the
+        // session actually negotiated, not a freshly guessed one.
+        session.negotiation = state.negotiation;
+        if (await this.#probe(session, state.negotiation)) continue;
+        session.negotiation = undefined;
+        session.tools = [];
+        await this.#store?.unhealthy(session.config.name);
+      }
+      for (let attempt = 0; attempt < this.#policy.maxReconnectAttempts; attempt += 1) {
+        session.negotiation = undefined;
+        session.tools = [];
+        try {
+          await this.#negotiate(session, true);
+          break;
+        } catch {
+          // `#negotiate` already recorded the failure (and the doubled
+          // backoff) on the shared record; keep trying up to the bound.
+        }
+      }
+    }
+    return await this.statuses();
+  }
+
+  /** The shared record when a store is bound, else this isolate's view. */
+  async #state(session: UpstreamSession): Promise<McpSessionState> {
+    if (this.#store !== undefined) return await this.#store.read(session.config.name);
+    const local: McpSessionState = {
+      connected: session.negotiation !== undefined,
+      tools: session.tools,
+      reconnectAttempts: 0,
+      nextReconnectBackoffSecs: this.#policy.minReconnectBackoffSecs,
+    };
+    if (session.negotiation !== undefined) local.negotiation = session.negotiation;
+    return local;
+  }
+
+  /**
+   * Rust `HttpMcpClient::health_check`: modern sessions re-run
+   * `server/discover` and require the negotiated version to still be
+   * advertised; legacy sessions send `ping` and require no JSON-RPC error.
+   */
+  async #probe(session: UpstreamSession, negotiation: McpNegotiatedProtocol): Promise<boolean> {
+    try {
+      if (negotiation.mode === "modern") {
+        const response = await this.#post(
+          session,
+          "server/discover",
+          undefined,
+          modernDiscoverParams(),
+          McpDispatchHeaders.empty(),
+          true,
+        );
+        if (response.status < 200 || response.status >= 300) return false;
+        return response.json !== undefined && discoverSupportsCurrentVersion(response.json);
+      }
+      const response = await this.#post(
+        session,
+        "ping",
+        undefined,
+        {},
+        McpDispatchHeaders.empty(),
+        false,
+      );
+      if (response.status < 200 || response.status >= 300) return false;
+      return response.json !== undefined && jsonRpcErrorCode(response.json) === undefined;
+    } catch {
+      return false;
     }
   }
 
@@ -530,6 +665,10 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     if (session.tools.length > 0) return session.tools;
     if (session.config.transport === "stdio") return [];
     const negotiation = await this.#negotiate(session);
+    // `#negotiate` may have ADOPTED the shared session's tool list, which is
+    // the whole point of the manager: a warm upstream costs a cold isolate one
+    // DO read instead of a handshake plus a `tools/list`.
+    if (session.tools.length > 0) return session.tools;
     const params = negotiation.mode === "modern" ? modernRequestParams({}) : {};
     const response = await this.#post(
       session,
@@ -539,10 +678,10 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
       McpDispatchHeaders.empty(),
     );
     if (response.json === undefined) {
-      throw new McpExecutionError(
-        "mcp_server_unavailable",
-        `MCP server ${session.config.name} returned HTTP ${response.status} for tools/list`,
-      );
+      const detail = `MCP server ${session.config.name} returned HTTP ${response.status} for tools/list`;
+      await this.#store?.failed(session.config.name, detail);
+      session.negotiation = undefined;
+      throw new McpExecutionError("mcp_server_unavailable", detail);
     }
     const parsed: ParsedToolDef[] = parseToolsList(response.json);
     session.tools = parsed
@@ -558,14 +697,61 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
         if (tool.description !== undefined) entry.description = tool.description;
         return entry;
       });
+    // Publish the discovered catalog so the NEXT isolate does not re-discover
+    // it. Rust's manager held the same list on the shared session.
+    if (session.negotiation !== undefined) {
+      await this.#store?.connected(
+        session.config.name,
+        session.negotiation,
+        session.tools,
+        this.#now(),
+      );
+    }
     return session.tools;
   }
 
-  async #negotiate(session: UpstreamSession): Promise<McpNegotiatedProtocol> {
-    if (session.negotiation !== undefined) return session.negotiation;
+  /**
+   * Resolve the negotiated protocol, preferring the SHARED session.
+   *
+   * Order — isolate cache, then the shared record, then a real handshake:
+   * cheapest first, and the handshake's outcome (either arm) is written back
+   * so the next isolate inherits it. `force` re-handshakes unconditionally and
+   * is what {@link healthCheckAndReconnect}'s reconnect loop uses.
+   */
+  async #negotiate(session: UpstreamSession, force = false): Promise<McpNegotiatedProtocol> {
+    if (!force && session.negotiation !== undefined) return session.negotiation;
+    if (!force && this.#store !== undefined) {
+      const shared = await this.#store.read(session.config.name);
+      if (shared.connected && shared.negotiation !== undefined) {
+        session.negotiation = shared.negotiation;
+        if (session.tools.length === 0 && shared.tools.length > 0) session.tools = shared.tools;
+        return shared.negotiation;
+      }
+    }
+    let negotiated: McpNegotiatedProtocol;
+    try {
+      negotiated = await this.#handshake(session);
+    } catch (cause) {
+      // Record the failure on the SHARED session — this is what makes an
+      // upstream outage a fleet-wide fact instead of a per-isolate one, and it
+      // is what advances `reconnectAttempts` / the doubled backoff.
+      session.negotiation = undefined;
+      session.tools = [];
+      await this.#store?.failed(
+        session.config.name,
+        cause instanceof Error ? cause.message : String(cause),
+      );
+      throw cause;
+    }
+    session.negotiation = negotiated;
+    await this.#store?.connected(session.config.name, negotiated, session.tools, this.#now());
+    return negotiated;
+  }
+
+  /** The wire handshake itself — Rust `McpSession::connect`. */
+  async #handshake(session: UpstreamSession): Promise<McpNegotiatedProtocol> {
     if (session.config.transport !== "streamable_http") {
-      session.negotiation = await this.#initializeLegacy(session, undefined);
-      return session.negotiation;
+      return await this.#initializeLegacy(session, undefined);
     }
     const response = await this.#post(
       session,
@@ -588,8 +774,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
           "MCP modern discovery did not advertise the requested protocol version",
         );
       }
-      session.negotiation = { mode: "modern", version: MCP_PROTOCOL_VERSION };
-      return session.negotiation;
+      return { mode: "modern", version: MCP_PROTOCOL_VERSION };
     }
     if (response.status === 401) {
       throw new McpExecutionError(
@@ -599,8 +784,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     }
     const reason = httpLegacyDowngradeReason(response.status, response.json);
     if (reason !== undefined) {
-      session.negotiation = await this.#initializeLegacy(session, reason);
-      return session.negotiation;
+      return await this.#initializeLegacy(session, reason);
     }
     throw new McpExecutionError(
       "mcp_server_unavailable",

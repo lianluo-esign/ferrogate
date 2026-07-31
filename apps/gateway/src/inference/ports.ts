@@ -149,6 +149,56 @@ export interface PhysicalRoute {
  * {@link catalog}: a `null` resolve whose name appears in the catalog with
  * `enabled: false` is `model_disabled`. Keeping `resolve` at the one-line
  * signature keeps the seam trivial for the wave-2 `@ferrogate/routing` adapter.
+ *
+ * ## PORT-TODO(inventory-request-path §1.7 + §"routing/failover", issue #582)
+ *
+ * `resolve` returning ONE {@link PhysicalRoute} is the reason the entire Rust
+ * reliability layer between "resolve a model" and "call the provider" is absent
+ * from this data plane. Rust's counterpart is
+ * `AppState::candidate_model_routes` (`state_routing.rs:489`), which returns an
+ * ORDERED LIST, and `chat.rs:259`'s `'routes:` loop walks it. Three distinct
+ * behaviors die on this signature; none is a platform limit.
+ *
+ *  1. **Circuit breaking.** `ProviderCircuitBreaker` (`state.rs:5540`;
+ *     `reliability.provider_circuit_breaker_failure_threshold` /
+ *     `_cooldown_secs`), `provider_circuit_allows` /
+ *     `record_provider_success` / `record_provider_failure`
+ *     (`state_routing.rs:686-719`), and the two branches at `chat.rs:283-314`:
+ *     an open circuit SKIPS to the next candidate, or — if there is no next
+ *     candidate — answers `503 provider_circuit_open`. `grep -ri circuit
+ *     apps/gateway/src` returns zero. A wedged provider is retried on every
+ *     single request, forever.
+ *  2. **The failover ladder.** `ProviderAttemptDecision::from_retryable_status`
+ *     / `::from_dispatch_error` (`chat.rs:3163-3187`) is a two-level ladder:
+ *     retry the SAME provider up to `provider_dispatch_max_retries`, then fall
+ *     through to the next candidate route, then `ReturnError`.
+ *     `isRetryableStatus` — the predicate the first level turns on — is fully
+ *     implemented in `@ferrogate/providers` (`types.ts:308`, `registry.ts:174`)
+ *     and is **called from nowhere in this app**. `handlers.ts` dispatches
+ *     exactly once. Note the billing coupling already recorded at
+ *     `src/metering/event.ts` (`SINGLE_PROVIDER_ATTEMPT_INDEX`): when this
+ *     lands, the attempt index must be threaded onto `Usage`, or the second
+ *     attempt of a request collapses onto the first's `ledgerEntryId` and is
+ *     absorbed by `ON CONFLICT DO NOTHING` as a silent under-bill.
+ *  3. **Route eligibility (issue #582).** `model_routing.rs` (564 lines) filters
+ *     candidates on declared {@link ModelCapability}, `context_window` fit
+ *     (`input_token_upper_bound` + `explicit_output_tokens`), unbounded-media
+ *     exclusion, and the caller's `region_allowlist` — deliberately BEFORE any
+ *     strategy reads price or health, "so an incompatible cheap/healthy route
+ *     cannot influence ordering and is never allowed to reach dispatch".
+ *     {@link PhysicalRoute.capabilities} exists here but is read only when the
+ *     catalog is built, never as a gate; `contextWindow`, the per-1M prices and
+ *     `AuthContext.region_allowlist` are not on this type at all. Do not
+ *     mistake the adapter-level `unsupported_capability` in `handlers.ts:318`
+ *     for this check — that one is "the provider FAMILY cannot do images", a
+ *     different and much coarser test.
+ *
+ * To close: widen this to `resolve(model, requirements) -> PhysicalRoute[]`
+ * (ordered, already filtered), have `handlers.ts` loop it with a circuit
+ * consulted per candidate, and put the breaker state in a Durable Object — the
+ * Rust `Arc<HashMap<String, ProviderCircuitBreaker>>` is per-process and would
+ * silently become per-isolate as a module global. See
+ * `docs/rewrite/parity-audit-request-path.md` F3/F4/F5.
  */
 export interface ModelResolver {
   /** Resolve a logical model to the physical route to dispatch on. */
@@ -519,9 +569,19 @@ export interface AnthropicTranslator {
  * that greps, parses or asserts the format keeps working, and collisions are
  * ~2^-64 per pair rather than impossible-by-construction — but ids are NOT
  * ordered, and nothing may infer arrival order from them.
- * `test/inference/chat-completions.test.ts` pins the shape and the
- * `x-request-id` passthrough; the ordering property is deliberately unpinned
- * because it is the thing that is gone.
+ *
+ * `test/inference/platform-limits.test.ts` pins the approximation ITSELF: the
+ * shape, uniqueness across 512 draws, and that the digits come from a CSPRNG
+ * rather than from a counter. That last assertion is the one that matters — a
+ * per-isolate `AtomicU64` lookalike would look perfectly ordered in a
+ * single-isolate test while colliding across isolates in production, and it is
+ * the substitution a reader who sees this marker is most likely to reach for.
+ * (`test/inference/chat-completions.test.ts` pins only the `x-request-id`
+ * passthrough and an INJECTED factory, so it holds none of the above.)
+ *
+ * The ordering property is deliberately left unpinned in the positive
+ * direction: it is the thing that is gone, and a future deliberate ordered
+ * implementation should not have to delete an assertion to land.
  */
 export interface RequestIdFactory {
   next(): string;

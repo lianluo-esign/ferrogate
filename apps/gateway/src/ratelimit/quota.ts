@@ -36,7 +36,12 @@ import {
   type StoredQuotaPolicy,
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
-import { boolFromSqlite, optionalNumber } from "@ferrogate/storage";
+import {
+  WALLET_RESERVATION_ACTIVE,
+  boolFromSqlite,
+  optionalNumber,
+  periodMonthFromUnix,
+} from "@ferrogate/storage";
 import { type CounterWindow, requestWindows, tpmWindow } from "./keys.js";
 
 /**
@@ -506,4 +511,236 @@ export function d1QuotaPolicySource(db: D1Database): QuotaPolicySource {
 export function quotaPolicySourceFromEnv(env: QuotaBindings): QuotaPolicySource {
   const db = env.CONTROL_DB ?? env.BILLING_DB;
   return db === undefined ? quotaPolicySourceFromVars(env) : d1QuotaPolicySource(db);
+}
+
+// ---------------------------------------------------------------------------
+// Spend + prepaid wallet — `finalize_auth` steps 2 and 3
+// ---------------------------------------------------------------------------
+
+/**
+ * The BALANCE half of the admission chain: what has already been spent, and
+ * what is left in the prepaid wallet.
+ *
+ * `QuotaPolicySource` answers "what is this caller allowed"; this answers "how
+ * much of it is gone". They are separate ports because they read separate
+ * DATABASES — policies live in the CONTROL database (`quota_policies`, `plans`)
+ * and spend lives in the TENANT database (`usage_monthly_rollups`, `wallets`,
+ * `wallet_reservations`, all defined in `sql/d1-ts/tenant/0001_init_tenant.sql`).
+ *
+ * Rust reads both off `AppState.repositories`:
+ * `state_wallets.rs::monthly_budget_exceeded` (→ `get_usage_monthly_rollup`)
+ * and `state_wallets.rs::wallet_balance_exhausted` (→ `get_wallet`, minus the
+ * cluster counters' outstanding reservations).
+ *
+ * Both readings are RESULT types, never bare numbers, for the same reason
+ * {@link QuotaPolicySnapshot} is: Rust maps an `Err` from either lookup to
+ * `503 quota_resolution_unavailable`, NOT to "0 spent" / "no wallet". A source
+ * that swallowed a database outage into `0` would hand every over-budget tenant
+ * unlimited spend for the duration of the outage.
+ */
+export interface SpendSource {
+  /**
+   * `get_usage_monthly_rollup(scope_type, scope_id, period_month).cost_usd`.
+   *
+   * An ABSENT rollup row is `0`, not a failure — that is Rust's
+   * `.map(|rollup| rollup.cost_usd).unwrap_or(0.0)`, and it is the normal state
+   * for a scope that has not been billed this month.
+   */
+  committedSpendUsd(
+    scopeKind: QuotaScopeKind,
+    scopeId: string,
+    periodMonth: string,
+  ): Promise<MonthlySpendReading>;
+  /**
+   * `wallet.balance_credits - reserved`, or `null` when the tenant has NO
+   * wallet row.
+   *
+   * `null` is load-bearing: the prepaid wallet is OPT-IN per tenant
+   * (`wallet_balance_exhausted` returns `Ok(false)` for a tenant with no
+   * wallet), so "no row" must be distinguishable from "a row at zero". A source
+   * that reported `0` for an absent wallet would refuse every tenant that has
+   * not adopted prepaid billing.
+   */
+  walletBalanceCredits(tenantId: string): Promise<WalletBalanceReading>;
+}
+
+export type MonthlySpendReading =
+  | { readonly ok: true; readonly committedSpendUsd: number }
+  | { readonly ok: false; readonly detail: string };
+
+export type WalletBalanceReading =
+  | { readonly ok: true; readonly availableCredits: number | null }
+  | { readonly ok: false; readonly detail: string };
+
+/**
+ * The source for a deployment with no tenant database bound.
+ *
+ * NOT a fail-open stub: with no `usage_monthly_rollups` table there is no
+ * recorded spend, and `0` is the true reading (the same value the D1 source
+ * returns for a scope with no rollup row). Likewise `null` — no wallet table
+ * means no tenant has adopted prepaid billing, which is exactly the case Rust
+ * never denies. Both answers are the Rust behavior for an empty store, so
+ * binding the database can only ever TIGHTEN admission, never loosen it.
+ */
+export const NO_SPEND_SOURCE: SpendSource = {
+  async committedSpendUsd(): Promise<MonthlySpendReading> {
+    return { ok: true, committedSpendUsd: 0 };
+  },
+  async walletBalanceCredits(): Promise<WalletBalanceReading> {
+    return { ok: true, availableCredits: null };
+  },
+};
+
+/** Worker bindings {@link spendSourceFromEnv} reads. */
+export interface SpendBindings {
+  /**
+   * The TENANT database (`sql/d1-ts/tenant/`), holding `usage_monthly_rollups`,
+   * `wallets` and `wallet_reservations`.
+   *
+   * This is the SAME binding `d1ApiKeyResolverFromEnv` reads for `api_keys`, and
+   * it is already declared in `apps/gateway/wrangler.toml` — which is why the
+   * budget and wallet gates need no composition-root edit to go live.
+   */
+  readonly DB?: D1Database | undefined;
+}
+
+/**
+ * `env.DB`, but only when it is really a D1 binding.
+ *
+ * Same guard as `meteringBindingsFromEnv`: a `[vars]` entry named `DB` is a
+ * STRING, and handing a string to `db.prepare()` would throw on the request
+ * path rather than degrading to {@link NO_SPEND_SOURCE}.
+ */
+function spendDatabase(env: SpendBindings): D1Database | undefined {
+  const candidate = env.DB;
+  return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
+}
+
+/** `usage_monthly_rollups` is UNIQUE on `(period_month, scope_type, scope_id)`. */
+const MONTHLY_SPEND_SQL =
+  "SELECT cost_usd FROM usage_monthly_rollups " +
+  "WHERE period_month = ? AND scope_type = ? AND scope_id = ?";
+
+const WALLET_BALANCE_SQL = "SELECT balance_credits FROM wallets WHERE tenant_id = ?";
+
+/**
+ * The live holds, i.e. the port of Rust's
+ * `cluster_counters.reserved_wallet_credits(tenant_id)`.
+ *
+ * Rust keeps outstanding reservations in the cluster counter backend; this port
+ * keeps them in the durable `wallet_reservations` table, whose schema comment
+ * names this exact query ("the active, unexpired holds are summed against
+ * `balance_credits` to compute AVAILABLE balance for the no-oversell guard").
+ * `idx_wallet_reservations_live_holds` covers it. EXPIRED holds are excluded so
+ * a crashed request cannot strand credits forever — the expiry IS the release
+ * that JS has no `Drop` for.
+ */
+const WALLET_HELD_SQL =
+  "SELECT COALESCE(SUM(amount_credits), 0) AS held FROM wallet_reservations " +
+  "WHERE tenant_id = ? AND status = ? AND expires_at_unix > ?";
+
+/**
+ * The durable {@link SpendSource}: the tenant database's spend rollups and
+ * prepaid wallet.
+ *
+ * The wallet leg is ONE `db.batch()` — balance and live holds must be read from
+ * the same committed snapshot, or a hold that settles between the two reads is
+ * counted twice (balance already debited AND still summed as outstanding),
+ * which would refuse a tenant that is in fact funded.
+ */
+export function d1SpendSource(
+  db: D1Database,
+  nowUnixSeconds: () => number = () => Math.floor(Date.now() / 1000),
+): SpendSource {
+  return {
+    async committedSpendUsd(
+      scopeKind: QuotaScopeKind,
+      scopeId: string,
+      periodMonth: string,
+    ): Promise<MonthlySpendReading> {
+      try {
+        const row = await db
+          .prepare(MONTHLY_SPEND_SQL)
+          .bind(periodMonth, scopeKind, scopeId)
+          .first<{ cost_usd: number | null }>();
+        // No row = nothing billed to this scope this month.
+        return { ok: true, committedSpendUsd: Number(row?.cost_usd ?? 0) };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: `cloudflare d1: monthly spend lookup failed: ${detail}` };
+      }
+    },
+
+    async walletBalanceCredits(tenantId: string): Promise<WalletBalanceReading> {
+      try {
+        const results = (await db.batch([
+          db.prepare(WALLET_BALANCE_SQL).bind(tenantId),
+          db.prepare(WALLET_HELD_SQL).bind(tenantId, WALLET_RESERVATION_ACTIVE, nowUnixSeconds()),
+        ])) as unknown as { results?: unknown[] }[];
+
+        const walletRow = (results[0]?.results ?? [])[0] as
+          | { balance_credits?: number | null }
+          | undefined;
+        // Opt-in: no wallet row means this tenant has not adopted prepaid
+        // billing and the gate must never deny it.
+        if (walletRow === undefined) return { ok: true, availableCredits: null };
+
+        const heldRow = (results[1]?.results ?? [])[0] as { held?: number | null } | undefined;
+        const balance = Number(walletRow.balance_credits ?? 0);
+        const held = Number(heldRow?.held ?? 0);
+        return { ok: true, availableCredits: balance - held };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: `cloudflare d1: wallet balance lookup failed: ${detail}` };
+      }
+    },
+  };
+}
+
+/**
+ * The {@link SpendSource} the composition root gets: D1 whenever the tenant
+ * database is bound, {@link NO_SPEND_SOURCE} otherwise.
+ */
+export function spendSourceFromEnv(env: SpendBindings): SpendSource {
+  const db = spendDatabase(env);
+  return db === undefined ? NO_SPEND_SOURCE : d1SpendSource(db);
+}
+
+/**
+ * The scope a monthly budget is CHARGED against — `finalize_auth`'s
+ * `budget_scope` argument.
+ *
+ * The winner recorded by `resolveEffectiveQuota` (the scope whose
+ * `monthly_budget_usd` won the chain's `min`) is authoritative, so a
+ * tenant/project/workspace budget is measured against that scope's AGGREGATE
+ * rollup and holds across every key under it. Counting it per key would let N
+ * keys each spend the full cap.
+ *
+ * The fallback — most specific attributed scope first — is Rust's `or_else`
+ * arm, reached when a budget has no recorded scope (it came from the plan
+ * FLOOR rather than from a policy row). `null` means the request carries no
+ * attribution at all, which Rust answers `Ok(false)`: nothing to measure, so
+ * nothing to refuse.
+ */
+export function monthlyBudgetScope(
+  quota: EffectiveQuota,
+  chain: QuotaScopeChain,
+): { readonly kind: QuotaScopeKind; readonly id: string } | null {
+  const winner = quota.monthlyBudgetScope;
+  if (winner !== undefined) return { kind: winner.kind, id: winner.id };
+  const candidates: [QuotaScopeKind, string | undefined][] = [
+    ["key", chain.keyId],
+    ["workspace", chain.workspaceId],
+    ["project", chain.projectId],
+    ["tenant", chain.tenantId],
+  ];
+  for (const [kind, id] of candidates) {
+    if (id !== undefined && id !== "") return { kind, id };
+  }
+  return null;
+}
+
+/** The current UTC `YYYY-MM`, Rust `AppState::current_period_month`. */
+export function currentPeriodMonth(nowUnixSeconds: number = Math.floor(Date.now() / 1000)): string {
+  return periodMonthFromUnix(nowUnixSeconds);
 }

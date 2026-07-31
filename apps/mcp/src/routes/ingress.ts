@@ -31,6 +31,7 @@ import {
 import { resolvePorts } from "../ports.js";
 import { type ToolExecutionRequest, executeToolWithGovernance, isBuiltinTool } from "../tools.js";
 import { prefersEventStream, sseJsonRpcResponse } from "../transport.js";
+import { withTenantUpstreams } from "../upstreams.js";
 import { type McpRouter, type RouteModule, methodNotAllowed } from "./index.js";
 
 /** Contract operations this module mounts. */
@@ -74,8 +75,15 @@ export function ingressRouteModule(): RouteModule {
         );
         if (!authenticated.ok) return respondError(c, authenticated.status, authenticated.body);
 
+        // THE MOUNT. Upstreams are per-TENANT, so the real host can only be
+        // built once the caller is authenticated — see `../upstreams.ts`.
+        // Deleting this line silently reverts every deployment to the in-memory
+        // host, which is why `test/durable-upstreams.test.ts` drives
+        // `tools/list` over `SELF` and asserts a catalog only D1 can supply.
+        const tenantPorts = await withTenantUpstreams(c.env, ports, authenticated.context.auth);
+
         const outcome = await dispatchMcpRequest(
-          ports,
+          tenantPorts,
           c.req.raw.headers,
           planned.plan,
           authenticated.context,
@@ -166,7 +174,12 @@ export function ingressRouteModule(): RouteModule {
         const sessionId = object["session_id"];
         if (typeof sessionId === "string") request.sessionId = sessionId;
 
-        const executed = await executeToolWithGovernance(ports, context, request, backend);
+        // THE MOUNT, on the REST transport of the same chokepoint. Both ingress
+        // paths must resolve the tenant's real host or the two transports
+        // disagree about which tools exist — see `../upstreams.ts`.
+        const tenantPorts = await withTenantUpstreams(c.env, ports, context.auth);
+
+        const executed = await executeToolWithGovernance(tenantPorts, context, request, backend);
         if (!executed.ok) {
           return respondError(
             c,

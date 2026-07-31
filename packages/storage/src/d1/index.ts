@@ -17,6 +17,7 @@
  * | (control-plane replay floors) | `ControlMonotonicUpserts`     |
  * | `quota.ts` rollup DTOs        | `D1UsageLedger`               |
  * | `MemoryReferenceGuardedDeletes` | `D1ReferenceGuardedDeletes` |
+ * | `MemoryBudgetAlertStore`      | `D1BudgetAlertStore`          |
  *
  * The in-memory stores are not deprecated by these: they remain the executable
  * specification of the invariant, and the D1 tests assert the SAME observable
@@ -30,3 +31,4 @@ export * from "./usage-d1.js";
 export * from "./billing-d1.js";
 export * from "./references-d1.js";
 export * from "./assets-r2.js";
+export * from "./budget-alerts-d1.js";

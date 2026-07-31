@@ -28,6 +28,7 @@ import {
   gatewayNotFoundHandler,
   requestId,
 } from "../middleware/errors.js";
+import { networkAccess } from "../middleware/network.js";
 import type { GatewayEnv } from "../ports.js";
 
 /** Service identity echoed by `/healthz` and `/readyz` (Rust `SERVICE_NAME`). */
@@ -291,6 +292,18 @@ export interface CreateGatewayAppOptions {
    * — admission (rate limit / quota) before content screening (guardrails).
    */
   readonly middleware?: readonly MiddlewareHandler<GatewayEnv>[];
+  /**
+   * Override the PRE-AUTH network gate. Production never passes this — the
+   * default reads the `GATEWAY_IP_ALLOWLIST` / `GATEWAY_TRUST_FORWARDED_FOR` /
+   * `GATEWAY_TRUSTED_PROXY_HOPS` /
+   * `GATEWAY_UNAUTHENTICATED_RATE_LIMIT_PER_MINUTE` vars and is inert with none
+   * of them set. It exists so a test can inject a fresh
+   * `UnauthenticatedIpRateLimiter` and a fixed clock, since the real one is
+   * isolate-scoped by design (see `middleware/network.ts`).
+   *
+   * It is deliberately NOT nullable: there is no way to ask for "no gate".
+   */
+  readonly networkAccess?: MiddlewareHandler<GatewayEnv>;
 }
 
 /** The assembled Worker plus the registry the anti-drift test inspects. */
@@ -305,6 +318,13 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   app.onError(gatewayErrorHandler);
   app.notFound(gatewayNotFoundHandler);
   app.use("*", requestId);
+
+  // PRE-AUTH network gate (Rust `check_network_access`, issue #166). Mounted
+  // HERE — after the request id is minted so a refusal still carries one, and
+  // BEFORE `contractAuth` — because the Rust reason for its existence is that a
+  // flood or credential-stuffing scan must never pay the virtual-key/storage
+  // lookup cost. Inert until one of the four `GATEWAY_*` vars is set.
+  app.use("*", options.networkAccess ?? networkAccess());
 
   // ONE table-driven guard for all 251 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.
@@ -331,6 +351,37 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // Retained from the pre-contract scaffold so existing probes keep working;
   // neither is a contract operation, so both fall through `contractAuth`.
   app.get("/health", (c) => c.json({ ok: true }));
+
+  // PORT-TODO(inventory-request-path §"Cross-crate architecture" step 12,
+  // §1.3): the OPERATOR REVERSE-PROXY FALL-THROUGH is absent. In Rust, a
+  // request that matches no route group does not 404 — it falls through to
+  // `AppState::match_runtime_route` (`state_routing.rs:816`), which resolves the
+  // operator's `[[routes]]` host/path table onto an `[[upstreams]]` entry, and
+  // Pingora proxies it. That is the difference between "an LLM API" and "a
+  // gateway": every non-`/v1/**` surface an operator puts behind FerroGate goes
+  // through this path, and `ROUTE-MAP.md` §"Dynamic surfaces" puts it explicitly
+  // IN scope ("in Hono use a catch-all resolved against the config snapshot").
+  //
+  // Everything around it is already ported and unused:
+  //   - `packages/config` validates `routes` + `upstreams` (`schema/config.ts:91-92`);
+  //   - `@ferrogate/routing` exports `RouteMatch` + `RouteMatcher` — an INTERFACE
+  //     WITH NO IMPLEMENTATION and no caller (see the PORT-TODO on that package);
+  //   - `select_runtime_upstream_endpoint` / `select_upstream_url` (upstream
+  //     rotation and health) have no counterpart here.
+  //
+  // Also unported with it, from `proxy.rs::apply_upstream_request_filter` /
+  // `response_filter`: `build_target_uri`, the `Host` rewrite,
+  // `x-forwarded-host`, `x-ferrogate-request-id` / `x-ferrogate-trace-id` /
+  // `traceparent` / `tracestate` injection toward the upstream, and the per-route
+  // request/response header tables. (The gateway-ORIGINATED response headers ARE
+  // ported — see `middleware/errors.ts`.)
+  //
+  // Consequence today: `app.notFound` answers `404 not_found` for every path
+  // the contract does not name, so an operator route is not misrouted — it is
+  // simply not served. Not a platform limit: a Hono `app.all("*", …)` resolved
+  // against the config snapshot is the whole shape, and it must be registered
+  // LAST, after every contract route, or it would shadow them.
+  // See `docs/rewrite/parity-audit-request-path.md` F9.
 
   return { app, router };
 }
